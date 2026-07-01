@@ -1,0 +1,253 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\title{Hyper-NCA / Hyper-NPA: Conditioned Generative Neural Cellular and Particle Automata}
+\author{burn\_automata Research Notes}
+\date{\today}
+
+\newcommand{\npa}{\mathrm{NPA}}
+\newcommand{\hypernpa}{\mathrm{HyperNPA}}
+\newcommand{\cond}{\mathcal{C}}
+\newcommand{\chunks}{\mathcal{G}}
+\newcommand{\thetachunk}{\theta_c}
+\newcommand{\state}{\mathbf{x}}
+\newcommand{\feat}{\mathbf{s}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Neural cellular automata (NCA) and neural particle automata (NPA) provide compact local-update models for morphogenesis, texture growth, and particle-based scene representation, but most trained systems remain target-specific. We propose Hyper-NCA/NPA, a conditional hypernetwork framework that generates chunk-local automata from 2D or 3D scene conditions. A geometry-aware condition encoder, such as VGGT/VGGT-$\Omega$-style world features or dense DINOv3 image features, is routed into overlapping spatial chunks. Each chunk receives a sparse volume or image mask prior, a particle/state initialization prior, and generated NPA parameters or low-rank adapters. The generated automata define a hyper-rectified-flow transport field that evolves particles from sparse priors toward target geometry, features, or renderings. We outline an architecture, losses, training schedule, test-time-training strategy, validation matrix, and codebase roadmap for turning a fixed-checkpoint NPA implementation into a generalizable conditioned generative automata system.
+\end{abstract}
+
+\section{Introduction}
+
+Target-specific NCA and NPA models are attractive because they compress behavior into local update rules. They are also awkward for general scene generation: each new image, object, or 3D scene often requires a new optimization run. The central question is whether a model can infer the automata itself from a condition. Given an image, multi-view set, point map, or geometry-foundation-model latent, can a hypernetwork produce local automata that initialize, grow, render, and adapt?
+
+This paper stub proposes Hyper-NCA/NPA. The system consumes a condition $\cond$, builds a chunk graph $\chunks$, predicts sparse initialization priors, generates chunk-local automata parameters $\thetachunk$, rolls out the resulting local dynamics, and optionally applies test-time training (TTT). The intended implementation target is the \texttt{burn\_automata} workspace, which already contains deterministic SPH perception, BPK import/export, WGPU rollout, and gaussian-buffer rendering validation.
+
+\section{Related Work}
+
+\paragraph{Neural particle automata.}
+Self-organising NPA uses SPH-like perception, local particle state, and a small MLP update rule to grow particle systems from seeded states. The reference implementation motivates particle-density and scale normalization, but does not enforce rotational equivariance in the update rule.
+
+\paragraph{Geometry foundation models.}
+VGGT predicts cameras, depth, point maps, and point tracks from one or more views. VGGT-$\Omega$ extends this line toward stronger static and dynamic feed-forward 3D reconstruction. These systems are natural condition providers for 3D Hyper-NPA because they expose geometry-aware dense features rather than only RGB pixels.
+
+\paragraph{Dense self-supervised image features.}
+DINOv3-style dense visual features are useful as 2D condition tokens and as perceptual or correspondence losses. In the proposed framework, they provide image-space chunk tokens and render-space supervision.
+
+\paragraph{Hypernetworks and generated weights.}
+Hyper-NPA treats an automata checkpoint as the output of a generator. The generated object may be full weights, low-rank adapters, FiLM parameters, or coefficients over a learned weight basis.
+
+\section{Method}
+
+\subsection{Overview}
+
+The proposed dataflow is:
+\[
+\cond \rightarrow \text{ConditionProvider} \rightarrow \text{ChunkPlanner} \rightarrow
+\text{PriorHead} \rightarrow \text{HyperGenerator} \rightarrow \text{NPA Rollout} \rightarrow
+\text{Losses/TTT}.
+\]
+
+\subsection{Condition Field}
+
+A condition provider maps external encoders into an internal field:
+\[
+\cond = \{(\mathbf{p}_i, \mathbf{f}_i, \sigma_i, k_i)\}_{i=1}^{N},
+\]
+where $\mathbf{p}_i$ is a 2D/3D token position, $\mathbf{f}_i$ is a feature vector, $\sigma_i$ is confidence or scale, and $k_i$ describes token type. Providers may wrap image encoders, VGGT-style point maps, sparse voxels, gaussian clouds, text prompts, masks, or control trajectories.
+
+\subsection{Chunk Graph}
+
+The chunk planner builds an overlapping graph $\chunks=(V,E)$. Each chunk $c \in V$ owns bounds, halo bounds, routed condition tokens, and a particle budget. Edges encode overlap or halo exchange. The first implementation can use uniform chunks with overlap; later versions can split adaptively based on occupancy or feature variance.
+
+\subsection{Sparse Prior}
+
+For each chunk, a prior head predicts:
+\begin{itemize}[leftmargin=*]
+  \item sparse occupancy logits;
+  \item particle count and seed positions;
+  \item initial particle state vectors;
+  \item optional gaussian color, opacity, scale, and rotation;
+  \item uncertainty weights for TTT and masked losses.
+\end{itemize}
+
+\subsection{Generated Automata}
+
+Let $h_c$ be the pooled condition embedding for chunk $c$. A hypernetwork emits automata parameters:
+\[
+\thetachunk = H_\phi(h_c).
+\]
+The recommended first variant is a shared base NPA plus generated low-rank adapters:
+\[
+W_{\ell,c} = W_{\ell,0} + A_{\ell,c}B_{\ell,c},
+\]
+where $A_{\ell,c}, B_{\ell,c}$ are generated from $h_c$ or from a compact coefficient vector.
+
+\subsection{Hyper-Rectified Flow}
+
+Given source particles $\state_0$, target representation $\state_1$, and interpolation time $t$, define:
+\[
+\state_t = (1-t)\state_0 + t\state_1.
+\]
+The generated NPA predicts a velocity/update field:
+\[
+v_{\theta_c}(\state_t,\feat_t) = \npa_{\theta_c}(\mathrm{perception}(\state_t,\feat_t)).
+\]
+The flow objective is:
+\[
+\mathcal{L}_{flow} =
+\sum_c \left\| v_{\theta_c}(\state_t,\feat_t) -
+\mathrm{stopgrad}(\state_1-\state_0) \right\|_{\rho_c},
+\]
+where $\rho_c$ applies occupancy, visibility, and confidence masks. Multi-step variants add rollout and rendering losses.
+
+\section{Training}
+
+\subsection{Stage 0: Checkpoint Distillation}
+
+Train Hyper-NPA to reproduce existing BPK checkpoints or rollouts. This validates the generated-weight schema before adding external foundation-model conditions.
+
+\subsection{Stage 1: 2D Conditional Automata}
+
+Input dense image features and masks. Generate 2D chunk priors and adapters. Validate against imported NPA rollouts, held-out textures, and image reconstruction.
+
+\subsection{Stage 2: 3D Sparse Volume Automata}
+
+Input multi-view or world-latent geometry features. Generate 3D sparse particle/gaussian priors and adapters. Validate with point-map losses and held-out-view gaussian renders.
+
+\subsection{Stage 3: Flow and Multi-Step Rollout}
+
+Train one-step flow first, then unroll the generated automata. Add stochastic update masks, chunk dropout, overlap consistency, and particle-density regularization.
+
+\subsection{Stage 4: Test-Time Training}
+
+At inference time, adapt only chunk embeddings, low-rank coefficients, sparse prior logits, or rollout schedule scalars. Freeze the global condition encoder and most hypernetwork weights. Stop by validation-view loss, delta norm, or iteration budget.
+
+\section{Losses}
+
+\begin{align}
+\mathcal{L} =
+& \lambda_f \mathcal{L}_{flow}
++ \lambda_r \mathcal{L}_{render}
++ \lambda_g \mathcal{L}_{geom}
++ \lambda_b \mathcal{L}_{boundary} \nonumber \\
+& + \lambda_d \mathcal{L}_{density}
++ \lambda_a \mathcal{L}_{adapter}
++ \lambda_t \mathcal{L}_{ttt}.
+\end{align}
+
+Geometry losses include Chamfer/F-score, depth reprojection, normal consistency, and occupancy losses. Rendering losses include RGB, alpha, perceptual, and feature-space consistency. Automata losses include density regularization, state entropy floors, scale/particle-thinning consistency, and chunk-boundary consistency.
+
+\section{Experiments}
+
+\subsection{Experiment 1: BPK Reproduction}
+
+\textbf{Goal.} Generate a single-chunk NPA matching an existing checkpoint.
+
+\textbf{Metrics.} Rollout PSNR, max particle/state error, generated parameter size.
+
+\textbf{Status.} Placeholder for imported lizard/polka checkpoints.
+
+\subsection{Experiment 2: Chunked 2D Textures}
+
+\textbf{Goal.} Generate overlapping tile automata from image features.
+
+\textbf{Metrics.} PSNR, SSIM, LPIPS, boundary error, WGPU ms/step.
+
+\begin{figure}[h]
+\centering
+\fbox{\rule{0pt}{1.4in}\rule{0.85\linewidth}{0pt}}
+\caption{Placeholder: input image, chunk masks, generated rollout, and boundary-error heatmap.}
+\end{figure}
+
+\subsection{Experiment 3: Sparse 3D Gaussian Growth}
+
+\textbf{Goal.} Generate a sparse 3D particle/gaussian prior and 3D NPA adapters from geometry features.
+
+\textbf{Metrics.} Held-out render PSNR, Chamfer distance, depth error, nonblank headless render rate, particle count, WGPU ms/step.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Method & Particles & PSNR & Chamfer & ms/step \\
+\midrule
+Prior only & -- & -- & -- & -- \\
+Hyper-NPA, one-step & -- & -- & -- & -- \\
+Hyper-NPA, rollout & -- & -- & -- & -- \\
+Hyper-NPA + TTT & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\caption{Placeholder 3D reconstruction and rollout metrics.}
+\end{table}
+
+\subsection{Experiment 4: TTT Adaptation}
+
+\textbf{Goal.} Improve a generated chunk graph at test time with self-supervised render/geometry losses.
+
+\textbf{Metrics.} Observed-view loss, held-out-view loss, adapter norm, runtime, stability.
+
+\section{Implementation Roadmap}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add condition field and chunk graph schemas.
+  \item Add generated adapter manifest (\texttt{.bpkh}) beside realized \texttt{.bpk}.
+  \item Add a tiny Burn hypernetwork that emits LoRA adapters.
+  \item Train against current imported 2D BPK rollouts.
+  \item Add WGPU per-chunk parameter buffers and active chunk masks.
+  \item Add sparse 3D prior and gaussian render validation.
+  \item Add TTT loop over adapter coefficients and prior logits.
+  \item Add Bevy UI for condition source, chunk graph, rollout metrics, and TTT iterations.
+\end{enumerate}
+
+\section{Discussion}
+
+Hyper-NPA trades a single monolithic scene model for many local generated automata. The hypothesis is that locality makes generation and adaptation cheaper, while foundation-model features supply the missing global context. The main technical risks are chunk-boundary artifacts, dense-neighborhood throughput, generated-weight instability, and TTT overfitting. The current \texttt{burn\_automata} validation stack provides a useful base: deterministic CPU oracle, WGPU parity, imported-model PSNR checks, and headless gaussian render tests.
+
+\paragraph{Implemented mesh baselines.}
+The current 3D artifacts are explicit baselines, not solved Hyper-NPA models. \texttt{uv\_torus\_growth\_3d.bpk} and \texttt{teapot\_growth\_3d.bpk} both use \texttt{position\_features=false}, compact growth seeds, and no target residual/color seed state; validation evaluates them with the app-facing seed \texttt{0x51a7\_3d}. Both artifacts now carry guarded \texttt{render-refined-rust:...conditionless-local...} lineage. The latest torus refresh selected no better checkpoint and remains hidden from the Bevy app catalog because it fails coverage/depth and torus tube-angle support; the teapot is also hidden at the current 1024-particle interactive scale because it fails strict target coverage and rendered density despite passing the older catalog-sanity threshold. Both still fail the strict rendered density/mesh acceptance gate. Legacy \texttt{uv\_torus\_3d.bpk}, \texttt{uv\_torus\_morphogen\_3d.bpk}, and \texttt{teapot\_morphogen\_3d.bpk} artifacts are retired from the catalog asset set and should be regenerated only as diagnostics. The explicit projection baseline remains available for mesh-target sanity checks, rollout-local teacher distillation remains available for testing rollout-row training plumbing, and rollout-position-field remains available for position-field rollout rows. The \texttt{ablate-local-3d} command is the strict conditionless-local experiment: it uses \texttt{position\_features=false}, random-ball seeds, no target residual/color state, refreshed local rollout rows, and mesh rollout validation. Current torus and teapot reports fail the strict geometry/color/opacity gates, showing that the one-step mesh-projection proxy is not enough for fully local 3D morphogenesis. The \texttt{render-loss-3d} command provides a CPU multi-view orthographic Gaussian-splat oracle over relative alpha density, density-gated color, and depth moments, and \texttt{train-render3d} provides a proxy training scaffold against that oracle. Native differentiable or WGPU training through the full rollout remains future work. These artifacts and ablations are validation baselines for the proposed \texttt{PriorInitializer} and \texttt{RenderLossHarness}; fully general 3D lizard-like NPA still needs a learned condition/initializer and differentiable or proxy rendered/geometry rollout losses rather than baked projection-state channels or hand-authored position fields.
+
+\section{Limitations}
+
+This proposal does not solve rotational equivariance, differentiable Bevy rendering, or large-scale dense particle throughput by itself. The initial implementation should favor exactness and measurable validation over architectural breadth.
+
+\section{Conclusion}
+
+Hyper-NCA/NPA is a path toward generalizable conditioned automata: conditions produce sparse priors and local update rules; rollout remains local and GPU-resident; TTT adapts compact generated parameters to new scenes. The proposed roadmap turns existing fixed-checkpoint NPA infrastructure into an experimental platform for generic, generative, and conditioned particle automata.
+
+\begin{thebibliography}{9}
+
+\bibitem{npa}
+Self-Organising Neural Particle Automata.
+\url{https://selforg-npa.github.io/}
+
+\bibitem{vggt}
+J. Wang, M. Chen, N. Karaev, A. Vedaldi, C. Rupprecht, and D. Novotny.
+VGGT: Visual Geometry Grounded Transformer.
+\url{https://arxiv.org/abs/2503.11651}
+
+\bibitem{vggtomega}
+VGGT-$\Omega$: improving feed-forward reconstruction for static and dynamic scenes.
+\url{https://vggt-omega.github.io/}
+
+\bibitem{dinov3}
+DINOv3: Self-supervised learning for vision at unprecedented scale.
+\url{https://arxiv.org/abs/2508.10104}
+
+\bibitem{ttt3d}
+VGG-T$^3$: test-time training for scalable 3D reconstruction.
+\url{https://research.nvidia.com/labs/dvl/projects/vgg-ttt/}
+
+\end{thebibliography}
+
+\end{document}

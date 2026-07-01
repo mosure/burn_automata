@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""Compare a 3D growth candidate validation report against an active baseline."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_ABS_TOLERANCE = 1.0e-6
+MIN_PERTURBED_NEWLY_ACTIVATED_FRACTION = 0.5
+MIN_PERTURBED_ACTIVE_COUNT_RATIO = 0.5
+MAX_PERTURBED_ACTIVE_COUNT_RATIO = 2.0
+MIN_PERTURBED_PEAK_MOTION_RATIO = 0.25
+MAX_PERTURBED_PEAK_MOTION_RATIO = 4.0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Reject 3D candidate artifacts that regress current local-growth "
+            "validation metrics. Run validate-growth3d first and pass the "
+            "resulting JSON reports here."
+        )
+    )
+    parser.add_argument("--baseline-report", required=True, type=Path)
+    parser.add_argument("--candidate-report", required=True, type=Path)
+    parser.add_argument(
+        "--require-catalog-safe",
+        action="store_true",
+        help="Require the candidate to pass catalog-sanity and robust gates.",
+    )
+    parser.add_argument(
+        "--abs-tolerance",
+        default=DEFAULT_ABS_TOLERANCE,
+        type=float,
+        help="Absolute tolerance for no-regression comparisons.",
+    )
+    parser.add_argument(
+        "--min-render-improvement",
+        default=0.0,
+        type=float,
+        help="Required reduction in primary render total loss.",
+    )
+    parser.add_argument(
+        "--min-coverage-improvement",
+        default=0.0,
+        type=float,
+        help="Required increase in primary target coverage fraction.",
+    )
+    args = parser.parse_args()
+
+    baseline = load_report(args.baseline_report)
+    candidate = load_report(args.candidate_report)
+    failures = compare_reports(
+        baseline,
+        candidate,
+        require_catalog_safe=args.require_catalog_safe,
+        abs_tolerance=args.abs_tolerance,
+        min_render_improvement=args.min_render_improvement,
+        min_coverage_improvement=args.min_coverage_improvement,
+    )
+    summary = {
+        "baseline": str(args.baseline_report),
+        "candidate": str(args.candidate_report),
+        "status": "ok" if not failures else "failed",
+        "baseline_metrics": metrics_summary(baseline),
+        "candidate_metrics": metrics_summary(candidate),
+        "failures": failures,
+    }
+    print(json.dumps(summary, indent=2))
+    if failures:
+        raise SystemExit(1)
+
+
+def load_report(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise SystemExit(f"missing validation report: {path}")
+    return json.loads(path.read_text())
+
+
+def compare_reports(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    require_catalog_safe: bool,
+    abs_tolerance: float,
+    min_render_improvement: float,
+    min_coverage_improvement: float,
+) -> list[str]:
+    failures: list[str] = []
+    for field in ("target", "seed_mode", "particle_count", "steps", "seed_scale"):
+        if baseline.get(field) != candidate.get(field):
+            failures.append(
+                f"{field}: expected {baseline.get(field)!r}, got {candidate.get(field)!r}"
+            )
+
+    for field in (
+        "local_conditionless_lineage",
+        "position_features",
+    ):
+        expected = baseline.get(field)
+        observed = candidate.get(field)
+        if field == "position_features":
+            if observed is not False:
+                failures.append(f"{field}: expected false, got {observed!r}")
+        elif expected is True and observed is not True:
+            failures.append(f"{field}: expected true, got {observed!r}")
+
+    strict = candidate.get("strict_checks") or {}
+    for field in (
+        "no_position_features",
+        "local_conditionless_lineage",
+        "neutral_non_opacity_seed_state",
+        "sparse_active_seed",
+        "active_count_growth",
+        "newly_activated_fraction",
+        "active_front_expanded",
+        "nonzero_motion",
+        "sustained_motion",
+        "local_front_coherent",
+        "temporal_geometry_progressive",
+        "mean_displacement_growth",
+        "bounded_final_opacity",
+        "color_state_emerged",
+        "permutation_consistent",
+        "surface_tail_bounded",
+        "target_coverage_mean_improved",
+    ):
+        if strict.get(field) is not True:
+            failures.append(f"strict_checks.{field}: expected true, got {strict.get(field)!r}")
+    seed_perturbation = candidate.get("seed_perturbation") or {}
+    if seed_perturbation.get("passed") is not True:
+        failures.append(
+            f"seed_perturbation.passed: expected true, got {seed_perturbation.get('passed')!r}"
+        )
+
+    compare_lower(
+        failures,
+        "strict_score.score",
+        nested_get(candidate, "strict_score", "score"),
+        nested_get(baseline, "strict_score", "score"),
+        abs_tolerance,
+    )
+    compare_lower(
+        failures,
+        "render_loss.total_loss",
+        nested_get(candidate, "render_loss", "total_loss"),
+        nested_get(baseline, "render_loss", "total_loss") - min_render_improvement,
+        abs_tolerance,
+    )
+    compare_higher(
+        failures,
+        "render_loss.density_psnr_db",
+        nested_get(candidate, "render_loss", "density_psnr_db"),
+        nested_get(baseline, "render_loss", "density_psnr_db"),
+        abs_tolerance,
+    )
+    compare_higher(
+        failures,
+        "render_loss.depth_psnr_db",
+        nested_get(candidate, "render_loss", "depth_psnr_db"),
+        nested_get(baseline, "render_loss", "depth_psnr_db"),
+        abs_tolerance,
+    )
+    compare_higher(
+        failures,
+        "final_active_target_coverage.covered_fraction",
+        nested_get(candidate, "final_active_target_coverage", "covered_fraction"),
+        nested_get(baseline, "final_active_target_coverage", "covered_fraction")
+        + min_coverage_improvement,
+        abs_tolerance,
+    )
+
+    if candidate.get("target") == "Torus":
+        compare_higher(
+            failures,
+            "torus_angular_coverage.joint_coverage_fraction",
+            nested_get(candidate, "torus_angular_coverage", "joint_coverage_fraction"),
+            nested_get(baseline, "torus_angular_coverage", "joint_coverage_fraction"),
+            abs_tolerance,
+        )
+        compare_higher(
+            failures,
+            "torus_angular_coverage.tube_coverage_fraction",
+            nested_get(candidate, "torus_angular_coverage", "tube_coverage_fraction"),
+            nested_get(baseline, "torus_angular_coverage", "tube_coverage_fraction"),
+            abs_tolerance,
+        )
+
+    compare_lower(
+        failures,
+        "final_opacity.max",
+        nested_get(candidate, "final_opacity", "max"),
+        nested_get(baseline, "final_opacity", "max") + 0.25,
+        abs_tolerance,
+    )
+    compare_lower(
+        failures,
+        "robustness.max_render_loss",
+        nested_get(candidate, "robustness", "max_render_loss"),
+        nested_get(baseline, "robustness", "max_render_loss"),
+        abs_tolerance,
+    )
+    compare_higher(
+        failures,
+        "robustness.min_depth_psnr_db",
+        nested_get(candidate, "robustness", "min_depth_psnr_db"),
+        nested_get(baseline, "robustness", "min_depth_psnr_db"),
+        abs_tolerance,
+    )
+    compare_higher(
+        failures,
+        "robustness.min_final_active_target_coverage_fraction",
+        nested_get(candidate, "robustness", "min_final_active_target_coverage_fraction"),
+        nested_get(baseline, "robustness", "min_final_active_target_coverage_fraction"),
+        abs_tolerance,
+    )
+    robustness = candidate.get("robustness") or {}
+    if robustness.get("all_seed_perturbation_stable") is not True:
+        failures.append(
+            "robustness.all_seed_perturbation_stable: expected true, "
+            f"got {robustness.get('all_seed_perturbation_stable')!r}"
+        )
+    compare_higher_value(
+        failures,
+        "robustness.min_perturbed_newly_activated_fraction",
+        nested_get(candidate, "robustness", "min_perturbed_newly_activated_fraction"),
+        MIN_PERTURBED_NEWLY_ACTIVATED_FRACTION,
+        abs_tolerance,
+    )
+    compare_higher_value(
+        failures,
+        "robustness.min_perturbed_active_count_ratio",
+        nested_get(candidate, "robustness", "min_perturbed_active_count_ratio"),
+        MIN_PERTURBED_ACTIVE_COUNT_RATIO,
+        abs_tolerance,
+    )
+    compare_lower_value(
+        failures,
+        "robustness.max_perturbed_active_count_ratio",
+        nested_get(candidate, "robustness", "max_perturbed_active_count_ratio"),
+        MAX_PERTURBED_ACTIVE_COUNT_RATIO,
+        abs_tolerance,
+    )
+    compare_higher_value(
+        failures,
+        "robustness.min_perturbed_peak_motion_ratio",
+        nested_get(candidate, "robustness", "min_perturbed_peak_motion_ratio"),
+        MIN_PERTURBED_PEAK_MOTION_RATIO,
+        abs_tolerance,
+    )
+    compare_lower_value(
+        failures,
+        "robustness.max_perturbed_peak_motion_ratio",
+        nested_get(candidate, "robustness", "max_perturbed_peak_motion_ratio"),
+        MAX_PERTURBED_PEAK_MOTION_RATIO,
+        abs_tolerance,
+    )
+
+    if require_catalog_safe:
+        if candidate.get("gate_passed") is not True:
+            failures.append(f"gate_passed: expected true, got {candidate.get('gate_passed')!r}")
+        catalog_sanity = candidate.get("catalog_sanity") or {}
+        if catalog_sanity.get("passed") is not True:
+            failures.append(
+                f"catalog_sanity.passed: expected true, got {catalog_sanity.get('passed')!r}"
+            )
+        robustness = candidate.get("robustness") or {}
+        for field in ("all_gate_passed", "all_catalog_sanity_passed"):
+            if robustness.get(field) is not True:
+                failures.append(
+                    f"robustness.{field}: expected true, got {robustness.get(field)!r}"
+                )
+
+    return failures
+
+
+def metrics_summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": report.get("model"),
+        "gate_passed": report.get("gate_passed"),
+        "strict_score": nested_get(report, "strict_score", "score"),
+        "failure_reasons": nested_get(report, "strict_checks", "failure_reasons") or [],
+        "render_total_loss": nested_get(report, "render_loss", "total_loss"),
+        "density_psnr_db": nested_get(report, "render_loss", "density_psnr_db"),
+        "depth_psnr_db": nested_get(report, "render_loss", "depth_psnr_db"),
+        "target_coverage_fraction": nested_get(
+            report, "final_active_target_coverage", "covered_fraction"
+        ),
+        "torus_joint_coverage_fraction": nested_get(
+            report, "torus_angular_coverage", "joint_coverage_fraction"
+        ),
+        "torus_tube_coverage_fraction": nested_get(
+            report, "torus_angular_coverage", "tube_coverage_fraction"
+        ),
+        "seed_perturbation_passed": nested_get(report, "seed_perturbation", "passed"),
+        "seed_perturbation_active_count_ratio": nested_get(
+            report, "seed_perturbation", "active_count_ratio"
+        ),
+        "seed_perturbation_peak_motion_ratio": nested_get(
+            report, "seed_perturbation", "peak_motion_ratio"
+        ),
+        "max_final_opacity": nested_get(report, "final_opacity", "max"),
+        "robustness_max_render_loss": nested_get(report, "robustness", "max_render_loss"),
+        "robustness_min_depth_psnr_db": nested_get(
+            report, "robustness", "min_depth_psnr_db"
+        ),
+        "robustness_min_target_coverage_fraction": nested_get(
+            report, "robustness", "min_final_active_target_coverage_fraction"
+        ),
+        "robustness_all_seed_perturbation_stable": nested_get(
+            report, "robustness", "all_seed_perturbation_stable"
+        ),
+        "robustness_min_perturbed_newly_activated_fraction": nested_get(
+            report, "robustness", "min_perturbed_newly_activated_fraction"
+        ),
+        "robustness_min_perturbed_active_count_ratio": nested_get(
+            report, "robustness", "min_perturbed_active_count_ratio"
+        ),
+        "robustness_max_perturbed_active_count_ratio": nested_get(
+            report, "robustness", "max_perturbed_active_count_ratio"
+        ),
+        "robustness_min_perturbed_peak_motion_ratio": nested_get(
+            report, "robustness", "min_perturbed_peak_motion_ratio"
+        ),
+        "robustness_max_perturbed_peak_motion_ratio": nested_get(
+            report, "robustness", "max_perturbed_peak_motion_ratio"
+        ),
+    }
+
+
+def compare_lower(
+    failures: list[str],
+    field: str,
+    observed: Any,
+    maximum: Any,
+    tolerance: float,
+) -> None:
+    if not is_number(observed) or not is_number(maximum):
+        failures.append(f"{field}: expected numeric <= {maximum!r}, got {observed!r}")
+        return
+    if float(observed) > float(maximum) + tolerance:
+        failures.append(f"{field}: expected <= {float(maximum):.8g}, got {float(observed):.8g}")
+
+
+def compare_lower_value(
+    failures: list[str],
+    field: str,
+    observed: Any,
+    maximum: float,
+    tolerance: float,
+) -> None:
+    compare_lower(failures, field, observed, maximum, tolerance)
+
+
+def compare_higher(
+    failures: list[str],
+    field: str,
+    observed: Any,
+    minimum: Any,
+    tolerance: float,
+) -> None:
+    if not is_number(observed) or not is_number(minimum):
+        failures.append(f"{field}: expected numeric >= {minimum!r}, got {observed!r}")
+        return
+    if float(observed) + tolerance < float(minimum):
+        failures.append(f"{field}: expected >= {float(minimum):.8g}, got {float(observed):.8g}")
+
+
+def compare_higher_value(
+    failures: list[str],
+    field: str,
+    observed: Any,
+    minimum: float,
+    tolerance: float,
+) -> None:
+    compare_higher(failures, field, observed, minimum, tolerance)
+
+
+def nested_get(value: dict[str, Any], *keys: str) -> Any:
+    current: Any = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def is_number(value: Any) -> bool:
+    return isinstance(value, int | float)
+
+
+if __name__ == "__main__":
+    main()

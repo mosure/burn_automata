@@ -1,0 +1,296 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.72in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{microtype}
+\title{Spatial Index Ablations for GPU Neural Particle Automata Inference}
+\author{burn\_automata contributors}
+\date{June 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+Neural Particle Automata (NPA) inference is dominated by local neighbor
+traversal rather than neural matrix-vector arithmetic once particle counts reach
+interactive 2D and 3D regimes. We benchmark the direct WGPU inference backend in
+\texttt{burn\_automata} across linked lists, scalar fixed buckets,
+active-cell tiled fixed buckets, sorted cell ranges, CPU structural
+prototypes for tile blocks and median-split BVH traversal, an executable
+CPU-rebuilt/WGPU-traversed BVH mode, a fully GPU-built fixed-order BVH
+baseline, a GPU-built sorted-cell LBVH-style baseline, and a GPU Morton-order
+bitonic-sort LBVH baseline. The main result is
+that 2D NPA inference benefits strongly from active-cell tiled buckets when
+bucket capacity is selected from measured occupancy, while broad 3D clouds
+remain best served by exact linked lists on the tested GPU. Collapsed
+low-dimensional 3D distributions are the exception: a tiled active-cell path
+reduces the adversarial line case by roughly 2.7x. The current WGPU BVH path is
+exact and useful for ablation, but its CPU rebuild/readback/upload cost keeps it
+behind the best grid/tiled modes at 4K--8K particles. The no-readback GPU-built
+fixed-order BVH removes CPU rebuild cost but performs worse because it lacks
+spatial ordering. The sorted-cell GPU-LBVH baseline improves the pathological
+3D line case over fixed-order GPU BVH, but scan/scatter/tree/traversal overhead
+still keeps it behind the active-cell tiled grid path at 4K--8K particles.
+Morton ordering improves broad-cloud BVH coherence relative to sorted-cell
+ordering, but the current bitonic sort overhead is too high for it to become an
+auto-mode candidate.
+\end{abstract}
+
+\section{Introduction}
+NPAs update each particle from compact local features gathered from a spatial
+neighborhood. This locality creates a natural opportunity for spatial indexing,
+but the best GPU data structure depends on dimension, occupancy, overflow
+behavior, and workgroup utilization. The library now keeps the neighbor
+strategy modular through \texttt{WgpuNeighborMode} for executable WGPU paths
+and \texttt{SpatialStrategyKind} for CPU structural studies.
+
+\section{Kernel Strategies}
+The linked-list path stores a per-cell atomic head and a per-particle next
+pointer. It is exact and memory efficient, but every particle launches its own
+neighbor traversal. Fixed buckets replace linked traversal with a dense
+\(\mathrm{cells}\times\mathrm{capacity}\) slab. This is exact only when the
+overflow counter is zero. The active-cell tiled variant reuses the same slab,
+stores the non-empty cells and indirect dispatch dimensions during binning, and
+uses workgroup memory for neighbor tiles. Sorted cells build exact contiguous
+cell ranges with a count, prefix scan, and scatter. The BVH prototype is a CPU
+median-split AABB tree used to study 3D candidate behavior before committing to
+a GPU LBVH rebuild and traversal implementation.
+
+The CPU-rebuilt WGPU BVH mode stores packed median-split nodes and leaf particle
+indices in the existing grid storage buffer, then performs density and update
+traversal in WGSL. To keep resident multi-step rollouts exact before a GPU LBVH
+builder exists, the backend reads current GPU positions, rebuilds the BVH on
+CPU, uploads the packed tree, and then runs WGPU traversal every step. The
+`GpuBvh` baseline initializes a complete binary tree and reduces AABBs entirely
+on GPU, avoiding readback but using fixed particle order rather than Morton
+order. The `GpuLbvh` baseline reuses the GPU sorted-cell count/scan/scatter
+ordering, builds leaves over that spatially coherent order, then reduces the
+tree bottom-up on GPU. It is not a Karras radix-tree LBVH yet, but it measures
+the cost and benefit of spatially ordered GPU BVH traversal without host
+transfer.
+The `GpuMortonLbvh` baseline generates Morton keys from clamped grid
+coordinates, bitonic-sorts `(key, particle)` pairs on GPU, builds leaves over
+that order, and reuses the same bottom-up tree reduction and traversal.
+
+\section{Experimental Setup}
+Benchmarks were run with the release \texttt{gpu\_wgpu} backend. Each row
+reports average milliseconds per simulation step. Overflowed fixed-bucket rows
+are excluded from best-exact selections because truncating cells changes NPA
+states and rendered output. The structural BVH and tile-block rows are CPU
+oracle measurements and should be read as candidate-count evidence, not direct
+GPU timing.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lllllll}
+\toprule
+preset & N & geometry & old auto & new auto & speedup & new layout \\
+\midrule
+growing-2d & 4096 & dense & 61.69 & 19.51 & 3.16x & TiledFixedCellBuckets \{ capacity: 1024 \} \\
+growing-2d & 4096 & line & 101.01 & 26.40 & 3.83x & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+growing-2d & 8192 & dense & 119.67 & 42.93 & 2.79x & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+growing-2d & 8192 & line & 207.33 & 63.90 & 3.24x & TiledFixedCellBuckets \{ capacity: 4096 \} \\
+texture-2d & 4096 & uniform & 12.41 & 5.77 & 2.15x & TiledFixedCellBuckets \{ capacity: 256 \} \\
+texture-2d & 4096 & line & 44.64 & 12.76 & 3.50x & TiledFixedCellBuckets \{ capacity: 1024 \} \\
+texture-2d & 8192 & uniform & 20.63 & 9.25 & 2.23x & TiledFixedCellBuckets \{ capacity: 512 \} \\
+texture-2d & 8192 & line & 85.17 & 26.88 & 3.17x & TiledFixedCellBuckets \{ capacity: 1024 \} \\
+growing-3d-gs & 4096 & line & 48.19 & 17.59 & 2.74x & TiledFixedCellBuckets \{ capacity: 128 \} \\
+growing-3d-gs & 8192 & line & 87.25 & 32.76 & 2.66x & TiledFixedCellBuckets \{ capacity: 256 \} \\
+growing-3d-gs & 8192 & torus & 12.41 & 12.44 & 1.00x & LinkedList \\
+\bottomrule
+\end{tabular}
+\caption{Post-change auto-mode speedups versus the previous auto resolver. All rows have zero final bucket overflow.}
+\label{tab:auto}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lllllllll}
+\toprule
+preset & N & geometry & best non-BVH & CPU-BVH & GPU-BVH & GPU-LBVH & Morton-LBVH & best BVH ratio \\
+\midrule
+growing-3d-gs & 4096 & dense & auto 8.89 & bvh:8 11.94 & gpu-bvh-32 20.67 & gpu-lbvh-32 21.25 & morton-lbvh-16 17.38 & 1.34x \\
+growing-3d-gs & 4096 & line & tiled-512 14.71 & bvh:8 34.23 & gpu-bvh-32 102.65 & gpu-lbvh-16 87.44 & morton-lbvh-16 89.17 & 2.33x \\
+growing-3d-gs & 8192 & dense & sorted 10.10 & bvh:8 16.73 & gpu-bvh-32 34.49 & gpu-lbvh-32 36.84 & morton-lbvh-16 25.10 & 1.66x \\
+growing-3d-gs & 8192 & line & auto 26.02 & bvh:8 61.38 & gpu-bvh-32 220.56 & gpu-lbvh-16 150.81 & morton-lbvh-16 183.15 & 2.36x \\
+growing-2d & 4096 & dense & auto 19.51 & bvh:8 56.03 & gpu-bvh-32 71.52 & gpu-lbvh-16 95.97 & -- & 2.87x \\
+growing-2d & 4096 & line & tiled-2048 25.79 & bvh:16 77.60 & gpu-bvh-16 72.05 & gpu-lbvh-32 101.41 & -- & 2.79x \\
+growing-2d & 8192 & dense & auto 41.23 & bvh:8 109.44 & gpu-bvh-32 149.57 & gpu-lbvh-16 190.36 & -- & 2.65x \\
+growing-2d & 8192 & line & auto 63.90 & bvh:16 163.30 & gpu-bvh-32 151.68 & gpu-lbvh-32 214.58 & -- & 2.37x \\
+\bottomrule
+\end{tabular}
+\caption{Executable WGPU BVH ablation. Ratios above 1.0 mean the best BVH variant is slower than the best exact non-BVH mode for the same row.}
+\label{tab:bvhgpu}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llll}
+\toprule
+geometry & best exact mode & ms/step & resolved layout \\
+\midrule
+dense & auto & 41.23 & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+line & auto & 63.90 & TiledFixedCellBuckets \{ capacity: 4096 \} \\
+plane & auto & 35.69 & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+torus & tiled-2048 & 19.22 & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+uniform & tiled-2048 & 33.90 & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+\bottomrule
+\end{tabular}
+\caption{Best exact growing-2D WGPU rows from the ablation and tiled-capacity sweeps.}
+\label{tab:growing2d}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llll}
+\toprule
+geometry & best exact mode & ms/step & resolved layout \\
+\midrule
+dense & tiled-1024 & 9.73 & TiledFixedCellBuckets \{ capacity: 1024 \} \\
+line & auto & 26.88 & TiledFixedCellBuckets \{ capacity: 1024 \} \\
+plane & auto & 9.32 & TiledFixedCellBuckets \{ capacity: 512 \} \\
+torus & tiled-1024 & 14.86 & TiledFixedCellBuckets \{ capacity: 1024 \} \\
+uniform & tiled-2048 & 9.01 & TiledFixedCellBuckets \{ capacity: 2048 \} \\
+\bottomrule
+\end{tabular}
+\caption{Best exact texture-2D WGPU rows from the ablation and tiled-capacity sweeps.}
+\label{tab:texture2d}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llll}
+\toprule
+geometry & best exact mode & ms/step & resolved layout \\
+\midrule
+dense & sorted & 10.10 & SortedCells \\
+line & auto & 26.02 & TiledFixedCellBuckets \{ capacity: 512 \} \\
+plane & fixed-128 & 17.03 & FixedCellBuckets \{ capacity: 128 \} \\
+torus & auto & 11.66 & LinkedList \\
+uniform & sorted & 9.20 & SortedCells \\
+\bottomrule
+\end{tabular}
+\caption{Best exact growing-3D Gaussian-splat rows from the WGPU ablation and post-change auto sweeps.}
+\label{tab:3d}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lllllll}
+\toprule
+preset & N & geometry & strategy & cand./p & exact/p & nodes/p \\
+\midrule
+growing-3d-gs & 4096 & dense & hash-grid & 23.9 & 4.8 & 0.0 \\
+growing-3d-gs & 4096 & dense & bvh & 61.2 & 4.8 & 30.0 \\
+growing-3d-gs & 4096 & line & hash-grid & 596.9 & 397.4 & 0.0 \\
+growing-3d-gs & 4096 & line & bvh & 429.1 & 397.4 & 65.7 \\
+growing-3d-gs & 4096 & torus & hash-grid & 21.0 & 7.0 & 0.0 \\
+growing-3d-gs & 4096 & torus & bvh & 39.9 & 7.0 & 23.8 \\
+growing-2d & 4096 & dense & hash-grid & 1861.5 & 798.4 & 0.0 \\
+growing-2d & 4096 & dense & bvh & 982.8 & 798.4 & 159.2 \\
+texture-2d & 4096 & dense & hash-grid & 421.6 & 153.4 & 0.0 \\
+texture-2d & 4096 & dense & tile-blocks & 725.9 & 153.4 & 0.0 \\
+\bottomrule
+\end{tabular}
+\caption{CPU spatial strategy oracle. Candidate counts include exact radius filtering opportunities before the neural update.}
+\label{tab:spatial}
+\end{table}
+
+\section{Analysis}
+The 2D conclusion is direct: active-cell tiled buckets provide large speedups
+when the capacity is selected from observed occupancy with headroom. The
+post-change auto resolver therefore routes 2D particle and periodic grids to
+\texttt{TiledFixedCellBuckets} and uses a tiled-specific capacity rule
+\(\mathrm{nextpow2}(2m+64)\), where \(m\) is the initial maximum cell
+occupancy. This prevented overflow in the tested seed, dense, line, uniform,
+plane, and torus distributions.
+
+The 3D conclusion is more nuanced. Broad 3D clouds have low maximum occupancy
+and enough active cells that per-particle linked traversal remains competitive.
+Forcing tiled workgroups in those cases adds barriers and duplicated
+cell-block work without enough reuse. Collapsed 3D line distributions are
+different: active cells are sparse and occupancy is high, so the new auto
+resolver switches to tiled buckets only when
+\(\mathrm{nonempty}\times 32 \leq N\) and \(m \geq 64\). This preserves broad
+3D behavior while improving adversarial collapsed cases.
+
+BVH is now measured in four ways. The CPU oracle often reduces candidates for
+thin or low-dimensional manifolds, the CPU-rebuilt/WGPU-traversed backend
+confirms that BVH can beat linked lists on collapsed 3D lines, the fully-GPU
+fixed-order BVH shows that eliminating readback alone is not enough, and the
+sorted GPU-LBVH baseline shows that spatial ordering helps the worst fixed-order
+3D line case but does not yet beat active-cell tiled grids, and the Morton
+GPU-LBVH baseline shows better broad-cloud BVH coherence but excessive bitonic
+sort overhead. A production GPU LBVH path still needs cheaper ordering, better
+hierarchy construction, and stackless or short-stack traversal every step
+because NPA particles move.
+
+\section{Library Organization}
+The implementation keeps executable strategies and analysis strategies separate.
+\texttt{burn\_automata::gpu} owns WGPU layouts, BVH traversal, and auto-mode resolution.
+\texttt{burn\_automata\_kernels::spatial} owns CPU analysis for hash grids,
+tile blocks, and BVH. CLI commands \texttt{bench} and \texttt{bench-spatial}
+emit parseable JSON/CSV for regression tests and papers. This separation makes
+it straightforward to add a future GPU LBVH or cooperative-neighbor storage
+without hard-coding BVH assumptions into model configs.
+
+\section{Limitations and Next Steps}
+The `GpuBvh` path is GPU-built but fixed-order. The `GpuLbvh` path is
+GPU-built and spatially sorted by existing grid cell order, but it is not yet a
+full Morton radix-tree LBVH and remains slower than tiled grids on the measured
+4K--8K rows. The `GpuMortonLbvh` path validates GPU Morton ordering but uses
+multi-dispatch bitonic sort, which is intentionally simple and not production
+efficient. The CPU-rebuilt BVH path remains useful as a traversal-quality upper
+baseline for median-split trees. The tiled WGPU path still uses capped buckets,
+so exactness requires an overflow counter check. The next high-value kernel
+experiments are: (1) radix-sort or persistent Morton ordering plus stackless
+traversal for 3D collapsed/surface-like clouds; (2)
+cooperative sorted-cell traversal that amortizes scan/scatter over multiple NPA
+steps or combines density and update staging; and (3) per-step overflow
+telemetry in long rollouts, not only final-state overflow.
+
+\section{Reproducibility}
+\begin{verbatim}
+cargo build -p burn_automata --release --features gpu_wgpu
+scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_auto_after.json \
+  --preset growing-3d-gs --preset growing-2d --preset texture-2d \
+  --particles 4096 --particles 8192 --steps 8 --repeats 2 \
+  --geometry seed --geometry dense --geometry line --geometry uniform \
+  --geometry plane --geometry torus --mode auto
+scripts/bench_spatial_index.py --no-build --output target/bench_spatial_index_perf.json
+scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_bvh_ablation.json \
+  --preset growing-3d-gs --preset growing-2d --particles 4096 --particles 8192 \
+  --steps 6 --repeats 2 --geometry dense --geometry line --geometry torus \
+  --geometry uniform --mode auto --mode linked-list --mode tiled-fixed-buckets:128 \
+  --mode tiled-fixed-buckets:512 --mode sorted-cells \
+  --mode bvh:8 --mode bvh:16 --mode bvh:32 --mode bvh:64
+scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_gpu_bvh_ablation.json \
+  --preset growing-3d-gs --preset growing-2d --particles 4096 --particles 8192 \
+  --steps 6 --repeats 2 --geometry dense --geometry line --geometry torus \
+  --geometry uniform --mode auto --mode linked-list --mode tiled-fixed-buckets:512 \
+  --mode sorted-cells --mode bvh:16 \
+  --mode gpu-bvh:8 --mode gpu-bvh:16 --mode gpu-bvh:32
+scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_lbvh_ablation.json \
+  --preset growing-3d-gs --preset growing-2d --particles 4096 --particles 8192 \
+  --steps 6 --repeats 2 --geometry dense --geometry line --geometry torus \
+  --geometry uniform --mode auto --mode linked-list --mode tiled-fixed-buckets:512 \
+  --mode sorted-cells --mode bvh:16 --mode gpu-bvh:16 \
+  --mode gpu-lbvh:16 --mode gpu-lbvh:32
+scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_morton_lbvh_ablation.json \
+  --preset growing-3d-gs --particles 4096 --particles 8192 --steps 4 \
+  --repeats 1 --geometry dense --geometry line --geometry torus --geometry uniform \
+  --mode auto --mode gpu-bvh:16 --mode gpu-lbvh:16 --mode gpu-morton-lbvh:16
+scripts/render_kernel_ablation_paper.py
+\end{verbatim}
+
+\begin{thebibliography}{9}
+\bibitem{nca} A. Mordvintsev et al. Growing Neural Cellular Automata.
+\bibitem{lbvh} T. Karras. Maximizing Parallelism in the Construction of BVHs, HPG 2012.
+\bibitem{npa} Self-organizing Neural Particle Automata reference implementation and model zoo.
+\end{thebibliography}
+\end{document}

@@ -1,0 +1,26 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v3
+      - run: cargo fmt --all --check
+      - run: cargo check -p burn_automata_kernels -p burn_automata --all-targets
+      - run: cargo check -p burn_automata --examples --benches
+      - run: cargo check -p burn_automata --no-default-features --features backend_wgpu
+      - run: cargo check -p burn_automata --no-default-features --features gpu_wgpu
+      - run: cargo test -p burn_automata_kernels -p burn_automata -p bevy_burn
+      - run: cargo test -p burn_automata --test gpu_wgpu --no-default-features --features gpu_wgpu
+      - run: cargo test -p bevy_automata --no-default-features --features "splatting gpu_wgpu" --test gaussian_gpu_link
+      - run: cargo check -p bevy_automata --no-default-features --features viewer
+      - run: cargo check -p bevy_automata
