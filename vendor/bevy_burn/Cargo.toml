@@ -1,0 +1,29 @@
+[package]
+name = "bevy_burn"
+description = "Workspace bridge extensions for Bevy/Burn GPU buffer interop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+bevy = { workspace = true, features = [
+  "bevy_asset",
+  "bevy_render",
+  "std",
+] }
+burn = { workspace = true, features = ["std"] }
+bytemuck.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+burn = { workspace = true, features = ["std", "ndarray"] }
+
+[lib]
+path = "src/lib.rs"

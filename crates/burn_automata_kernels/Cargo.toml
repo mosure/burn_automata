@@ -1,0 +1,24 @@
+[package]
+name = "burn_automata_kernels"
+description = "Reference and GPU kernel interfaces for burn neural particle automata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[features]
+default = ["serde"]
+cubecl = []
+serde = ["dep:serde"]
+
+[dependencies]
+rayon.workspace = true
+serde = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[lib]
+path = "src/lib.rs"

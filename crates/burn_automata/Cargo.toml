@@ -1,0 +1,80 @@
+[package]
+name = "burn_automata"
+description = "Burn neural particle automata inference, training, and import utilities"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["burn", "automata", "particle", "nca"]
+categories = ["science", "simulation", "computer-vision"]
+
+[features]
+default = ["cli", "backend_ndarray"]
+backend_ndarray = ["burn/ndarray"]
+backend_wgpu = ["burn/wgpu", "burn/webgpu", "burn/fusion"]
+cli = ["dep:clap"]
+gpu_wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
+import = []
+train = []
+
+[dependencies]
+burn_automata_kernels = { path = "../burn_automata_kernels", version = "0.1.0" }
+burn = { workspace = true, features = ["std"] }
+bytemuck = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+rand.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+wgpu = { workspace = true, optional = true }
+zip.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "burn_automata"
+path = "src/bin/burn_automata.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "infer_2d"
+path = "examples/infer_2d.rs"
+
+[[example]]
+name = "infer_3d"
+path = "examples/infer_3d.rs"
+
+[[example]]
+name = "train_2d"
+path = "examples/train_2d.rs"
+
+[[example]]
+name = "train_3d"
+path = "examples/train_3d.rs"
+
+[[bench]]
+name = "rollout"
+path = "benches/rollout.rs"
+harness = false
+
+[[bench]]
+name = "training"
+path = "benches/training.rs"
+harness = false
+
+[[bench]]
+name = "tile"
+path = "benches/tile.rs"
+harness = false

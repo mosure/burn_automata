@@ -1,0 +1,294 @@
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::{AutomataError, AutomataResult, NpaConfig};
+use burn::tensor::{Tensor, TensorData, activation::relu, backend::Backend};
+use burn_automata_kernels::{
+    HashGridConfig, PerceptionOptions, PerceptionOutput, euler_step, perceive_with_options,
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NpaWeights {
+    pub w1: Vec<f32>,
+    pub b1: Vec<f32>,
+    pub w2: Vec<f32>,
+    pub b2: Vec<f32>,
+}
+
+impl NpaWeights {
+    pub fn zeros(config: &NpaConfig) -> Self {
+        Self {
+            w1: vec![0.0; config.hidden_dims * config.perception_dims()],
+            b1: vec![0.0; config.hidden_dims],
+            w2: vec![0.0; config.update_dims() * config.hidden_dims],
+            b2: vec![0.0; config.update_dims()],
+        }
+    }
+
+    pub fn seeded(config: &NpaConfig, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut weights = Self::zeros(config);
+        for v in &mut weights.w1 {
+            *v = rng.random_range(-0.1..0.1);
+        }
+        for v in &mut weights.w2 {
+            *v = rng.random_range(-0.1..0.1);
+        }
+        weights
+    }
+
+    pub fn validate(&self, config: &NpaConfig) -> AutomataResult<()> {
+        let expected_w1 = config.hidden_dims * config.perception_dims();
+        let expected_w2 = config.update_dims() * config.hidden_dims;
+        if self.w1.len() != expected_w1 {
+            return Err(AutomataError::InvalidModel(format!(
+                "w1 len {} != {expected_w1}",
+                self.w1.len()
+            )));
+        }
+        if self.b1.len() != config.hidden_dims {
+            return Err(AutomataError::InvalidModel(format!(
+                "b1 len {} != {}",
+                self.b1.len(),
+                config.hidden_dims
+            )));
+        }
+        if self.w2.len() != expected_w2 {
+            return Err(AutomataError::InvalidModel(format!(
+                "w2 len {} != {expected_w2}",
+                self.w2.len()
+            )));
+        }
+        if self.b2.len() != config.update_dims() {
+            return Err(AutomataError::InvalidModel(format!(
+                "b2 len {} != {}",
+                self.b2.len(),
+                config.update_dims()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NpaModel {
+    pub config: NpaConfig,
+    pub weights: NpaWeights,
+}
+
+#[derive(Clone, Debug)]
+pub struct StepOutput {
+    pub next_positions: Vec<[f32; 4]>,
+    pub next_states: Vec<f32>,
+    pub dx: Vec<[f32; 4]>,
+    pub ds: Vec<f32>,
+    pub perception: PerceptionOutput,
+}
+
+impl NpaModel {
+    pub fn seeded(config: NpaConfig, seed: u64) -> Self {
+        let weights = NpaWeights::seeded(&config, seed);
+        Self { config, weights }
+    }
+
+    pub fn validate(&self) -> AutomataResult<()> {
+        if !(self.config.spatial_dims == 2 || self.config.spatial_dims == 3) {
+            return Err(AutomataError::InvalidModel(format!(
+                "spatial_dims must be 2 or 3, got {}",
+                self.config.spatial_dims
+            )));
+        }
+        self.weights.validate(&self.config)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_cpu(
+        &self,
+        positions: &[[f32; 4]],
+        states: &[f32],
+        batch_size: usize,
+        particle_count: usize,
+        grid: &HashGridConfig,
+        dt: f32,
+        update_mask: Option<&[f32]>,
+    ) -> AutomataResult<StepOutput> {
+        self.validate()?;
+        if grid.dim != self.config.spatial_dims {
+            return Err(AutomataError::InvalidArgument(format!(
+                "grid dim {} does not match model spatial dims {}",
+                grid.dim, self.config.spatial_dims
+            )));
+        }
+        let perception = perceive_with_options(
+            positions,
+            states,
+            batch_size,
+            particle_count,
+            self.config.state_dims,
+            grid,
+            PerceptionOptions {
+                state_grad: self.config.state_grad,
+                density_grad: self.config.density_grad,
+                eps0: self.config.eps0,
+                scale_equivariance: self.config.scale_equivariant(),
+                particle_density_equivariance: self.config.particle_density_equivariant(),
+                log_norm_grad: self.config.log_norm_grad,
+                log_norm_density_grad: self.config.log_norm_density_grad,
+                hybrid_state_gradient: true,
+                position_features: self.config.position_features,
+            },
+        )?;
+        let (dx, ds) = self.forward_from_features_with_eps(&perception.features, grid.eps)?;
+        let (next_positions, next_states) = euler_step(
+            positions,
+            states,
+            &dx,
+            &ds,
+            batch_size,
+            particle_count,
+            self.config.state_dims,
+            grid,
+            dt,
+            update_mask,
+        )?;
+
+        Ok(StepOutput {
+            next_positions,
+            next_states,
+            dx,
+            ds,
+            perception,
+        })
+    }
+
+    pub fn forward_from_features(
+        &self,
+        features: &[f32],
+    ) -> AutomataResult<(Vec<[f32; 4]>, Vec<f32>)> {
+        self.forward_from_features_with_eps(features, self.config.eps0)
+    }
+
+    pub fn forward_from_features_with_eps(
+        &self,
+        features: &[f32],
+        eps: f32,
+    ) -> AutomataResult<(Vec<[f32; 4]>, Vec<f32>)> {
+        let update = self.forward_update_from_features(features)?;
+        let input_dims = self.config.perception_dims();
+        let rows = features.len() / input_dims;
+        let output_dims = self.config.update_dims();
+        let mut dx = vec![[0.0; 4]; rows];
+        let mut ds = vec![0.0; rows * self.config.state_dims];
+
+        for row in 0..rows {
+            let row_update = &update[row * output_dims..(row + 1) * output_dims];
+            let mut norm = 0.0;
+            for value in row_update.iter().take(self.config.spatial_dims) {
+                norm += value * value;
+            }
+            norm = norm.sqrt();
+            let motion_eps = self.config.motion_eps(eps);
+            for (axis, value) in row_update.iter().enumerate().take(self.config.spatial_dims) {
+                dx[row][axis] = self.config.alpha * *value * motion_eps / (1.0 + norm);
+            }
+            let state_base = row * self.config.state_dims;
+            let update_state_base = self.config.spatial_dims;
+            ds[state_base..state_base + self.config.state_dims].copy_from_slice(
+                &row_update[update_state_base..update_state_base + self.config.state_dims],
+            );
+        }
+
+        Ok((dx, ds))
+    }
+
+    pub fn forward_update_from_features(&self, features: &[f32]) -> AutomataResult<Vec<f32>> {
+        let input_dims = self.config.perception_dims();
+        if !features.len().is_multiple_of(input_dims) {
+            return Err(AutomataError::InvalidArgument(format!(
+                "feature len {} is not divisible by perception dims {input_dims}",
+                features.len()
+            )));
+        }
+        let rows = features.len() / input_dims;
+        let output_dims = self.config.update_dims();
+        let mut update_rows = vec![0.0; rows * output_dims];
+
+        update_rows
+            .par_chunks_mut(output_dims)
+            .enumerate()
+            .for_each_init(
+                || vec![0.0; self.config.hidden_dims],
+                |hidden, (row, update)| {
+                    let feature = &features[row * input_dims..(row + 1) * input_dims];
+                    for (h, hidden_value) in hidden.iter_mut().enumerate() {
+                        let mut sum = self.weights.b1[h];
+                        let w_base = h * input_dims;
+                        for (i, value) in feature.iter().enumerate().take(input_dims) {
+                            sum += self.weights.w1[w_base + i] * *value;
+                        }
+                        *hidden_value = sum.max(0.0);
+                    }
+
+                    for (o, update_value) in update.iter_mut().enumerate() {
+                        let mut sum = self.weights.b2[o];
+                        let w_base = o * self.config.hidden_dims;
+                        for (h, value) in hidden.iter().enumerate().take(self.config.hidden_dims) {
+                            sum += self.weights.w2[w_base + h] * *value;
+                        }
+                        *update_value = sum;
+                    }
+                },
+            );
+
+        Ok(update_rows)
+    }
+
+    pub fn forward_update_tensor<B: Backend>(
+        &self,
+        features: Tensor<B, 2>,
+        device: &B::Device,
+    ) -> AutomataResult<Tensor<B, 2>> {
+        self.validate()?;
+        let input_dims = self.config.perception_dims();
+        let dims: [usize; 2] = features.shape().dims();
+        if dims[1] != input_dims {
+            return Err(AutomataError::InvalidArgument(format!(
+                "feature tensor shape {:?} does not end with perception dims {input_dims}",
+                dims
+            )));
+        }
+
+        let rows = dims[0];
+        let hidden_dims = self.config.hidden_dims;
+        let output_dims = self.config.update_dims();
+        let w1 = Tensor::<B, 2>::from_data(
+            TensorData::new(self.weights.w1.clone(), [hidden_dims, input_dims]),
+            device,
+        )
+        .transpose();
+        let b1 = Tensor::<B, 2>::from_data(
+            TensorData::new(repeated_rows(&self.weights.b1, rows), [rows, hidden_dims]),
+            device,
+        );
+        let w2 = Tensor::<B, 2>::from_data(
+            TensorData::new(self.weights.w2.clone(), [output_dims, hidden_dims]),
+            device,
+        )
+        .transpose();
+        let b2 = Tensor::<B, 2>::from_data(
+            TensorData::new(repeated_rows(&self.weights.b2, rows), [rows, output_dims]),
+            device,
+        );
+
+        Ok(relu(features.matmul(w1) + b1).matmul(w2) + b2)
+    }
+}
+
+fn repeated_rows(values: &[f32], rows: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(values.len() * rows);
+    for _ in 0..rows {
+        out.extend_from_slice(values);
+    }
+    out
+}

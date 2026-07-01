@@ -1,0 +1,59 @@
+[workspace]
+members = [
+  "crates/bevy_automata",
+  "crates/burn_automata",
+  "crates/burn_automata_kernels",
+  "vendor/bevy_burn",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT"
+repository = "https://github.com/mosure/burn_automata"
+homepage = "https://github.com/mosure/burn_automata"
+
+[workspace.dependencies]
+bevy = { version = "0.19.0", default-features = false }
+bevy_burn = { path = "vendor/bevy_burn", version = "0.1.0" }
+bevy_gaussian_splatting = { version = "8.0.1", default-features = false }
+bevy_panorbit_camera = { version = "0.35.0", default-features = false }
+bevy_ui_widgets = { version = "0.19.0", default-features = false }
+burn = { version = "0.21", default-features = false }
+burn-store = { version = "0.21", default-features = false }
+bytemuck = "1.24"
+clap = { version = "4.5", features = ["derive"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+rand = "0.9"
+pollster = "0.4"
+rayon = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tracing = "0.1"
+wgpu = "29"
+zip = { version = "7.2", default-features = false, features = ["deflate"] }
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

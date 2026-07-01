@@ -1,0 +1,41 @@
+# Rust / build output
+/target/
+/.cargo/
+
+# Generated experiment outputs and local model stores
+/artifacts/
+/models/
+/assets/models/
+
+# Web build output
+/www/pkg/
+/www/dist/
+/www/.parcel-cache/
+/node_modules/
+
+# Python cache
+**/__pycache__/
+*.py[cod]
+
+# Profiling, logs, and scratch files
+*.profraw
+*.profdata
+*.trace
+*.log
+*.tmp
+
+# Model/checkpoint artifacts. Keep conversion scripts and manifests in git, but
+# do not check in weights or generated binary model packages.
+*.bpk
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.npz
+*.npy
+*.ckpt
+
+# Generated binary deliverables
+*.bin
+*.wasm
+*.pdf
