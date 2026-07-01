@@ -25,7 +25,7 @@ use burn_automata::{
     AutomataPreset, NpaConfig, NpaModel, ParticleSeed, RolloutBatchConfig, RolloutConfig,
     RolloutTrace, SgdConfig, SupervisedTarget,
     kernels::HashGridConfig,
-    rollout::{growth_3d_material_opacity_channel, uv_torus_outer_radius, uv_torus_position_color},
+    rollout::{uv_torus_outer_radius, uv_torus_position_color},
     rollout_supervised_batch, run_rollout, supervised_backward, supervised_loss,
     supervised_train_step,
     target_geometry::TriangleMeshTarget,
@@ -67,7 +67,7 @@ const TRAINING_PROBE_PARTICLES: usize = 256;
 const TRAINING_INTERVAL_FRAMES: usize = 60;
 const LIVE_TRAINING_TARGET: &str = "rollout teacher";
 const CATALOG_DOUBLE_CLICK_SECONDS: f64 = 0.35;
-const CATALOG_3D_GROWTH_SEED: u64 = 0x51a7_3d;
+const CATALOG_3D_GROWTH_SEED: u64 = 0x0051_a73d;
 const AUTOMATA_UI_PANEL_WIDTH: f32 = 540.0;
 #[cfg(feature = "splatting")]
 const AUTOMATA_MIN_VIEWPORT_WIDTH: u32 = 256;

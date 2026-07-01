@@ -873,8 +873,7 @@ fn accumulate_density_kernel_position_adjoint(
     density_adjoint: &[f32],
     position_adjoint: &mut [[f32; 4]],
 ) {
-    for idx in 0..positions.len() {
-        let adjoint = density_adjoint[idx];
+    for (idx, &adjoint) in density_adjoint.iter().enumerate().take(positions.len()) {
         if adjoint == 0.0 {
             continue;
         }

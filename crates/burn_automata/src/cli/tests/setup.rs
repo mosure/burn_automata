@@ -1,0 +1,638 @@
+use super::*;
+
+#[test]
+fn train_defaults_to_seeded_growth_target() {
+    let seed = default_train_target_seed(AutomataPreset::Growing3dGs, None, false);
+
+    assert_eq!(seed, Some(DEFAULT_GROWTH_TARGET_SEED));
+    assert_eq!(
+        train_target_source(AutomataPreset::Growing3dGs, seed, false),
+        "seeded:Growing3dGs:42"
+    );
+}
+
+#[test]
+fn train_source_defaults_to_rollout_local_metadata() {
+    let seed = default_train_target_seed(AutomataPreset::Growing2d, None, false);
+    let target_source = train_target_source(AutomataPreset::Growing2d, seed, false);
+
+    assert_eq!(
+        training_source_with_batch(TrainingBatchArg::Rollout, &target_source),
+        "rollout-local:seeded:Growing2d:42"
+    );
+    assert_eq!(
+        training_source_with_batch(TrainingBatchArg::Features, &target_source),
+        "feature-rows:seeded:Growing2d:42"
+    );
+}
+
+#[test]
+fn train_zero_update_requires_explicit_flag() {
+    let seed = default_train_target_seed(AutomataPreset::Growing2d, None, true);
+
+    assert_eq!(seed, None);
+    assert_eq!(
+        train_target_source(AutomataPreset::Growing2d, seed, true),
+        "explicit-zero-update"
+    );
+}
+
+#[test]
+fn mesh_training_sources_separate_rollout_local_from_projection_baseline() {
+    assert!(UV_TORUS_POSITION_FIELD_TARGET_SOURCE.contains("position-field"));
+    assert!(TEAPOT_POSITION_FIELD_TARGET_SOURCE.contains("position-field"));
+    assert!(UV_TORUS_ROLLOUT_FIELD_TARGET_SOURCE.contains("rollout-position-field"));
+    assert!(TEAPOT_ROLLOUT_FIELD_TARGET_SOURCE.contains("rollout-position-field"));
+    assert!(UV_TORUS_MORPHOGEN_ROLLOUT_TARGET_SOURCE.contains("rollout-local"));
+    assert!(TEAPOT_MORPHOGEN_ROLLOUT_TARGET_SOURCE.contains("rollout-local"));
+    assert!(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE.contains("conditionless-local"));
+    assert!(TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE.contains("conditionless-local"));
+    assert!(UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE.contains("random-ball"));
+    assert!(TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE.contains("random-ball"));
+    assert!(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE.contains("substrate"));
+    assert!(TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE.contains("substrate"));
+    assert!(UV_TORUS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE.contains("no-scaffold"));
+    assert!(TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE.contains("no-scaffold"));
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Torus,
+            ParticleSeed::TorusGrowth3d,
+        ),
+        UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE
+    );
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Torus,
+            ParticleSeed::TorusSubstrateGrowth3d,
+        ),
+        UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    );
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Torus,
+            ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ),
+        UV_TORUS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+    );
+    assert!(UV_TORUS_MORPHOGEN_BASELINE_TARGET_SOURCE.contains("seed-frame"));
+    assert!(TEAPOT_MORPHOGEN_BASELINE_TARGET_SOURCE.contains("seed-frame"));
+}
+
+#[test]
+fn train_render3d_defaults_to_full_coverage_adjoint_with_opt_out() {
+    assert!(app::resolve_full_coverage_adjoint(false, false).unwrap());
+    assert!(app::resolve_full_coverage_adjoint(true, false).unwrap());
+    assert!(!app::resolve_full_coverage_adjoint(false, true).unwrap());
+    assert!(app::resolve_full_coverage_adjoint(true, true).is_err());
+}
+
+#[test]
+fn train_render3d_defaults_to_selection_seed_direct_training_with_opt_out() {
+    assert!(app::resolve_direct_selection_seed_training(false, false).unwrap());
+    assert!(app::resolve_direct_selection_seed_training(true, false).unwrap());
+    assert!(!app::resolve_direct_selection_seed_training(false, true).unwrap());
+    assert!(app::resolve_direct_selection_seed_training(true, true).is_err());
+}
+
+#[test]
+fn train_render3d_defaults_to_strict_line_search_with_value_opt_out() {
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d {
+        direct_line_search, ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert!(
+        direct_line_search,
+        "direct rollout training should default to strict-score line search"
+    );
+
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d {
+        direct_line_search_scales,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(
+        &direct_line_search_scales[..4],
+        &[0.0625, 0.125, 0.25, 0.5],
+        "direct line search should include fine continuation scales after an activation breakthrough"
+    );
+    assert!(
+        direct_line_search_scales.contains(&1.0),
+        "default line search should still include the nominal step"
+    );
+
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d { grad_clip_norm, .. } = args.command else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(
+        grad_clip_norm, 1.0,
+        "row-normalized direct rollout gradients should use the generic SGD clip default"
+    );
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d",
+        "--direct-line-search=false",
+    ])
+    .unwrap();
+    let Command::TrainRender3d {
+        direct_line_search, ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert!(
+        !direct_line_search,
+        "explicit false should keep single-step direct training available as an ablation"
+    );
+}
+
+#[test]
+fn train_render3d_exposes_robust_geometry_objective_gains() {
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d {
+        coverage_gain,
+        coverage_samples,
+        coverage_repulsion_gain,
+        coverage_normal_weight,
+        extent_gain,
+        surface_gain,
+        surface_escape_gain,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(coverage_gain, ROBUST_3D_COVERAGE_GAIN);
+    assert_eq!(coverage_samples, ROBUST_3D_COVERAGE_SAMPLES);
+    assert_eq!(coverage_repulsion_gain, ROBUST_3D_COVERAGE_REPULSION_GAIN);
+    assert_eq!(coverage_normal_weight, ROBUST_3D_COVERAGE_NORMAL_WEIGHT);
+    assert_eq!(extent_gain, ROBUST_3D_EXTENT_GAIN);
+    assert_eq!(surface_gain, ROBUST_3D_SURFACE_GAIN);
+    assert_eq!(surface_escape_gain, ROBUST_3D_SURFACE_ESCAPE_GAIN);
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d",
+        "--coverage-gain",
+        "0.12",
+        "--extent-gain",
+        "0.34",
+        "--surface-gain",
+        "0.056",
+    ])
+    .unwrap();
+    let Command::TrainRender3d {
+        coverage_gain,
+        extent_gain,
+        surface_gain,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(coverage_gain, 0.12);
+    assert_eq!(extent_gain, 0.34);
+    assert_eq!(surface_gain, 0.056);
+}
+
+#[test]
+fn train_render3d_exposes_material_gains_separately_from_opacity_gain() {
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d {
+        opacity_gain,
+        liveness_update_multiplier,
+        material_liveness_gain,
+        material_tail_gain,
+        material_suppression_update_multiplier,
+        direct_output_gradient_rms_cap,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(opacity_gain, ROBUST_3D_OPACITY_GAIN);
+    assert_eq!(
+        liveness_update_multiplier,
+        ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER
+    );
+    assert_eq!(material_liveness_gain, ROBUST_3D_MATERIAL_LIVENESS_GAIN);
+    assert_eq!(material_tail_gain, ROBUST_3D_MATERIAL_TAIL_GAIN);
+    assert_eq!(
+        material_suppression_update_multiplier,
+        ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER
+    );
+    assert_eq!(
+        direct_output_gradient_rms_cap,
+        ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP
+    );
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d",
+        "--opacity-gain",
+        "0",
+        "--material-liveness-gain",
+        "0.35",
+        "--material-tail-gain",
+        "0.45",
+        "--liveness-update-multiplier",
+        "7.5",
+        "--material-suppression-update-multiplier",
+        "3.5",
+        "--direct-output-gradient-rms-cap",
+        "0.125",
+    ])
+    .unwrap();
+    let Command::TrainRender3d {
+        opacity_gain,
+        liveness_update_multiplier,
+        material_liveness_gain,
+        material_tail_gain,
+        material_suppression_update_multiplier,
+        direct_output_gradient_rms_cap,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(opacity_gain, 0.0);
+    assert_eq!(liveness_update_multiplier, 7.5);
+    assert_eq!(material_liveness_gain, 0.35);
+    assert_eq!(material_tail_gain, 0.45);
+    assert_eq!(material_suppression_update_multiplier, 3.5);
+    assert_eq!(direct_output_gradient_rms_cap, 0.125);
+}
+
+#[test]
+fn render_training_source_preserves_local_refinement_lineage() {
+    let local_source = render_training_source(
+        MeshTargetArg::Torus,
+        Some(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+        ParticleSeed::TorusGrowth3d,
+    );
+    assert!(local_source.starts_with("render-refined-rust:"));
+    assert!(local_source.contains("conditionless-local"));
+    assert!(!local_source.contains("position-field"));
+    assert!(!local_source.contains("render-proxy-rust"));
+
+    let already_refined_source = render_training_source(
+        MeshTargetArg::Torus,
+        Some(&local_source),
+        ParticleSeed::TorusGrowth3d,
+    );
+    assert_eq!(already_refined_source, local_source);
+
+    let field_source = render_training_source(
+        MeshTargetArg::Torus,
+        Some(UV_TORUS_POSITION_FIELD_TARGET_SOURCE),
+        ParticleSeed::TorusFieldDense3d,
+    );
+    assert!(field_source.starts_with("render-proxy-rust:"));
+    assert!(field_source.contains("position-field"));
+
+    let default_source = render_training_source(
+        MeshTargetArg::Teapot,
+        None,
+        ParticleSeed::TeapotFieldDense3d,
+    );
+    assert!(default_source.contains("field-baseline"));
+}
+
+#[test]
+fn render_training_defaults_match_model_family() {
+    assert_eq!(
+        render_training_default_seed_mode(MeshTargetArg::Torus),
+        ParticleSeed::TorusLocalSubstrateGrowth3d
+    );
+    assert_eq!(
+        render_training_default_seed_mode(MeshTargetArg::Teapot),
+        ParticleSeed::TeapotLocalSubstrateGrowth3d
+    );
+
+    let local_model = NpaModel::seeded(NpaConfig::growing_3dgs(), 7);
+    assert_eq!(
+        default_render_training_seed_mode(MeshTargetArg::Torus, &local_model),
+        ParticleSeed::TorusLocalSubstrateGrowth3d
+    );
+    assert_eq!(
+        default_render_training_seed_mode(MeshTargetArg::Teapot, &local_model),
+        ParticleSeed::TeapotLocalSubstrateGrowth3d
+    );
+
+    let field_model = NpaModel::seeded(NpaConfig::torus_field_3dgs(), 7);
+    assert_eq!(
+        default_render_training_seed_mode(MeshTargetArg::Torus, &field_model),
+        ParticleSeed::TorusFieldDense3d
+    );
+    assert_eq!(
+        default_render_training_seed_mode(MeshTargetArg::Teapot, &field_model),
+        ParticleSeed::TeapotFieldDense3d
+    );
+}
+
+#[test]
+fn render_training_validation_extra_seeds_dedupe_selection_set() {
+    assert_eq!(
+        render_training_validation_extra_seeds(42, &[99, 42, 7, 99]),
+        vec![42, 99, 7]
+    );
+}
+
+#[test]
+fn catalog_promotion_validation_extra_seeds_include_app_heldouts() {
+    assert_eq!(
+        catalog_promotion_validation_extra_seeds(CATALOG_3D_APP_EVAL_SEED, &[]),
+        vec![42, 99]
+    );
+    assert_eq!(
+        catalog_promotion_validation_extra_seeds(42, &[99, 7, CATALOG_3D_APP_EVAL_SEED]),
+        vec![42, 99, 7]
+    );
+}
+
+#[test]
+fn catalog_promotion_validation_configs_match_app_scale() {
+    let mut render = RenderLossConfig {
+        image_size: 8,
+        target_samples: 0,
+        ..RenderLossConfig::default()
+    };
+    render.world_scale = 0.5;
+
+    let configs =
+        catalog_promotion_validation_configs(7, &[99], 0.54, ParticleSeed::TorusGrowth3d, render);
+
+    assert_eq!(configs.len(), 2);
+    assert_eq!(
+        configs.iter().map(|cfg| cfg.steps).collect::<Vec<_>>(),
+        CATALOG_3D_PROMOTION_STEPS.to_vec()
+    );
+    for cfg in configs {
+        assert_eq!(cfg.particle_count, CATALOG_3D_VALIDATION_PARTICLES);
+        assert_eq!(cfg.seed, CATALOG_3D_APP_EVAL_SEED);
+        assert_eq!(cfg.extra_seeds, vec![42, 99, 7]);
+        assert_eq!(cfg.seed_mode, ParticleSeed::TorusGrowth3d);
+        assert!(matches!(cfg.gate, Growth3dValidationGateArg::Strict));
+        assert_eq!(cfg.render.image_size, CATALOG_3D_VALIDATION_IMAGE_SIZE);
+        assert_eq!(
+            cfg.render.target_samples,
+            CATALOG_3D_VALIDATION_TARGET_SAMPLES
+        );
+        assert_eq!(cfg.render.world_scale, 0.5);
+    }
+}
+
+#[test]
+fn render_training_base_defaults_to_conditionless_local_growth() {
+    let target = uv_torus_mesh_target(UV_TORUS_FIELD_SCALE);
+    let (model, source) = render_training_base_model(
+        MeshTargetArg::Torus,
+        &target,
+        render_training_default_seed_mode(MeshTargetArg::Torus),
+    )
+    .unwrap();
+
+    assert!(!model.config.position_features);
+    assert!(local_conditionless_lineage(&source));
+    assert!(source.starts_with("ablation-rust:"));
+    assert!(source.contains("conditionless-local"));
+    assert!(source.contains("substrate"));
+    assert!(source.contains("no-scaffold"));
+    assert!(!source.contains("position-field"));
+    assert!(!source.contains("render-proxy-rust"));
+
+    let err = render_training_base_model(
+        MeshTargetArg::Torus,
+        &target,
+        ParticleSeed::TorusFieldDense3d,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("target local growth seed"));
+}
+
+#[test]
+fn sparse_growth_seed_modes_do_not_preload_target_state() {
+    let config = NpaConfig::growing_3dgs();
+    for seed_mode in [ParticleSeed::TorusGrowth3d, ParticleSeed::TeapotGrowth3d] {
+        let (_positions, states) = seed_particles_scaled(
+            1,
+            512,
+            config.state_dims,
+            config.spatial_dims,
+            0x5eed,
+            seed_mode,
+            UV_TORUS_FIELD_SCALE,
+        );
+        let mut active = 0usize;
+        let mut inactive = 0usize;
+        for state in states.chunks_exact(config.state_dims) {
+            if state[3] > -1.0 {
+                active += 1;
+            } else {
+                inactive += 1;
+            }
+        }
+        let non_opacity_seed_abs_max =
+            growth_3d_non_scaffold_seed_abs_max(config.state_dims, seed_mode, &states);
+
+        assert!(active > 0, "{seed_mode:?} should seed a sparse active core");
+        assert!(
+            inactive > active,
+            "{seed_mode:?} should leave most particles dormant"
+        );
+        assert_eq!(
+            non_opacity_seed_abs_max, 0.0,
+            "{seed_mode:?} must not preload residual, normal, color, or other target state outside the coordinate scaffold"
+        );
+    }
+}
+
+#[test]
+fn local_growth_seed_modes_do_not_write_coordinate_scaffold() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_modes = [
+        ParticleSeed::TorusLocalGrowth3d,
+        ParticleSeed::TeapotLocalGrowth3d,
+        ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+    ];
+    for seed_mode in seed_modes {
+        let (_positions, states) = seed_particles_scaled(
+            1,
+            512,
+            config.state_dims,
+            config.spatial_dims,
+            0x5eed,
+            seed_mode,
+            UV_TORUS_FIELD_SCALE,
+        );
+        let non_opacity_seed_abs_max =
+            growth_3d_non_scaffold_seed_abs_max(config.state_dims, seed_mode, &states);
+
+        assert!(
+            !growth_3d_seed_has_coordinate_scaffold(seed_mode),
+            "{seed_mode:?} should be eligible for the strict no-scaffold gate"
+        );
+        assert_eq!(
+            non_opacity_seed_abs_max, 0.0,
+            "{seed_mode:?} must leave non-opacity state neutral at initialization"
+        );
+    }
+}
+
+#[test]
+fn catalog_bound_render_training_requires_local_growth_lineage() {
+    assert!(is_catalog_model_output_path(Path::new(
+        "assets/models/teapot_growth_3d.bpk"
+    )));
+    assert!(!is_catalog_model_output_path(Path::new(
+        "artifacts/render_trained_3d.bpk"
+    )));
+
+    validate_catalog_bound_render_training_output(
+        Path::new("artifacts/render_trained_3d.bpk"),
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotFieldDense3d,
+        None,
+    )
+    .unwrap();
+
+    let local_source = format!("render-refined-rust:{TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE}");
+    validate_catalog_bound_render_training_output(
+        Path::new("assets/models/teapot_growth_3d.bpk"),
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotGrowth3d,
+        Some(&local_source),
+    )
+    .unwrap();
+
+    let field_seed_error = validate_catalog_bound_render_training_output(
+        Path::new("assets/models/render_trained_3d.bpk"),
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotFieldDense3d,
+        Some(&local_source),
+    )
+    .unwrap_err();
+    assert!(field_seed_error.to_string().contains("local growth seed"));
+
+    let shortcut_lineage_error = validate_catalog_bound_render_training_output(
+        Path::new("assets/models/render_trained_3d.bpk"),
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotGrowth3d,
+        Some(TEAPOT_POSITION_FIELD_TARGET_SOURCE),
+    )
+    .unwrap_err();
+    assert!(
+        shortcut_lineage_error
+            .to_string()
+            .contains("conditionless-local")
+    );
+}
+
+#[test]
+fn catalog_bound_render_training_uses_target_temp_candidate_path() {
+    let torus = catalog_bound_candidate_path(MeshTargetArg::Torus, 1234);
+    let teapot = catalog_bound_candidate_path(MeshTargetArg::Teapot, 1234);
+
+    assert!(torus.starts_with("target"));
+    assert!(teapot.starts_with("target"));
+    assert!(!is_catalog_model_output_path(&torus));
+    assert!(!is_catalog_model_output_path(&teapot));
+    assert!(torus.to_string_lossy().contains("torus"));
+    assert!(teapot.to_string_lossy().contains("teapot"));
+    assert_ne!(torus, teapot);
+}
+
+#[test]
+fn diagnostic_3d_outputs_refuse_catalog_paths() {
+    validate_diagnostic_3d_output_not_catalog(
+        Path::new("target/teapot_probe.bpk"),
+        "ablate-local-3d",
+    )
+    .unwrap();
+    validate_diagnostic_3d_output_not_catalog(
+        Path::new("artifacts/teapot_probe.bpk"),
+        "ablate-local-3d",
+    )
+    .unwrap();
+
+    let err = validate_diagnostic_3d_output_not_catalog(
+        Path::new("assets/models/teapot_probe.bpk"),
+        "ablate-local-3d",
+    )
+    .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("diagnostic 3D artifacts"));
+    assert!(message.contains("validate_3d_catalog.py"));
+}
+
+#[test]
+fn local_3d_continuation_accepts_only_conditionless_local_lineage() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let model = NpaModel::seeded(config.clone(), 17);
+    let local_path = bin_temp_path("local_3d_continuation_ok.bpk");
+    let local_manifest = BpkModelManifest::from_model(
+        &model,
+        grid.clone(),
+        Some(format!(
+            "ablation-rust:{UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE}"
+        )),
+    );
+    crate::import::save_manifest(&local_path, &local_manifest).unwrap();
+
+    let (_loaded, _grid, source) =
+        load_conditionless_local_base_model(&local_path, TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE)
+            .unwrap();
+    std::fs::remove_file(&local_path).ok();
+    assert!(source.contains("continued-from="));
+    assert!(source.contains("conditionless-local"));
+    assert!(!source.contains("position-field"));
+    assert!(!source.contains("seed-frame"));
+    assert!(!source.contains("render-proxy-rust"));
+
+    let shortcut_path = bin_temp_path("local_3d_continuation_shortcut.bpk");
+    let shortcut_manifest = BpkModelManifest::from_model(
+        &model,
+        grid.clone(),
+        Some(format!(
+            "ablation-rust:{UV_TORUS_POSITION_FIELD_TARGET_SOURCE}"
+        )),
+    );
+    crate::import::save_manifest(&shortcut_path, &shortcut_manifest).unwrap();
+    let shortcut_err = load_conditionless_local_base_model(
+        &shortcut_path,
+        UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+    )
+    .unwrap_err();
+    std::fs::remove_file(&shortcut_path).ok();
+    assert!(shortcut_err.to_string().contains("shortcut lineage"));
+
+    let mut position_config = config;
+    position_config.position_features = true;
+    let position_model = NpaModel::seeded(position_config, 19);
+    let position_path = bin_temp_path("local_3d_continuation_position_features.bpk");
+    let position_manifest = BpkModelManifest::from_model(
+        &position_model,
+        grid,
+        Some(format!(
+            "ablation-rust:{TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE}"
+        )),
+    );
+    crate::import::save_manifest(&position_path, &position_manifest).unwrap();
+    let position_err = load_conditionless_local_base_model(
+        &position_path,
+        TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+    )
+    .unwrap_err();
+    std::fs::remove_file(&position_path).ok();
+    assert!(position_err.to_string().contains("position-feature"));
+}

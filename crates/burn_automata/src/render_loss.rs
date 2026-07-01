@@ -1,9 +1,12 @@
+#![allow(clippy::too_many_arguments)]
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AutomataError, AutomataResult, RolloutTrace, TriangleMeshTarget,
     rollout::growth_3d_material_opacity_channel,
 };
+use burn_automata_kernels::GaussianDecodeMode;
 
 const EPS: f32 = 1.0e-8;
 const RENDER_MIN_OPACITY: f32 = 0.001;
@@ -21,6 +24,9 @@ pub enum RenderViewPreset {
 pub struct RenderLossConfig {
     pub image_size: usize,
     pub sigma: f32,
+    pub min_sigma: f32,
+    pub max_sigma: f32,
+    pub gaussian_decode_mode: GaussianDecodeMode,
     pub world_scale: f32,
     pub target_samples: usize,
     pub opacity_logit_bias: f32,
@@ -34,6 +40,9 @@ impl Default for RenderLossConfig {
         Self {
             image_size: 64,
             sigma: 2.5,
+            min_sigma: 0.75,
+            max_sigma: 5.0,
+            gaussian_decode_mode: GaussianDecodeMode::GaussianSh0FixedScale,
             world_scale: 1.25,
             target_samples: 8192,
             opacity_logit_bias: 0.0,
@@ -81,6 +90,7 @@ pub struct MultiViewRenderPositionGradient {
     pub row_indices: Vec<usize>,
     pub gradients: Vec<[f32; 3]>,
     pub opacity_gradients: Vec<f32>,
+    pub scale_gradients: Vec<f32>,
     pub color_gradients: Vec<[f32; 3]>,
 }
 
@@ -91,10 +101,10 @@ pub fn mesh_multiview_render_loss_from_trace(
 ) -> AutomataResult<MultiViewRenderLossReport> {
     validate_render_trace(trace, cfg)?;
 
-    let (particle_colors, particle_opacities) =
-        state_tail_rgb_and_opacity(&trace.states, trace.state_dims, cfg.opacity_logit_bias)?;
+    let particle_attrs = state_tail_render_attributes(&trace.states, trace.state_dims, cfg)?;
     let target_samples = mesh_surface_render_samples(target, cfg.target_samples);
     let target_opacities = vec![RENDER_MAX_OPACITY; target_samples.positions.len()];
+    let target_sigmas = vec![cfg.sigma; target_samples.positions.len()];
     let views = [
         RenderViewPreset::Xy,
         RenderViewPreset::Xz,
@@ -106,11 +116,13 @@ pub fn mesh_multiview_render_loss_from_trace(
         reports.push(render_view_loss(
             view,
             &trace.positions,
-            &particle_colors,
-            &particle_opacities,
+            &particle_attrs.colors,
+            &particle_attrs.opacities,
+            &particle_attrs.sigmas,
             &target_samples.positions,
             &target_samples.colors,
             &target_opacities,
+            &target_sigmas,
             cfg,
         )?);
     }
@@ -151,10 +163,10 @@ pub fn mesh_multiview_render_position_gradient_for_rows_from_trace(
             trace.particle_count
         )));
     }
-    let (particle_colors, particle_opacities) =
-        state_tail_rgb_and_opacity(&trace.states, trace.state_dims, cfg.opacity_logit_bias)?;
+    let particle_attrs = state_tail_render_attributes(&trace.states, trace.state_dims, cfg)?;
     let target_samples = mesh_surface_render_samples(target, cfg.target_samples);
     let target_opacities = vec![RENDER_MAX_OPACITY; target_samples.positions.len()];
+    let target_sigmas = vec![cfg.sigma; target_samples.positions.len()];
     let views = [
         RenderViewPreset::Xy,
         RenderViewPreset::Xz,
@@ -163,6 +175,7 @@ pub fn mesh_multiview_render_position_gradient_for_rows_from_trace(
     ];
     let mut gradients = vec![[0.0; 3]; row_indices.len()];
     let mut opacity_gradients = vec![0.0; row_indices.len()];
+    let mut scale_gradients = vec![0.0; row_indices.len()];
     let mut color_gradients = vec![[0.0; 3]; row_indices.len()];
     let mut reports = Vec::with_capacity(views.len());
     let loss_scale = 1.0 / views.len() as f32;
@@ -172,14 +185,16 @@ pub fn mesh_multiview_render_position_gradient_for_rows_from_trace(
         let target_projected = project_positions(view, &target_samples.positions, cfg.world_scale);
         let particle_image = splat_projected(
             &particle_projected,
-            &particle_colors,
-            &particle_opacities,
+            &particle_attrs.colors,
+            &particle_attrs.opacities,
+            &particle_attrs.sigmas,
             cfg,
         );
         let target_image = splat_projected(
             &target_projected,
             &target_samples.colors,
             &target_opacities,
+            &target_sigmas,
             cfg,
         );
         let (report, pixel_adjoints) =
@@ -187,13 +202,16 @@ pub fn mesh_multiview_render_position_gradient_for_rows_from_trace(
         accumulate_projected_position_gradients(
             view,
             &particle_projected,
-            &particle_colors,
-            &particle_opacities,
+            &particle_attrs.colors,
+            &particle_attrs.opacities,
+            &particle_attrs.sigmas,
+            &particle_attrs.scale_logit_derivatives,
             row_indices,
             &pixel_adjoints,
             cfg,
             &mut gradients,
             &mut opacity_gradients,
+            &mut scale_gradients,
             &mut color_gradients,
         );
         reports.push(report);
@@ -204,6 +222,7 @@ pub fn mesh_multiview_render_position_gradient_for_rows_from_trace(
         row_indices: row_indices.to_vec(),
         gradients,
         opacity_gradients,
+        scale_gradients,
         color_gradients,
     })
 }
@@ -288,9 +307,11 @@ fn render_view_loss(
     particle_positions: &[[f32; 4]],
     particle_colors: &[[f32; 3]],
     particle_opacities: &[f32],
+    particle_sigmas: &[f32],
     target_positions: &[[f32; 4]],
     target_colors: &[[f32; 3]],
     target_opacities: &[f32],
+    target_sigmas: &[f32],
     cfg: RenderLossConfig,
 ) -> AutomataResult<RenderViewLossReport> {
     let particle_projected = project_positions(view, particle_positions, cfg.world_scale);
@@ -299,9 +320,16 @@ fn render_view_loss(
         &particle_projected,
         particle_colors,
         particle_opacities,
+        particle_sigmas,
         cfg,
     );
-    let target_image = splat_projected(&target_projected, target_colors, target_opacities, cfg);
+    let target_image = splat_projected(
+        &target_projected,
+        target_colors,
+        target_opacities,
+        target_sigmas,
+        cfg,
+    );
     Ok(image_loss(view, &particle_image, &target_image, cfg))
 }
 
@@ -330,16 +358,25 @@ fn splat_projected(
     positions: &[ProjectedPoint],
     colors: &[[f32; 3]],
     opacities: &[f32],
+    sigmas: &[f32],
     cfg: RenderLossConfig,
 ) -> Vec<RenderedPixel> {
     debug_assert_eq!(positions.len(), colors.len());
     debug_assert_eq!(positions.len(), opacities.len());
+    debug_assert_eq!(positions.len(), sigmas.len());
     let size = cfg.image_size;
     let mut out = vec![RenderedPixel::default(); size * size];
-    let radius = (5.0 * cfg.sigma).ceil().max(1.0) as isize;
     let norm_scale = 1.0 / positions.len().max(1) as f32;
 
-    for ((pos, color), opacity) in positions.iter().zip(colors.iter()).zip(opacities.iter()) {
+    for (((pos, color), opacity), sigma) in positions
+        .iter()
+        .zip(colors.iter())
+        .zip(opacities.iter())
+        .zip(sigmas.iter())
+    {
+        let sigma = sigma.clamp(cfg.min_sigma, cfg.max_sigma).max(EPS);
+        let sigma2 = sigma * sigma;
+        let radius = (5.0 * sigma).ceil().max(1.0) as isize;
         let px = (pos.x + cfg.world_scale) / (2.0 * cfg.world_scale) * (size as f32 - 1.0);
         let py = (cfg.world_scale - pos.y) / (2.0 * cfg.world_scale) * (size as f32 - 1.0);
         let base_x = px.floor() as isize;
@@ -358,7 +395,7 @@ fn splat_projected(
                 }
                 let dx = ox as f32 - frac_x;
                 let dy = oy as f32 - frac_y;
-                let w = (-(dx * dx + dy * dy) / (2.0 * cfg.sigma * cfg.sigma)).exp();
+                let w = (-(dx * dx + dy * dy) / (2.0 * sigma2)).exp();
                 weights.push((x as usize, y as usize, w));
                 weight_sum += w;
             }
@@ -452,6 +489,8 @@ fn image_loss_with_adjoint(
         let density_den = target_density_energy.max(EPS);
         let color_den = gated_color_weight.max(EPS) * 3.0;
         let depth_den = gated_depth_weight.max(EPS);
+        let color_loss_per_gate = color_loss / gated_color_weight.max(EPS);
+        let depth_loss_per_gate = depth_loss / gated_depth_weight.max(EPS);
         for ((actual, target), adjoint) in particle_image
             .iter()
             .zip(target_image.iter())
@@ -468,18 +507,28 @@ fn image_loss_with_adjoint(
                 - (actual_alpha - target_alpha).abs()
                     / (actual_alpha + target_alpha + EPS).max(EPS);
             let color_gate = density_match.clamp(0.0, 1.0);
+            let gate_alpha_gradient =
+                density_gate_alpha_gradient(actual_alpha, target_alpha, density_match);
+            let mut color_error_sum = 0.0_f32;
             for channel in 0..3 {
                 let raw_actual_color = actual.color[channel] / alpha_den;
                 let raw_target_color = target.color[channel] / target_alpha_den;
                 let actual_color = raw_actual_color.clamp(0.0, 1.0);
                 let target_color = raw_target_color.clamp(0.0, 1.0);
                 let color_diff = actual_color - target_color;
+                color_error_sum += color_diff * color_diff;
                 if raw_actual_color > 0.0 && raw_actual_color < 1.0 && actual_alpha > EPS {
                     let coeff =
                         loss_scale * cfg.color_weight * color_gate * 2.0 * color_diff / color_den;
                     adjoint.color[channel] += coeff / alpha_den;
                     adjoint.alpha -= coeff * actual.color[channel] / (alpha_den * alpha_den);
                 }
+            }
+            if gate_alpha_gradient != 0.0 && gated_color_weight > EPS {
+                let color_gate_coeff = cfg.color_weight * (color_error_sum - color_loss_per_gate)
+                    / gated_color_weight.max(EPS)
+                    / 3.0;
+                adjoint.alpha += loss_scale * color_gate_coeff * gate_alpha_gradient;
             }
 
             if actual_alpha > 1.0e-5 && target_alpha > 1.0e-5 {
@@ -488,11 +537,17 @@ fn image_loss_with_adjoint(
                 let actual_depth = raw_actual_depth.clamp(0.0, 1.0);
                 let target_depth = raw_target_depth.clamp(0.0, 1.0);
                 let depth_diff = actual_depth - target_depth;
+                let depth_error = depth_diff * depth_diff;
                 if raw_actual_depth > 0.0 && raw_actual_depth < 1.0 {
                     let coeff =
                         loss_scale * cfg.depth_weight * color_gate * 2.0 * depth_diff / depth_den;
                     adjoint.depth_sum += coeff / alpha_den;
                     adjoint.alpha -= coeff * actual.depth_sum / (alpha_den * alpha_den);
+                }
+                if gate_alpha_gradient != 0.0 && gated_depth_weight > EPS {
+                    let depth_gate_coeff = cfg.depth_weight * (depth_error - depth_loss_per_gate)
+                        / gated_depth_weight.max(EPS);
+                    adjoint.alpha += loss_scale * depth_gate_coeff * gate_alpha_gradient;
                 }
             }
         }
@@ -515,27 +570,54 @@ fn image_loss_with_adjoint(
     )
 }
 
+fn density_gate_alpha_gradient(
+    actual_alpha: f32,
+    target_alpha: f32,
+    unclamped_density_match: f32,
+) -> f32 {
+    if unclamped_density_match <= 0.0
+        || unclamped_density_match >= 1.0
+        || actual_alpha <= 0.0
+        || target_alpha <= 0.0
+    {
+        return 0.0;
+    }
+    let den = (actual_alpha + target_alpha + EPS).max(EPS);
+    let delta = actual_alpha - target_alpha;
+    if delta > 0.0 {
+        -(2.0 * target_alpha + EPS) / (den * den)
+    } else if delta < 0.0 {
+        (2.0 * target_alpha + EPS) / (den * den)
+    } else {
+        0.0
+    }
+}
+
 fn accumulate_projected_position_gradients(
     view: RenderViewPreset,
     projected: &[ProjectedPoint],
     colors: &[[f32; 3]],
     opacities: &[f32],
+    sigmas: &[f32],
+    scale_logit_derivatives: &[f32],
     row_indices: &[usize],
     pixel_adjoints: &[RenderedPixelAdjoint],
     cfg: RenderLossConfig,
     gradients: &mut [[f32; 3]],
     opacity_gradients: &mut [f32],
+    scale_gradients: &mut [f32],
     color_gradients: &mut [[f32; 3]],
 ) {
     debug_assert_eq!(projected.len(), colors.len());
     debug_assert_eq!(projected.len(), opacities.len());
+    debug_assert_eq!(projected.len(), sigmas.len());
+    debug_assert_eq!(projected.len(), scale_logit_derivatives.len());
     debug_assert_eq!(row_indices.len(), gradients.len());
     debug_assert_eq!(row_indices.len(), opacity_gradients.len());
+    debug_assert_eq!(row_indices.len(), scale_gradients.len());
     debug_assert_eq!(row_indices.len(), color_gradients.len());
     let size = cfg.image_size;
-    let radius = (5.0 * cfg.sigma).ceil().max(1.0) as isize;
     let norm_scale = 1.0 / projected.len().max(1) as f32;
-    let sigma2 = (cfg.sigma * cfg.sigma).max(EPS);
     let pixel_scale = (size as f32 - 1.0) / (2.0 * cfg.world_scale.max(EPS));
     let depth_scale = 0.5 / cfg.world_scale.max(EPS);
     let (right, up, forward) = view_basis(view);
@@ -543,10 +625,15 @@ fn accumulate_projected_position_gradients(
     for (gradient_idx, &row) in row_indices.iter().enumerate() {
         let gradient = &mut gradients[gradient_idx];
         let opacity_gradient = &mut opacity_gradients[gradient_idx];
+        let scale_gradient = &mut scale_gradients[gradient_idx];
         let color_gradient = &mut color_gradients[gradient_idx];
         let pos = projected[row];
         let color = colors[row];
         let opacity = opacities[row].clamp(0.0, 1.0);
+        let sigma = sigmas[row].clamp(cfg.min_sigma, cfg.max_sigma).max(EPS);
+        let sigma2 = sigma * sigma;
+        let sigma3 = (sigma2 * sigma).max(EPS);
+        let radius = (5.0 * sigma).ceil().max(1.0) as isize;
         let px = (pos.x + cfg.world_scale) / (2.0 * cfg.world_scale) * (size as f32 - 1.0);
         let py = (cfg.world_scale - pos.y) / (2.0 * cfg.world_scale) * (size as f32 - 1.0);
         let base_x = px.floor() as isize;
@@ -558,6 +645,7 @@ fn accumulate_projected_position_gradients(
         let mut weight_sum = 0.0_f32;
         let mut dsum_dpx = 0.0_f32;
         let mut dsum_dpy = 0.0_f32;
+        let mut dsum_dsigma = 0.0_f32;
         for oy in -radius..=radius {
             for ox in -radius..=radius {
                 let x = base_x + ox;
@@ -567,13 +655,22 @@ fn accumulate_projected_position_gradients(
                 }
                 let dx = ox as f32 - frac_x;
                 let dy = oy as f32 - frac_y;
+                let d2 = dx * dx + dy * dy;
                 let raw = (-(dx * dx + dy * dy) / (2.0 * sigma2)).exp();
                 let draw_dpx = raw * dx / sigma2;
                 let draw_dpy = raw * dy / sigma2;
-                taps.push((y as usize * size + x as usize, raw, draw_dpx, draw_dpy));
+                let draw_dsigma = raw * d2 / sigma3;
+                taps.push((
+                    y as usize * size + x as usize,
+                    raw,
+                    draw_dpx,
+                    draw_dpy,
+                    draw_dsigma,
+                ));
                 weight_sum += raw;
                 dsum_dpx += draw_dpx;
                 dsum_dpy += draw_dpy;
+                dsum_dsigma += draw_dsigma;
             }
         }
 
@@ -583,7 +680,8 @@ fn accumulate_projected_position_gradients(
         let mut dloss_dpy = 0.0_f32;
         let mut dloss_ddepth = 0.0_f32;
         let mut dloss_dopacity = 0.0_f32;
-        for (pixel_idx, raw, draw_dpx, draw_dpy) in taps {
+        let mut dloss_dsigma = 0.0_f32;
+        for (pixel_idx, raw, draw_dpx, draw_dpy, draw_dsigma) in taps {
             let w = raw / denom * norm_scale * opacity;
             let adjoint = pixel_adjoints[pixel_idx];
             let dloss_dw = adjoint.alpha
@@ -595,10 +693,13 @@ fn accumulate_projected_position_gradients(
             dloss_dopacity += dloss_dw * raw / denom * norm_scale;
             let dw_dpx = norm_scale * opacity * (draw_dpx * denom - raw * dsum_dpx) / denom2;
             let dw_dpy = norm_scale * opacity * (draw_dpy * denom - raw * dsum_dpy) / denom2;
+            let dw_dsigma =
+                norm_scale * opacity * (draw_dsigma * denom - raw * dsum_dsigma) / denom2;
             dloss_dpx += dloss_dw * dw_dpx;
             dloss_dpy += dloss_dw * dw_dpy;
-            for channel in 0..3 {
-                color_gradient[channel] += adjoint.color[channel] * w;
+            dloss_dsigma += dloss_dw * dw_dsigma;
+            for (channel, color_gradient) in color_gradient.iter_mut().enumerate() {
+                *color_gradient += adjoint.color[channel] * w;
             }
         }
 
@@ -615,6 +716,7 @@ fn accumulate_projected_position_gradients(
                 + dloss_ddepth_unclamped * forward[axis];
         }
         *opacity_gradient += dloss_dopacity;
+        *scale_gradient += dloss_dsigma * scale_logit_derivatives[row];
     }
 }
 
@@ -652,14 +754,27 @@ fn view_basis(view: RenderViewPreset) -> ([f32; 3], [f32; 3], [f32; 3]) {
     }
 }
 
-fn state_tail_rgb_and_opacity(
+#[derive(Clone, Debug)]
+struct RenderParticleAttributes {
+    colors: Vec<[f32; 3]>,
+    opacities: Vec<f32>,
+    sigmas: Vec<f32>,
+    scale_logit_derivatives: Vec<f32>,
+}
+
+fn state_tail_render_attributes(
     states: &[f32],
     state_dims: usize,
-    opacity_logit_bias: f32,
-) -> AutomataResult<(Vec<[f32; 3]>, Vec<f32>)> {
+    cfg: RenderLossConfig,
+) -> AutomataResult<RenderParticleAttributes> {
     if state_dims < 3 {
         return Err(AutomataError::InvalidArgument(format!(
             "render loss needs at least 3 state channels for color, got {state_dims}"
+        )));
+    }
+    if cfg.gaussian_decode_mode == GaussianDecodeMode::GaussianSh0LearnedScale && state_dims < 5 {
+        return Err(AutomataError::InvalidArgument(format!(
+            "learned-scale render decode needs at least 5 state channels, got {state_dims}"
         )));
     }
     if !states.len().is_multiple_of(state_dims) {
@@ -672,6 +787,8 @@ fn state_tail_rgb_and_opacity(
     let tail = state_dims - 3;
     let mut colors = Vec::with_capacity(count);
     let mut opacities = Vec::with_capacity(count);
+    let mut sigmas = Vec::with_capacity(count);
+    let mut scale_logit_derivatives = Vec::with_capacity(count);
     for idx in 0..count {
         let base = idx * state_dims + tail;
         colors.push([
@@ -680,14 +797,39 @@ fn state_tail_rgb_and_opacity(
             (0.5 + 0.5 * states[base + 2]).clamp(0.0, 1.0),
         ]);
         let opacity = if let Some(channel) = growth_3d_material_opacity_channel(state_dims) {
-            sigmoid(states[idx * state_dims + channel] + opacity_logit_bias)
+            sigmoid(states[idx * state_dims + channel] + cfg.opacity_logit_bias)
                 .clamp(RENDER_MIN_OPACITY, RENDER_MAX_OPACITY)
         } else {
             RENDER_MAX_OPACITY
         };
         opacities.push(opacity);
+        let (sigma, derivative) = match cfg.gaussian_decode_mode {
+            GaussianDecodeMode::ParticlePoint => (cfg.min_sigma.max(EPS), 0.0),
+            GaussianDecodeMode::GaussianSh0FixedScale | GaussianDecodeMode::GaussianSh0Oriented => {
+                (cfg.sigma.clamp(cfg.min_sigma, cfg.max_sigma), 0.0)
+            }
+            GaussianDecodeMode::GaussianSh0LearnedScale => {
+                let channel = state_dims - 5;
+                let logit = states[idx * state_dims + channel].clamp(-8.0, 8.0);
+                let raw_sigma = cfg.sigma * logit.exp();
+                let sigma = raw_sigma.clamp(cfg.min_sigma, cfg.max_sigma);
+                let derivative = if raw_sigma > cfg.min_sigma && raw_sigma < cfg.max_sigma {
+                    raw_sigma
+                } else {
+                    0.0
+                };
+                (sigma, derivative)
+            }
+        };
+        sigmas.push(sigma);
+        scale_logit_derivatives.push(derivative);
     }
-    Ok((colors, opacities))
+    Ok(RenderParticleAttributes {
+        colors,
+        opacities,
+        sigmas,
+        scale_logit_derivatives,
+    })
 }
 
 fn sigmoid(value: f32) -> f32 {
@@ -740,6 +882,18 @@ fn validate_render_loss_config(cfg: RenderLossConfig) -> AutomataResult<()> {
         return Err(AutomataError::InvalidArgument(format!(
             "render loss sigma must be finite and positive, got {}",
             cfg.sigma
+        )));
+    }
+    if !cfg.min_sigma.is_finite() || cfg.min_sigma <= 0.0 {
+        return Err(AutomataError::InvalidArgument(format!(
+            "render loss min_sigma must be finite and positive, got {}",
+            cfg.min_sigma
+        )));
+    }
+    if !cfg.max_sigma.is_finite() || cfg.max_sigma < cfg.min_sigma {
+        return Err(AutomataError::InvalidArgument(format!(
+            "render loss max_sigma must be finite and >= min_sigma, got max={} min={}",
+            cfg.max_sigma, cfg.min_sigma
         )));
     }
     if !cfg.world_scale.is_finite() || cfg.world_scale <= 0.0 {
@@ -1010,6 +1164,59 @@ mod tests {
     }
 
     #[test]
+    fn learned_scale_decode_changes_render_footprint_without_moving_particles() {
+        let target = TriangleMeshTarget::torus(0.72, 0.72 * 0.72, 24, 16).unwrap();
+        let samples = mesh_surface_render_samples(&target, 256);
+        let state_dims = 16;
+        let opacity_channel = growth_3d_material_opacity_channel(state_dims).unwrap();
+        let scale_channel = state_dims - 5;
+        let mut states = vec![0.0; samples.positions.len() * state_dims];
+        for (idx, color) in samples.colors.iter().enumerate() {
+            let state_base = idx * state_dims;
+            states[state_base + opacity_channel] = 8.0;
+            let color_base = state_base + state_dims - 3;
+            states[color_base] = 2.0 * color[0] - 1.0;
+            states[color_base + 1] = 2.0 * color[1] - 1.0;
+            states[color_base + 2] = 2.0 * color[2] - 1.0;
+        }
+        let matching = RolloutTrace {
+            batch_size: 1,
+            particle_count: samples.positions.len(),
+            state_dims,
+            steps: 0,
+            positions: samples.positions.clone(),
+            states: states.clone(),
+            mean_dx: vec![0.0],
+        };
+        let mut large_scale = matching.clone();
+        for idx in 0..large_scale.particle_count {
+            large_scale.states[idx * state_dims + scale_channel] = 1.25;
+        }
+        let cfg = RenderLossConfig {
+            image_size: 32,
+            target_samples: 256,
+            sigma: 2.0,
+            min_sigma: 0.5,
+            max_sigma: 6.0,
+            world_scale: 1.4,
+            gaussian_decode_mode: GaussianDecodeMode::GaussianSh0LearnedScale,
+            ..RenderLossConfig::default()
+        };
+
+        let matching_report =
+            mesh_multiview_render_loss_from_trace(&matching, &target, cfg).unwrap();
+        let large_report =
+            mesh_multiview_render_loss_from_trace(&large_scale, &target, cfg).unwrap();
+
+        assert!(
+            matching_report.density_mse < large_report.density_mse,
+            "oversized learned scales should be measured as a density regression: matching={} large={}",
+            matching_report.density_mse,
+            large_report.density_mse
+        );
+    }
+
+    #[test]
     fn render_position_gradient_matches_density_finite_difference() {
         let target = TriangleMeshTarget::torus(0.72, 0.72 * 0.72, 24, 16).unwrap();
         let state_dims = 16;
@@ -1082,6 +1289,190 @@ mod tests {
         assert!(
             (analytic - finite_difference).abs() <= 2.5e-2 + finite_difference.abs() * 0.1,
             "opacity analytic={analytic} finite_difference={finite_difference}"
+        );
+    }
+
+    #[test]
+    fn render_scale_gradient_matches_density_finite_difference() {
+        let target = TriangleMeshTarget::torus(0.72, 0.72 * 0.72, 24, 16).unwrap();
+        let state_dims = 16;
+        let positions = vec![
+            [0.13, -0.17, 0.09, 0.0],
+            [-0.24, 0.31, -0.18, 0.0],
+            [0.42, 0.07, 0.21, 0.0],
+            [-0.36, -0.28, 0.14, 0.0],
+            [0.18, 0.44, -0.33, 0.0],
+            [-0.08, -0.41, -0.23, 0.0],
+            [0.51, -0.11, 0.04, 0.0],
+            [-0.47, 0.16, 0.37, 0.0],
+        ];
+        let mut states = vec![0.0; positions.len() * state_dims];
+        let opacity_channel = growth_3d_material_opacity_channel(state_dims).unwrap();
+        for idx in 0..positions.len() {
+            states[idx * state_dims + opacity_channel] = 6.0;
+        }
+        let trace = RolloutTrace {
+            batch_size: 1,
+            particle_count: positions.len(),
+            state_dims,
+            steps: 0,
+            positions,
+            states,
+            mean_dx: vec![0.0],
+        };
+        let cfg = RenderLossConfig {
+            image_size: 24,
+            target_samples: 64,
+            sigma: 2.0,
+            min_sigma: 0.5,
+            max_sigma: 6.0,
+            world_scale: 1.4,
+            color_weight: 0.0,
+            depth_weight: 0.0,
+            gaussian_decode_mode: GaussianDecodeMode::GaussianSh0LearnedScale,
+            ..RenderLossConfig::default()
+        };
+
+        let gradient =
+            mesh_multiview_render_position_gradient_from_trace(&trace, &target, cfg, 1).unwrap();
+        let eps = 1.0e-3;
+        let scale_channel = state_dims - 5;
+        let mut plus = trace.clone();
+        let mut minus = trace.clone();
+        plus.states[scale_channel] += eps;
+        minus.states[scale_channel] -= eps;
+        let plus_loss = mesh_multiview_render_loss_from_trace(&plus, &target, cfg)
+            .unwrap()
+            .total_loss;
+        let minus_loss = mesh_multiview_render_loss_from_trace(&minus, &target, cfg)
+            .unwrap()
+            .total_loss;
+        let finite_difference = (plus_loss - minus_loss) / (2.0 * eps);
+        let analytic = gradient.scale_gradients[0];
+
+        assert!(
+            (analytic - finite_difference).abs() <= 2.5e-2 + finite_difference.abs() * 0.15,
+            "scale analytic={analytic} finite_difference={finite_difference}"
+        );
+    }
+
+    #[test]
+    fn render_gradient_matches_full_loss_finite_difference() {
+        let target = TriangleMeshTarget::torus(0.72, 0.72 * 0.72, 24, 16).unwrap();
+        let state_dims = 16;
+        let positions = vec![
+            [0.16, -0.19, 0.11, 0.0],
+            [-0.29, 0.27, -0.21, 0.0],
+            [0.39, 0.09, 0.24, 0.0],
+            [-0.33, -0.25, 0.17, 0.0],
+            [0.21, 0.41, -0.29, 0.0],
+            [-0.11, -0.38, -0.26, 0.0],
+            [0.48, -0.14, 0.07, 0.0],
+            [-0.44, 0.19, 0.34, 0.0],
+        ];
+        let opacity_channel = growth_3d_material_opacity_channel(state_dims).unwrap();
+        let scale_channel = state_dims - 5;
+        let color_base = state_dims - 3;
+        let mut states = vec![0.0; positions.len() * state_dims];
+        for idx in 0..positions.len() {
+            let base = idx * state_dims;
+            states[base + opacity_channel] = 0.75;
+            states[base + scale_channel] = -0.1;
+            states[base + color_base] = -0.25 + idx as f32 * 0.03;
+            states[base + color_base + 1] = 0.35 - idx as f32 * 0.02;
+            states[base + color_base + 2] = -0.15 + idx as f32 * 0.01;
+        }
+        let trace = RolloutTrace {
+            batch_size: 1,
+            particle_count: positions.len(),
+            state_dims,
+            steps: 0,
+            positions,
+            states,
+            mean_dx: vec![0.0],
+        };
+        let cfg = RenderLossConfig {
+            image_size: 24,
+            target_samples: 64,
+            sigma: 2.0,
+            min_sigma: 0.5,
+            max_sigma: 6.0,
+            world_scale: 1.4,
+            gaussian_decode_mode: GaussianDecodeMode::GaussianSh0LearnedScale,
+            density_weight: 1.0,
+            color_weight: 0.7,
+            depth_weight: 0.5,
+            ..RenderLossConfig::default()
+        };
+
+        let gradient =
+            mesh_multiview_render_position_gradient_from_trace(&trace, &target, cfg, 1).unwrap();
+        assert!(gradient.loss.total_loss.is_finite());
+
+        let eps = 1.0e-3;
+        for axis in 0..3 {
+            let mut plus = trace.clone();
+            let mut minus = trace.clone();
+            plus.positions[0][axis] += eps;
+            minus.positions[0][axis] -= eps;
+            let finite_difference = finite_difference_render_loss(&plus, &minus, &target, cfg, eps);
+            let analytic = gradient.gradients[0][axis];
+            assert_gradient_close("position", axis, analytic, finite_difference, 0.05, 0.20);
+        }
+
+        let mut plus = trace.clone();
+        let mut minus = trace.clone();
+        plus.states[opacity_channel] += eps;
+        minus.states[opacity_channel] -= eps;
+        let finite_difference = finite_difference_render_loss(&plus, &minus, &target, cfg, eps);
+        let opacity = sigmoid(trace.states[opacity_channel] + cfg.opacity_logit_bias);
+        let analytic = gradient.opacity_gradients[0] * opacity * (1.0 - opacity);
+        assert_gradient_close("opacity", 0, analytic, finite_difference, 0.05, 0.20);
+
+        let mut plus = trace.clone();
+        let mut minus = trace.clone();
+        plus.states[color_base] += eps;
+        minus.states[color_base] -= eps;
+        let finite_difference = finite_difference_render_loss(&plus, &minus, &target, cfg, eps);
+        let analytic = 0.5 * gradient.color_gradients[0][0];
+        assert_gradient_close("color", 0, analytic, finite_difference, 0.05, 0.20);
+
+        let mut plus = trace.clone();
+        let mut minus = trace.clone();
+        plus.states[scale_channel] += eps;
+        minus.states[scale_channel] -= eps;
+        let finite_difference = finite_difference_render_loss(&plus, &minus, &target, cfg, eps);
+        let analytic = gradient.scale_gradients[0];
+        assert_gradient_close("scale", 0, analytic, finite_difference, 0.05, 0.20);
+    }
+
+    fn finite_difference_render_loss(
+        plus: &RolloutTrace,
+        minus: &RolloutTrace,
+        target: &TriangleMeshTarget,
+        cfg: RenderLossConfig,
+        eps: f32,
+    ) -> f32 {
+        let plus_loss = mesh_multiview_render_loss_from_trace(plus, target, cfg)
+            .unwrap()
+            .total_loss;
+        let minus_loss = mesh_multiview_render_loss_from_trace(minus, target, cfg)
+            .unwrap()
+            .total_loss;
+        (plus_loss - minus_loss) / (2.0 * eps)
+    }
+
+    fn assert_gradient_close(
+        name: &str,
+        axis: usize,
+        analytic: f32,
+        finite_difference: f32,
+        abs_tol: f32,
+        rel_tol: f32,
+    ) {
+        assert!(
+            (analytic - finite_difference).abs() <= abs_tol + finite_difference.abs() * rel_tol,
+            "{name} axis={axis} analytic={analytic} finite_difference={finite_difference}"
         );
     }
 }

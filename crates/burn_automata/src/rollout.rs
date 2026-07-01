@@ -10,13 +10,17 @@ pub const UV_TORUS_INITIAL_SCALE: f32 = 0.45;
 pub const UV_TORUS_DENSE_SEED_RADIUS_RATIO: f32 = 0.35;
 pub const GROWTH_3D_SEED_RADIUS_RATIO: f32 = 0.20;
 pub const GROWTH_3D_ACTIVE_CORE_RADIUS_RATIO: f32 = 0.30;
+pub const GROWTH_3D_MIN_ACTIVE_SEED_COUNT: usize = 8;
 pub const GROWTH_3D_DOMAIN_RADIUS_RATIO: f32 = 1.75;
+pub const GROWTH_3D_SUBSTRATE_MAX_RADIAL_GAP: f32 = 0.075;
 pub const GROWTH_3D_INACTIVE_OPACITY_LOGIT: f32 = -8.0;
 pub const GROWTH_3D_SUBSTRATE_INACTIVE_OPACITY_LOGIT: f32 = -4.0;
 pub const GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT: f32 = -4.0;
 pub const GROWTH_3D_ACTIVE_OPACITY_LOGIT: f32 = 0.0;
 pub const GROWTH_3D_LIVENESS_CHANNEL: usize = 3;
 pub const GROWTH_3D_RENDER_OPACITY_CHANNEL: usize = 8;
+pub const GROWTH_3D_PHASE_CHANNEL: usize = 9;
+pub const GROWTH_3D_VELOCITY_STATE_OFFSET: usize = 10;
 pub const UV_TORUS_MOTION_GAIN: f32 = 0.3;
 pub const UV_TORUS_RESIDUAL_DECAY: f32 = 0.025;
 pub const UV_TORUS_INITIAL_OPACITY_LOGIT: f32 = -2.8;
@@ -32,6 +36,15 @@ pub fn growth_3d_material_opacity_channel(state_dims: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+pub fn growth_3d_phase_channel(state_dims: usize) -> Option<usize> {
+    (state_dims > GROWTH_3D_PHASE_CHANNEL).then_some(GROWTH_3D_PHASE_CHANNEL)
+}
+
+pub fn growth_3d_velocity_channels(state_dims: usize) -> Option<std::ops::Range<usize>> {
+    (state_dims >= GROWTH_3D_VELOCITY_STATE_OFFSET + 3)
+        .then_some(GROWTH_3D_VELOCITY_STATE_OFFSET..GROWTH_3D_VELOCITY_STATE_OFFSET + 3)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +94,10 @@ pub enum ParticleSeed {
     TeapotGrowth3d,
     TorusSubstrateGrowth3d,
     TeapotSubstrateGrowth3d,
+    TorusLocalGrowth3d,
+    TeapotLocalGrowth3d,
+    TorusLocalSubstrateGrowth3d,
+    TeapotLocalSubstrateGrowth3d,
     TorusMorphogenDense3d,
     TeapotMorphogenDense3d,
 }
@@ -221,12 +238,18 @@ pub fn seed_particles_scaled(
             ParticleSeed::TorusGrowth3d
             | ParticleSeed::TeapotGrowth3d
             | ParticleSeed::TorusSubstrateGrowth3d
-            | ParticleSeed::TeapotSubstrateGrowth3d => {
+            | ParticleSeed::TeapotSubstrateGrowth3d
+            | ParticleSeed::TorusLocalGrowth3d
+            | ParticleSeed::TeapotLocalGrowth3d
+            | ParticleSeed::TorusLocalSubstrateGrowth3d
+            | ParticleSeed::TeapotLocalSubstrateGrowth3d => {
                 if spatial_dims == 3 {
                     let local_idx = idx % particle_count.max(1);
                     let seed_position = match seed_mode {
                         ParticleSeed::TorusSubstrateGrowth3d
-                        | ParticleSeed::TeapotSubstrateGrowth3d => {
+                        | ParticleSeed::TeapotSubstrateGrowth3d
+                        | ParticleSeed::TorusLocalSubstrateGrowth3d
+                        | ParticleSeed::TeapotLocalSubstrateGrowth3d => {
                             growth_3d_stratified_substrate_position(
                                 local_idx,
                                 particle_count,
@@ -244,7 +267,7 @@ pub fn seed_particles_scaled(
                     position[0] = seed_position[0];
                     position[1] = seed_position[1];
                     position[2] = seed_position[2];
-                    if state_dims >= 3 {
+                    if state_dims >= 3 && growth_3d_seed_writes_coordinate_scaffold(seed_mode) {
                         let domain_radius = growth_3d_domain_radius(scale).max(1.0e-4);
                         let state_base = idx * state_dims;
                         states[state_base] = seed_position[0] / domain_radius;
@@ -259,6 +282,8 @@ pub fn seed_particles_scaled(
                             seed_mode,
                             ParticleSeed::TorusSubstrateGrowth3d
                                 | ParticleSeed::TeapotSubstrateGrowth3d
+                                | ParticleSeed::TorusLocalSubstrateGrowth3d
+                                | ParticleSeed::TeapotLocalSubstrateGrowth3d
                         ) {
                             GROWTH_3D_SUBSTRATE_INACTIVE_OPACITY_LOGIT
                         } else {
@@ -432,6 +457,16 @@ pub fn seed_particles_scaled(
         }
     }
     (positions, states)
+}
+
+pub fn growth_3d_seed_writes_coordinate_scaffold(seed_mode: ParticleSeed) -> bool {
+    matches!(
+        seed_mode,
+        ParticleSeed::TorusGrowth3d
+            | ParticleSeed::TeapotGrowth3d
+            | ParticleSeed::TorusSubstrateGrowth3d
+            | ParticleSeed::TeapotSubstrateGrowth3d
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -613,7 +648,30 @@ pub fn growth_3d_active_seed_count(particle_count: usize) -> usize {
         return 0;
     }
     let active_fraction = GROWTH_3D_ACTIVE_CORE_RADIUS_RATIO.powi(3);
-    ((particle_count as f32 * active_fraction).round() as usize).clamp(1, particle_count)
+    let proportional_count =
+        ((particle_count as f32 * active_fraction).round() as usize).clamp(1, particle_count);
+    proportional_count.max(GROWTH_3D_MIN_ACTIVE_SEED_COUNT.min(particle_count))
+}
+
+pub fn growth_3d_substrate_min_level_count(scale: f32) -> usize {
+    let radial_span = (growth_3d_domain_radius(scale) - growth_3d_active_core_radius(scale))
+        .max(GROWTH_3D_SUBSTRATE_MAX_RADIAL_GAP);
+    (radial_span / GROWTH_3D_SUBSTRATE_MAX_RADIAL_GAP)
+        .ceil()
+        .max(1.0) as usize
+}
+
+pub fn growth_3d_substrate_ray_count(
+    inactive_count: usize,
+    active_count: usize,
+    scale: f32,
+) -> usize {
+    if inactive_count == 0 {
+        return 1;
+    }
+    let min_level_count = growth_3d_substrate_min_level_count(scale);
+    let max_connected_rays = (inactive_count / min_level_count).max(1);
+    max_connected_rays.min(active_count.max(1))
 }
 
 pub fn growth_3d_seed_position(rng: &mut impl Rng, scale: f32) -> [f32; 3] {
@@ -675,12 +733,21 @@ pub fn growth_3d_stratified_substrate_position(
     let inactive_idx = local_idx
         .saturating_sub(active_count)
         .min(inactive_count - 1);
-    let t = (inactive_idx as f32 + 0.5) / inactive_count as f32;
-    let inner3 = growth_3d_seed_radius(scale).powi(3);
-    let outer3 = growth_3d_domain_radius(scale).powi(3);
-    let radius = (inner3 + (outer3 - inner3).max(0.0) * t).cbrt();
-    let direction =
-        growth_3d_stratified_direction(inactive_idx, inactive_count, seed ^ 0x57d0_a11c_5eed_3d11);
+    let ray_count =
+        growth_3d_substrate_ray_count(inactive_count, active_count, scale).min(inactive_count);
+    let level_count = inactive_count.div_ceil(ray_count).max(1);
+    let ray_idx = inactive_idx % ray_count;
+    let level_idx = inactive_idx / ray_count;
+    let t = (level_idx as f32 + 0.5) / level_count as f32;
+    let active_radius = growth_3d_active_core_radius(scale);
+    let domain_radius = growth_3d_domain_radius(scale);
+    let radius = active_radius + (domain_radius - active_radius).max(0.0) * t;
+    let active_ray_idx = ray_idx % active_count.max(1);
+    let direction = growth_3d_stratified_direction(
+        active_ray_idx,
+        active_count.max(1),
+        seed ^ 0x3d60_7a11_5eed_f00d,
+    );
     [
         direction[0] * radius,
         direction[1] * radius,
@@ -1286,11 +1353,30 @@ mod tests {
     }
 
     #[test]
+    fn growth_3d_seed_active_count_uses_minimum_3d_nucleus_for_small_clouds() {
+        assert_eq!(growth_3d_active_seed_count(0), 0);
+        assert_eq!(growth_3d_active_seed_count(4), 4);
+        assert_eq!(
+            growth_3d_active_seed_count(64),
+            GROWTH_3D_MIN_ACTIVE_SEED_COUNT
+        );
+        assert_eq!(
+            growth_3d_active_seed_count(128),
+            GROWTH_3D_MIN_ACTIVE_SEED_COUNT
+        );
+
+        let proportional_count =
+            (1024.0_f32 * GROWTH_3D_ACTIVE_CORE_RADIUS_RATIO.powi(3)).round() as usize;
+        assert!(proportional_count > GROWTH_3D_MIN_ACTIVE_SEED_COUNT);
+        assert_eq!(growth_3d_active_seed_count(1024), proportional_count);
+    }
+
+    #[test]
     fn growth_3d_seed_active_count_is_seed_stable() {
         let state_dims = 12;
         let particle_count = 1024;
         let expected = growth_3d_active_seed_count(particle_count);
-        for seed in [1, 42, 99, 0x5a17_3d, 0x51a7_3d, 0xffff_ffff] {
+        for seed in [1, 42, 99, 0x005a_173d, 0x0051_a73d, 0xffff_ffff] {
             let (_positions, states) = seed_particles_scaled(
                 1,
                 particle_count,
@@ -1321,7 +1407,7 @@ mod tests {
             particle_count,
             12,
             3,
-            0x5a17_3d,
+            0x005a_173d,
             ParticleSeed::TeapotGrowth3d,
             0.72,
         );
@@ -1406,60 +1492,185 @@ mod tests {
 
     #[test]
     fn growth_3d_substrate_seed_keeps_sparse_active_core_in_dormant_domain() {
-        let particle_count = 512;
+        for particle_count in [64, 512] {
+            let scale = 0.72;
+            let active_count = growth_3d_active_seed_count(particle_count);
+            let active_radius = growth_3d_active_core_radius(scale);
+            let seed_radius = growth_3d_seed_radius(scale);
+            let domain_radius = growth_3d_domain_radius(scale);
+            let inactive_count = particle_count.saturating_sub(active_count);
+            let ray_count = growth_3d_substrate_ray_count(inactive_count, active_count, scale)
+                .min(inactive_count.max(1));
+            let kernel_radius = HashGridConfig::growing_3dgs().eps;
+            let (positions, states) = seed_particles_scaled(
+                1,
+                particle_count,
+                12,
+                3,
+                0x5eed,
+                ParticleSeed::TorusSubstrateGrowth3d,
+                scale,
+            );
+
+            let mut max_radius = 0.0_f32;
+            let mut inactive_local_shell = 0usize;
+            let mut inactive_beyond_seed = 0usize;
+            let mut ray_radii = vec![Vec::<f32>::new(); ray_count];
+            let mut active_positions = Vec::new();
+            let mut first_ray_positions = vec![None::<[f32; 4]>; ray_count];
+            for (idx, position) in positions.iter().enumerate() {
+                let radius = (position[0] * position[0]
+                    + position[1] * position[1]
+                    + position[2] * position[2])
+                    .sqrt();
+                max_radius = max_radius.max(radius);
+                assert!(radius <= domain_radius + 1.0e-5);
+                let state_base = idx * 12;
+                for axis in 0..3 {
+                    assert!(
+                        (states[state_base + axis] - position[axis] / domain_radius).abs() < 1.0e-6,
+                        "substrate seed state channels 0..2 should store normalized seed-frame coordinates"
+                    );
+                }
+                if idx < active_count {
+                    active_positions.push(*position);
+                    assert!(radius <= active_radius + 1.0e-5);
+                    assert_eq!(states[idx * 12 + 3], GROWTH_3D_ACTIVE_OPACITY_LOGIT);
+                    assert_eq!(
+                        states[idx * 12 + GROWTH_3D_RENDER_OPACITY_CHANNEL],
+                        GROWTH_3D_ACTIVE_OPACITY_LOGIT
+                    );
+                } else {
+                    assert!(radius >= active_radius - 1.0e-5);
+                    if radius <= seed_radius + 1.0e-5 {
+                        inactive_local_shell += 1;
+                    }
+                    if radius > seed_radius {
+                        inactive_beyond_seed += 1;
+                    }
+                    let inactive_idx = idx - active_count;
+                    let ray = inactive_idx % ray_count;
+                    if first_ray_positions[ray].is_none() {
+                        first_ray_positions[ray] = Some(*position);
+                    }
+                    ray_radii[ray].push(radius);
+                    assert_eq!(
+                        states[idx * 12 + 3],
+                        GROWTH_3D_SUBSTRATE_INACTIVE_OPACITY_LOGIT
+                    );
+                    assert_eq!(
+                        states[idx * 12 + GROWTH_3D_RENDER_OPACITY_CHANNEL],
+                        GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT
+                    );
+                }
+            }
+
+            assert!(max_radius > domain_radius * 0.95);
+            assert!(
+                inactive_local_shell > active_count,
+                "substrate seed should include a dormant local shell adjacent to the active core"
+            );
+            assert!(inactive_beyond_seed > particle_count / 2);
+            for radii in &mut ray_radii {
+                radii.sort_by(|lhs, rhs| lhs.partial_cmp(rhs).unwrap());
+                for pair in radii.windows(2) {
+                    assert!(
+                        pair[1] - pair[0] < kernel_radius,
+                        "substrate radial rays should stay inside the kernel support"
+                    );
+                }
+            }
+            for first_position in first_ray_positions.into_iter().flatten() {
+                let nearest_active = active_positions
+                    .iter()
+                    .map(|active| {
+                        let dx = first_position[0] - active[0];
+                        let dy = first_position[1] - active[1];
+                        let dz = first_position[2] - active[2];
+                        (dx * dx + dy * dy + dz * dz).sqrt()
+                    })
+                    .fold(f32::MAX, f32::min);
+                assert!(
+                    nearest_active < kernel_radius,
+                    "each substrate ray should begin within kernel support of the active core"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn growth_3d_local_substrate_seed_keeps_topology_without_coordinate_state() {
+        let particle_count = 128;
         let scale = 0.72;
         let active_count = growth_3d_active_seed_count(particle_count);
-        let active_radius = growth_3d_active_core_radius(scale);
-        let seed_radius = growth_3d_seed_radius(scale);
-        let domain_radius = growth_3d_domain_radius(scale);
+        let inactive_count = particle_count.saturating_sub(active_count);
+        let ray_count = growth_3d_substrate_ray_count(inactive_count, active_count, scale)
+            .min(inactive_count.max(1));
+        let kernel_radius = HashGridConfig::growing_3dgs().eps;
         let (positions, states) = seed_particles_scaled(
             1,
             particle_count,
             12,
             3,
             0x5eed,
-            ParticleSeed::TorusSubstrateGrowth3d,
+            ParticleSeed::TorusLocalSubstrateGrowth3d,
             scale,
         );
 
+        let mut active_positions = Vec::new();
+        let mut first_ray_positions = vec![None::<[f32; 4]>; ray_count];
         let mut max_radius = 0.0_f32;
-        let mut inactive_beyond_seed = 0usize;
         for (idx, position) in positions.iter().enumerate() {
+            let state_base = idx * 12;
+            assert_eq!(
+                states[state_base], 0.0,
+                "local substrate seed must not write x scaffold state"
+            );
+            assert_eq!(
+                states[state_base + 1],
+                0.0,
+                "local substrate seed must not write y scaffold state"
+            );
+            assert_eq!(
+                states[state_base + 2],
+                0.0,
+                "local substrate seed must not write z scaffold state"
+            );
             let radius =
                 (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
                     .sqrt();
             max_radius = max_radius.max(radius);
-            assert!(radius <= domain_radius + 1.0e-5);
-            let state_base = idx * 12;
-            for axis in 0..3 {
-                assert!(
-                    (states[state_base + axis] - position[axis] / domain_radius).abs() < 1.0e-6,
-                    "substrate seed state channels 0..2 should store normalized seed-frame coordinates"
-                );
-            }
             if idx < active_count {
-                assert!(radius <= active_radius + 1.0e-5);
-                assert_eq!(states[idx * 12 + 3], GROWTH_3D_ACTIVE_OPACITY_LOGIT);
-                assert_eq!(
-                    states[idx * 12 + GROWTH_3D_RENDER_OPACITY_CHANNEL],
-                    GROWTH_3D_ACTIVE_OPACITY_LOGIT
-                );
+                active_positions.push(*position);
+                assert_eq!(states[state_base + 3], GROWTH_3D_ACTIVE_OPACITY_LOGIT);
             } else {
-                if radius > seed_radius {
-                    inactive_beyond_seed += 1;
-                }
                 assert_eq!(
-                    states[idx * 12 + 3],
+                    states[state_base + 3],
                     GROWTH_3D_SUBSTRATE_INACTIVE_OPACITY_LOGIT
                 );
-                assert_eq!(
-                    states[idx * 12 + GROWTH_3D_RENDER_OPACITY_CHANNEL],
-                    GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT
-                );
+                let inactive_idx = idx - active_count;
+                let ray = inactive_idx % ray_count;
+                if first_ray_positions[ray].is_none() {
+                    first_ray_positions[ray] = Some(*position);
+                }
             }
         }
 
-        assert!(max_radius > domain_radius * 0.95);
-        assert!(inactive_beyond_seed > particle_count / 2);
+        assert!(max_radius > growth_3d_domain_radius(scale) * 0.95);
+        for first_position in first_ray_positions.into_iter().flatten() {
+            let nearest_active = active_positions
+                .iter()
+                .map(|active| {
+                    let dx = first_position[0] - active[0];
+                    let dy = first_position[1] - active[1];
+                    let dz = first_position[2] - active[2];
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                })
+                .fold(f32::MAX, f32::min);
+            assert!(
+                nearest_active < kernel_radius,
+                "local substrate seed should keep first dormant shell within kernel support"
+            );
+        }
     }
 }

@@ -31,7 +31,7 @@ use burn_automata::{
 };
 use rand::{SeedableRng, rngs::StdRng};
 
-const CATALOG_3D_GROWTH_SEED: u64 = 0x51a7_3d;
+const CATALOG_3D_GROWTH_SEED: u64 = 0x0051_a73d;
 
 #[test]
 fn rollout_runs_with_seeded_2d_model() {

@@ -104,8 +104,9 @@ experiments should write to `target/` or `artifacts/` until they pass the
 strict mesh/render gates. `train-render3d` refuses `assets/models/*` outputs
 unless the run starts from a conditionless-local base model and uses the
 matching local 3D growth seed; catalog-bound candidates are validated from a
-temporary `target/` path and only promoted after strict multi-seed growth
-validation passes. Legacy, ablation, and retiming 3D commands refuse
+temporary `target/` path and only promoted after strict app-scale multi-seed
+growth validation passes at the 1024-particle catalog and viewer horizons.
+Legacy, ablation, and retiming 3D commands refuse
 catalog-bound output paths entirely:
 
 ```bash
@@ -144,13 +145,23 @@ propagates RGB/opacity state adjoints through direct, blurred, and
 state-gradient SPH perception channels over stored snapshots, carries position
 adjoints through direct Euler integration, and applies a conservative
 `--perception-position-gain` to fixed-neighborhood SPH position-perception
-adjoints. `--direct-selection-seed-training` is available as an opt-in
-multi-seed update ablation. `--trajectory-render-gain`/`--trajectory-render-samples`
-can inject render adjoints at stored rollout snapshots, and
-`--full-coverage-adjoint` can apply target-coverage pressure to all active
-particles instead of sampled render-gradient rows; both are currently diagnostic
-ablations because short 3D probes regressed strict gates. The older supervised
-row projection remains
+adjoints. Direct-rollout training now averages clipped SGD deltas over the
+selection seed set by default; use `--no-direct-selection-seed-training` only
+for the older single-seed ablation. `--trajectory-render-gain`/`--trajectory-render-samples`
+can inject render adjoints at stored rollout snapshots, while
+`--trajectory-mesh-gain` uses the same snapshot schedule for mesh
+coverage/surface adjoints without enabling intermediate render gradients.
+`--liveness-gain`
+adds a bounded local-front state adjoint on the strict liveness channel
+(`state[3]`), so render/coverage training can teach progressive activation
+instead of only material opacity. This liveness snapshot path uses
+`--trajectory-render-samples` but does not require nonzero
+`--trajectory-render-gain`; far dormant particles receive no global activation
+pressure. The direct backend now applies target-coverage pressure to
+all active particles by default instead of only sampled render-gradient rows.
+Coverage adjoints use `--coverage-gain` directly rather than being scaled by
+the render `--motion-gain`; use `--no-full-coverage-adjoint` only for the older
+sparse-row ablation. The older supervised row projection remains
 available as `--training-backend proxy`.
 `--coverage-mode soft-chamfer` adds an opt-in detached soft target-coverage
 proxy, and `--coverage-repulsion-gain`/`--coverage-repulsion-radius` can add
@@ -172,10 +183,21 @@ array prefix, so under-covered regions participate in continuation probes.
 `--gradient-mode finite-diff` remains available for regression checks. This is
 an honest backend scaffold, not full WGPU/autodiff BPTT through particle
 positions inside perception, changing neighbor membership, and render
-visibility through time. `train-render3d` reports serialize a
+visibility through time. `--surface-escape-gain` weights active particles that
+escape past the strict surface-distance threshold more strongly in the
+terminal, trajectory, and proxy surface projection objectives, so reported
+surface tails have a matching training signal instead of being diagnostics
+only. `train-render3d` reports serialize a
 `growth_validation` section with the same strict gate and seed set used by
 catalog promotion, and `--fail-on-validation` fails on that strict
-runtime-dynamics gate rather than render PSNR alone.
+runtime-dynamics gate rather than render PSNR alone. Candidate selection uses
+that strict score, including active-surface max/tail and render-density
+penalties. It also records target-normal-bin coverage, so missing broad surface
+normal families such as torus tube collapse are strict blockers even when
+pointwise target coverage looks acceptable. Selection only allows bounded
+render/density slack when the strict score improves materially. Rejected rounds
+are rolled back before the next rollout, so subsequent training continues from
+the best strict-scored checkpoint instead of a regressed candidate.
 
 For the stricter no-position experiment, use the explicit ablation command:
 
