@@ -2262,14 +2262,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     seed_mode,
                 )),
             );
+            let validation_extra_seeds =
+                render_training_validation_extra_seeds(selection_seed, &extra_selection_seeds);
             if catalog_bound_output {
                 let candidate_path = catalog_bound_candidate_path(target, std::process::id());
                 if let Some(parent) = candidate_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 burn_automata::import::save_manifest(&candidate_path, &manifest)?;
-                let mut validation_extra_seeds = vec![selection_seed];
-                validation_extra_seeds.extend(extra_selection_seeds.iter().copied());
                 let validation = growth_3d_validation_report(
                     &candidate_path,
                     target,
@@ -2277,7 +2277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         particle_count: particles,
                         steps: rollout_steps,
                         seed: 0x5a17_3d,
-                        extra_seeds: validation_extra_seeds,
+                        extra_seeds: validation_extra_seeds.clone(),
                         seed_scale,
                         seed_mode,
                         gate: Growth3dValidationGateArg::Strict,
@@ -2302,6 +2302,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let loaded = burn_automata::import::load_manifest(&model_output)?;
             let loaded_hashgrid = loaded.hashgrid.clone();
             let loaded_model = loaded.into_model();
+            let growth_validation = growth_3d_validation_report(
+                &model_output,
+                target,
+                Growth3dValidationConfig {
+                    particle_count: particles,
+                    steps: rollout_steps,
+                    seed: 0x5a17_3d,
+                    extra_seeds: validation_extra_seeds,
+                    seed_scale,
+                    seed_mode,
+                    gate: Growth3dValidationGateArg::Strict,
+                    render,
+                },
+            )?;
             let final_render_loss = mesh_render_loss_for_model(
                 &loaded_model,
                 &loaded_hashgrid,
@@ -2327,25 +2341,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sgd,
                 report,
                 final_render_loss,
+                growth_validation,
             };
             std::fs::write(
                 &report_output,
                 serde_json::to_string_pretty(&output_report)?,
             )?;
             println!(
-                "wrote {} and {} render_loss={:.6} density_psnr={:.3} color_psnr={:.3} depth_psnr={:.3} passed={}",
+                "wrote {} and {} render_loss={:.6} density_psnr={:.3} color_psnr={:.3} depth_psnr={:.3} passed={} strict_passed={} strict_score={:.3}",
                 model_output.display(),
                 report_output.display(),
                 output_report.final_render_loss.total_loss,
                 output_report.final_render_loss.density_psnr_db,
                 output_report.final_render_loss.color_psnr_db,
                 output_report.final_render_loss.depth_psnr_db,
-                output_report.final_render_loss.passed
+                output_report.final_render_loss.passed,
+                output_report.growth_validation.strict_passed,
+                output_report.growth_validation.strict_score.score
             );
-            if fail_on_validation && !output_report.final_render_loss.passed {
+            if fail_on_validation
+                && !growth_3d_fail_on_validation_passed(&output_report.growth_validation)
+            {
                 return Err(std::io::Error::other(format!(
-                    "render-proxy training failed render validation; see {}",
-                    report_output.display()
+                    "render-proxy training failed strict growth validation (score={:.6}, failures={:?}); see {}",
+                    output_report.growth_validation.strict_score.score,
+                    output_report.growth_validation.strict_checks.failure_reasons,
+                    report_output.display(),
                 ))
                 .into());
             }
@@ -3061,6 +3082,20 @@ fn render_proxy_selection_seeds(cfg: &RenderProxyTrainingConfig) -> Vec<u64> {
     for &selection_seed in &cfg.selection_seeds {
         if !seeds.contains(&selection_seed) {
             seeds.push(selection_seed);
+        }
+    }
+    seeds
+}
+
+fn render_training_validation_extra_seeds(
+    selection_seed: u64,
+    extra_selection_seeds: &[u64],
+) -> Vec<u64> {
+    let mut seeds = Vec::with_capacity(extra_selection_seeds.len() + 1);
+    seeds.push(selection_seed);
+    for &extra_seed in extra_selection_seeds {
+        if !seeds.contains(&extra_seed) {
+            seeds.push(extra_seed);
         }
     }
     seeds
@@ -6653,6 +6688,7 @@ struct CliRenderTrainingReport {
     sgd: SgdConfig,
     report: RenderProxyTrainingReport,
     final_render_loss: MultiViewRenderLossReport,
+    growth_validation: CliGrowth3dValidationReport,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -12354,6 +12390,14 @@ mod tests {
         assert_eq!(
             default_render_training_seed_mode(MeshTargetArg::Teapot, &field_model),
             ParticleSeed::TeapotFieldDense3d
+        );
+    }
+
+    #[test]
+    fn render_training_validation_extra_seeds_dedupe_selection_set() {
+        assert_eq!(
+            render_training_validation_extra_seeds(42, &[99, 42, 7, 99]),
+            vec![42, 99, 7]
         );
     }
 

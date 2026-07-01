@@ -75,7 +75,11 @@ starts from a conditionless-local compact-growth prior with
 `ablation-rust:*conditionless-local*` lineage. With `--base-model`, it can
 continue an explicit local-growth BPK. Any `assets/models/*` output is written
 through a temporary candidate and is refused unless strict multi-seed
-`validate-growth3d` gates pass.
+`validate-growth3d` gates pass. Every `train-render3d` report also contains a
+`growth_validation` section generated from the saved BPK with the same strict
+gate, training seed, `--selection-seed`, and `--extra-selection-seed` set, so
+diagnostic artifacts carry the runtime-dynamics blockers that prevent catalog
+promotion.
 
 The explicit conditionless-local ablation command is:
 

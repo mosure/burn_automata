@@ -172,7 +172,10 @@ array prefix, so under-covered regions participate in continuation probes.
 `--gradient-mode finite-diff` remains available for regression checks. This is
 an honest backend scaffold, not full WGPU/autodiff BPTT through particle
 positions inside perception, changing neighbor membership, and render
-visibility through time.
+visibility through time. `train-render3d` reports serialize a
+`growth_validation` section with the same strict gate and seed set used by
+catalog promotion, and `--fail-on-validation` fails on that strict
+runtime-dynamics gate rather than render PSNR alone.
 
 For the stricter no-position experiment, use the explicit ablation command:
 
