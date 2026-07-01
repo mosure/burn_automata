@@ -2156,17 +2156,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fail_on_validation,
         } => {
             let hashgrid = burn_automata::kernels::HashGridConfig::growing_3dgs();
-            let mut base_source = None;
-            let mut model = if let Some(path) = base_model.as_ref() {
+            let requested_seed_mode = seed_mode.map(ParticleSeed::from);
+            let target_mesh = mesh_target_for_arg(target, seed_scale);
+            let (mut model, base_source, default_seed_mode) = if let Some(path) =
+                base_model.as_ref()
+            {
                 let manifest = burn_automata::import::load_manifest(path)?;
-                base_source = manifest.source.clone();
-                manifest.into_model()
+                let base_source = manifest.source.clone();
+                let model = manifest.into_model();
+                let default_seed_mode = default_render_training_seed_mode(target, &model);
+                (model, base_source, default_seed_mode)
             } else {
-                render_training_base_model(target)?
+                let default_seed_mode = render_training_default_seed_mode(target);
+                let seed_mode = requested_seed_mode.unwrap_or(default_seed_mode);
+                if !target_local_growth_seed(target, seed_mode) {
+                    return Err(std::io::Error::other(format!(
+                        "train-render3d without --base-model defaults to conditionless-local growth and requires a target local growth seed; got seed_mode={seed_mode:?}"
+                    ))
+                    .into());
+                }
+                let (model, source) = render_training_base_model(target, &target_mesh, seed_mode)?;
+                (model, Some(source), default_seed_mode)
             };
-            let seed_mode = seed_mode
-                .map(ParticleSeed::from)
-                .unwrap_or_else(|| default_render_training_seed_mode(target, &model));
+            let seed_mode = requested_seed_mode.unwrap_or(default_seed_mode);
             let catalog_bound_output = is_catalog_model_output_path(&model_output);
             validate_catalog_bound_render_training_output(
                 &model_output,
@@ -2174,7 +2186,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 seed_mode,
                 base_source.as_deref(),
             )?;
-            let target_mesh = mesh_target_for_arg(target, seed_scale);
             let coverage_gap_gain = coverage_gap_gain.unwrap_or(coverage_repulsion_gain);
             let render = RenderLossConfig {
                 image_size,
@@ -2993,14 +3004,35 @@ struct RenderProxyTrainingConfig {
     sgd: SgdConfig,
 }
 
+fn render_training_default_seed_mode(target: MeshTargetArg) -> ParticleSeed {
+    match target {
+        MeshTargetArg::Torus => ParticleSeed::TorusGrowth3d,
+        MeshTargetArg::Teapot => ParticleSeed::TeapotGrowth3d,
+    }
+}
+
 fn render_training_base_model(
     target: MeshTargetArg,
-) -> Result<NpaModel, Box<dyn std::error::Error>> {
-    let config = NpaConfig::torus_field_3dgs();
-    match target {
-        MeshTargetArg::Torus => torus_field_model(config),
-        MeshTargetArg::Teapot => teapot_field_model(config),
+    target_mesh: &TriangleMeshTarget,
+    seed_mode: ParticleSeed,
+) -> Result<(NpaModel, String), Box<dyn std::error::Error>> {
+    if !target_local_growth_seed(target, seed_mode) {
+        return Err(std::io::Error::other(format!(
+            "default render training base requires a target local growth seed; got seed_mode={seed_mode:?}"
+        ))
+        .into());
     }
+    let model = local_growth_student_model_with_axis_gains(
+        NpaConfig::growing_3dgs(),
+        0x5a17_3d,
+        0.0,
+        mesh_axis_expansion_gains(target_mesh, LOCAL_GROWTH_EXPANSION_GAIN),
+    )?;
+    let source = format!(
+        "ablation-rust:{}",
+        mesh_conditionless_local_target_source_for_seed(target, seed_mode)
+    );
+    Ok((model, source))
 }
 
 fn render_training_seed_mode(target: MeshTargetArg) -> ParticleSeed {
@@ -12295,6 +12327,15 @@ mod tests {
 
     #[test]
     fn render_training_defaults_match_model_family() {
+        assert_eq!(
+            render_training_default_seed_mode(MeshTargetArg::Torus),
+            ParticleSeed::TorusGrowth3d
+        );
+        assert_eq!(
+            render_training_default_seed_mode(MeshTargetArg::Teapot),
+            ParticleSeed::TeapotGrowth3d
+        );
+
         let local_model = NpaModel::seeded(NpaConfig::growing_3dgs(), 7);
         assert_eq!(
             default_render_training_seed_mode(MeshTargetArg::Torus, &local_model),
@@ -12314,6 +12355,34 @@ mod tests {
             default_render_training_seed_mode(MeshTargetArg::Teapot, &field_model),
             ParticleSeed::TeapotFieldDense3d
         );
+    }
+
+    #[test]
+    fn render_training_base_defaults_to_conditionless_local_growth() {
+        let target = uv_torus_mesh_target(UV_TORUS_FIELD_SCALE);
+        let (model, source) = render_training_base_model(
+            MeshTargetArg::Torus,
+            &target,
+            render_training_default_seed_mode(MeshTargetArg::Torus),
+        )
+        .unwrap();
+
+        assert!(!model.config.position_features);
+        assert!(local_conditionless_lineage(&source));
+        assert!(source.starts_with("ablation-rust:"));
+        assert!(source.contains("conditionless-local"));
+        assert!(source.contains("random-ball"));
+        assert!(!source.contains("position-field"));
+        assert!(!source.contains("render-proxy-rust"));
+
+        let err = render_training_base_model(
+            MeshTargetArg::Torus,
+            &target,
+            ParticleSeed::TorusFieldDense3d,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("target local growth seed"));
     }
 
     #[test]

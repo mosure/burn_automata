@@ -145,17 +145,19 @@ cargo run -p burn_automata --release --bin burn_automata -- validate-growth3d \
 
 Use `--gate strict` for future promotion candidates. Render validation is now
 opacity-aware and matches the Bevy/WGPU Gaussian opacity mapping. At the current
-1024-particle Bevy catalog scale, teapot now passes strict validation after the
-render-density retime (`density PSNR=11.144`, target coverage=`0.919`,
-strict score=`0.000`) and is the only promoted 3D mesh artifact. Torus still
-fails compact-growth target coverage, angular support, and render density. Add
+1024-particle Bevy catalog scale, both trained mesh artifacts remain hidden:
+teapot can pass the older catalog-sanity render floors on some horizons but
+still fails the strict app-catalog gate, and torus still fails compact-growth
+target coverage, angular support, and render density. Add
 `--fail-on-validation` only for future promotion candidates expected to pass the
 selected gate.
 
 ## Ablations Run
 
-The new ablation command trains a no-position model from random-ball seeds and
-validates against mesh rollout gates:
+The ablation command trains a no-position model from conditionless local growth
+seeds and validates against mesh rollout gates. Use the target-specific
+`--seed-mode *-growth-3d` values for compact random-ball growth probes, or the
+default substrate growth seed for sparse-core growth through a dormant domain:
 
 ```bash
 cargo run -p burn_automata --release --bin burn_automata -- ablate-local-3d \

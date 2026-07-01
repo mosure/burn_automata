@@ -133,10 +133,13 @@ The legacy projection/seed-frame batch is still available as
 `--training-mode rollout-local` remains available for local teacher
 distillation experiments. `--training-mode rollout-position-field` is available
 for rollout-state mesh rows, but those commands are no longer catalog defaults.
-`train-render3d` defaults to `--training-backend direct-rollout`, starts from
-the current saved growth prior, backpropagates the deterministic CPU multi-view
-splat loss analytically to final particle positions, opacity, and color, and
-applies those adjoints through the stored rollout MLP outputs. It also
+`train-render3d` defaults to `--training-backend direct-rollout`. Without
+`--base-model`, it starts from a conditionless-local compact-growth prior with
+`position_features=false` and target-local growth seed defaults; with
+`--base-model`, it continues the provided local-growth BPK. The backend
+backpropagates the deterministic CPU multi-view splat loss analytically to
+final particle positions, opacity, and color, and applies those adjoints through
+the stored rollout MLP outputs. It also
 propagates RGB/opacity state adjoints through direct, blurred, and
 state-gradient SPH perception channels over stored snapshots, carries position
 adjoints through direct Euler integration, and applies a conservative

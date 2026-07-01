@@ -63,23 +63,19 @@ The latest local rollout-supervision smoke runs reduced 2D loss from
 `2.1044495` to `1.2905985` and 3D loss from `1.6761311` to `0.44246006` over
 16 steps with four history samples.
 
-For the built-in 3D torus catalog artifact, `train-torus3d` writes a dedicated
-robustness section into `artifacts/uv_torus_3d_training_report.json` after
-loading the saved `.bpk` back from disk. The command fails if any configured
-rollout case has non-finite state, geometry drift, excessive torus surface
-error, or opacity growth outside tolerance.
+The legacy `train-torus3d`, `train-torus-morphogen3d`, and
+`train-teapot-morphogen3d` commands now write diagnostic artifacts under
+`artifacts/` and refuse catalog-bound output paths. Their position-field,
+rollout-position-field, and projection-baseline modes remain useful for mesh
+sanity checks, but they are not catalog-promotion paths.
 
-The companion `train-torus-morphogen3d` and `train-teapot-morphogen3d`
-commands write the catalog BPKs and their JSON training reports. Particles
-start from neutral dense seeds, target residual/color are not written into
-initial state, and the saved BPK is loaded back from disk for rollout
-validation. Torus defaults to `--training-mode rollout-position-field`, which
-mixes random mesh rows with rows sampled from the model's own rollout states.
-Teapot defaults to `--training-mode position-field` because the current
-rollout-aware teapot curriculum is correctly rejected by the mesh rollout gate.
-The explicit `--training-mode projection-baseline` path remains available for
-mesh-projection sanity checks, and `--training-mode rollout-local` remains
-available for local teacher distillation experiments.
+The promotion-oriented path is `train-render3d`. Without `--base-model`, it now
+starts from a conditionless-local compact-growth prior with
+`position_features=false`, target-local growth seed defaults, and
+`ablation-rust:*conditionless-local*` lineage. With `--base-model`, it can
+continue an explicit local-growth BPK. Any `assets/models/*` output is written
+through a temporary candidate and is refused unless strict multi-seed
+`validate-growth3d` gates pass.
 
 The explicit conditionless-local ablation command is:
 
