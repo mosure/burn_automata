@@ -15,6 +15,8 @@ mod strict;
 pub(crate) use strict::*;
 mod validation;
 pub(crate) use validation::*;
+mod robustness;
+pub(crate) use robustness::*;
 mod dynamics;
 pub(crate) use dynamics::*;
 mod state_metrics;

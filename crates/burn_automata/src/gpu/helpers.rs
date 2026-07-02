@@ -1,14 +1,8 @@
-#[path = "buffers.rs"]
 mod buffers;
-#[path = "bvh.rs"]
 mod bvh;
-#[path = "constants.rs"]
 mod constants;
-#[path = "neighbor.rs"]
 mod neighbor;
-#[path = "params.rs"]
 mod params;
-#[path = "util.rs"]
 mod util;
 
 pub(super) use buffers::*;
