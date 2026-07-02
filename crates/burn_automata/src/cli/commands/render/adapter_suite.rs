@@ -416,6 +416,8 @@ pub(crate) fn run_train_render_3d_adapters(
         shared_plus_adapter_parameter_count as f32 / full_bank_parameter_count as f32
     };
     let shared_plus_adapter_savings_ratio = 1.0 - shared_plus_adapter_to_full_bank_ratio;
+    let missing_train_signal = adapter_suite_missing_train_signal(&shared_base_training, &entries);
+    let training_signal_passed = missing_train_signal.is_empty();
     let suite_report = CliRenderAdapterSuiteReport {
         base_model_input,
         base_model: shared_base_output.display().to_string(),
@@ -445,6 +447,8 @@ pub(crate) fn run_train_render_3d_adapters(
         shared_plus_adapter_parameter_count,
         shared_plus_adapter_to_full_bank_ratio,
         shared_plus_adapter_savings_ratio,
+        training_signal_passed,
+        missing_train_signal,
         entries,
     };
     std::fs::write(&report_output, serde_json::to_string_pretty(&suite_report)?)?;
@@ -455,16 +459,19 @@ pub(crate) fn run_train_render_3d_adapters(
         .filter(|entry| !growth_3d_fail_on_validation_passed(&entry.growth_validation))
         .map(|entry| mesh_target_slug(entry.target))
         .collect::<Vec<_>>();
+    let missing_signal_labels =
+        adapter_suite_missing_signal_labels(&suite_report.missing_train_signal);
     println!(
-        "wrote {} with {} adapters adapter/full={:.4} failed_targets={:?}",
+        "wrote {} with {} adapters adapter/full={:.4} failed_targets={:?} missing_train_signal={:?}",
         report_output.display(),
         suite_report.entries.len(),
         suite_report.shared_plus_adapter_to_full_bank_ratio,
-        failed_targets
+        failed_targets,
+        missing_signal_labels
     );
-    if fail_on_validation && !failed_targets.is_empty() {
+    if fail_on_validation && (!failed_targets.is_empty() || !missing_signal_labels.is_empty()) {
         return Err(std::io::Error::other(format!(
-            "adapter suite failed strict growth validation for {failed_targets:?}; see {}",
+            "adapter suite failed validation failed_targets={failed_targets:?} missing_train_signal={missing_signal_labels:?}; see {}",
             report_output.display()
         ))
         .into());
@@ -538,4 +545,60 @@ fn suite_report_holdout_target_count(entries: &[CliRenderAdapterSuiteEntry]) -> 
         .iter()
         .filter(|entry| entry.split == CliRenderAdapterSuiteSplit::HoldoutAdapterOnly)
         .count()
+}
+
+fn adapter_suite_missing_train_signal(
+    shared_base_training: &[CliRenderAdapterSuiteBaseEntry],
+    entries: &[CliRenderAdapterSuiteEntry],
+) -> Vec<CliRenderAdapterSuiteTrainingSignalGap> {
+    let mut missing = Vec::new();
+    for entry in shared_base_training {
+        let rounds = render_proxy_missing_signal_rounds(&entry.report);
+        if !rounds.is_empty() {
+            missing.push(CliRenderAdapterSuiteTrainingSignalGap {
+                phase: CliRenderAdapterSuiteTrainingPhase::SharedBase,
+                cycle: Some(entry.cycle),
+                target: entry.target,
+                rounds,
+            });
+        }
+    }
+    for entry in entries {
+        let rounds = render_proxy_missing_signal_rounds(&entry.report);
+        if !rounds.is_empty() {
+            missing.push(CliRenderAdapterSuiteTrainingSignalGap {
+                phase: CliRenderAdapterSuiteTrainingPhase::Adapter,
+                cycle: None,
+                target: entry.target,
+                rounds,
+            });
+        }
+    }
+    missing
+}
+
+fn adapter_suite_missing_signal_labels(
+    missing: &[CliRenderAdapterSuiteTrainingSignalGap],
+) -> Vec<String> {
+    missing
+        .iter()
+        .map(|entry| {
+            let phase = match entry.phase {
+                CliRenderAdapterSuiteTrainingPhase::SharedBase => "shared-base",
+                CliRenderAdapterSuiteTrainingPhase::Adapter => "adapter",
+            };
+            match entry.cycle {
+                Some(cycle) => format!(
+                    "{phase}:cycle={cycle}:target={}:rounds={:?}",
+                    mesh_target_slug(entry.target),
+                    entry.rounds
+                ),
+                None => format!(
+                    "{phase}:target={}:rounds={:?}",
+                    mesh_target_slug(entry.target),
+                    entry.rounds
+                ),
+            }
+        })
+        .collect()
 }

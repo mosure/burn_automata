@@ -84,9 +84,10 @@ fn accepted_catalog_render_training_candidate_promotes_after_validation() {
 
 #[test]
 fn catalog_promotion_summary_records_rejected_validation_evidence() {
-    let summary = CliCatalogPromotionSummary::from_validation_result(
+    let summary = CliCatalogPromotionSummary::from_validation_and_training_result(
         true,
         2,
+        Vec::new(),
         Some("strict gate failed".to_string()),
     );
 
@@ -98,9 +99,35 @@ fn catalog_promotion_summary_records_rejected_validation_evidence() {
         Some("strict gate failed")
     );
 
-    let skipped = CliCatalogPromotionSummary::from_validation_result(false, 0, None);
+    let skipped =
+        CliCatalogPromotionSummary::from_validation_and_training_result(false, 0, Vec::new(), None);
     assert!(!skipped.requested);
     assert_eq!(skipped.validation_count, 0);
     assert!(!skipped.validation_passed);
+    assert!(skipped.training_signal_passed);
+    assert!(skipped.missing_train_signal_rounds.is_empty());
     assert!(skipped.rejection_reason.is_none());
+}
+
+#[test]
+fn catalog_promotion_summary_rejects_missing_training_signal() {
+    let summary = CliCatalogPromotionSummary::from_validation_and_training_result(
+        true,
+        2,
+        vec![0, 3],
+        Some("direct rollout training signal missing for rounds [0, 3]".to_string()),
+    );
+
+    assert!(summary.requested);
+    assert_eq!(summary.validation_count, 2);
+    assert!(!summary.validation_passed);
+    assert!(!summary.training_signal_passed);
+    assert_eq!(summary.missing_train_signal_rounds, vec![0, 3]);
+    assert!(
+        summary
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("training signal missing")
+    );
 }

@@ -57,6 +57,15 @@ pub(crate) struct RenderProxyTrainingReport {
     pub(crate) trained_adapter: Option<NpaLowRankAdapter>,
 }
 
+pub(crate) fn render_proxy_missing_signal_rounds(report: &RenderProxyTrainingReport) -> Vec<usize> {
+    report
+        .history
+        .iter()
+        .filter(|entry| entry.train_signal_missing)
+        .map(|entry| entry.round)
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RenderWeightUpdateReport {
     pub(crate) mode: RenderWeightUpdateModeArg,

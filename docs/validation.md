@@ -138,7 +138,9 @@ base is preserved unless continuation is requested explicitly. The suite report
 records the shared-base training entries separately from each adapter's strict
 growth/render validation, plus the full-bank parameter count versus
 shared-base-plus-adapter-bank count; these artifacts still remain diagnostic
-until the strict gates pass.
+until the strict gates pass. The suite report also rolls direct training-signal
+health up to `training_signal_passed` and `missing_train_signal`, covering both
+shared-base cycles and per-target adapters.
 
 Each direct-rollout history entry also reports
 `direct_train_objective_signal_rms`, `train_signal_grad_norm_per_row`,
@@ -148,7 +150,9 @@ or LoRA SGD gradient. A healthy training round should have nonzero objective
 signal and nonzero trainable signal; `train_signal_missing=true` means the
 configured objective produced pressure that did not reach the trainable
 MLP/adapter parameters and should be treated as a training-path bug or dead
-configuration, not as a strict-gate pass.
+configuration, not as a strict-gate pass. Catalog-shaped `train-render3d`
+outputs reject promotion when any direct-rollout round is missing this signal;
+`--fail-on-validation` applies the same failure to non-catalog diagnostics.
 
 The direct backend uses analytic CPU gradients from render loss to final
 particle positions, opacity, and color, then applies those adjoints through

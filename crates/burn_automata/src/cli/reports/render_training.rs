@@ -50,6 +50,8 @@ pub(crate) struct CliRenderAdapterSuiteReport {
     pub(crate) shared_plus_adapter_parameter_count: usize,
     pub(crate) shared_plus_adapter_to_full_bank_ratio: f32,
     pub(crate) shared_plus_adapter_savings_ratio: f32,
+    pub(crate) training_signal_passed: bool,
+    pub(crate) missing_train_signal: Vec<CliRenderAdapterSuiteTrainingSignalGap>,
     pub(crate) entries: Vec<CliRenderAdapterSuiteEntry>,
 }
 
@@ -83,24 +85,45 @@ pub(crate) enum CliRenderAdapterSuiteSplit {
     HoldoutAdapterOnly,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct CliRenderAdapterSuiteTrainingSignalGap {
+    pub(crate) phase: CliRenderAdapterSuiteTrainingPhase,
+    pub(crate) cycle: Option<usize>,
+    pub(crate) target: MeshTargetArg,
+    pub(crate) rounds: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CliRenderAdapterSuiteTrainingPhase {
+    SharedBase,
+    Adapter,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct CliCatalogPromotionSummary {
     pub(crate) requested: bool,
     pub(crate) validation_count: usize,
     pub(crate) validation_passed: bool,
+    pub(crate) training_signal_passed: bool,
+    pub(crate) missing_train_signal_rounds: Vec<usize>,
     pub(crate) rejection_reason: Option<String>,
 }
 
 impl CliCatalogPromotionSummary {
-    pub(crate) fn from_validation_result(
+    pub(crate) fn from_validation_and_training_result(
         requested: bool,
         validation_count: usize,
+        missing_train_signal_rounds: Vec<usize>,
         rejection_reason: Option<String>,
     ) -> Self {
+        let training_signal_passed = missing_train_signal_rounds.is_empty();
         Self {
             requested,
             validation_count,
-            validation_passed: requested && rejection_reason.is_none(),
+            validation_passed: requested && training_signal_passed && rejection_reason.is_none(),
+            training_signal_passed,
+            missing_train_signal_rounds,
             rejection_reason,
         }
     }

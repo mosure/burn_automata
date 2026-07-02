@@ -270,16 +270,53 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         },
     )?;
     let strict_gate_summary = CliRenderTrainingGateSummary::from_validation(&growth_validation);
-    let promotion_error = if catalog_bound_output {
-        require_catalog_promotion_validations_pass(&catalog_promotion_validations, &model_output)
-            .err()
+    let missing_train_signal_rounds = render_proxy_missing_signal_rounds(&report);
+    let mut promotion_rejection_reasons = Vec::new();
+    if catalog_bound_output
+        && let Err(error) = require_catalog_promotion_validations_pass(
+            &catalog_promotion_validations,
+            &model_output,
+        )
+    {
+        promotion_rejection_reasons.push(error.to_string());
+    }
+    if !missing_train_signal_rounds.is_empty() {
+        promotion_rejection_reasons.push(format!(
+            "direct rollout training signal missing for rounds {:?}",
+            missing_train_signal_rounds
+        ));
+    }
+    let promotion_error: Option<Box<dyn std::error::Error>> =
+        if catalog_bound_output && !promotion_rejection_reasons.is_empty() {
+            Some(std::io::Error::other(promotion_rejection_reasons.join("; ")).into())
+        } else {
+            None
+        };
+    let validation_error = if !missing_train_signal_rounds.is_empty() {
+        Some(std::io::Error::other(format!(
+            "direct rollout training signal missing for rounds {:?}; see {}",
+            missing_train_signal_rounds,
+            report_output.display()
+        )))
+    } else if fail_on_validation && !growth_3d_fail_on_validation_passed(&growth_validation) {
+        Some(std::io::Error::other(format!(
+            "render-proxy training failed strict growth validation (score={:.6}, failures={:?}); see {}",
+            growth_validation.strict_score.score,
+            growth_validation.strict_checks.failure_reasons,
+            report_output.display(),
+        )))
     } else {
         None
     };
-    let promotion_rejection_reason = promotion_error.as_ref().map(|error| error.to_string());
-    let catalog_promotion = CliCatalogPromotionSummary::from_validation_result(
+    let promotion_rejection_reason = if catalog_bound_output {
+        promotion_error.as_ref().map(|error| error.to_string())
+    } else {
+        validation_error.as_ref().map(|error| error.to_string())
+    };
+    let catalog_promotion = CliCatalogPromotionSummary::from_validation_and_training_result(
         catalog_bound_output,
         catalog_promotion_validations.len(),
+        missing_train_signal_rounds.clone(),
         promotion_rejection_reason,
     );
     let output_report = CliRenderTrainingReport {
@@ -340,15 +377,10 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         output_report.growth_validation.strict_passed,
         output_report.growth_validation.strict_score.score
     );
-    if fail_on_validation && !growth_3d_fail_on_validation_passed(&output_report.growth_validation)
+    if let Some(error) = validation_error
+        && (fail_on_validation || output_report.catalog_promotion.requested)
     {
-        return Err(std::io::Error::other(format!(
-            "render-proxy training failed strict growth validation (score={:.6}, failures={:?}); see {}",
-            output_report.growth_validation.strict_score.score,
-            output_report.growth_validation.strict_checks.failure_reasons,
-            report_output.display(),
-        ))
-        .into());
+        return Err(error.into());
     }
 
     Ok(())
