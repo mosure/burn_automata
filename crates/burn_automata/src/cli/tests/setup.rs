@@ -380,8 +380,13 @@ fn catalog_promotion_validation_configs_match_app_scale() {
     };
     render.world_scale = 0.5;
 
-    let configs =
-        catalog_promotion_validation_configs(7, &[99], 0.54, ParticleSeed::TorusGrowth3d, render);
+    let configs = catalog_promotion_validation_configs(
+        7,
+        &[99],
+        0.54,
+        ParticleSeed::TorusLocalSubstrateGrowth3d,
+        render,
+    );
 
     assert_eq!(configs.len(), 2);
     assert_eq!(
@@ -392,7 +397,11 @@ fn catalog_promotion_validation_configs_match_app_scale() {
         assert_eq!(cfg.particle_count, CATALOG_3D_VALIDATION_PARTICLES);
         assert_eq!(cfg.seed, CATALOG_3D_APP_EVAL_SEED);
         assert_eq!(cfg.extra_seeds, vec![42, 99, 7]);
-        assert_eq!(cfg.seed_mode, ParticleSeed::TorusGrowth3d);
+        assert_eq!(cfg.seed_mode, ParticleSeed::TorusLocalSubstrateGrowth3d);
+        assert!(
+            !growth_3d_seed_has_coordinate_scaffold(cfg.seed_mode),
+            "catalog promotion validation must run the same no-scaffold seed family required by the strict gate"
+        );
         assert!(matches!(cfg.gate, Growth3dValidationGateArg::Strict));
         assert_eq!(cfg.render.image_size, CATALOG_3D_VALIDATION_IMAGE_SIZE);
         assert_eq!(
@@ -554,7 +563,7 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     validate_catalog_bound_render_training_output(
         Path::new("assets/models/teapot_growth_3d.bpk"),
         MeshTargetArg::Teapot,
-        ParticleSeed::TeapotGrowth3d,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
         Some(&local_source),
     )
     .unwrap();
@@ -568,10 +577,24 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     .unwrap_err();
     assert!(field_seed_error.to_string().contains("local growth seed"));
 
-    let shortcut_lineage_error = validate_catalog_bound_render_training_output(
+    let scaffold_seed_error = validate_catalog_bound_render_training_output(
         Path::new("assets/models/render_trained_3d.bpk"),
         MeshTargetArg::Teapot,
         ParticleSeed::TeapotGrowth3d,
+        Some(&local_source),
+    )
+    .unwrap_err();
+    assert!(
+        scaffold_seed_error
+            .to_string()
+            .contains("no-scaffold local growth seed"),
+        "catalog promotion should fail before training when the seed mode cannot satisfy the strict no-scaffold gate"
+    );
+
+    let shortcut_lineage_error = validate_catalog_bound_render_training_output(
+        Path::new("assets/models/render_trained_3d.bpk"),
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
         Some(TEAPOT_POSITION_FIELD_TARGET_SOURCE),
     )
     .unwrap_err();

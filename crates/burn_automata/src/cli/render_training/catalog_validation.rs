@@ -310,6 +310,13 @@ pub(crate) fn validate_catalog_bound_render_training_output(
         ))
         .into());
     }
+    if growth_3d_seed_has_coordinate_scaffold(seed_mode) {
+        return Err(std::io::Error::other(format!(
+            "catalog-bound 3D render training output {} requires a strict no-scaffold local growth seed; got seed_mode={seed_mode:?}",
+            model_output.display()
+        ))
+        .into());
+    }
     let source = base_source.unwrap_or_default();
     if !local_conditionless_lineage(source) {
         return Err(std::io::Error::other(format!(
