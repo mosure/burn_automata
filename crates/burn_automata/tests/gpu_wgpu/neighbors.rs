@@ -2,6 +2,7 @@ use super::common::*;
 
 #[test]
 fn wgpu_neighbor_modes_match_cpu_oracle_for_2d() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Texture2d;
     let particles = 96;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);
@@ -67,6 +68,7 @@ fn wgpu_neighbor_modes_match_cpu_oracle_for_2d() -> Result<(), Box<dyn std::erro
 #[test]
 fn wgpu_bvh_mode_matches_cpu_oracle_for_clamped_2d_and_3d() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _wgpu_guard = wgpu_test_guard();
     let executor = match new_executor_or_skip()? {
         Some(executor) => executor,
         None => return Ok(()),
@@ -126,6 +128,7 @@ fn wgpu_bvh_mode_matches_cpu_oracle_for_clamped_2d_and_3d() -> Result<(), Box<dy
 #[test]
 fn wgpu_bvh_persistent_state_matches_cpu_rollout_for_3d() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing3dGs;
     let particles = 48;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);
@@ -179,6 +182,7 @@ fn wgpu_bvh_persistent_state_matches_cpu_rollout_for_3d() -> Result<(), Box<dyn 
 #[test]
 fn wgpu_particle_hashgrid_handles_shifted_3d_fixed_buckets()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing3dGs;
     let particles = 128;
     let seed_scale = 1.2;
@@ -311,6 +315,7 @@ fn wgpu_particle_hashgrid_handles_shifted_3d_fixed_buckets()
 #[test]
 fn wgpu_fixed_bucket_overflow_counter_reports_saturation() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing2d;
     let particles = 96;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);

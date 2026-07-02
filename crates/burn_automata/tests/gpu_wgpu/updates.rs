@@ -2,6 +2,7 @@ use super::common::*;
 
 #[test]
 fn wgpu_update_probability_zero_keeps_state_fixed() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing2d;
     let particles = 64;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);
@@ -34,6 +35,7 @@ fn wgpu_update_probability_zero_keeps_state_fixed() -> Result<(), Box<dyn std::e
 #[test]
 fn wgpu_update_probability_half_matches_cpu_mask_oracle() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing2d;
     let particles = 64;
     let seed = 53;

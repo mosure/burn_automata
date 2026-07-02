@@ -7,6 +7,16 @@ pub(crate) use burn_automata::{
     },
 };
 
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+pub(crate) fn wgpu_test_guard() -> MutexGuard<'static, ()> {
+    static WGPU_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    WGPU_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub(crate) fn uv_torus_growth_model(config: NpaConfig) -> NpaModel {
     let mut weights = NpaWeights::zeros(&config);
     let input_dims = config.perception_dims();
@@ -30,6 +40,7 @@ pub(crate) fn assert_preset_parity(
     particles: usize,
     seed: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);
     let (config, grid) = NpaConfig::for_preset(preset);
     let model = NpaModel::seeded(config, 42);

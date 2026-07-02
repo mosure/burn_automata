@@ -2,6 +2,7 @@ use super::common::*;
 
 #[test]
 fn wgpu_persistent_state_matches_cpu_rollout_for_3d() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing3dGs;
     let particles = 48;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);
@@ -54,6 +55,7 @@ fn wgpu_persistent_state_matches_cpu_rollout_for_3d() -> Result<(), Box<dyn std:
 
 #[test]
 fn wgpu_persistent_state_accepts_model_weight_updates() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing3dGs;
     let particles = 48;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);

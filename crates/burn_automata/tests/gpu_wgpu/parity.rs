@@ -17,6 +17,7 @@ fn wgpu_step_matches_cpu_oracle_for_growing_3d_gs() -> Result<(), Box<dyn std::e
 
 #[test]
 fn wgpu_step_matches_cpu_oracle_with_position_features() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let particles = 64;
     let seed_scale = 0.72;
     let config = NpaConfig::torus_field_3dgs();
@@ -60,6 +61,7 @@ fn wgpu_step_matches_cpu_oracle_with_position_features() -> Result<(), Box<dyn s
 #[test]
 fn wgpu_step_matches_cpu_oracle_for_teapot_morphogen_seed() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _wgpu_guard = wgpu_test_guard();
     let particles = 64;
     let seed_scale = 0.72;
     let config = NpaConfig::growing_3dgs();
@@ -108,6 +110,7 @@ fn wgpu_step_matches_cpu_oracle_for_point_mnist_shape() -> Result<(), Box<dyn st
 #[test]
 fn wgpu_scale_equivariant_auto_mode_preserves_scaled_rollout()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing2d;
     let particles = 64;
     let (config, grid) = NpaConfig::for_preset(preset);
@@ -180,6 +183,7 @@ fn wgpu_scale_equivariant_auto_mode_preserves_scaled_rollout()
 #[test]
 fn wgpu_normalized_seed_scale_preserves_3d_torus_morphogen_rollout()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let particles = 128;
     let reference_scale = 0.72;
     let scaled_seed = 0.25;

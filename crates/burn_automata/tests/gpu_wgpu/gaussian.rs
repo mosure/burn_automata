@@ -2,6 +2,7 @@ use super::common::*;
 
 #[test]
 fn wgpu_state_writes_gaussian_buffers_on_gpu() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing3dGs;
     let particles = 64;
     let seed_scale = NpaConfig::seed_scale_for_preset(preset);
@@ -72,6 +73,7 @@ fn wgpu_state_writes_gaussian_buffers_on_gpu() -> Result<(), Box<dyn std::error:
 #[test]
 fn wgpu_batched_gaussian_steps_match_repeated_steps_with_stochastic_updates()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing2d;
     let particles = 96;
     let steps = 4;
@@ -186,6 +188,7 @@ fn wgpu_batched_gaussian_steps_match_repeated_steps_with_stochastic_updates()
 #[test]
 fn wgpu_uv_torus_seed_writes_stationary_gaussians_on_gpu() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _wgpu_guard = wgpu_test_guard();
     const SH_C0: f32 = 0.282_094_8;
 
     let particles = 256;
@@ -272,6 +275,7 @@ fn wgpu_uv_torus_seed_writes_stationary_gaussians_on_gpu() -> Result<(), Box<dyn
 #[test]
 fn wgpu_uv_torus_growth_step_writes_moving_gaussians_on_gpu()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
     let particles = 512;
     let seed_scale = 0.72;
     let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);
