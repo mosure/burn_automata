@@ -150,8 +150,13 @@ fn render_selection_training_progress_rejects_mature_material_opacity_without_su
     surface_approach.material_visible_target_mean_distance =
         previous.material_visible_target_mean_distance - 0.006;
     assert!(
+        !render_selection_training_progress_beats(&surface_approach, &previous),
+        "mature visible-material continuation should not retain static target-surface approach without temporal geometry progress"
+    );
+    surface_approach.all_temporal_geometry_progressive = true;
+    assert!(
         render_selection_training_progress_beats(&surface_approach, &previous),
-        "mature material continuation remains valid once visible material moves toward target support"
+        "mature material continuation remains valid once visible material moves toward target support with progressive geometry"
     );
 }
 
@@ -182,6 +187,11 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
         "strict-band material margin alone should not promote a checkpoint before material visibility gates flip"
     );
     assert!(
+        !render_selection_training_progress_beats(&continued, &previous),
+        "mature strict-band material margin progress should not continue if temporal geometry is static"
+    );
+    continued.all_temporal_geometry_progressive = true;
+    assert!(
         render_selection_training_progress_beats(&continued, &previous),
         "bounded strict-band material margin progress should keep material-only training from rolling back"
     );
@@ -191,6 +201,7 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
     larger_bounded_step.density_psnr_db = previous.density_psnr_db - 0.014;
     larger_bounded_step.strict_surface_material_mean_opacity = -2.95;
     larger_bounded_step.strict_surface_material_visible_margin = 1.95;
+    larger_bounded_step.all_temporal_geometry_progressive = true;
     assert!(
         render_selection_training_progress_beats(&larger_bounded_step, &previous),
         "larger strict-band material progress should earn a tightly capped render slack"
@@ -637,8 +648,13 @@ fn render_selection_candidate_rejects_mature_material_opacity_without_surface_pr
     surface_approach.material_visible_target_mean_distance =
         best.material_visible_target_mean_distance - 0.006;
     assert!(
+        !render_selection_candidate_metrics_beats(&surface_approach, &best),
+        "mature visible-material candidates should not be selected by static surface approach alone"
+    );
+    surface_approach.all_temporal_geometry_progressive = true;
+    assert!(
         render_selection_candidate_metrics_beats(&surface_approach, &best),
-        "mature visible-material precursors remain selectable when they also move toward the target surface"
+        "mature visible-material precursors remain selectable when surface approach also has progressive temporal geometry"
     );
 }
 

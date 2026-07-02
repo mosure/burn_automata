@@ -52,6 +52,10 @@ pub(crate) fn render_selection_candidate_metrics_beats(
     selection: &RenderSelectionMetrics,
     best: &RenderSelectionMetrics,
 ) -> bool {
+    if !render_selection_mature_material_temporal_dynamics_ok(selection, best) {
+        return false;
+    }
+
     (render_selection_dormant_drift_not_regressed(selection, best)
         && render_selection_candidate_beats(
             selection.score,
@@ -253,6 +257,7 @@ pub(crate) fn render_selection_training_progress_beats(
         && surface_ok
         && material_tail_ok
         && inactive_material_ok
+        && render_selection_mature_material_temporal_dynamics_ok(selection, previous)
         && render_selection_dormant_drift_not_regressed(selection, previous)
         && local_front_ok
 }
@@ -570,6 +575,17 @@ pub(crate) fn render_selection_post_activation_refinement_beats(
         && selection.material_visible_inactive_fraction
             <= best.material_visible_inactive_fraction + 0.01
         && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
+}
+
+fn render_selection_mature_material_temporal_dynamics_ok(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+) -> bool {
+    let mature_material = selection.material_visible_count >= MATURE_VISIBLE_MATERIAL_COUNT
+        || previous.material_visible_count >= MATURE_VISIBLE_MATERIAL_COUNT;
+    !mature_material
+        || (selection.all_temporal_geometry_progressive
+            && render_selection_temporal_activation_not_regressed(selection, previous))
 }
 
 pub(crate) fn render_selection_temporal_activation_not_regressed(
