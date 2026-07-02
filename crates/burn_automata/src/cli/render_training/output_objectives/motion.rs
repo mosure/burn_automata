@@ -497,23 +497,14 @@ pub(crate) fn target_coverage_liveness_candidate_weights(
         coverage_normal_weight,
         seed_scale,
     );
-    let normalizer = if max_update_norm > 0.0 && max_update_norm.is_finite() {
-        max_update_norm
-    } else {
-        coverage_updates
-            .iter()
-            .map(|update| {
-                update
-                    .iter()
-                    .take(config.spatial_dims)
-                    .map(|value| value * value)
-                    .sum::<f32>()
-                    .sqrt()
-            })
-            .filter(|norm| norm.is_finite())
-            .fold(0.0_f32, f32::max)
-    }
-    .max(1.0e-6);
+    let candidate_row_weights =
+        dormant_candidate_row_weights(config, states, positions.len(), &row_weights);
+    let normalizer = coverage_update_weight_normalizer_for_row_weights(
+        &coverage_updates,
+        config.spatial_dims,
+        max_update_norm,
+        &candidate_row_weights,
+    );
 
     for row in 0..positions.len() {
         let liveness = states[row * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL];
@@ -629,23 +620,14 @@ pub(crate) fn material_coverage_liveness_candidate_weights(
         coverage_normal_weight,
         seed_scale,
     );
-    let normalizer = if max_update_norm > 0.0 && max_update_norm.is_finite() {
-        max_update_norm
-    } else {
-        coverage_updates
-            .iter()
-            .map(|update| {
-                update
-                    .iter()
-                    .take(config.spatial_dims)
-                    .map(|value| value * value)
-                    .sum::<f32>()
-                    .sqrt()
-            })
-            .filter(|norm| norm.is_finite())
-            .fold(0.0_f32, f32::max)
-    }
-    .max(1.0e-6);
+    let candidate_row_weights =
+        dormant_candidate_row_weights(config, states, positions.len(), &row_weights);
+    let normalizer = coverage_update_weight_normalizer_for_row_weights(
+        &coverage_updates,
+        config.spatial_dims,
+        max_update_norm,
+        &candidate_row_weights,
+    );
 
     for row in 0..positions.len() {
         let liveness = states[row * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL];
@@ -664,6 +646,69 @@ pub(crate) fn material_coverage_liveness_candidate_weights(
         weights[row] = (norm / normalizer).sqrt().clamp(0.0, 1.0);
     }
     weights
+}
+
+#[cfg(test)]
+pub(crate) fn coverage_update_weight_normalizer(
+    updates: &[[f32; 3]],
+    spatial_dims: usize,
+    max_update_norm: f32,
+) -> f32 {
+    coverage_update_weight_normalizer_for_row_weights(updates, spatial_dims, max_update_norm, &[])
+}
+
+fn coverage_update_weight_normalizer_for_row_weights(
+    updates: &[[f32; 3]],
+    spatial_dims: usize,
+    max_update_norm: f32,
+    row_weights: &[f32],
+) -> f32 {
+    let observed = updates
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| {
+            row_weights
+                .get(*row)
+                .map(|weight| *weight > 1.0e-3 && weight.is_finite())
+                .unwrap_or(row_weights.is_empty())
+        })
+        .map(|(_, update)| vector_update_norm(update, spatial_dims))
+        .filter(|norm| norm.is_finite())
+        .fold(0.0_f32, f32::max);
+    let capped = if max_update_norm > 0.0 && max_update_norm.is_finite() {
+        observed.min(max_update_norm)
+    } else {
+        observed
+    };
+    capped.max(1.0e-6)
+}
+
+fn vector_update_norm(update: &[f32; 3], spatial_dims: usize) -> f32 {
+    update
+        .iter()
+        .take(spatial_dims.min(3))
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+}
+
+fn dormant_candidate_row_weights(
+    config: &NpaConfig,
+    states: &[f32],
+    rows: usize,
+    row_weights: &[f32],
+) -> Vec<f32> {
+    let mut candidate_weights = vec![0.0_f32; rows];
+    if config.state_dims <= GROWTH_3D_LIVENESS_CHANNEL || states.len() < rows * config.state_dims {
+        return candidate_weights;
+    }
+    for row in 0..rows {
+        let liveness = states[row * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL];
+        if liveness <= -1.0 {
+            candidate_weights[row] = row_weights.get(row).copied().unwrap_or(0.0);
+        }
+    }
+    candidate_weights
 }
 
 #[allow(clippy::too_many_arguments)]
