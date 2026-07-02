@@ -270,6 +270,7 @@ pub(crate) fn add_material_visibility_output_objective(
             surface_weight
         };
         let mut material_delta = 0.0_f32;
+        let mut force_material_target = false;
         if opacity_gain > 0.0 && opacity_gain.is_finite() && material_candidate {
             if material_surface_weight > 0.0 {
                 material_delta += opacity_gain
@@ -285,14 +286,25 @@ pub(crate) fn add_material_visibility_output_objective(
             }
         }
         if pending_liveness {
-            let precursor_delta = material_precursor_ceiling() - material_opacity;
+            let precursor_ceiling = material_precursor_ceiling();
             if predicted_material > material_visible_threshold {
+                let inactive_delta = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT - material_opacity;
+                material_delta = if material_delta == 0.0 {
+                    inactive_delta
+                } else {
+                    material_delta.min(inactive_delta)
+                };
+                force_material_target = true;
+            } else if predicted_material > precursor_ceiling {
+                let precursor_delta = precursor_ceiling - material_opacity;
                 material_delta = if material_delta == 0.0 {
                     precursor_delta
                 } else {
                     material_delta.min(precursor_delta)
                 };
+                force_material_target = true;
             } else if material_delta > 0.0 {
+                let precursor_delta = precursor_ceiling - material_opacity;
                 material_delta = material_delta.min(precursor_delta.max(0.0));
             }
         }
@@ -340,7 +352,26 @@ pub(crate) fn add_material_visibility_output_objective(
                 }
             }
         }
-        if material_delta == 0.0 {
+        if liveness_enabled
+            && pending_liveness
+            && predicted_material > material_visible_threshold
+            && !predicted_live
+            && front_weight > 0.0
+            && liveness_surface_weight > 0.0
+        {
+            let score = (front_weight * liveness_surface_weight * candidate_weight).clamp(0.0, 1.0);
+            if score > 0.0 {
+                let target_liveness = temporal_activation_candidate_liveness_target(schedule);
+                let target_update = (material_liveness_gain * score * (target_liveness - liveness))
+                    .clamp(0.0, max_liveness_update);
+                if target_update > 0.0 {
+                    let output_index = row * output_dims + liveness_output;
+                    let raw = raw_updates[output_index];
+                    output_gradients[output_index] += weight * (raw - target_update);
+                }
+            }
+        }
+        if material_delta == 0.0 && !force_material_target {
             continue;
         }
         let capped_delta = material_delta.clamp(-negative_cap, positive_cap);
