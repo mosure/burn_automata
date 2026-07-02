@@ -276,7 +276,7 @@ pub(crate) fn mesh_field_target_update_for_rows(
             let surface_weight = (1.0 - projection.distance / surface_band).clamp(0.0, 1.0);
             let target_opacity = GROWTH_3D_INACTIVE_OPACITY_LOGIT
                 + surface_weight
-                    * (UV_TORUS_FIELD_OPACITY_TARGET - GROWTH_3D_INACTIVE_OPACITY_LOGIT);
+                    * (DEFAULT_3D_FIELD_OPACITY_TARGET - GROWTH_3D_INACTIVE_OPACITY_LOGIT);
             let direct_opacity_update =
                 front_weight * opacity_gain * (target_opacity - current_opacity);
             target_update[update_base + config.spatial_dims + opacity_channel] +=
@@ -342,14 +342,14 @@ pub(crate) fn local_front_opacity_targets(
         let state_base = row * config.state_dims;
         let current_opacity = states[state_base + 3];
         let mut target_opacity = if front_weights[row] >= 1.0 {
-            UV_TORUS_FIELD_OPACITY_TARGET
+            DEFAULT_3D_FIELD_OPACITY_TARGET
         } else {
             dormant_target
         };
 
         if front_weights[row] > 0.0 && front_weights[row] < 1.0 {
             target_opacity = dormant_target
-                + front_weights[row] * (UV_TORUS_FIELD_OPACITY_TARGET - dormant_target);
+                + front_weights[row] * (DEFAULT_3D_FIELD_OPACITY_TARGET - dormant_target);
         }
 
         let delta = front_opacity_gain * (target_opacity - current_opacity);

@@ -243,7 +243,7 @@ pub(crate) fn reference_seed_scale_for_seed_mode(
         | ParticleSeed::TorusLocalSubstrateGrowth3d
         | ParticleSeed::TeapotLocalSubstrateGrowth3d
         | ParticleSeed::TorusMorphogenDense3d
-        | ParticleSeed::TeapotMorphogenDense3d => UV_TORUS_FIELD_SCALE,
+        | ParticleSeed::TeapotMorphogenDense3d => DEFAULT_3D_MESH_FIELD_SCALE,
         _ => NpaConfig::seed_scale_for_preset(preset),
     }
 }

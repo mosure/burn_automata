@@ -3,12 +3,15 @@ use super::prelude::*;
 pub(crate) const DEFAULT_GROWTH_TARGET_SEED: u64 = 42;
 pub(crate) const UV_TORUS_FIELD_MOTION_GAIN: f32 = 8.0;
 pub(crate) const UV_TORUS_FIELD_COLOR_GAIN: f32 = 0.16;
-pub(crate) const UV_TORUS_FIELD_OPACITY_TARGET: f32 = 6.0;
-pub(crate) const UV_TORUS_FIELD_OPACITY_GAIN: f32 = 0.10;
+pub(crate) const DEFAULT_3D_FIELD_OPACITY_TARGET: f32 = 6.0;
+pub(crate) const DEFAULT_3D_FIELD_OPACITY_GAIN: f32 = 0.10;
+pub(crate) const UV_TORUS_FIELD_OPACITY_TARGET: f32 = DEFAULT_3D_FIELD_OPACITY_TARGET;
+pub(crate) const UV_TORUS_FIELD_OPACITY_GAIN: f32 = DEFAULT_3D_FIELD_OPACITY_GAIN;
 pub(crate) const GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET: f32 = 6.0;
-pub(crate) const UV_TORUS_FIELD_SCALE: f32 = 0.72;
+pub(crate) const DEFAULT_3D_MESH_FIELD_SCALE: f32 = 0.72;
+pub(crate) const UV_TORUS_FIELD_SCALE: f32 = DEFAULT_3D_MESH_FIELD_SCALE;
 pub(crate) const UV_TORUS_RENDER_TRAINING_SCALE: f32 = 0.54;
-pub(crate) const TEAPOT_RENDER_TRAINING_SCALE: f32 = UV_TORUS_FIELD_SCALE;
+pub(crate) const TEAPOT_RENDER_TRAINING_SCALE: f32 = DEFAULT_3D_MESH_FIELD_SCALE;
 pub(crate) const TEAPOT_FIELD_MOTION_GAIN: f32 = 1.0;
 pub(crate) const TEAPOT_FIELD_COLOR_GAIN: f32 = 0.4;
 pub(crate) const LOCAL_TORUS_MOTION_GAIN: f32 = 0.0;
@@ -98,6 +101,49 @@ pub(crate) const TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
 pub(crate) const TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
     "utah-teapot-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MeshTargetTrainingProfile {
+    pub(crate) target: MeshTargetArg,
+    pub(crate) field_scale: f32,
+    pub(crate) render_training_scale: f32,
+    pub(crate) field_seed_mode: ParticleSeed,
+    pub(crate) conditionless_local_seed_mode: ParticleSeed,
+    pub(crate) field_motion_gain: f32,
+    pub(crate) field_color_gain: f32,
+    pub(crate) local_motion_gain: f32,
+    pub(crate) local_color_gain: f32,
+    pub(crate) conditionless_local_target_source: &'static str,
+}
+
+pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetTrainingProfile {
+    match target {
+        MeshTargetArg::Torus => MeshTargetTrainingProfile {
+            target,
+            field_scale: UV_TORUS_FIELD_SCALE,
+            render_training_scale: UV_TORUS_RENDER_TRAINING_SCALE,
+            field_seed_mode: ParticleSeed::TorusFieldDense3d,
+            conditionless_local_seed_mode: ParticleSeed::TorusLocalSubstrateGrowth3d,
+            field_motion_gain: UV_TORUS_FIELD_MOTION_GAIN,
+            field_color_gain: UV_TORUS_FIELD_COLOR_GAIN,
+            local_motion_gain: LOCAL_TORUS_MOTION_GAIN,
+            local_color_gain: LOCAL_TORUS_COLOR_GAIN,
+            conditionless_local_target_source: UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+        },
+        MeshTargetArg::Teapot => MeshTargetTrainingProfile {
+            target,
+            field_scale: DEFAULT_3D_MESH_FIELD_SCALE,
+            render_training_scale: TEAPOT_RENDER_TRAINING_SCALE,
+            field_seed_mode: ParticleSeed::TeapotFieldDense3d,
+            conditionless_local_seed_mode: ParticleSeed::TeapotLocalSubstrateGrowth3d,
+            field_motion_gain: TEAPOT_FIELD_MOTION_GAIN,
+            field_color_gain: TEAPOT_FIELD_COLOR_GAIN,
+            local_motion_gain: LOCAL_TEAPOT_MOTION_GAIN,
+            local_color_gain: LOCAL_TEAPOT_COLOR_GAIN,
+            conditionless_local_target_source: TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+        },
+    }
+}
+
 pub(crate) fn uv_torus_mesh_target(scale: f32) -> TriangleMeshTarget {
     TriangleMeshTarget::torus(
         scale.max(1.0e-4),
@@ -121,17 +167,11 @@ pub(crate) fn mesh_target_for_arg(target: MeshTargetArg, scale: f32) -> Triangle
 }
 
 pub(crate) fn mesh_target_render_training_seed_scale(target: MeshTargetArg) -> f32 {
-    match target {
-        MeshTargetArg::Torus => UV_TORUS_RENDER_TRAINING_SCALE,
-        MeshTargetArg::Teapot => TEAPOT_RENDER_TRAINING_SCALE,
-    }
+    mesh_target_training_profile(target).render_training_scale
 }
 
 pub(crate) fn mesh_conditionless_local_target_source(target: MeshTargetArg) -> &'static str {
-    match target {
-        MeshTargetArg::Torus => UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
-        MeshTargetArg::Teapot => TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
-    }
+    mesh_target_training_profile(target).conditionless_local_target_source
 }
 
 pub(crate) fn mesh_conditionless_local_target_source_for_seed(
@@ -162,24 +202,15 @@ pub(crate) fn mesh_conditionless_local_target_source_for_seed(
 }
 
 pub(crate) fn mesh_target_motion_gain(target: MeshTargetArg) -> f32 {
-    match target {
-        MeshTargetArg::Torus => LOCAL_TORUS_MOTION_GAIN,
-        MeshTargetArg::Teapot => LOCAL_TEAPOT_MOTION_GAIN,
-    }
+    mesh_target_training_profile(target).local_motion_gain
 }
 
 pub(crate) fn mesh_target_color_gain(target: MeshTargetArg) -> f32 {
-    match target {
-        MeshTargetArg::Torus => LOCAL_TORUS_COLOR_GAIN,
-        MeshTargetArg::Teapot => LOCAL_TEAPOT_COLOR_GAIN,
-    }
+    mesh_target_training_profile(target).local_color_gain
 }
 
 pub(crate) fn conditionless_local_seed_mode(target: MeshTargetArg) -> ParticleSeed {
-    match target {
-        MeshTargetArg::Torus => ParticleSeed::TorusLocalSubstrateGrowth3d,
-        MeshTargetArg::Teapot => ParticleSeed::TeapotLocalSubstrateGrowth3d,
-    }
+    mesh_target_training_profile(target).conditionless_local_seed_mode
 }
 
 pub(crate) fn conditionless_local_rollout_cases(

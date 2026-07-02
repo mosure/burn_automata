@@ -338,6 +338,70 @@ fn render_training_defaults_match_model_family() {
 }
 
 #[test]
+fn mesh_target_training_profiles_are_explicit_per_target() {
+    let torus = mesh_target_training_profile(MeshTargetArg::Torus);
+    assert_eq!(torus.target, MeshTargetArg::Torus);
+    assert_eq!(torus.field_scale, UV_TORUS_FIELD_SCALE);
+    assert_eq!(torus.render_training_scale, UV_TORUS_RENDER_TRAINING_SCALE);
+    assert_eq!(torus.field_seed_mode, ParticleSeed::TorusFieldDense3d);
+    assert_eq!(
+        torus.conditionless_local_seed_mode,
+        ParticleSeed::TorusLocalSubstrateGrowth3d
+    );
+    assert_eq!(torus.field_motion_gain, UV_TORUS_FIELD_MOTION_GAIN);
+    assert_eq!(torus.field_color_gain, UV_TORUS_FIELD_COLOR_GAIN);
+    assert_eq!(torus.local_motion_gain, LOCAL_TORUS_MOTION_GAIN);
+    assert_eq!(torus.local_color_gain, LOCAL_TORUS_COLOR_GAIN);
+    assert_eq!(
+        torus.conditionless_local_target_source,
+        UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    );
+
+    let teapot = mesh_target_training_profile(MeshTargetArg::Teapot);
+    assert_eq!(teapot.target, MeshTargetArg::Teapot);
+    assert_eq!(teapot.field_scale, DEFAULT_3D_MESH_FIELD_SCALE);
+    assert_eq!(teapot.render_training_scale, TEAPOT_RENDER_TRAINING_SCALE);
+    assert_eq!(teapot.field_seed_mode, ParticleSeed::TeapotFieldDense3d);
+    assert_eq!(
+        teapot.conditionless_local_seed_mode,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d
+    );
+    assert_eq!(teapot.field_motion_gain, TEAPOT_FIELD_MOTION_GAIN);
+    assert_eq!(teapot.field_color_gain, TEAPOT_FIELD_COLOR_GAIN);
+    assert_eq!(teapot.local_motion_gain, LOCAL_TEAPOT_MOTION_GAIN);
+    assert_eq!(teapot.local_color_gain, LOCAL_TEAPOT_COLOR_GAIN);
+    assert_eq!(
+        teapot.conditionless_local_target_source,
+        TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    );
+    assert_ne!(
+        teapot.field_seed_mode, torus.field_seed_mode,
+        "generic profile lookup must not reuse torus seed modes for teapot"
+    );
+    assert_ne!(
+        teapot.conditionless_local_target_source, torus.conditionless_local_target_source,
+        "target profile sources must identify the actual mesh target"
+    );
+}
+
+#[test]
+fn mesh_seed_modes_use_neutral_3d_reference_scale() {
+    for seed_mode in [
+        ParticleSeed::TorusFieldDense3d,
+        ParticleSeed::TeapotFieldDense3d,
+        ParticleSeed::TorusGrowth3d,
+        ParticleSeed::TeapotGrowth3d,
+        ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+    ] {
+        assert_eq!(
+            reference_seed_scale_for_seed_mode(AutomataPreset::Growing3dGs, seed_mode),
+            DEFAULT_3D_MESH_FIELD_SCALE
+        );
+    }
+}
+
+#[test]
 fn train_render3d_uses_target_specific_seed_scale_defaults() {
     assert_eq!(
         mesh_target_render_training_seed_scale(MeshTargetArg::Torus),

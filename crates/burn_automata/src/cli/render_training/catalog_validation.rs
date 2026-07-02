@@ -29,10 +29,7 @@ pub(crate) fn render_training_base_model(
 }
 
 pub(crate) fn render_training_seed_mode(target: MeshTargetArg) -> ParticleSeed {
-    match target {
-        MeshTargetArg::Torus => ParticleSeed::TorusFieldDense3d,
-        MeshTargetArg::Teapot => ParticleSeed::TeapotFieldDense3d,
-    }
+    mesh_target_training_profile(target).field_seed_mode
 }
 
 pub(crate) fn default_render_training_seed_mode(

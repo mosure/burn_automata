@@ -43,7 +43,7 @@ pub(crate) fn add_liveness_front_state_adjoint(
         let scheduled_target = GROWTH_3D_INACTIVE_OPACITY_LOGIT
             + schedule
                 * front_weight
-                * (UV_TORUS_FIELD_OPACITY_TARGET - GROWTH_3D_INACTIVE_OPACITY_LOGIT);
+                * (DEFAULT_3D_FIELD_OPACITY_TARGET - GROWTH_3D_INACTIVE_OPACITY_LOGIT);
         let target_liveness = if current_liveness > -1.0 {
             current_liveness.max(scheduled_target)
         } else {
@@ -91,7 +91,7 @@ pub(crate) fn liveness_front_temporal_target_updates(
         let scheduled_target = GROWTH_3D_INACTIVE_OPACITY_LOGIT
             + schedule
                 * front_weight
-                * (UV_TORUS_FIELD_OPACITY_TARGET - GROWTH_3D_INACTIVE_OPACITY_LOGIT);
+                * (DEFAULT_3D_FIELD_OPACITY_TARGET - GROWTH_3D_INACTIVE_OPACITY_LOGIT);
         let target_liveness = if current_liveness > -1.0 {
             current_liveness.max(scheduled_target)
         } else {

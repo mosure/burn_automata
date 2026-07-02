@@ -69,21 +69,21 @@ pub(crate) const TEAPOT_FIELD_ROLLOUT_CASES: &[MeshRolloutCaseConfig] = &[
         particle_count: 512,
         steps: 180,
         seed: 13,
-        seed_scale: UV_TORUS_FIELD_SCALE,
+        seed_scale: DEFAULT_3D_MESH_FIELD_SCALE,
         seed_mode: ParticleSeed::TeapotFieldDense3d,
     },
     MeshRolloutCaseConfig {
         particle_count: 2048,
         steps: 180,
         seed: 42,
-        seed_scale: UV_TORUS_FIELD_SCALE,
+        seed_scale: DEFAULT_3D_MESH_FIELD_SCALE,
         seed_mode: ParticleSeed::TeapotFieldDense3d,
     },
     MeshRolloutCaseConfig {
         particle_count: 8192,
         steps: 180,
         seed: 131,
-        seed_scale: UV_TORUS_FIELD_SCALE,
+        seed_scale: DEFAULT_3D_MESH_FIELD_SCALE,
         seed_mode: ParticleSeed::TeapotFieldDense3d,
     },
 ];
@@ -150,9 +150,9 @@ pub(crate) fn torus_field_model(config: NpaConfig) -> Result<NpaModel, Box<dyn s
     }
 
     let opacity_out = config.spatial_dims + 3;
-    weights.b2[opacity_out] = UV_TORUS_FIELD_OPACITY_GAIN * UV_TORUS_FIELD_OPACITY_TARGET;
-    weights.w2[opacity_out * config.hidden_dims + opacity_pair.0] -= UV_TORUS_FIELD_OPACITY_GAIN;
-    weights.w2[opacity_out * config.hidden_dims + opacity_pair.1] += UV_TORUS_FIELD_OPACITY_GAIN;
+    weights.b2[opacity_out] = DEFAULT_3D_FIELD_OPACITY_GAIN * DEFAULT_3D_FIELD_OPACITY_TARGET;
+    weights.w2[opacity_out * config.hidden_dims + opacity_pair.0] -= DEFAULT_3D_FIELD_OPACITY_GAIN;
+    weights.w2[opacity_out * config.hidden_dims + opacity_pair.1] += DEFAULT_3D_FIELD_OPACITY_GAIN;
 
     Ok(NpaModel { config, weights })
 }
@@ -198,9 +198,9 @@ pub(crate) fn mesh_field_model(
     }
 
     let opacity_out = config.spatial_dims + 3;
-    weights.b2[opacity_out] = UV_TORUS_FIELD_OPACITY_GAIN * UV_TORUS_FIELD_OPACITY_TARGET;
-    weights.w2[opacity_out * config.hidden_dims + opacity_pair.0] -= UV_TORUS_FIELD_OPACITY_GAIN;
-    weights.w2[opacity_out * config.hidden_dims + opacity_pair.1] += UV_TORUS_FIELD_OPACITY_GAIN;
+    weights.b2[opacity_out] = DEFAULT_3D_FIELD_OPACITY_GAIN * DEFAULT_3D_FIELD_OPACITY_TARGET;
+    weights.w2[opacity_out * config.hidden_dims + opacity_pair.0] -= DEFAULT_3D_FIELD_OPACITY_GAIN;
+    weights.w2[opacity_out * config.hidden_dims + opacity_pair.1] += DEFAULT_3D_FIELD_OPACITY_GAIN;
 
     Ok(NpaModel { config, weights })
 }
@@ -248,11 +248,11 @@ pub(crate) fn teapot_field_model(
     ];
 
     let opacity_out = config.spatial_dims + 3;
-    weights.b2[opacity_out] = UV_TORUS_FIELD_OPACITY_GAIN * UV_TORUS_FIELD_OPACITY_TARGET;
-    weights.w2[opacity_out * config.hidden_dims + opacity_pair.0] -= UV_TORUS_FIELD_OPACITY_GAIN;
-    weights.w2[opacity_out * config.hidden_dims + opacity_pair.1] += UV_TORUS_FIELD_OPACITY_GAIN;
+    weights.b2[opacity_out] = DEFAULT_3D_FIELD_OPACITY_GAIN * DEFAULT_3D_FIELD_OPACITY_TARGET;
+    weights.w2[opacity_out * config.hidden_dims + opacity_pair.0] -= DEFAULT_3D_FIELD_OPACITY_GAIN;
+    weights.w2[opacity_out * config.hidden_dims + opacity_pair.1] += DEFAULT_3D_FIELD_OPACITY_GAIN;
 
-    let (bounds_min, bounds_max) = utah_teapot_mesh_target(UV_TORUS_FIELD_SCALE).bounds();
+    let (bounds_min, bounds_max) = utah_teapot_mesh_target(DEFAULT_3D_MESH_FIELD_SCALE).bounds();
     for channel in 0..3 {
         let out = config.spatial_dims + tail + channel;
         let (tail_pos, tail_neg) = tail_pairs[channel];

@@ -118,7 +118,7 @@ pub(crate) fn mesh_rollout_case_report(
         case.seed_mode,
         case.seed_scale,
     );
-    let expected_final_opacity_logit = UV_TORUS_FIELD_OPACITY_TARGET;
+    let expected_final_opacity_logit = DEFAULT_3D_FIELD_OPACITY_TARGET;
     let mut max_initial_surface_distance = 0.0_f32;
     let mut sum_initial_surface_distance = 0.0_f32;
     let mut max_surface_distance = 0.0_f32;

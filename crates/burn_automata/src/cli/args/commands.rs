@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use super::values::*;
 use crate::{
-    cli::targets::{LOCAL_GROWTH_EXPANSION_GAIN, LOCAL_GROWTH_OPACITY_GAIN, UV_TORUS_FIELD_SCALE},
+    cli::targets::{
+        DEFAULT_3D_MESH_FIELD_SCALE, LOCAL_GROWTH_EXPANSION_GAIN, LOCAL_GROWTH_OPACITY_GAIN,
+    },
     mesh_objective::{
         ROBUST_3D_COVERAGE_GAIN, ROBUST_3D_COVERAGE_NORMAL_WEIGHT,
         ROBUST_3D_COVERAGE_REPULSION_GAIN, ROBUST_3D_COVERAGE_SAMPLES,
@@ -177,7 +179,7 @@ pub(crate) enum Command {
         temporal_samples: usize,
         #[arg(long, default_value_t = 4)]
         training_rounds: usize,
-        #[arg(long, default_value_t = UV_TORUS_FIELD_SCALE)]
+        #[arg(long, default_value_t = DEFAULT_3D_MESH_FIELD_SCALE)]
         seed_scale: f32,
         #[arg(long)]
         seed_mode: Option<SeedModeArg>,
@@ -250,7 +252,7 @@ pub(crate) enum Command {
         seed: u64,
         #[arg(long = "extra-seed", value_delimiter = ',')]
         extra_seeds: Vec<u64>,
-        #[arg(long, default_value_t = UV_TORUS_FIELD_SCALE)]
+        #[arg(long, default_value_t = DEFAULT_3D_MESH_FIELD_SCALE)]
         seed_scale: f32,
         #[arg(long, default_value = "uniform-circle")]
         seed_mode: SeedModeArg,
@@ -295,7 +297,7 @@ pub(crate) enum Command {
         seed: u64,
         #[arg(long = "extra-seed", value_delimiter = ',')]
         extra_seeds: Vec<u64>,
-        #[arg(long, default_value_t = UV_TORUS_FIELD_SCALE)]
+        #[arg(long, default_value_t = DEFAULT_3D_MESH_FIELD_SCALE)]
         seed_scale: f32,
         #[arg(long)]
         seed_mode: Option<SeedModeArg>,

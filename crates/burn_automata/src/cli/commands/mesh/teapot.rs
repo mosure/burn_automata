@@ -18,6 +18,8 @@ pub(crate) fn run_train_teapot_morphogen_3d(
     };
 
     validate_diagnostic_3d_output_not_catalog(&model_output, "train-teapot-morphogen3d")?;
+    let target_profile = mesh_target_training_profile(MeshTargetArg::Teapot);
+    let field_scale = target_profile.field_scale;
     let hashgrid = crate::kernels::HashGridConfig::growing_3dgs();
     let (_config, mut model, batch, sgd, target_source, rollout_report) = match training_mode {
         MeshTrainingModeArg::PositionField => {
@@ -45,7 +47,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                 mesh_field_rollout_supervised_batch(
                     &model,
                     &hashgrid,
-                    &utah_teapot_mesh_target(UV_TORUS_FIELD_SCALE),
+                    &utah_teapot_mesh_target(field_scale),
                     MeshFieldRolloutBatchConfig {
                         max_rows: rollout_rows,
                         particle_count: rollout_particles,
@@ -53,9 +55,9 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                         rollouts,
                         temporal_samples: 1,
                         seed: 0x7ea9_07d0,
-                        seed_scale: UV_TORUS_FIELD_SCALE,
-                        seed_mode: ParticleSeed::TeapotFieldDense3d,
-                        motion_gain: TEAPOT_FIELD_MOTION_GAIN,
+                        seed_scale: field_scale,
+                        seed_mode: target_profile.field_seed_mode,
+                        motion_gain: target_profile.field_motion_gain,
                         max_update_norm: f32::INFINITY,
                         coverage_gain: 0.0,
                         coverage_samples: 0,
@@ -66,9 +68,9 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                         coverage_repulsion_radius: 0.0,
                         coverage_normal_weight: 0.0,
                         extent_gain: 0.0,
-                        color_gain: TEAPOT_FIELD_COLOR_GAIN,
+                        color_gain: target_profile.field_color_gain,
                         aux_state_gain: 1.0,
-                        opacity_gain: UV_TORUS_FIELD_OPACITY_GAIN,
+                        opacity_gain: DEFAULT_3D_FIELD_OPACITY_GAIN,
                         front_opacity_gain: 0.0,
                         front_radius: 0.0,
                         front_max_opacity_update: 0.0,
@@ -83,9 +85,9 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                 rollouts,
                 temporal_samples: 1,
                 update_prob: 1.0,
-                seed_scale: UV_TORUS_FIELD_SCALE,
-                seed_mode: ParticleSeed::TeapotFieldDense3d,
-                motion_gain: Some(TEAPOT_FIELD_MOTION_GAIN),
+                seed_scale: field_scale,
+                seed_mode: target_profile.field_seed_mode,
+                motion_gain: Some(target_profile.field_motion_gain),
                 max_update_norm: Some(f32::INFINITY),
                 density_gain: Some(0.0),
                 expansion_gain: None,
@@ -98,9 +100,9 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                 coverage_repulsion_radius: None,
                 coverage_normal_weight: None,
                 extent_gain: None,
-                color_gain: Some(TEAPOT_FIELD_COLOR_GAIN),
+                color_gain: Some(target_profile.field_color_gain),
                 aux_state_gain: Some(1.0),
-                opacity_gain: Some(UV_TORUS_FIELD_OPACITY_GAIN),
+                opacity_gain: Some(DEFAULT_3D_FIELD_OPACITY_GAIN),
                 front_opacity_gain: None,
                 front_radius: None,
                 front_max_opacity_update: None,
@@ -122,7 +124,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
         }
         MeshTrainingModeArg::RolloutLocal => {
             let config = NpaConfig::growing_3dgs();
-            let target_mesh = utah_teapot_mesh_target(UV_TORUS_FIELD_SCALE);
+            let target_mesh = utah_teapot_mesh_target(field_scale);
             let student = local_growth_student_model_with_axis_gains(
                 config.clone(),
                 0x7ea9_07d0,
@@ -135,9 +137,9 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                 rollouts,
                 temporal_samples: 4,
                 update_prob: 1.0,
-                seed_scale: UV_TORUS_FIELD_SCALE,
-                seed_mode: ParticleSeed::TeapotGrowth3d,
-                motion_gain: Some(LOCAL_TEAPOT_MOTION_GAIN),
+                seed_scale: field_scale,
+                seed_mode: target_profile.conditionless_local_seed_mode,
+                motion_gain: Some(target_profile.local_motion_gain),
                 max_update_norm: Some(0.06),
                 density_gain: Some(0.0),
                 expansion_gain: Some(LOCAL_GROWTH_EXPANSION_GAIN),
@@ -150,7 +152,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                 coverage_repulsion_radius: Some(0.0),
                 coverage_normal_weight: Some(0.0),
                 extent_gain: Some(0.14),
-                color_gain: Some(LOCAL_TEAPOT_COLOR_GAIN),
+                color_gain: Some(target_profile.local_color_gain),
                 aux_state_gain: Some(0.3),
                 opacity_gain: Some(0.12),
                 front_opacity_gain: Some(0.05),
@@ -170,9 +172,9 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                     rollouts,
                     temporal_samples: 4,
                     seed: 0x7ea9_07d0,
-                    seed_scale: UV_TORUS_FIELD_SCALE,
-                    seed_mode: ParticleSeed::TeapotGrowth3d,
-                    motion_gain: LOCAL_TEAPOT_MOTION_GAIN,
+                    seed_scale: field_scale,
+                    seed_mode: target_profile.conditionless_local_seed_mode,
+                    motion_gain: target_profile.local_motion_gain,
                     max_update_norm: 0.06,
                     coverage_gain: 0.35,
                     coverage_samples: 4096,
@@ -183,7 +185,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                     coverage_repulsion_radius: 0.0,
                     coverage_normal_weight: 0.0,
                     extent_gain: 0.14,
-                    color_gain: LOCAL_TEAPOT_COLOR_GAIN,
+                    color_gain: target_profile.local_color_gain,
                     aux_state_gain: 0.3,
                     opacity_gain: 0.12,
                     front_opacity_gain: 0.05,
@@ -253,7 +255,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
         Some(mesh_rollout_report_for_cases(
             &loaded_model,
             &loaded_hashgrid,
-            &utah_teapot_mesh_target(UV_TORUS_FIELD_SCALE),
+            &utah_teapot_mesh_target(field_scale),
             TEAPOT_FIELD_ROLLOUT_CASES,
         )?)
     } else {
