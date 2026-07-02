@@ -315,6 +315,7 @@ pub(crate) fn material_surface_candidate_row_weights(
     };
     let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
     let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
+    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
     let material_visible_threshold = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.0;
     let target_span =
         (GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET - material_visible_threshold).max(1.0e-6);
@@ -351,8 +352,12 @@ pub(crate) fn material_surface_candidate_row_weights(
         }
 
         let projection = target.project(position3(*position));
-        let surface_weight =
-            soft_material_assignment_weight(projection.distance, strict_threshold, soft_threshold);
+        let surface_weight = frontier_material_assignment_weight(
+            projection.distance,
+            strict_threshold,
+            soft_threshold,
+            frontier_threshold,
+        );
         if surface_weight <= 0.0 {
             continue;
         }

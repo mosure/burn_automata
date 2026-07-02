@@ -1098,7 +1098,7 @@ fn material_surface_candidate_approach_moves_active_rows_before_visibility() {
     )
     .unwrap();
     let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
-    let positions = vec![[0.0_f32, 0.0, 0.0, 0.0], [0.8_f32, 0.0, 0.0, 0.0]];
+    let positions = vec![[0.0_f32, 0.0, 0.0, 0.0], [1.6_f32, 0.0, 0.0, 0.0]];
     let mut states = vec![0.0; positions.len() * config.state_dims];
     states[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
     states[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
@@ -1114,7 +1114,35 @@ fn material_surface_candidate_approach_moves_active_rows_before_visibility() {
     );
     assert_eq!(
         updates[1], [0.0; 3],
-        "dormant non-front material candidate should not get global projection motion"
+        "dormant material candidate outside the bounded frontier should not get global projection motion"
+    );
+}
+
+#[test]
+fn material_surface_candidate_approach_moves_frontier_rows_before_visibility() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[0.80, -0.1, 0.0], [0.80, 0.1, 0.0], [0.80, 0.0, 0.2]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let positions = vec![[0.0_f32, 0.0, 0.0, 0.0], [-0.80_f32, 0.0, 0.0, 0.0]];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    states[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    states[config.state_dims + material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+
+    let updates = material_visible_surface_approach_updates(
+        &config, &target, &positions, &states, None, 1.0, 0.0, 1.0, 1.0, 0.20, None,
+    );
+
+    assert!(
+        updates[0][0] > 1.0e-4,
+        "active material candidate inside the bounded frontier should get projection motion before strict material coverage"
+    );
+    assert_eq!(
+        updates[1], [0.0; 3],
+        "active rows outside the bounded frontier should not get global material projection motion"
     );
 }
 
