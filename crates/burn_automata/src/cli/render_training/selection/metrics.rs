@@ -17,6 +17,9 @@ pub(crate) struct RenderSelectionMetrics {
     pub(crate) material_visible_max_inactive_opacity: f32,
     pub(crate) material_active_mean_opacity: f32,
     pub(crate) material_visible_count: usize,
+    pub(crate) active_color_state_mean_abs: f32,
+    pub(crate) active_color_state_max_abs: f32,
+    pub(crate) active_color_state_stddev_mean: f32,
     pub(crate) surface_covered_bin_fraction: f32,
     pub(crate) surface_mean_bin_covered_fraction: f32,
     pub(crate) material_visible_surface_covered_bin_fraction: f32,
@@ -110,6 +113,9 @@ pub(crate) fn render_selection_metrics(
     let mut material_visible_max_inactive_opacity = f32::NEG_INFINITY;
     let mut material_active_mean_opacity = f32::INFINITY;
     let mut material_visible_count = usize::MAX;
+    let mut active_color_state_mean_abs = f32::INFINITY;
+    let mut active_color_state_max_abs = f32::INFINITY;
+    let mut active_color_state_stddev_mean = f32::INFINITY;
     let mut surface_covered_bin_fraction = f32::INFINITY;
     let mut surface_mean_bin_covered_fraction = f32::INFINITY;
     let mut material_visible_surface_covered_bin_fraction = f32::INFINITY;
@@ -189,6 +195,12 @@ pub(crate) fn render_selection_metrics(
             material_active_mean_opacity.min(selection_case.material_opacity.active_mean);
         material_visible_count =
             material_visible_count.min(selection_case.material_liveness.material_visible_count);
+        active_color_state_mean_abs =
+            active_color_state_mean_abs.min(selection_case.final_color_state.active_mean_abs);
+        active_color_state_max_abs =
+            active_color_state_max_abs.min(selection_case.final_color_state.active_max_abs);
+        active_color_state_stddev_mean = active_color_state_stddev_mean
+            .min(selection_case.final_color_state.active_channel_stddev_mean);
         surface_covered_bin_fraction = surface_covered_bin_fraction
             .min(selection_case.surface_coverage_profile.covered_bin_fraction);
         surface_mean_bin_covered_fraction = surface_mean_bin_covered_fraction.min(
@@ -312,6 +324,9 @@ pub(crate) fn render_selection_metrics(
         } else {
             material_visible_count
         },
+        active_color_state_mean_abs: finite_report_metric(active_color_state_mean_abs, 0.0),
+        active_color_state_max_abs: finite_report_metric(active_color_state_max_abs, 0.0),
+        active_color_state_stddev_mean: finite_report_metric(active_color_state_stddev_mean, 0.0),
         surface_covered_bin_fraction: finite_report_metric(surface_covered_bin_fraction, 0.0),
         surface_mean_bin_covered_fraction: finite_report_metric(
             surface_mean_bin_covered_fraction,

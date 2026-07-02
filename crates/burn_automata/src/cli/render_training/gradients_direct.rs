@@ -832,6 +832,22 @@ pub(crate) fn render_direct_rollout_training_step(
             );
         }
         add_output_gradients(&mut step_output_gradients, &material_output_gradients);
+        let mut surface_color_output_gradients = vec![0.0; particle_count * output_dims];
+        add_boosted_surface_color_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.opacity_gain * DIRECT_GROWTH_SURFACE_COLOR_GAIN_FRACTION,
+            cfg.seed_scale,
+            cfg.material_max_opacity_update,
+            cfg.liveness_front_radius,
+            Some(&liveness_candidate_weights),
+            cfg.direct_output_gradient_rms_cap * 0.5,
+            &mut surface_color_output_gradients,
+        );
+        add_output_gradients(&mut step_output_gradients, &surface_color_output_gradients);
         boost_sparse_output_channel_rms(
             &mut step_output_gradients,
             output_dims,

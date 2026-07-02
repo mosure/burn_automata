@@ -9,6 +9,8 @@ use super::*;
 
 mod liveness;
 pub(crate) use liveness::*;
+mod color;
+pub(crate) use color::*;
 mod motion;
 pub(crate) use motion::*;
 mod memory;

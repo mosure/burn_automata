@@ -237,6 +237,8 @@ pub(crate) struct DirectRolloutObjectiveDiagnostics {
     pub(crate) active_surface_materialization_nonzero_fraction: f32,
     pub(crate) material_visibility_rms: f32,
     pub(crate) material_visibility_nonzero_fraction: f32,
+    pub(crate) surface_color_rms: f32,
+    pub(crate) surface_color_nonzero_fraction: f32,
     pub(crate) combined_pre_cap_rms: f32,
     pub(crate) combined_post_cap_rms: f32,
     pub(crate) mesh_motion_post_cap_rms: f32,
@@ -248,4 +250,5 @@ pub(crate) struct DirectRolloutObjectiveDiagnostics {
     pub(crate) liveness_post_cap_rms: f32,
     pub(crate) phase_post_cap_rms: f32,
     pub(crate) material_post_cap_rms: f32,
+    pub(crate) color_post_cap_rms: f32,
 }

@@ -25,6 +25,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
     let material_output = growth_3d_material_opacity_channel(model.config.state_dims)
         .map(|channel| model.config.spatial_dims + channel)
         .filter(|channel| *channel < output_dims);
+    let color_outputs = growth_3d_color_output_channels(&model.config);
     let phase_output = growth_3d_phase_channel(model.config.state_dims)
         .map(|channel| model.config.spatial_dims + channel)
         .filter(|channel| *channel < output_dims);
@@ -52,6 +53,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
     let mut temporal_materialization = OutputGradientAccumulator::default();
     let mut active_surface_materialization = OutputGradientAccumulator::default();
     let mut material_visibility = OutputGradientAccumulator::default();
+    let mut surface_color = OutputGradientAccumulator::default();
     let mut combined_pre_cap = OutputGradientAccumulator::default();
     let mut combined_post_cap = OutputGradientAccumulator::default();
     let mut mesh_motion_post_cap = OutputGradientAccumulator::default();
@@ -60,6 +62,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
     let mut liveness_post_cap = OutputGradientAccumulator::default();
     let mut phase_post_cap = OutputGradientAccumulator::default();
     let mut material_post_cap = OutputGradientAccumulator::default();
+    let mut color_post_cap = OutputGradientAccumulator::default();
     let mut rows = 0usize;
 
     for snapshot in trajectory {
@@ -710,6 +713,30 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             );
         }
 
+        let mut surface_color_output_gradients = vec![0.0; particle_count * output_dims];
+        if let Some(color_outputs) = add_boosted_surface_color_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.opacity_gain * DIRECT_GROWTH_SURFACE_COLOR_GAIN_FRACTION,
+            cfg.seed_scale,
+            cfg.material_max_opacity_update,
+            cfg.liveness_front_radius,
+            Some(&liveness_candidate_weights),
+            cfg.direct_output_gradient_rms_cap * 0.5,
+            &mut surface_color_output_gradients,
+        ) {
+            accumulate_output_channels(
+                &mut surface_color,
+                &surface_color_output_gradients,
+                particle_count,
+                output_dims,
+                color_outputs,
+            );
+        }
+
         let mut combined = temporal_output_gradients;
         add_output_gradients(&mut combined, &mesh_liveness_output_gradients);
         add_output_gradients(&mut combined, &surface_escape_liveness_output_gradients);
@@ -740,6 +767,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &active_surface_materialization_output_gradients,
         );
         add_output_gradients(&mut combined, &material_output_gradients);
+        add_output_gradients(&mut combined, &surface_color_output_gradients);
         boost_sparse_output_channel_rms(
             &mut combined,
             output_dims,
@@ -819,6 +847,15 @@ pub(crate) fn direct_rollout_objective_diagnostics(
                 [material_output],
             );
         }
+        if let Some(color_outputs) = color_outputs {
+            accumulate_output_channels(
+                &mut color_post_cap,
+                &combined,
+                particle_count,
+                output_dims,
+                color_outputs,
+            );
+        }
     }
     let terminal_liveness_state =
         terminal_liveness_state_diagnostics(model, trajectory, cfg, liveness_update_cap);
@@ -873,6 +910,8 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             .nonzero_fraction(),
         material_visibility_rms: material_visibility.rms(),
         material_visibility_nonzero_fraction: material_visibility.nonzero_fraction(),
+        surface_color_rms: surface_color.rms(),
+        surface_color_nonzero_fraction: surface_color.nonzero_fraction(),
         combined_pre_cap_rms: combined_pre_cap.rms(),
         combined_post_cap_rms: combined_post_cap.rms(),
         mesh_motion_post_cap_rms: mesh_motion_post_cap.rms(),
@@ -884,5 +923,6 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         liveness_post_cap_rms: liveness_post_cap.rms(),
         phase_post_cap_rms: phase_post_cap.rms(),
         material_post_cap_rms: material_post_cap.rms(),
+        color_post_cap_rms: color_post_cap.rms(),
     })
 }

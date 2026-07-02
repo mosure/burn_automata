@@ -1,8 +1,10 @@
 use super::*;
 
+mod color;
 mod geometry;
 mod liveness;
 
+use color::render_selection_color_training_progress_beats;
 use geometry::{
     render_selection_geometry_growth_precursor_beats,
     render_selection_geometry_training_progress_beats,
@@ -176,13 +178,15 @@ pub(crate) fn render_selection_training_progress_beats(
         && (material_precursor_improved || liveness_precursor_improved);
     let geometry_progressed =
         render_selection_geometry_training_progress_beats(selection, previous);
+    let color_progressed = render_selection_color_training_progress_beats(selection, previous);
     if !((render_improved
         && (coverage_improved
             || material_distance_improved
             || extent_improved
             || activation_improved))
         || precursor_improved
-        || geometry_progressed)
+        || geometry_progressed
+        || color_progressed)
     {
         return false;
     }

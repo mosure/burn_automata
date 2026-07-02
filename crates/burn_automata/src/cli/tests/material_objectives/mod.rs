@@ -1,5 +1,6 @@
 use super::*;
 
+mod color;
 mod coverage;
 mod materialization;
 mod motion;

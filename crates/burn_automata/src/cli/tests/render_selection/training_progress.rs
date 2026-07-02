@@ -134,6 +134,64 @@ fn render_selection_training_progress_rejects_precursor_coverage_collapse() {
 }
 
 #[test]
+fn render_selection_training_progress_accepts_bounded_color_emergence() {
+    let mut previous = render_selection_metrics_with_liveness(99.4, 0.6756, 1.99, 0.0);
+    previous.active_color_state_mean_abs = 0.020;
+    previous.active_color_state_max_abs = 0.045;
+    previous.active_color_state_stddev_mean = 0.011;
+    previous.min_final_active_count = 128;
+
+    let mut colored = previous.clone();
+    colored.active_color_state_mean_abs = 0.023;
+    colored.active_color_state_max_abs = 0.0475;
+    colored.active_color_state_stddev_mean = 0.0125;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&colored, &previous),
+        "color-only progress should not be promoted as a strict selected checkpoint"
+    );
+    assert!(
+        render_selection_training_progress_beats(&colored, &previous),
+        "bounded rollout color-state emergence should keep direct training moving"
+    );
+}
+
+#[test]
+fn render_selection_training_progress_rejects_color_emergence_with_geometry_regression() {
+    let mut previous = render_selection_metrics_with_liveness(99.4, 0.6756, 1.99, 0.0);
+    previous.active_color_state_stddev_mean = 0.011;
+    previous.target_coverage_fraction = 0.30;
+    previous.material_visible_target_coverage_fraction = 0.24;
+    previous.surface_covered_bin_fraction = 0.32;
+    previous.material_visible_surface_covered_bin_fraction = 0.26;
+
+    let mut collapsed = previous.clone();
+    collapsed.active_color_state_stddev_mean = 0.013;
+    collapsed.target_coverage_fraction = 0.28;
+
+    assert!(
+        !render_selection_training_progress_beats(&collapsed, &previous),
+        "color progress must not carry a target-coverage collapse"
+    );
+}
+
+#[test]
+fn render_selection_training_progress_rejects_color_emergence_with_material_tail_leak() {
+    let mut previous = render_selection_metrics_with_liveness(99.4, 0.6756, 1.99, 0.0);
+    previous.active_color_state_stddev_mean = 0.011;
+    previous.material_visible_surface_tail_over_threshold_fraction = 0.0;
+
+    let mut leaked = previous.clone();
+    leaked.active_color_state_stddev_mean = 0.013;
+    leaked.material_visible_surface_tail_over_threshold_fraction = 0.05;
+
+    assert!(
+        !render_selection_training_progress_beats(&leaked, &previous),
+        "color progress must remain bounded by material-visible tail safety"
+    );
+}
+
+#[test]
 fn render_selection_can_retain_geometry_growth_before_material_visibility() {
     let mut previous = render_selection_metrics_with_liveness(112.13, 0.6346, 2.26, 0.0);
     previous.morphology_non_regressed = false;
