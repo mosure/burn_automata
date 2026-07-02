@@ -174,14 +174,17 @@ fn render_proxy_history_records_direct_line_search_candidates() {
     let history = &report.history[0];
     let candidates = &history.direct_line_search_candidates;
 
-    assert_eq!(candidates.len(), 3);
-    assert_eq!(
-        candidates
-            .iter()
-            .map(|candidate| candidate.scale)
-            .collect::<Vec<_>>(),
-        vec![0.5, 1.0, 2.0]
-    );
+    assert!(candidates.len() >= 3);
+    let candidate_scales = candidates
+        .iter()
+        .map(|candidate| candidate.scale)
+        .collect::<Vec<_>>();
+    for scale in [0.5, 1.0, 2.0] {
+        assert!(
+            candidate_scales.contains(&scale),
+            "line search should retain requested scale {scale}"
+        );
+    }
     assert!(candidates.iter().all(|candidate| candidate.inner_step == 0));
     assert!(
         candidates
@@ -214,8 +217,95 @@ fn render_proxy_history_records_direct_line_search_candidates() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        candidates.len()
     );
+}
+
+#[test]
+fn adaptive_line_search_refines_underactive_to_bursty_scale_gap() {
+    let reports = vec![
+        adaptive_line_search_candidate(8.0, 47, 0.325, 0.08),
+        adaptive_line_search_candidate(16.0, 113, 0.875, 0.274),
+    ];
+
+    let scales = adaptive_direct_line_search_refinement_scales(&reports, 128);
+
+    assert_eq!(scales.len(), 3);
+    assert!(scales.iter().all(|scale| *scale > 8.0 && *scale < 16.0));
+    assert!(
+        scales.windows(2).all(|pair| pair[0] < pair[1]),
+        "refinement scales should preserve log-space order"
+    );
+    assert!((scales[1] - (8.0_f32 * 16.0).sqrt()).abs() <= 1.0e-5);
+}
+
+#[test]
+fn adaptive_line_search_skips_pairs_without_activation_bracket() {
+    let reports = vec![
+        adaptive_line_search_candidate(4.0, 36, 0.233, 0.10),
+        adaptive_line_search_candidate(8.0, 47, 0.325, 0.08),
+    ];
+
+    assert!(adaptive_direct_line_search_refinement_scales(&reports, 128).is_empty());
+}
+
+fn adaptive_line_search_candidate(
+    scale: f32,
+    min_final_active_count: usize,
+    min_newly_activated_fraction: f32,
+    max_temporal_activation_schedule_error: f32,
+) -> DirectLineSearchCandidateReport {
+    DirectLineSearchCandidateReport {
+        inner_step: 0,
+        scale,
+        checkpoint_candidate: false,
+        progress_candidate: false,
+        selected_checkpoint: false,
+        selected_progress: false,
+        render_loss: 1.0,
+        score: 1.0,
+        density_psnr_db: 0.0,
+        morphology_non_regressed: true,
+        active_surface_max: 0.0,
+        target_coverage_fraction: 0.0,
+        material_visible_target_mean_distance: 0.0,
+        material_visible_target_max_distance: 0.0,
+        material_visible_target_coverage_fraction: 0.0,
+        material_visible_inactive_fraction: 0.0,
+        material_visible_max_inactive_opacity: 0.0,
+        material_active_mean_opacity: 0.0,
+        material_visible_count: 0,
+        surface_covered_bin_fraction: 0.0,
+        surface_mean_bin_covered_fraction: 0.0,
+        material_visible_surface_covered_bin_fraction: 0.0,
+        material_visible_surface_mean_bin_covered_fraction: 0.0,
+        surface_normal_covered_bin_fraction: 0.0,
+        surface_normal_mean_bin_covered_fraction: 0.0,
+        material_visible_surface_normal_covered_bin_fraction: 0.0,
+        material_visible_surface_normal_mean_bin_covered_fraction: 0.0,
+        material_visible_surface_tail_p99_distance: 0.0,
+        material_visible_surface_tail_over_threshold_fraction: 0.0,
+        min_active_extent_bbox_ratio: 0.0,
+        min_active_extent_min_axis_ratio: 0.0,
+        min_final_active_count,
+        min_newly_activated_fraction,
+        min_front_local_newly_activated_fraction: 1.0,
+        max_front_liveness_margin: 0.0,
+        min_front_liveness_candidate_count: 0,
+        max_extent_front_liveness_margin: 0.0,
+        min_extent_front_liveness_candidate_count: 0,
+        max_temporal_front_liveness_margin: 0.0,
+        min_temporal_front_liveness_candidate_count: 0,
+        max_temporal_extent_front_liveness_margin: 0.0,
+        min_temporal_extent_front_liveness_candidate_count: 0,
+        max_temporal_activation_schedule_error,
+        all_temporal_activation_progressive: false,
+        all_temporal_geometry_progressive: false,
+        train_final_loss: 1.0,
+        train_grad_norm: 0.0,
+        train_grad_scale: 1.0,
+        failure_reasons: Vec::new(),
+    }
 }
 
 #[test]
