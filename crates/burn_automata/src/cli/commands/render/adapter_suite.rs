@@ -7,6 +7,9 @@ pub(crate) fn run_train_render_3d_adapters(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Command::TrainRender3dAdapters {
         base_model,
+        shared_base_output,
+        shared_base_cycles,
+        shared_base_seed,
         targets,
         output_dir,
         report_output,
@@ -62,14 +65,20 @@ pub(crate) fn run_train_render_3d_adapters(
         .into());
     }
     let targets = unique_targets(targets)?;
+    let shared_base_output =
+        shared_base_output.unwrap_or_else(|| output_dir.join("shared_base.bpk"));
+    if is_catalog_model_output_path(&shared_base_output) {
+        return Err(std::io::Error::other(format!(
+            "adapter suite shared base output {} must not be under assets/models",
+            shared_base_output.display()
+        ))
+        .into());
+    }
+    let shared_base_cycles = shared_base_cycles.unwrap_or(usize::from(base_model.is_none()));
     let direct_selection_seed_training = resolve_direct_selection_seed_training(
         direct_selection_seed_training,
         no_direct_selection_seed_training,
     )?;
-    let base_manifest = crate::import::load_manifest(&base_model)?;
-    let base_parameter_count = crate::import::parameter_count(&base_manifest);
-    let hashgrid = base_manifest.hashgrid.clone();
-    let base_source = base_manifest.source.clone();
     let sgd = SgdConfig {
         learning_rate,
         grad_clip_norm,
@@ -77,9 +86,139 @@ pub(crate) fn run_train_render_3d_adapters(
     };
 
     std::fs::create_dir_all(&output_dir)?;
+    if let Some(parent) = shared_base_output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     if let Some(parent) = report_output.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    let base_model_input = base_model.as_ref().map(|path| path.display().to_string());
+    let (mut shared_model, hashgrid, loaded_base_source, shared_base_initialized) =
+        if let Some(path) = base_model.as_ref() {
+            let manifest = crate::import::load_manifest(path)?;
+            let hashgrid = manifest.hashgrid.clone();
+            let loaded_base_source = manifest.source.clone();
+            (manifest.into_model(), hashgrid, loaded_base_source, false)
+        } else {
+            let hashgrid = crate::kernels::HashGridConfig::growing_3dgs();
+            let model = local_growth_student_model(
+                NpaConfig::growing_3dgs(),
+                shared_base_seed,
+                0.0,
+                LOCAL_GROWTH_EXPANSION_GAIN,
+            )?;
+            (model, hashgrid, None, true)
+        };
+    let training_selection_seeds =
+        render_training_default_extra_selection_seeds(selection_seed, &extra_selection_seeds);
+    let mut shared_base_training = Vec::new();
+    for cycle in 0..shared_base_cycles {
+        for (target_index, target) in targets.iter().copied().enumerate() {
+            let target_seed_scale =
+                seed_scale.unwrap_or_else(|| mesh_target_render_training_seed_scale(target));
+            let target_mesh = mesh_target_for_arg(target, target_seed_scale);
+            let target_seed_mode = seed_mode
+                .map(ParticleSeed::from)
+                .unwrap_or_else(|| default_render_training_seed_mode(target, &shared_model));
+            let render = RenderLossConfig {
+                image_size,
+                sigma,
+                min_sigma,
+                max_sigma,
+                gaussian_decode_mode: gaussian_decode_mode.into(),
+                world_scale: world_scale.unwrap_or(target_seed_scale * 2.0),
+                target_samples,
+                opacity_logit_bias: render_opacity_logit_bias,
+                density_weight,
+                color_weight,
+                depth_weight,
+            };
+            let report = run_render_proxy_training(
+                &mut shared_model,
+                &hashgrid,
+                &target_mesh,
+                RenderProxyTrainingConfig {
+                    target,
+                    rounds: 1,
+                    supervised_steps_per_round,
+                    particles,
+                    rollout_steps,
+                    gradient_particles,
+                    gradient_mode,
+                    finite_diff_eps,
+                    motion_gain,
+                    perception_position_gain,
+                    max_update_norm,
+                    trajectory_supervision,
+                    trajectory_render_gain: ROBUST_3D_TRAJECTORY_RENDER_GAIN,
+                    trajectory_mesh_gain: ROBUST_3D_TRAJECTORY_MESH_GAIN,
+                    trajectory_render_samples: ROBUST_3D_TRAJECTORY_RENDER_SAMPLES,
+                    liveness_gain: ROBUST_3D_LIVENESS_GAIN,
+                    liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
+                    liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
+                    coverage_gain: ROBUST_3D_COVERAGE_GAIN,
+                    coverage_samples: ROBUST_3D_COVERAGE_SAMPLES,
+                    coverage_mode: CoverageUpdateModeArg::SlicedOt,
+                    coverage_softness: 0.0,
+                    coverage_repulsion_gain: ROBUST_3D_COVERAGE_REPULSION_GAIN,
+                    coverage_gap_gain: ROBUST_3D_COVERAGE_REPULSION_GAIN,
+                    coverage_repulsion_radius: 0.0,
+                    coverage_normal_weight: ROBUST_3D_COVERAGE_NORMAL_WEIGHT,
+                    extent_gain: ROBUST_3D_EXTENT_GAIN,
+                    full_coverage_adjoint: true,
+                    surface_gain: ROBUST_3D_SURFACE_GAIN,
+                    surface_escape_gain: ROBUST_3D_SURFACE_ESCAPE_GAIN,
+                    opacity_gain: ROBUST_3D_OPACITY_GAIN,
+                    material_liveness_gain: ROBUST_3D_MATERIAL_LIVENESS_GAIN,
+                    material_tail_gain: ROBUST_3D_MATERIAL_TAIL_GAIN,
+                    material_suppression_update_multiplier:
+                        ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
+                    material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
+                    scale_gain: ROBUST_3D_SCALE_GAIN,
+                    scale_budget_weight: ROBUST_3D_SCALE_BUDGET_WEIGHT,
+                    max_opacity_update: 0.05,
+                    direct_output_gradient_rms_cap,
+                    direct_line_search,
+                    direct_line_search_scales: direct_line_search_scales.clone(),
+                    direct_material_output_only,
+                    training_backend,
+                    weight_update_mode: RenderWeightUpdateModeArg::Full,
+                    adapter_rank,
+                    adapter_alpha,
+                    adapter_seed: adapter_seed.wrapping_add(target_index as u64),
+                    direct_selection_seed_training,
+                    seed: shared_base_seed
+                        .wrapping_add((cycle * targets.len() + target_index) as u64),
+                    selection_seed: Some(selection_seed),
+                    selection_seeds: training_selection_seeds.clone(),
+                    seed_scale: target_seed_scale,
+                    seed_mode: target_seed_mode,
+                    render,
+                    sgd,
+                },
+            )?;
+            shared_base_training.push(CliRenderAdapterSuiteBaseEntry {
+                cycle,
+                target,
+                seed_scale: target_seed_scale,
+                seed_mode: target_seed_mode,
+                report,
+            });
+        }
+    }
+    let base_source = if shared_base_initialized || shared_base_cycles > 0 {
+        Some(shared_render_adapter_base_source(
+            &targets,
+            shared_base_cycles,
+        ))
+    } else {
+        loaded_base_source
+    };
+    let base_manifest =
+        BpkModelManifest::from_model(&shared_model, hashgrid.clone(), base_source.clone());
+    crate::import::save_manifest(&shared_base_output, &base_manifest)?;
+    let base_parameter_count = crate::import::parameter_count(&base_manifest);
 
     let mut entries = Vec::with_capacity(targets.len());
     for (target_index, target) in targets.iter().copied().enumerate() {
@@ -179,7 +318,7 @@ pub(crate) fn run_train_render_3d_adapters(
         let materialized_model_output = output_dir.join(format!("{slug}_materialized.bpk"));
         let adapter_manifest = crate::import::BpkAdapterManifest::from_adapter(
             &base_manifest,
-            Some(base_model.display().to_string()),
+            Some(shared_base_output.display().to_string()),
             adapter,
             Some(render_adapter_training_source(
                 target,
@@ -252,8 +391,12 @@ pub(crate) fn run_train_render_3d_adapters(
         adapter_parameter_count as f32 / materialized_parameter_count as f32
     };
     let suite_report = CliRenderAdapterSuiteReport {
-        base_model: base_model.display().to_string(),
+        base_model_input,
+        base_model: shared_base_output.display().to_string(),
         base_source,
+        shared_base_initialized,
+        shared_base_cycles,
+        shared_base_training,
         output_dir: output_dir.display().to_string(),
         targets,
         particle_count: particles,

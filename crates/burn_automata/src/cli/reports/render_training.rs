@@ -22,8 +22,12 @@ pub(crate) struct CliRenderTrainingReport {
 
 #[derive(Serialize)]
 pub(crate) struct CliRenderAdapterSuiteReport {
+    pub(crate) base_model_input: Option<String>,
     pub(crate) base_model: String,
     pub(crate) base_source: Option<String>,
+    pub(crate) shared_base_initialized: bool,
+    pub(crate) shared_base_cycles: usize,
+    pub(crate) shared_base_training: Vec<CliRenderAdapterSuiteBaseEntry>,
     pub(crate) output_dir: String,
     pub(crate) targets: Vec<MeshTargetArg>,
     pub(crate) particle_count: usize,
@@ -36,6 +40,15 @@ pub(crate) struct CliRenderAdapterSuiteReport {
     pub(crate) adapter_parameter_count: usize,
     pub(crate) adapter_to_full_ratio: f32,
     pub(crate) entries: Vec<CliRenderAdapterSuiteEntry>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliRenderAdapterSuiteBaseEntry {
+    pub(crate) cycle: usize,
+    pub(crate) target: MeshTargetArg,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) report: RenderProxyTrainingReport,
 }
 
 #[derive(Serialize)]

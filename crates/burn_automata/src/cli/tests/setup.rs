@@ -228,15 +228,11 @@ fn train_render3d_defaults_to_shared_base_adapter_updates() {
 
 #[test]
 fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
-    let args = CliArgs::try_parse_from([
-        "burn_automata",
-        "train-render3d-adapters",
-        "--base-model",
-        "artifacts/shared_base.bpk",
-    ])
-    .unwrap();
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d-adapters"]).unwrap();
     let Command::TrainRender3dAdapters {
         base_model,
+        shared_base_output,
+        shared_base_cycles,
         targets,
         output_dir,
         training_backend,
@@ -248,7 +244,9 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
     else {
         panic!("expected train-render3d-adapters command");
     };
-    assert_eq!(base_model, PathBuf::from("artifacts/shared_base.bpk"));
+    assert_eq!(base_model, None);
+    assert_eq!(shared_base_output, None);
+    assert_eq!(shared_base_cycles, None);
     assert_eq!(targets, vec![MeshTargetArg::Torus, MeshTargetArg::Teapot]);
     assert_eq!(
         output_dir,
@@ -258,6 +256,26 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
     assert_eq!(adapter_rank, 8);
     assert_eq!(adapter_alpha, 8.0);
     assert_eq!(particles, 512);
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d-adapters",
+        "--base-model",
+        "artifacts/shared_base.bpk",
+        "--shared-base-cycles",
+        "2",
+    ])
+    .unwrap();
+    let Command::TrainRender3dAdapters {
+        base_model,
+        shared_base_cycles,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d-adapters command");
+    };
+    assert_eq!(base_model, Some(PathBuf::from("artifacts/shared_base.bpk")));
+    assert_eq!(shared_base_cycles, Some(2));
 }
 
 #[test]
@@ -443,6 +461,16 @@ fn render_adapter_training_source_marks_target_adapter_without_proxy_lineage() {
         MeshTargetArg::Teapot,
         ParticleSeed::LocalSubstrateGrowth3d,
         &teapot_source
+    ));
+
+    let shared_base_source =
+        shared_render_adapter_base_source(&[MeshTargetArg::Teapot, MeshTargetArg::Torus], 3);
+    assert!(shared_base_source.starts_with("shared-3d-base:conditionless-local"));
+    assert!(shared_base_source.contains("targets=teapot+torus"));
+    assert!(shared_base_source.contains("cycles=3"));
+    assert!(!target_conditionless_lineage(
+        MeshTargetArg::Torus,
+        &shared_base_source
     ));
 }
 

@@ -237,6 +237,23 @@ pub(crate) fn render_adapter_training_source(
     format!("render-adapter-rust:{target_source}:shared-base={base}")
 }
 
+pub(crate) fn shared_render_adapter_base_source(
+    targets: &[MeshTargetArg],
+    cycles: usize,
+) -> String {
+    let mut slugs = targets
+        .iter()
+        .copied()
+        .map(mesh_target_slug)
+        .collect::<Vec<_>>();
+    slugs.sort_unstable();
+    slugs.dedup();
+    format!(
+        "shared-3d-base:conditionless-local-substrate-no-scaffold-rollout-ablation:targets={}:cycles={cycles}",
+        slugs.join("+")
+    )
+}
+
 pub(crate) fn is_catalog_model_output_path(path: &Path) -> bool {
     let parts = path
         .components()

@@ -510,7 +510,13 @@ pub(crate) enum Command {
     )]
     TrainRender3dAdapters {
         #[arg(long)]
-        base_model: PathBuf,
+        base_model: Option<PathBuf>,
+        #[arg(long)]
+        shared_base_output: Option<PathBuf>,
+        #[arg(long)]
+        shared_base_cycles: Option<usize>,
+        #[arg(long, default_value_t = 0x005a_173d)]
+        shared_base_seed: u64,
         #[arg(long, value_delimiter = ',', default_value = "torus,teapot")]
         targets: Vec<MeshTargetArg>,
         #[arg(long, default_value = "artifacts/render_3d_adapter_suite")]

@@ -134,12 +134,18 @@ The shared-base adapter path now has core training support:
 - Adapter training reports record the rank, alpha, seed, adapter parameter
   count, shared-base parameter count, materialized parameter count, and the
   fact that the current BPK export is a materialized compatibility artifact.
-- Adapter manifests are now first-class JSON artifacts. `train-render3d-adapters
-  --base-model <shared.bpk> --targets torus,teapot` freezes the shared base,
-  trains one LoRA adapter per target, saves `<target>.adapter.json`, saves a
+- Adapter manifests are now first-class JSON artifacts.
+  `train-render3d-adapters --targets torus,teapot` initializes an
+  object-agnostic conditionless-local 3D growth base when `--base-model` is
+  omitted, alternates full-weight shared-base training for
+  `--shared-base-cycles` cycles, saves `shared_base.bpk`, then freezes that base
+  and trains one LoRA adapter per target. With `--base-model`, shared-base
+  cycles default to zero so existing bases stay frozen unless continuation is
+  requested explicitly. The suite saves `<target>.adapter.json`, saves a
   materialized `<target>_materialized.bpk` only for validation/viewer
-  compatibility, and writes a suite report with adapter-to-full parameter
-  efficiency plus strict growth/render validation for each target.
+  compatibility, and writes a report with shared-base training entries,
+  adapter-to-full parameter efficiency, and strict growth/render validation for
+  each target.
 
 The next promotion-facing training experiments should use the same
 rollout/render objectives on a shared base model and train per-target adapters

@@ -413,8 +413,10 @@ as the final Hyper-NPA target:
   gradients can be projected into adapter gradients, and supervised adapter
   training can update only the adapter. Render-rollout training now uses this
   path for both single-target training and `train-render3d-adapters` shared-base
-  suites. The suite output is the desired bridge artifact for HyperNPA: a
-  frozen shared BPK plus many compact `.adapter.json` object adapters, with
+  suites. The suite can initialize and train an object-agnostic shared local 3D
+  growth base across the target list before freezing it for per-object adapter
+  fitting. The suite output is the desired bridge artifact for HyperNPA: a
+  shared BPK plus many compact `.adapter.json` object adapters, with
   materialized BPKs treated as validation/viewer compatibility outputs.
 - Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
   `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
