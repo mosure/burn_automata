@@ -203,6 +203,15 @@ impl WgpuAutomataExecutor {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
+        let cooperative_density_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("burn_automata_cooperative_density"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("cooperative_density_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let update_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("burn_automata_update"),
             layout: Some(&pipeline_layout),
@@ -226,6 +235,15 @@ impl WgpuAutomataExecutor {
                 layout: Some(&pipeline_layout),
                 module: &shader,
                 entry_point: Some("bvh_update_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+        let cooperative_update_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("burn_automata_cooperative_update"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("cooperative_update_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
@@ -261,6 +279,8 @@ impl WgpuAutomataExecutor {
             update_pipeline,
             tiled_update_pipeline,
             bvh_update_pipeline,
+            cooperative_density_pipeline,
+            cooperative_update_pipeline,
             gaussian_pipeline,
         })
     }

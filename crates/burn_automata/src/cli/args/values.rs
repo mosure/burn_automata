@@ -25,6 +25,12 @@ pub(crate) enum NeighborModeArg {
     TiledFixedBuckets,
     #[value(name = "sorted-cells", alias = "sorted")]
     SortedCells,
+    #[value(
+        name = "cooperative-sorted-cells",
+        alias = "cooperative-cells",
+        alias = "coop"
+    )]
+    CooperativeSortedCells,
     #[value(name = "bvh", alias = "cpu-bvh")]
     Bvh,
     #[value(name = "gpu-bvh", alias = "fixed-gpu-bvh")]
@@ -260,6 +266,9 @@ pub(crate) enum SeedModeArg {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum BenchGeometryArg {
     Seed,
+    Point,
+    #[value(name = "micro-cluster", alias = "microcluster", alias = "cluster")]
+    MicroCluster,
     Dense,
     Uniform,
     Line,

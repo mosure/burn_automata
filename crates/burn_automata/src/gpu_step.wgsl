@@ -6,6 +6,7 @@ const MAX_DIMS: u32 = 3u;
 const GAUSSIAN_SH_COEFF_COUNT: u32 = 48u;
 const SH_C0: f32 = 0.28209479177387814;
 const TILE_SIZE: u32 = 128u;
+const COOP_SIZE: u32 = 32u;
 const SCAN_SIZE: u32 = 256u;
 const LAYOUT_LINKED_LIST: u32 = 0u;
 const LAYOUT_FIXED_BUCKETS: u32 = 1u;
@@ -13,9 +14,15 @@ const LAYOUT_SORTED_CELLS: u32 = 2u;
 const LAYOUT_BVH: u32 = 3u;
 const LAYOUT_SORTED_BVH: u32 = 4u;
 const LAYOUT_MORTON_BVH: u32 = 5u;
+const LAYOUT_COOPERATIVE_SORTED_CELLS: u32 = 6u;
 const BVH_HEADER_U32: u32 = 4u;
 const BVH_NODE_U32: u32 = 9u;
 const BVH_STACK_SIZE: u32 = 64u;
+const COOP_BLUR_BASE: u32 = 0u;
+const COOP_STATE_GRAD_BASE: u32 = COOP_BLUR_BASE + MAX_STATE_DIMS;
+const COOP_DENSITY_GRAD_BASE: u32 = COOP_STATE_GRAD_BASE + MAX_STATE_DIMS * MAX_DIMS;
+const COOP_MOMENT_BASE: u32 = COOP_DENSITY_GRAD_BASE + MAX_DIMS;
+const COOP_COMPONENTS: u32 = COOP_MOMENT_BASE + MAX_DIMS * MAX_DIMS;
 const GROWTH_3D_MIN_OPACITY_LOGIT: f32 = -8.0;
 const GROWTH_3D_MAX_OPACITY_LOGIT: f32 = 24.0;
 
@@ -59,6 +66,10 @@ var<workgroup> tile_states: array<f32, TILE_SIZE * MAX_STATE_DIMS>;
 var<workgroup> tile_center: vec3<i32>;
 var<workgroup> tile_mismatch: atomic<u32>;
 var<workgroup> scan_values: array<u32, SCAN_SIZE>;
+var<workgroup> coop_values: array<f32, COOP_SIZE * COOP_COMPONENTS>;
+var<workgroup> coop_feature: array<f32, MAX_FEATURE_DIMS>;
+var<workgroup> coop_hidden: array<f32, MAX_HIDDEN_DIMS>;
+var<workgroup> coop_update_values: array<f32, MAX_OUTPUT_DIMS>;
 
 fn pu(index: u32) -> u32 {
     let lane = params.values[index / 4u];
@@ -202,7 +213,9 @@ fn bvh_sort_j() -> u32 {
 }
 
 fn is_sorted_layout() -> bool {
-    return neighbor_layout() == LAYOUT_SORTED_CELLS || neighbor_layout() == LAYOUT_SORTED_BVH;
+    return neighbor_layout() == LAYOUT_SORTED_CELLS
+        || neighbor_layout() == LAYOUT_SORTED_BVH
+        || neighbor_layout() == LAYOUT_COOPERATIVE_SORTED_CELLS;
 }
 
 fn is_bvh_layout() -> bool {
@@ -293,11 +306,11 @@ fn vec3i_axis(value: vec3<i32>, axis: u32) -> i32 {
 }
 
 fn rem_euclid_i32(value: i32, modulus: i32) -> i32 {
-    var out = value;
-    while (out < 0) {
+    let quotient = value / modulus;
+    var out = value - quotient * modulus;
+    if (out < 0) {
         out = out + modulus;
-    }
-    while (out >= modulus) {
+    } else if (out >= modulus) {
         out = out - modulus;
     }
     return out;
@@ -1122,6 +1135,69 @@ fn compute_density_particle(idx: u32) -> f32 {
     return rho;
 }
 
+fn coop_component_index(component: u32, lane: u32) -> u32 {
+    return component * COOP_SIZE + lane;
+}
+
+@compute @workgroup_size(32)
+fn cooperative_density_main(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    let idx = workgroup.x;
+    let local_id = local.x;
+    if (idx >= total_count()) {
+        return;
+    }
+
+    let pi = position(idx);
+    let center = cell_coords(pi);
+    let eps2 = eps() * eps();
+    var rho = 0.0;
+
+    for (var dz = z_min(); dz <= z_max(); dz = dz + 1) {
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            for (var dx = -1; dx <= 1; dx = dx + 1) {
+                let coords = vec3<i32>(center.x + dx, center.y + dy, center.z + dz);
+                let cell = cell_index(coords);
+                if (cell < 0) {
+                    continue;
+                }
+                let cell_u = u32(cell);
+                let start = sorted_offset(cell_u);
+                let end = sorted_offset(cell_u + 1u);
+                for (var slot = start + local_id; slot < end; slot = slot + COOP_SIZE) {
+                    let j = sorted_particle(slot);
+                    let pj = position(j);
+                    if (!particle_candidate_matches_cell(pj, coords)) {
+                        continue;
+                    }
+                    var r2 = 0.0;
+                    for (var axis = 0u; axis < spatial_dims(); axis = axis + 1u) {
+                        let delta = neighbor_delta(pi, pj, axis);
+                        r2 = r2 + delta * delta;
+                    }
+                    if (r2 < eps2) {
+                        rho = rho + smoothing_poly6(r2);
+                    }
+                }
+            }
+        }
+    }
+
+    coop_values[local_id] = rho;
+    workgroupBarrier();
+    for (var stride = COOP_SIZE / 2u; stride > 0u; stride = stride / 2u) {
+        if (local_id < stride) {
+            coop_values[local_id] = coop_values[local_id] + coop_values[local_id + stride];
+        }
+        workgroupBarrier();
+    }
+    if (local_id == 0u) {
+        density.values[idx] = coop_values[0u];
+    }
+}
+
 @compute @workgroup_size(128)
 fn bvh_density_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
@@ -1480,6 +1556,313 @@ fn update_particle(idx: u32) {
     }
 
     finish_update_particle(idx, mask, pi, blur, state_grad, density_grad, moment);
+}
+
+fn reduce_coop_components(local_id: u32) {
+    for (var stride = COOP_SIZE / 2u; stride > 0u; stride = stride / 2u) {
+        if (local_id < stride) {
+            for (var component = 0u; component < COOP_COMPONENTS; component = component + 1u) {
+                let dst = coop_component_index(component, local_id);
+                coop_values[dst] = coop_values[dst] + coop_values[dst + stride];
+            }
+        }
+        workgroupBarrier();
+    }
+}
+
+fn finish_update_particle_cooperative(local_id: u32, idx: u32, mask: f32, pi: vec4<f32>) {
+    let sd = state_dims();
+    let dim = spatial_dims();
+    let hd = hidden_dims();
+    let fd = feature_dims();
+    let od = output_dims();
+    let position_base = idx * 4u;
+    let state_base = idx * sd;
+
+    if (local_id == 0u) {
+        var inverse: array<f32, MAX_DIMS * MAX_DIMS>;
+        if (dim == 2u) {
+            let a = coop_values[coop_component_index(COOP_MOMENT_BASE + 0u, 0u)];
+            let b = coop_values[coop_component_index(COOP_MOMENT_BASE + 1u, 0u)];
+            let d = coop_values[coop_component_index(COOP_MOMENT_BASE + 4u, 0u)];
+            let det = a * d - b * b;
+            if (abs(det) < 1e-3) {
+                inverse[0u] = 1.0;
+                inverse[4u] = 1.0;
+            } else {
+                let inv_det = 1.0 / det;
+                inverse[0u] = d * inv_det;
+                inverse[1u] = -b * inv_det;
+                inverse[3u] = -b * inv_det;
+                inverse[4u] = a * inv_det;
+            }
+        } else {
+            let a = coop_values[coop_component_index(COOP_MOMENT_BASE + 0u, 0u)];
+            let b = coop_values[coop_component_index(COOP_MOMENT_BASE + 1u, 0u)];
+            let c = coop_values[coop_component_index(COOP_MOMENT_BASE + 2u, 0u)];
+            let d = coop_values[coop_component_index(COOP_MOMENT_BASE + 4u, 0u)];
+            let e = coop_values[coop_component_index(COOP_MOMENT_BASE + 5u, 0u)];
+            let f = coop_values[coop_component_index(COOP_MOMENT_BASE + 8u, 0u)];
+            let t1 = d * f - e * e;
+            let t2 = c * e - b * f;
+            let t3 = b * e - c * d;
+            let det = a * t1 + b * t2 + c * t3;
+            if (abs(det) < 1e-3) {
+                inverse[0u] = 1.0;
+                inverse[4u] = 1.0;
+                inverse[8u] = 1.0;
+            } else {
+                let inv_det = 1.0 / det;
+                inverse[0u] = t1 * inv_det;
+                inverse[1u] = t2 * inv_det;
+                inverse[2u] = t3 * inv_det;
+                inverse[3u] = t2 * inv_det;
+                inverse[4u] = (a * f - c * c) * inv_det;
+                inverse[5u] = (b * c - a * e) * inv_det;
+                inverse[6u] = t3 * inv_det;
+                inverse[7u] = (b * c - a * e) * inv_det;
+                inverse[8u] = (a * d - b * b) * inv_det;
+            }
+        }
+
+        var cursor = 0u;
+        for (var c = 0u; c < sd; c = c + 1u) {
+            coop_feature[cursor] = states.values[state_base + c];
+            cursor = cursor + 1u;
+        }
+        for (var c = 0u; c < sd; c = c + 1u) {
+            coop_feature[cursor] = coop_values[coop_component_index(COOP_BLUR_BASE + c, 0u)];
+            cursor = cursor + 1u;
+        }
+
+        for (var c = 0u; c < sd; c = c + 1u) {
+            var corrected: array<f32, MAX_DIMS>;
+            for (var out_axis = 0u; out_axis < dim; out_axis = out_axis + 1u) {
+                var value = 0.0;
+                for (var in_axis = 0u; in_axis < dim; in_axis = in_axis + 1u) {
+                    value = value
+                        + coop_values[coop_component_index(
+                            COOP_STATE_GRAD_BASE + c * MAX_DIMS + in_axis,
+                            0u,
+                        )] * inverse[in_axis * MAX_DIMS + out_axis];
+                }
+                corrected[out_axis] = value * grad_scale();
+            }
+
+            var norm = 0.0;
+            for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                norm = norm + corrected[axis] * corrected[axis];
+            }
+            norm = sqrt(norm);
+            for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                var value = corrected[axis];
+                if (pu(12u) != 0u) {
+                    value = log_normalized(value, norm);
+                }
+                coop_feature[cursor] = value;
+                cursor = cursor + 1u;
+            }
+        }
+
+        var density_grad_local: array<f32, MAX_DIMS>;
+        for (var axis = 0u; axis < dim; axis = axis + 1u) {
+            density_grad_local[axis] =
+                coop_values[coop_component_index(COOP_DENSITY_GRAD_BASE + axis, 0u)]
+                * density_scale();
+        }
+        if (pu(13u) != 0u) {
+            var norm = 0.0;
+            for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                norm = norm + density_grad_local[axis] * density_grad_local[axis];
+            }
+            norm = sqrt(norm);
+            for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                density_grad_local[axis] = log_normalized(density_grad_local[axis], norm);
+            }
+        }
+        for (var axis = 0u; axis < dim; axis = axis + 1u) {
+            coop_feature[cursor] = density_grad_local[axis];
+            cursor = cursor + 1u;
+        }
+        if (has_position_features()) {
+            for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                coop_feature[cursor] = vec4_axis(pi, axis);
+                cursor = cursor + 1u;
+            }
+        }
+    }
+    workgroupBarrier();
+
+    for (var h = local_id; h < hd; h = h + COOP_SIZE) {
+        var sum = weights.values[b1_offset() + h];
+        let w_base = h * fd;
+        for (var i = 0u; i < fd; i = i + 1u) {
+            sum = sum + weights.values[w_base + i] * coop_feature[i];
+        }
+        coop_hidden[h] = max(sum, 0.0);
+    }
+    workgroupBarrier();
+
+    for (var o = local_id; o < od; o = o + COOP_SIZE) {
+        var sum = weights.values[b2_offset() + o];
+        let w_base = w2_offset() + o * hd;
+        for (var h = 0u; h < hd; h = h + 1u) {
+            sum = sum + weights.values[w_base + h] * coop_hidden[h];
+        }
+        coop_update_values[o] = sum;
+    }
+    workgroupBarrier();
+
+    if (local_id == 0u) {
+        var update_norm = 0.0;
+        for (var axis = 0u; axis < dim; axis = axis + 1u) {
+            update_norm = update_norm + coop_update_values[axis] * coop_update_values[axis];
+        }
+        update_norm = sqrt(update_norm);
+        for (var axis = 0u; axis < 4u; axis = axis + 1u) {
+            var value = positions.values[position_base + axis];
+            if (axis < dim) {
+                value = value
+                    + mask * dt() * alpha() * coop_update_values[axis] * motion_eps()
+                        / (1.0 + update_norm);
+                value = wrap_axis(value, axis);
+            }
+            out_positions.values[position_base + axis] = value;
+        }
+
+        let update_state_base = dim;
+        for (var c = 0u; c < sd; c = c + 1u) {
+            var next_state =
+                states.values[state_base + c] + mask * dt() * coop_update_values[update_state_base + c];
+            if (dim == 3u && sd > 3u && (c == 3u || (sd > 8u && c == 8u))) {
+                next_state = clamp(
+                    next_state,
+                    GROWTH_3D_MIN_OPACITY_LOGIT,
+                    GROWTH_3D_MAX_OPACITY_LOGIT,
+                );
+            }
+            out_states.values[state_base + c] = next_state;
+        }
+    }
+}
+
+@compute @workgroup_size(32)
+fn cooperative_update_main(
+    @builtin(workgroup_id) workgroup: vec3<u32>,
+    @builtin(local_invocation_id) local: vec3<u32>,
+) {
+    let idx = workgroup.x;
+    let local_id = local.x;
+    if (idx >= total_count()) {
+        return;
+    }
+
+    let sd = state_dims();
+    let dim = spatial_dims();
+    let mask = update_mask(idx);
+    if (mask == 0.0) {
+        if (local_id == 0u) {
+            copy_particle_to_output(idx);
+        }
+        return;
+    }
+
+    let pi = position(idx);
+    let center = cell_coords(pi);
+    let eps2 = eps() * eps();
+    let state_base = idx * sd;
+
+    var blur: array<f32, MAX_STATE_DIMS>;
+    var target_state: array<f32, MAX_STATE_DIMS>;
+    var state_grad: array<f32, MAX_STATE_DIMS * MAX_DIMS>;
+    var density_grad: array<f32, MAX_DIMS>;
+    var moment: array<f32, MAX_DIMS * MAX_DIMS>;
+    for (var c = 0u; c < sd; c = c + 1u) {
+        target_state[c] = states.values[state_base + c];
+    }
+
+    for (var dz = z_min(); dz <= z_max(); dz = dz + 1) {
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            for (var dx = -1; dx <= 1; dx = dx + 1) {
+                let coords = vec3<i32>(center.x + dx, center.y + dy, center.z + dz);
+                let cell = cell_index(coords);
+                if (cell < 0) {
+                    continue;
+                }
+                let cell_u = u32(cell);
+                let start = sorted_offset(cell_u);
+                let end = sorted_offset(cell_u + 1u);
+                for (var slot = start + local_id; slot < end; slot = slot + COOP_SIZE) {
+                    let j = sorted_particle(slot);
+                    let pj = position(j);
+                    if (!particle_candidate_matches_cell(pj, coords)) {
+                        continue;
+                    }
+                    var delta: array<f32, MAX_DIMS>;
+                    var r2 = 0.0;
+                    for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                        delta[axis] = neighbor_delta(pi, pj, axis);
+                        r2 = r2 + delta[axis] * delta[axis];
+                    }
+                    if (r2 < eps2) {
+                        let volume_j = recip_finite(density.values[j]);
+                        let smooth_w = smoothing_poly6(r2);
+                        let src = j * sd;
+                        if (idx != j && r2 > 0.0) {
+                            let r = sqrt(r2);
+                            let e = eps() - r;
+                            let grad_mag = spiky_coef() * 3.0 * e * e / r;
+                            var grad_volume: array<f32, MAX_DIMS>;
+                            for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                                let grad = grad_mag * delta[axis];
+                                grad_volume[axis] = grad * volume_j;
+                                density_grad[axis] = density_grad[axis] + grad;
+                            }
+
+                            for (var c = 0u; c < sd; c = c + 1u) {
+                                let state_j = states.values[src + c];
+                                blur[c] = blur[c] + state_j * smooth_w * volume_j;
+                                let diff = state_j - target_state[c];
+                                for (var axis = 0u; axis < dim; axis = axis + 1u) {
+                                    state_grad[c * MAX_DIMS + axis] =
+                                        state_grad[c * MAX_DIMS + axis] + diff * grad_volume[axis];
+                                }
+                            }
+
+                            for (var row = 0u; row < dim; row = row + 1u) {
+                                for (var col = 0u; col < dim; col = col + 1u) {
+                                    moment[row * MAX_DIMS + col] =
+                                        moment[row * MAX_DIMS + col] + delta[row] * grad_volume[col];
+                                }
+                            }
+                        } else {
+                            for (var c = 0u; c < sd; c = c + 1u) {
+                                let state_j = states.values[src + c];
+                                blur[c] = blur[c] + state_j * smooth_w * volume_j;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (var c = 0u; c < MAX_STATE_DIMS; c = c + 1u) {
+        coop_values[coop_component_index(COOP_BLUR_BASE + c, local_id)] = blur[c];
+    }
+    for (var c = 0u; c < MAX_STATE_DIMS * MAX_DIMS; c = c + 1u) {
+        coop_values[coop_component_index(COOP_STATE_GRAD_BASE + c, local_id)] = state_grad[c];
+    }
+    for (var c = 0u; c < MAX_DIMS; c = c + 1u) {
+        coop_values[coop_component_index(COOP_DENSITY_GRAD_BASE + c, local_id)] = density_grad[c];
+    }
+    for (var c = 0u; c < MAX_DIMS * MAX_DIMS; c = c + 1u) {
+        coop_values[coop_component_index(COOP_MOMENT_BASE + c, local_id)] = moment[c];
+    }
+    workgroupBarrier();
+    reduce_coop_components(local_id);
+
+    finish_update_particle_cooperative(local_id, idx, mask, pi);
 }
 
 @compute @workgroup_size(128)

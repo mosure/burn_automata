@@ -3,6 +3,7 @@ use crate::cli::prelude::*;
 pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let Command::Bench {
         preset,
+        model: model_path,
         particles,
         steps,
         repeats,
@@ -18,21 +19,34 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
         seed_mode,
         geometry,
         gaussian,
+        step_timing,
     } = command
     else {
         unreachable!("run_bench called with the wrong command variant");
     };
 
     #[cfg(not(feature = "gpu_wgpu"))]
-    let _ = (neighbor_mode, bucket_capacity, gaussian, repeats);
+    let _ = (
+        neighbor_mode,
+        bucket_capacity,
+        gaussian,
+        repeats,
+        step_timing,
+    );
     let preset: AutomataPreset = preset.into();
     let seed_scale = seed_scale.unwrap_or_else(|| NpaConfig::seed_scale_for_preset(preset));
     let seed_mode: ParticleSeed = seed_mode.into();
     let normalize_seed_scale = normalize_seed_scale || !fixed_eps;
     let reference_seed_scale = reference_seed_scale
         .unwrap_or_else(|| reference_seed_scale_for_seed_mode(preset, seed_mode));
-    let (config, base_grid) = NpaConfig::for_preset(preset);
-    let model = NpaModel::seeded(config.clone(), 42);
+    let (model, base_grid) = if let Some(path) = model_path {
+        let manifest = crate::import::load_manifest(&path)?;
+        let hashgrid = manifest.hashgrid.clone();
+        (manifest.into_model(), hashgrid)
+    } else {
+        let (config, hashgrid) = NpaConfig::for_preset(preset);
+        (NpaModel::seeded(config, 42), hashgrid)
+    };
     let grid = if normalize_seed_scale {
         model
             .config
@@ -56,6 +70,7 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
                     geometry,
                     neighbor_mode: wgpu_neighbor_mode(neighbor_mode, bucket_capacity),
                     gaussian_write: gaussian,
+                    step_timing,
                 },
             )?;
             let reports = if repeats > 1 {
@@ -74,6 +89,7 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
                             geometry,
                             neighbor_mode: wgpu_neighbor_mode(neighbor_mode, bucket_capacity),
                             gaussian_write: gaussian,
+                            step_timing,
                         },
                     )?);
                 }
@@ -84,14 +100,26 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
             let summary = summarize_gpu_reports(&reports, steps);
             let report = summary.median_report;
             let avg_step_ms = report.gpu_step_ms / steps.max(1) as f64;
+            let timing = if step_timing {
+                "step_wait"
+            } else {
+                "submit_wait"
+            };
             println!(
-                "backend=wgpu particles={particles} steps={steps} repeats={} update_prob={update_prob:.3} geometry={geometry:?} elapsed_ms={:.6} gpu_step_ms={:.6} avg_step_ms={avg_step_ms:.6} min_avg_step_ms={:.6} median_avg_step_ms={:.6} max_avg_step_ms={:.6} final_mean_displacement_per_step={:.6} final_mean_density={:.6} initial_nonempty_cells={} initial_max_cell_occupancy={} hashgrid=gpu-local hashgrid_eps={:.6} normalized_seed_scale={} reference_seed_scale={:.6} resident_state=true timing=submit_wait readback=final gaussian_write={} neighbor_mode={:?} bucket_capacity={} grid_storage_u32={} grid_clear_u32={} grid_overflow_count={}",
+                "backend=wgpu particles={particles} steps={steps} repeats={} update_prob={update_prob:.3} geometry={geometry:?} elapsed_ms={:.6} gpu_step_ms={:.6} avg_step_ms={avg_step_ms:.6} min_avg_step_ms={:.6} median_avg_step_ms={:.6} max_avg_step_ms={:.6} step_timing={} step_min_ms={:.6} step_median_ms={:.6} step_p95_ms={:.6} step_p99_ms={:.6} step_max_ms={:.6} step_jitter_ratio={:.6} final_mean_displacement_per_step={:.6} final_mean_density={:.6} initial_nonempty_cells={} initial_max_cell_occupancy={} hashgrid=gpu-local hashgrid_eps={:.6} normalized_seed_scale={} reference_seed_scale={:.6} resident_state=true timing={timing} readback=final gaussian_write={} neighbor_mode={:?} bucket_capacity={} grid_storage_u32={} grid_clear_u32={} grid_overflow_count={} grid_max_overflow_count={} grid_overflowed_steps={}",
                 summary.repeats,
                 start.elapsed().as_secs_f64() * 1000.0,
                 report.gpu_step_ms,
                 summary.min_avg_step_ms,
                 summary.median_avg_step_ms,
                 summary.max_avg_step_ms,
+                step_timing,
+                report.step_min_ms,
+                report.step_median_ms,
+                report.step_p95_ms,
+                report.step_p99_ms,
+                report.step_max_ms,
+                report.step_jitter_ratio,
                 report.final_mean_dx,
                 report.final_mean_density,
                 report.initial_nonempty_cells,
@@ -104,7 +132,9 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
                 report.bucket_capacity,
                 report.grid_storage_len,
                 report.grid_clear_len,
-                report.grid_overflow_count
+                report.grid_overflow_count,
+                report.grid_max_overflow_count,
+                report.grid_overflowed_steps
             );
         }
         #[cfg(not(feature = "gpu_wgpu"))]

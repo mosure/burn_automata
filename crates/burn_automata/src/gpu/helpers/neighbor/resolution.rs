@@ -10,6 +10,11 @@ use super::storage::{
 };
 use crate::gpu::helpers::util::u32_checked;
 
+const MAX_AUTO_EXACT_CELL_OCCUPANCY: usize = 512;
+const MAX_AUTO_TILED_CELL_OCCUPANCY: usize = 2048;
+const MIN_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 512;
+const MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 4096;
+
 pub(in crate::gpu) fn resolve_bucket_capacity(
     grid: &HashGridConfig,
     particle_count: usize,
@@ -19,6 +24,7 @@ pub(in crate::gpu) fn resolve_bucket_capacity(
         WgpuNeighborMode::LinkedList => 0,
         WgpuNeighborMode::FixedCellBuckets { capacity } => capacity,
         WgpuNeighborMode::TiledFixedCellBuckets { capacity } => capacity,
+        WgpuNeighborMode::CooperativeSortedCells => 0,
         WgpuNeighborMode::Bvh { leaf_size } => {
             validate_bvh_mode(grid, leaf_size, "BVH")?;
             leaf_size
@@ -55,36 +61,61 @@ pub(in crate::gpu) fn resolve_neighbor_mode_for_state(
 ) -> AutomataResult<(usize, WgpuNeighborMode)> {
     if requested != WgpuNeighborMode::Auto {
         let capacity = resolve_bucket_capacity(grid, particle_count, requested)?;
-        return Ok((capacity, resolved_neighbor_mode(requested, capacity)));
+        let resolved = resolved_neighbor_mode(requested, capacity);
+        if matches!(
+            resolved,
+            WgpuNeighborMode::FixedCellBuckets { .. }
+                | WgpuNeighborMode::TiledFixedCellBuckets { .. }
+        ) {
+            let (_nonempty_cells, max_occupancy) =
+                initial_cell_occupancy_stats(grid, particle_count, positions)?;
+            ensure_fixed_bucket_capacity_fits_initial_occupancy(capacity, max_occupancy)?;
+        }
+        return Ok((capacity, resolved));
     }
 
     let (nonempty_cells, max_occupancy) =
         initial_cell_occupancy_stats(grid, particle_count, positions)?;
 
+    if should_use_cooperative_sorted_cells(grid, particle_count, nonempty_cells, max_occupancy) {
+        ensure_auto_cooperative_scan_is_bounded(grid, particle_count, max_occupancy)?;
+        return Ok((0, WgpuNeighborMode::CooperativeSortedCells));
+    }
+
     if grid.dim == 2 {
         if let Some(capacity) = adaptive_fixed_bucket_capacity(grid, max_occupancy, particle_count)?
         {
+            ensure_auto_tiled_scan_is_bounded(grid, particle_count, nonempty_cells, max_occupancy)?;
             return Ok((
                 capacity,
                 WgpuNeighborMode::TiledFixedCellBuckets { capacity },
             ));
         }
+        ensure_auto_exact_fallback_is_bounded(grid, particle_count, max_occupancy)?;
         return exact_neighbor_fallback_mode(grid, particle_count);
     }
 
     if grid.mode == HashGridMode::Particle {
         if grid.dim == 3 && particle_count <= 2048 && max_occupancy >= 96 {
+            ensure_auto_exact_fallback_is_bounded(grid, particle_count, max_occupancy)?;
             return exact_neighbor_fallback_mode(grid, particle_count);
         }
         if should_use_tiled_particle_grid(grid, particle_count, nonempty_cells, max_occupancy) {
             if let Some(capacity) =
                 adaptive_fixed_bucket_capacity(grid, max_occupancy, particle_count)?
             {
+                ensure_auto_tiled_scan_is_bounded(
+                    grid,
+                    particle_count,
+                    nonempty_cells,
+                    max_occupancy,
+                )?;
                 return Ok((
                     capacity,
                     WgpuNeighborMode::TiledFixedCellBuckets { capacity },
                 ));
             }
+            ensure_auto_exact_fallback_is_bounded(grid, particle_count, max_occupancy)?;
             return exact_neighbor_fallback_mode(grid, particle_count);
         }
         if max_occupancy >= 96 {
@@ -93,6 +124,7 @@ pub(in crate::gpu) fn resolve_neighbor_mode_for_state(
             {
                 return Ok((capacity, WgpuNeighborMode::FixedCellBuckets { capacity }));
             }
+            ensure_auto_exact_fallback_is_bounded(grid, particle_count, max_occupancy)?;
             return exact_neighbor_fallback_mode(grid, particle_count);
         }
         return Ok((0, WgpuNeighborMode::LinkedList));
@@ -100,6 +132,77 @@ pub(in crate::gpu) fn resolve_neighbor_mode_for_state(
 
     let capacity = resolve_bucket_capacity(grid, particle_count, requested)?;
     Ok((capacity, resolved_neighbor_mode(requested, capacity)))
+}
+
+fn ensure_auto_tiled_scan_is_bounded(
+    grid: &HashGridConfig,
+    particle_count: usize,
+    nonempty_cells: usize,
+    max_occupancy: usize,
+) -> AutomataResult<()> {
+    let concentrated = nonempty_cells <= 4;
+    if max_occupancy <= MAX_AUTO_TILED_CELL_OCCUPANCY || !concentrated {
+        return Ok(());
+    }
+    Err(AutomataError::InvalidArgument(format!(
+        "WGPU auto would need a full-cell tiled scan for max cell occupancy {max_occupancy} across {nonempty_cells} occupied cells with {particle_count} particles on a {}D grid, which can cause frame-time spikes; reduce particle density, increase seed scale, or use fewer particles for this distribution",
+        grid.dim
+    )))
+}
+
+fn should_use_cooperative_sorted_cells(
+    grid: &HashGridConfig,
+    particle_count: usize,
+    nonempty_cells: usize,
+    max_occupancy: usize,
+) -> bool {
+    if grid.dim == 2 && (1024..=MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY).contains(&particle_count) {
+        return max_occupancy > 0;
+    }
+    if grid.dim == 3 && (1024..=MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY).contains(&particle_count) {
+        return max_occupancy > 0;
+    }
+    nonempty_cells <= 4 && max_occupancy >= MIN_AUTO_COOPERATIVE_CELL_OCCUPANCY
+}
+
+fn ensure_auto_cooperative_scan_is_bounded(
+    grid: &HashGridConfig,
+    particle_count: usize,
+    max_occupancy: usize,
+) -> AutomataResult<()> {
+    if max_occupancy <= MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY {
+        return Ok(());
+    }
+    Err(AutomataError::InvalidArgument(format!(
+        "WGPU cooperative sorted cells currently supports concentrated auto cases up to max cell occupancy {MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY}, got {max_occupancy} with {particle_count} particles on a {}D grid; reduce particle density, increase seed scale, or use fewer particles for this distribution",
+        grid.dim
+    )))
+}
+
+fn ensure_fixed_bucket_capacity_fits_initial_occupancy(
+    capacity: usize,
+    max_occupancy: usize,
+) -> AutomataResult<()> {
+    if capacity >= max_occupancy {
+        return Ok(());
+    }
+    Err(AutomataError::InvalidArgument(format!(
+        "WGPU fixed bucket capacity {capacity} is smaller than initial max cell occupancy {max_occupancy}; use --neighbor-mode auto or a larger --bucket-capacity"
+    )))
+}
+
+fn ensure_auto_exact_fallback_is_bounded(
+    grid: &HashGridConfig,
+    particle_count: usize,
+    max_occupancy: usize,
+) -> AutomataResult<()> {
+    if max_occupancy <= MAX_AUTO_EXACT_CELL_OCCUPANCY {
+        return Ok(());
+    }
+    Err(AutomataError::InvalidArgument(format!(
+        "WGPU auto would need an exact neighbor scan for max cell occupancy {max_occupancy} with {particle_count} particles on a {}D grid, which can stall the GPU; reduce particle density, increase seed scale, or use fewer particles for this distribution",
+        grid.dim
+    )))
 }
 
 pub(in crate::gpu) fn initial_cell_occupancy_stats(

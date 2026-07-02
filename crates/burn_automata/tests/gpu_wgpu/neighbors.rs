@@ -32,6 +32,7 @@ fn wgpu_neighbor_modes_match_cpu_oracle_for_2d() -> Result<(), Box<dyn std::erro
             capacity: particles,
         },
         burn_automata::gpu::WgpuNeighborMode::SortedCells,
+        burn_automata::gpu::WgpuNeighborMode::CooperativeSortedCells,
         burn_automata::gpu::WgpuNeighborMode::Auto,
     ] {
         let mut state = executor.create_state_with_neighbor_mode(
@@ -309,12 +310,47 @@ fn wgpu_particle_hashgrid_handles_shifted_3d_fixed_buckets()
         max_density <= 2.5e-3,
         "shifted particle hashgrid sorted max density abs error {max_density} exceeded tolerance"
     );
+
+    let mut cooperative_state = executor.create_state_with_neighbor_mode(
+        &model,
+        &positions,
+        &states,
+        1,
+        particles,
+        &grid,
+        1.0,
+        burn_automata::gpu::WgpuNeighborMode::CooperativeSortedCells,
+    )?;
+    executor.step_state(&mut cooperative_state)?;
+    let overflow = executor.read_grid_overflow(&cooperative_state)?;
+    let gpu = executor.read_state(&cooperative_state)?;
+    let max_pos = max_position_abs_error(&cpu.next_positions, &gpu.next_positions);
+    let max_state = max_abs_error(&cpu.next_states, &gpu.next_states);
+    let max_density = max_abs_error(&cpu.perception.density, &gpu.density);
+    eprintln!(
+        "shifted Growing3dGs cooperative sorted particle hash: overflow={overflow} max_pos={max_pos:.8} max_state={max_state:.8} max_density={max_density:.8}"
+    );
+    assert_eq!(
+        overflow, 0,
+        "cooperative sorted particle hashgrid should not overflow"
+    );
+    assert!(
+        max_pos <= 2.5e-3,
+        "shifted particle hashgrid cooperative sorted max position abs error {max_pos} exceeded tolerance"
+    );
+    assert!(
+        max_state <= 2.5e-3,
+        "shifted particle hashgrid cooperative sorted max state abs error {max_state} exceeded tolerance"
+    );
+    assert!(
+        max_density <= 2.5e-3,
+        "shifted particle hashgrid cooperative sorted max density abs error {max_density} exceeded tolerance"
+    );
     Ok(())
 }
 
 #[test]
-fn wgpu_fixed_bucket_overflow_counter_reports_saturation() -> Result<(), Box<dyn std::error::Error>>
-{
+fn wgpu_fixed_bucket_rejects_initial_saturation() -> Result<(), Box<dyn std::error::Error>> {
     let _wgpu_guard = wgpu_test_guard();
     let preset = AutomataPreset::Growing2d;
     let particles = 96;
@@ -334,7 +370,7 @@ fn wgpu_fixed_bucket_overflow_counter_reports_saturation() -> Result<(), Box<dyn
         Some(executor) => executor,
         None => return Ok(()),
     };
-    let mut state = executor.create_state_with_neighbor_mode(
+    let err = match executor.create_state_with_neighbor_mode(
         &model,
         &positions,
         &states,
@@ -343,10 +379,14 @@ fn wgpu_fixed_bucket_overflow_counter_reports_saturation() -> Result<(), Box<dyn
         &grid,
         1.0,
         burn_automata::gpu::WgpuNeighborMode::FixedCellBuckets { capacity: 1 },
-    )?;
-    executor.step_state(&mut state)?;
-    let overflow = executor.read_grid_overflow(&state)?;
-    eprintln!("Growing2d fixed bucket capacity=1 overflow={overflow}");
-    assert!(overflow > 0, "expected fixed bucket capacity=1 to overflow");
+    ) {
+        Ok(_) => panic!("expected fixed bucket capacity=1 to reject initial saturation"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("is smaller than initial max cell occupancy"),
+        "unexpected error: {err}"
+    );
     Ok(())
 }

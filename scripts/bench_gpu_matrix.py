@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "target" / "bench_gpu_matrix.json"
+DENSITY_GEOMETRIES = ["seed", "uniform", "dense", "line", "point", "micro-cluster"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ QUICK_MATRIX = {
             Mode("fixed-buckets", 64),
             Mode("tiled-fixed-buckets", 128),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
             Mode("bvh", 16),
             Mode("bvh", 32),
             Mode("gpu-bvh", 16),
@@ -59,6 +61,7 @@ QUICK_MATRIX = {
             Mode("fixed-buckets", 128),
             Mode("tiled-fixed-buckets", 128),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
         ],
     },
     "growing-2d": {
@@ -70,6 +73,7 @@ QUICK_MATRIX = {
             Mode("fixed-buckets", 256),
             Mode("tiled-fixed-buckets", 256),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
             Mode("bvh", 16),
             Mode("bvh", 32),
             Mode("gpu-bvh", 16),
@@ -88,6 +92,7 @@ QUICK_MATRIX = {
             Mode("fixed-buckets", 128),
             Mode("tiled-fixed-buckets", 128),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
             Mode("bvh", 16),
             Mode("gpu-bvh", 16),
             Mode("gpu-lbvh", 16),
@@ -107,6 +112,7 @@ FULL_MATRIX = {
             Mode("fixed-buckets", 128),
             Mode("tiled-fixed-buckets", 128),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
             Mode("bvh", 16),
             Mode("bvh", 32),
             Mode("gpu-bvh", 16),
@@ -128,6 +134,7 @@ FULL_MATRIX = {
             Mode("tiled-fixed-buckets", 128),
             Mode("tiled-fixed-buckets", 256),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
         ],
     },
     "growing-2d": {
@@ -142,6 +149,7 @@ FULL_MATRIX = {
             Mode("tiled-fixed-buckets", 256),
             Mode("tiled-fixed-buckets", 512),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
             Mode("bvh", 16),
             Mode("bvh", 32),
             Mode("gpu-bvh", 16),
@@ -161,6 +169,7 @@ FULL_MATRIX = {
             Mode("fixed-buckets", 128),
             Mode("tiled-fixed-buckets", 128),
             Mode("sorted-cells"),
+            Mode("cooperative-sorted-cells"),
             Mode("bvh", 16),
             Mode("gpu-bvh", 16),
             Mode("gpu-lbvh", 16),
@@ -181,11 +190,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--geometry", action="append", dest="geometries", default=None)
+    parser.add_argument("--model", type=Path)
     parser.add_argument(
         "--mode",
         action="append",
         dest="modes",
-        help="Mode override: auto, linked-list, fixed-buckets:128, tiled-fixed-buckets:128, sorted-cells, bvh:16, gpu-bvh:16, gpu-lbvh:16, gpu-morton-lbvh:16.",
+        help="Mode override: auto, linked-list, fixed-buckets:128, tiled-fixed-buckets:128, sorted-cells, cooperative-sorted-cells, bvh:16, gpu-bvh:16, gpu-lbvh:16, gpu-morton-lbvh:16.",
     )
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -193,6 +203,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--fail-on-overflow", action="store_true")
     parser.add_argument("--gaussian", action="store_true")
+    parser.add_argument("--step-timing", action="store_true")
+    parser.add_argument(
+        "--density-suite",
+        action="store_true",
+        help="Run seed, uniform, dense, line, point, and micro-cluster geometries unless --geometry is supplied.",
+    )
     parser.add_argument("--extra-env", action="append", default=[])
     return parser.parse_args()
 
@@ -225,6 +241,8 @@ def coerce_values(values: dict[str, str]) -> dict[str, object]:
         "grid_storage_u32",
         "grid_clear_u32",
         "grid_overflow_count",
+        "grid_max_overflow_count",
+        "grid_overflowed_steps",
     ]:
         if key in out:
             out[key] = int(str(out[key]))
@@ -237,6 +255,12 @@ def coerce_values(values: dict[str, str]) -> dict[str, object]:
         "max_avg_step_ms",
         "final_mean_displacement_per_step",
         "final_mean_density",
+        "step_min_ms",
+        "step_median_ms",
+        "step_p95_ms",
+        "step_p99_ms",
+        "step_max_ms",
+        "step_jitter_ratio",
     ]:
         if key in out:
             out[key] = float(str(out[key]))
@@ -271,7 +295,9 @@ def run_case(
     repeats: int,
     mode: Mode,
     geometry: str,
+    model: Path | None,
     gaussian: bool,
+    step_timing: bool,
     env: dict[str, str],
     timeout: float,
 ) -> dict[str, object]:
@@ -292,10 +318,14 @@ def run_case(
         "--neighbor-mode",
         mode.name,
     ]
+    if model is not None:
+        command.extend(["--model", str(model)])
     if mode.bucket_capacity is not None:
         command.extend(["--bucket-capacity", str(mode.bucket_capacity)])
     if gaussian:
         command.append("--gaussian")
+    if step_timing:
+        command.append("--step-timing")
 
     started = time.perf_counter()
     result = subprocess.run(
@@ -313,6 +343,7 @@ def run_case(
         "requested_steps": steps,
         "requested_mode": mode.label,
         "requested_geometry": geometry,
+        "requested_model": str(model) if model is not None else "",
         "requested_gaussian": gaussian,
         "command": " ".join(command),
         "returncode": result.returncode,
@@ -326,7 +357,8 @@ def run_case(
         if gpu_step_ms > 0.0:
             row["particles_per_second"] = particles * steps / (gpu_step_ms / 1000.0)
             row["million_particles_per_second"] = row["particles_per_second"] / 1_000_000.0
-        row["overflow_ok"] = int(row.get("grid_overflow_count", 0)) == 0
+        max_overflow = int(row.get("grid_max_overflow_count", row.get("grid_overflow_count", 0)))
+        row["overflow_ok"] = max_overflow == 0
     return row
 
 
@@ -342,7 +374,7 @@ def selected_cases(args: argparse.Namespace) -> list[tuple[str, int, int, Mode, 
         particles = args.particles or spec["particles"]
         steps = args.steps or spec["steps"]
         modes = modes_override or spec["modes"]
-        geometries = args.geometries or ["seed"]
+        geometries = args.geometries or (DENSITY_GEOMETRIES if args.density_suite else ["seed"])
         for particle_count in particles:
             for mode in modes:
                 for geometry in geometries:
@@ -363,7 +395,7 @@ def write_reports(rows: list[dict[str, object]], output: Path) -> None:
 
 def print_summary(rows: list[dict[str, object]]) -> None:
     print("\nFastest non-overflow case per preset/particle count:")
-    grouped: dict[tuple[str, int], list[dict[str, object]]] = {}
+    grouped: dict[tuple[str, int, str, str], list[dict[str, object]]] = {}
     for row in rows:
         if row.get("returncode") != 0 or not row.get("overflow_ok", False):
             continue
@@ -371,6 +403,7 @@ def print_summary(rows: list[dict[str, object]]) -> None:
             str(row["preset"]),
             int(row["requested_particles"]),
             str(row.get("requested_geometry", "seed")),
+            str(row.get("requested_model", "")),
         )
         grouped.setdefault(key, []).append(row)
     for key in sorted(grouped):
@@ -379,7 +412,8 @@ def print_summary(rows: list[dict[str, object]]) -> None:
             f"{key[0]:14s} {key[1]:6d} particles {key[2]:7s}  "
             f"{best['requested_mode']:18s} {float(best['avg_step_ms']):9.4f} ms/step  "
             f"{float(best.get('million_particles_per_second', 0.0)):8.3f} M particles/s  "
-            f"resolved={best.get('neighbor_mode')} cap={best.get('bucket_capacity')}"
+            f"resolved={best.get('neighbor_mode')} cap={best.get('bucket_capacity')} "
+            f"model={key[3] or '<seeded>'}"
         )
 
     failed = [row for row in rows if row.get("returncode") != 0]
@@ -419,7 +453,9 @@ def main() -> int:
                 args.repeats,
                 mode,
                 geometry,
+                args.model,
                 args.gaussian,
+                args.step_timing,
                 env,
                 args.timeout,
             )
@@ -439,7 +475,9 @@ def main() -> int:
         if row.get("returncode") == 0:
             print(
                 f"    avg={float(row.get('avg_step_ms', 0.0)):.4f} ms "
-                f"overflow={row.get('grid_overflow_count', 'n/a')} "
+                f"p99={float(row.get('step_p99_ms', 0.0)):.4f} ms "
+                f"max={float(row.get('step_max_ms', 0.0)):.4f} ms "
+                f"overflow={row.get('grid_max_overflow_count', row.get('grid_overflow_count', 'n/a'))} "
                 f"resolved={row.get('neighbor_mode')}"
             )
         else:

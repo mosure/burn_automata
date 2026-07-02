@@ -627,6 +627,8 @@ pub(crate) enum Command {
     Bench {
         #[arg(long, default_value = "growing-2d")]
         preset: PresetArg,
+        #[arg(long)]
+        model: Option<PathBuf>,
         #[arg(long, default_value_t = 4096)]
         particles: usize,
         #[arg(long, default_value_t = 16)]
@@ -657,6 +659,8 @@ pub(crate) enum Command {
         geometry: BenchGeometryArg,
         #[arg(long)]
         gaussian: bool,
+        #[arg(long)]
+        step_timing: bool,
     },
     #[command(name = "bench-spatial", alias = "spatial-bench")]
     BenchSpatial {

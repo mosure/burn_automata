@@ -78,15 +78,15 @@ The current code keeps the portable two-pass gaussian write. Benchmarks show gau
 
 ## Fixed-Bucket Correctness
 
-Fixed buckets are exact only when `grid_overflow_count == 0`. A lower bucket capacity can look much faster because it drops particles from neighbor traversal, but that changes density, gradients, states, and final rendering.
+Fixed buckets are exact only when `grid_max_overflow_count == 0`. A lower bucket capacity can look much faster because it drops particles from neighbor traversal, but that changes density, gradients, states, and final rendering. State creation now rejects explicit fixed/tiled bucket capacities that are already smaller than the initial max cell occupancy.
 
 Benchmark output must therefore be filtered by:
 
 ```text
-returncode == 0 && grid_overflow_count == 0
+returncode == 0 && (grid_max_overflow_count if present, else grid_overflow_count) == 0
 ```
 
-The benchmark matrix reports overflowed cases separately and never selects them as fastest exact configurations.
+For `--step-timing` runs, prefer the stricter `grid_max_overflow_count == 0` and `grid_overflowed_steps == 0` fields. The benchmark matrix reports overflowed or rejected cases separately and never selects them as fastest exact configurations.
 
 ## Active-Cell Tiled Kernel
 
@@ -126,16 +126,17 @@ Benchmark matrix:
 | --- | --- |
 | presets | `growing-2d`, `texture-2d`, `point-mnist`, `growing-3d-gs` |
 | particles | 1k, 4k, 8k, 16k, 32k, 65k |
-| modes | linked-list, fixed buckets, tiled fixed buckets, sorted cells |
+| modes | linked-list, fixed buckets, tiled fixed buckets, sorted cells, cooperative sorted cells |
 | outputs | simulation-only, gaussian-write |
-| metrics | ms/step, M particles/s, overflow count, max occupancy, occupied cells |
+| metrics | ms/step, step p95/p99/max, jitter ratio, M particles/s, max overflow count, max occupancy, occupied cells |
 
 Measured impact after the June 2026 kernel pass:
 
-- 2D `auto` now uses `TiledFixedCellBuckets` with capacity derived from the initial max occupancy. This is exact when `grid_overflow_count == 0` and measured 2.1x-3.8x faster than the previous 2D auto resolver on the local WGPU benchmark matrix.
-- Broad 3D particle-hash grids still usually prefer the linked-list path: active-cell tiling adds barriers and duplicated cell-block work that the low occupancy does not recover.
-- Collapsed/high-occupancy 3D distributions are routed to tiled buckets only when `nonempty_cells * 32 <= particles` and max occupancy is at least 64. Capacity now uses the stronger `nextpow2(2 * max_occupancy + 64)` headroom rule, which removed final-state overflow in the 4K/8K collapsed-line regression check while preserving the adversarial 3D line speedup.
-- Sorted cells remain exact and memory-stable but slower in current measurements because count/scan/scatter overhead is not yet recovered by contiguous range traversal.
+- 2D `auto` now routes validated 1024-4096 particle workloads to cooperative sorted cells. This avoids fixed-bucket overflow/rejection on collapsed point and micro-cluster starts and removes the largest dense 2D tiled-kernel spikes in the local WGPU benchmark matrix.
+- 3D `auto` now also routes validated 1024-4096 particle workloads to cooperative sorted cells. The cooperative update path reduces neighbor features across a 32-lane workgroup, then evaluates the MLP hidden/output layers across those lanes instead of serializing the model on lane 0.
+- Larger 3D and 2D workloads remain deliberately bounded until their distributions are swept; the resolver keeps sparse sub-1024 particle 3D starts on linked lists and retains explicit overflow/rejection checks for fixed buckets.
+- Auto now rejects concentrated distributions before dispatch only when they exceed the validated exact cooperative/tiled fallback range: cooperative sorted cells are capped at 4096 particles per cell, exact sorted/linked fallback is capped at 512 particles per cell, and full-cell tiled scans are capped at 2,048 particles per cell when the distribution occupies at most four cells. This prevents known larger point and micro-cluster stalls from entering the default GPU path.
+- Sorted cells remain exact and memory-stable but slower in current measurements because count/scan/scatter overhead is not yet recovered by scalar contiguous range traversal. Cooperative sorted cells reuse the same compact layout but let one workgroup cooperatively reduce a target particle's neighbor range and MLP update, which is faster for validated 2D/3D 1k-4k cases.
 - BVH now exists in five forms: a CPU structural oracle in `burn_automata_kernels::spatial`, an executable `WgpuNeighborMode::Bvh { leaf_size }` path, an executable `WgpuNeighborMode::GpuBvh { leaf_size }` fixed-order baseline, an executable `WgpuNeighborMode::GpuLbvh { leaf_size }` sorted-cell GPU baseline, and an executable `WgpuNeighborMode::GpuMortonLbvh { leaf_size }` Morton-key GPU baseline. `Bvh` rebuilds a median-split BVH from current GPU positions on the CPU, uploads packed nodes/leaf indices into the existing grid buffer, then runs density/update traversal in WGSL. `GpuBvh` initializes a complete fixed-order binary tree and reduces AABBs entirely on GPU, avoiding readback but not spatially ordering particles. `GpuLbvh` reuses the GPU sorted-cell count/scan/scatter order, builds BVH leaves over that spatially coherent order, and reduces the tree on GPU. `GpuMortonLbvh` generates Morton keys from clamped grid coordinates, bitonic-sorts `(key, particle)` pairs on GPU, and builds the same tree over Morton order. All executable BVH modes are exact for clamped grids and useful for ablation; the Morton path is intentionally simple and not yet a production radix LBVH.
 
 ## Latest Local Measurements
@@ -144,13 +145,15 @@ Representative post-change release WGPU `auto` timings on the current ARM/NVIDIA
 
 | preset | particles | path | ms/step |
 | --- | ---: | --- | ---: |
-| `growing-3d-gs` dense | 8,192 | linked-list | 10.15 |
-| `growing-3d-gs` line | 8,192 | tiled buckets, cap 256 | 32.76 |
-| `growing-3d-gs` torus | 8,192 | linked-list | 12.44 |
-| `texture-2d` uniform | 8,192 | tiled buckets, cap 512 | 9.25 |
-| `texture-2d` line | 8,192 | tiled buckets, cap 1024 | 26.88 |
-| `growing-2d` uniform | 8,192 | tiled buckets, cap 2048 | 34.79 |
-| `growing-2d` line | 8,192 | tiled buckets, cap 4096 | 63.90 |
+| `growing-2d` dense | 4,096 | cooperative sorted cells | 3.18 |
+| `growing-2d` point | 4,096 | cooperative sorted cells | 3.38 |
+| `growing-2d` micro-cluster | 4,096 | cooperative sorted cells | 5.61 |
+| `texture-2d` dense | 4,096 | cooperative sorted cells | 1.31 |
+| `texture-2d` point | 4,096 | cooperative sorted cells | 2.26 |
+| `texture-2d` micro-cluster | 4,096 | cooperative sorted cells | 5.41 |
+| `growing-3d-gs` dense | 4,096 | cooperative sorted cells | 1.63 |
+| `growing-3d-gs` point | 4,096 | cooperative sorted cells | 3.82 |
+| `growing-3d-gs` micro-cluster | 4,096 | cooperative sorted cells | 13.80 |
 
 Representative executable BVH ablation rows:
 
@@ -217,6 +220,17 @@ and not simply forcing tiled or sorted cells into auto mode.
 
 The gaussian-write differences are within run-to-run noise. The throughput work should focus on neighbor memory reuse and active-cell scheduling rather than gaussian output writes.
 
+The guarded clustered-density sweep is saved by:
+
+```bash
+scripts/bench_gpu_matrix.py --no-build --step-timing \
+  --preset growing-2d --preset texture-2d --preset growing-3d-gs \
+  --particles 1024 --particles 4096 --steps 4 --repeats 1 \
+  --geometry dense --geometry point --geometry micro-cluster \
+  --mode auto --mode cooperative-sorted-cells --mode tiled-fixed-buckets:512 \
+  --output target/bench_gpu_cooperative_final.json --timeout 90
+```
+
 The reproducible gaussian-write sweep is saved by:
 
 ```bash
@@ -245,4 +259,5 @@ cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- 
 ```
 
 The CLI reports `min_avg_step_ms`, `median_avg_step_ms`, and
-`max_avg_step_ms`; use the median field when comparing kernels.
+`max_avg_step_ms`; use the median field when comparing batched throughput. Add
+`--step-timing` when measuring frame-time stability or spike regressions.

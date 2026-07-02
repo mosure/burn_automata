@@ -118,18 +118,139 @@ fn adaptive_auto_uses_sorted_cells_for_small_collapsed_3d_particle_grid_cells() 
 }
 
 #[test]
-fn adaptive_auto_falls_back_when_3d_fixed_buckets_cannot_fit_binding_limit() {
+fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_3d_cells() {
     let grid = HashGridConfig::growing_3dgs();
-    let particle_count = 8192;
+    let particle_count = 1024;
     let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
 
     let (capacity, mode) =
         resolve_neighbor_mode_for_state(&grid, particle_count, &positions, WgpuNeighborMode::Auto)
             .unwrap();
-    let storage_len =
-        grid_storage_len_for_mode(grid.cell_count(), particle_count, capacity, mode).unwrap();
 
     assert_eq!(capacity, 0);
-    assert_eq!(mode, WgpuNeighborMode::SortedCells);
-    assert!(grid_storage_binding_len_fits(storage_len));
+    assert_eq!(mode, WgpuNeighborMode::CooperativeSortedCells);
+}
+
+#[test]
+fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_3d_throughput_range() {
+    let particle_count = 1024;
+    let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);
+    let (positions, _) = seed_particles_scaled(
+        1,
+        particle_count,
+        config.state_dims,
+        config.spatial_dims,
+        13,
+        ParticleSeed::UniformCircle,
+        1.0,
+    );
+    let (nonempty_cells, max_occupancy) =
+        initial_cell_occupancy_stats(&grid, particle_count, &positions).unwrap();
+
+    let (capacity, mode) =
+        resolve_neighbor_mode_for_state(&grid, particle_count, &positions, WgpuNeighborMode::Auto)
+            .unwrap();
+
+    assert!(
+        nonempty_cells > 4 && max_occupancy > 0,
+        "expected a distributed 3D seed, got nonempty={nonempty_cells} max={max_occupancy}"
+    );
+    assert_eq!(capacity, 0);
+    assert_eq!(mode, WgpuNeighborMode::CooperativeSortedCells);
+}
+
+#[test]
+fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_2d_cells() {
+    let grid = HashGridConfig::growing_2d();
+    let particle_count = 4096;
+    let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
+
+    let (capacity, mode) =
+        resolve_neighbor_mode_for_state(&grid, particle_count, &positions, WgpuNeighborMode::Auto)
+            .unwrap();
+
+    assert_eq!(capacity, 0);
+    assert_eq!(mode, WgpuNeighborMode::CooperativeSortedCells);
+}
+
+#[test]
+fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_2d_throughput_range() {
+    let particle_count = 1024;
+    let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    let (positions, _) = seed_particles_scaled(
+        1,
+        particle_count,
+        config.state_dims,
+        config.spatial_dims,
+        7,
+        ParticleSeed::UniformCircle,
+        0.2,
+    );
+    let (nonempty_cells, max_occupancy) =
+        initial_cell_occupancy_stats(&grid, particle_count, &positions).unwrap();
+
+    let (capacity, mode) =
+        resolve_neighbor_mode_for_state(&grid, particle_count, &positions, WgpuNeighborMode::Auto)
+            .unwrap();
+
+    assert!(
+        nonempty_cells > 4 && max_occupancy > 0,
+        "expected a distributed 2D seed, got nonempty={nonempty_cells} max={max_occupancy}"
+    );
+    assert_eq!(capacity, 0);
+    assert_eq!(mode, WgpuNeighborMode::CooperativeSortedCells);
+}
+
+#[test]
+fn adaptive_auto_rejects_unvalidated_oversized_cooperative_cells() {
+    let grid = HashGridConfig::growing_2d();
+    let particle_count = 8192;
+    let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
+
+    let err =
+        resolve_neighbor_mode_for_state(&grid, particle_count, &positions, WgpuNeighborMode::Auto)
+            .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("cooperative sorted cells currently supports"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn adaptive_auto_rejects_unvalidated_oversized_3d_cooperative_cells() {
+    let grid = HashGridConfig::growing_3dgs();
+    let particle_count = 8192;
+    let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
+
+    let err =
+        resolve_neighbor_mode_for_state(&grid, particle_count, &positions, WgpuNeighborMode::Auto)
+            .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("cooperative sorted cells currently supports"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn fixed_buckets_reject_initial_occupancy_over_capacity() {
+    let grid = HashGridConfig::growing_2d();
+    let positions = vec![[0.0, 0.0, 0.0, 0.0]; 1024];
+
+    let err = resolve_neighbor_mode_for_state(
+        &grid,
+        positions.len(),
+        &positions,
+        WgpuNeighborMode::TiledFixedCellBuckets { capacity: 512 },
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("is smaller than initial max cell occupancy"),
+        "unexpected error: {err}"
+    );
 }

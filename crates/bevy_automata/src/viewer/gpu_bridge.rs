@@ -31,17 +31,13 @@ pub(super) fn automata_render_reinit_key(
 
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 pub(super) fn effective_gpu_neighbor_mode(
-    runtime: &AutomataRuntime,
+    _runtime: &AutomataRuntime,
     settings: &AutomataSettings,
 ) -> WgpuNeighborMode {
     if settings.gpu_neighbor_mode != WgpuNeighborMode::Auto {
         return settings.gpu_neighbor_mode;
     }
-    if runtime.model.config.spatial_dims == 3 && settings.particle_count <= 2048 {
-        WgpuNeighborMode::SortedCells
-    } else {
-        WgpuNeighborMode::Auto
-    }
+    WgpuNeighborMode::Auto
 }
 
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
@@ -122,6 +118,10 @@ pub struct AutomataRenderDiagnostics {
     pub requested_particle_count: usize,
     pub gaussian_storage_count: usize,
     pub resident_particle_count: usize,
+    pub resolved_neighbor_mode: String,
+    pub bucket_capacity: usize,
+    pub grid_storage_len: usize,
+    pub grid_clear_len: usize,
     pub frame: usize,
     pub last_error: Option<String>,
 }
@@ -317,6 +317,7 @@ pub(super) fn step_automata_into_gaussians(
             config.seed,
         ) {
             Ok(state) => {
+                let neighbor = executor.neighbor_report(&state);
                 render_state.state = Some(state);
                 render_state.gaussian_bind_group = None;
                 render_state.reinit_key = config.reinit_key;
@@ -326,6 +327,10 @@ pub(super) fn step_automata_into_gaussians(
                 render_state.frame = 0;
                 render_state.last_error = None;
                 diagnostics.resident_particle_count = config.particle_count;
+                diagnostics.resolved_neighbor_mode = format!("{:?}", neighbor.mode);
+                diagnostics.bucket_capacity = neighbor.bucket_capacity;
+                diagnostics.grid_storage_len = neighbor.grid_storage_len;
+                diagnostics.grid_clear_len = neighbor.grid_clear_len;
                 diagnostics.last_error = None;
             }
             Err(err) => {
@@ -382,6 +387,15 @@ pub(super) fn step_automata_into_gaussians(
                 return;
             }
         }
+    }
+    if let (Some(executor), Some(state)) =
+        (render_state.executor.as_ref(), render_state.state.as_ref())
+    {
+        let neighbor = executor.neighbor_report(state);
+        diagnostics.resolved_neighbor_mode = format!("{:?}", neighbor.mode);
+        diagnostics.bucket_capacity = neighbor.bucket_capacity;
+        diagnostics.grid_storage_len = neighbor.grid_storage_len;
+        diagnostics.grid_clear_len = neighbor.grid_clear_len;
     }
     let steps = config.steps_per_frame.max(1);
     let step_result = {

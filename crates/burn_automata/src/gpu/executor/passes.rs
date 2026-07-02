@@ -38,7 +38,10 @@ impl WgpuAutomataExecutor {
             pass.set_bind_group(0, grid_bind_group, &[]);
             pass.dispatch_workgroups(dispatch_groups(state.total)?, 1, 1);
         }
-        if matches!(state.neighbor_mode, WgpuNeighborMode::SortedCells) {
+        if matches!(
+            state.neighbor_mode,
+            WgpuNeighborMode::SortedCells | WgpuNeighborMode::CooperativeSortedCells
+        ) {
             let scan_groups = u32_checked(scan_block_count(state.cell_count)?, "scan block count")?;
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -86,14 +89,26 @@ impl WgpuAutomataExecutor {
                 state.neighbor_mode,
                 WgpuNeighborMode::TiledFixedCellBuckets { .. }
             );
+            let cooperative = matches!(
+                state.neighbor_mode,
+                WgpuNeighborMode::CooperativeSortedCells
+            );
             pass.set_pipeline(if tiled {
                 &self.tiled_density_pipeline
+            } else if cooperative {
+                &self.cooperative_density_pipeline
             } else {
                 &self.density_pipeline
             });
             pass.set_bind_group(0, bind_group, &[]);
             if tiled {
                 pass.dispatch_workgroups_indirect(&state.indirect_buffer, 0);
+            } else if cooperative {
+                pass.dispatch_workgroups(
+                    u32_checked(state.total, "cooperative density groups")?,
+                    1,
+                    1,
+                );
             } else {
                 pass.dispatch_workgroups(dispatch_groups(state.total)?, 1, 1);
             }
@@ -117,16 +132,28 @@ impl WgpuAutomataExecutor {
                 WgpuNeighborMode::TiledFixedCellBuckets { .. }
             );
             let bvh = is_bvh_neighbor_mode(state.neighbor_mode);
+            let cooperative = matches!(
+                state.neighbor_mode,
+                WgpuNeighborMode::CooperativeSortedCells
+            );
             pass.set_pipeline(if bvh {
                 &self.bvh_update_pipeline
             } else if tiled {
                 &self.tiled_update_pipeline
+            } else if cooperative {
+                &self.cooperative_update_pipeline
             } else {
                 &self.update_pipeline
             });
             pass.set_bind_group(0, bind_group, &[]);
             if tiled {
                 pass.dispatch_workgroups_indirect(&state.indirect_buffer, 0);
+            } else if cooperative {
+                pass.dispatch_workgroups(
+                    u32_checked(state.total, "cooperative update groups")?,
+                    1,
+                    1,
+                );
             } else {
                 pass.dispatch_workgroups(dispatch_groups(state.total)?, 1, 1);
             }

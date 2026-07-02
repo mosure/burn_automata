@@ -23,6 +23,7 @@ pub enum WgpuNeighborMode {
         capacity: usize,
     },
     SortedCells,
+    CooperativeSortedCells,
     Bvh {
         leaf_size: usize,
     },
@@ -132,5 +133,7 @@ pub struct WgpuAutomataExecutor {
     pub(super) update_pipeline: wgpu::ComputePipeline,
     pub(super) tiled_update_pipeline: wgpu::ComputePipeline,
     pub(super) bvh_update_pipeline: wgpu::ComputePipeline,
+    pub(super) cooperative_density_pipeline: wgpu::ComputePipeline,
+    pub(super) cooperative_update_pipeline: wgpu::ComputePipeline,
     pub(super) gaussian_pipeline: wgpu::ComputePipeline,
 }

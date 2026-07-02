@@ -55,7 +55,10 @@ pub(in crate::gpu) fn grid_storage_len_for_mode(
     bucket_capacity: usize,
     mode: WgpuNeighborMode,
 ) -> AutomataResult<usize> {
-    if matches!(mode, WgpuNeighborMode::SortedCells) {
+    if matches!(
+        mode,
+        WgpuNeighborMode::SortedCells | WgpuNeighborMode::CooperativeSortedCells
+    ) {
         return sorted_grid_storage_len(cell_count, particle_count);
     }
     if matches!(mode, WgpuNeighborMode::GpuLbvh { .. }) {

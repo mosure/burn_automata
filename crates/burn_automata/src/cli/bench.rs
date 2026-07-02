@@ -79,6 +79,12 @@ pub(crate) struct ProfileReport {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GpuBenchReport {
     pub(crate) gpu_step_ms: f64,
+    pub(crate) step_min_ms: f64,
+    pub(crate) step_median_ms: f64,
+    pub(crate) step_p95_ms: f64,
+    pub(crate) step_p99_ms: f64,
+    pub(crate) step_max_ms: f64,
+    pub(crate) step_jitter_ratio: f64,
     pub(crate) final_mean_dx: f32,
     pub(crate) final_mean_density: f32,
     pub(crate) initial_nonempty_cells: usize,
@@ -88,6 +94,8 @@ pub(crate) struct GpuBenchReport {
     pub(crate) grid_storage_len: usize,
     pub(crate) grid_clear_len: usize,
     pub(crate) grid_overflow_count: u32,
+    pub(crate) grid_max_overflow_count: u32,
+    pub(crate) grid_overflowed_steps: usize,
     pub(crate) gaussian_write: bool,
 }
 
@@ -102,6 +110,7 @@ pub(crate) struct GpuBenchConfig {
     pub(crate) geometry: BenchGeometryArg,
     pub(crate) neighbor_mode: crate::gpu::WgpuNeighborMode,
     pub(crate) gaussian_write: bool,
+    pub(crate) step_timing: bool,
 }
 
 #[cfg(feature = "gpu_wgpu")]
@@ -159,6 +168,12 @@ pub(crate) fn gpu_rollout_bench(
         hashgrid_occupancy_stats(&initial_grid.bin_offsets);
     let mut report = GpuBenchReport {
         gpu_step_ms: 0.0,
+        step_min_ms: 0.0,
+        step_median_ms: 0.0,
+        step_p95_ms: 0.0,
+        step_p99_ms: 0.0,
+        step_max_ms: 0.0,
+        step_jitter_ratio: 0.0,
         final_mean_dx: 0.0,
         final_mean_density: 0.0,
         initial_nonempty_cells,
@@ -168,6 +183,8 @@ pub(crate) fn gpu_rollout_bench(
         grid_storage_len: 0,
         grid_clear_len: 0,
         grid_overflow_count: 0,
+        grid_max_overflow_count: 0,
+        grid_overflowed_steps: 0,
         gaussian_write: cfg.gaussian_write,
     };
     let executor = crate::gpu::WgpuAutomataExecutor::new_blocking()?;
@@ -212,17 +229,46 @@ pub(crate) fn gpu_rollout_bench(
     report.bucket_capacity = neighbor.bucket_capacity;
     report.grid_storage_len = neighbor.grid_storage_len;
     report.grid_clear_len = neighbor.grid_clear_len;
-    let started = Instant::now();
-    for _ in 0..cfg.steps {
-        if let Some(bind_group) = gaussian_bind_group.as_ref() {
-            executor.step_state_into_gaussian_bind_group(&mut state, bind_group)?;
-        } else {
-            executor.step_state(&mut state)?;
+    if cfg.step_timing {
+        let mut step_ms = Vec::with_capacity(cfg.steps);
+        for _ in 0..cfg.steps {
+            let started = Instant::now();
+            if let Some(bind_group) = gaussian_bind_group.as_ref() {
+                executor.step_state_into_gaussian_bind_group(&mut state, bind_group)?;
+            } else {
+                executor.step_state(&mut state)?;
+            }
+            executor.wait_idle()?;
+            step_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            let overflow = executor.read_grid_overflow(&state)?;
+            report.grid_max_overflow_count = report.grid_max_overflow_count.max(overflow);
+            report.grid_overflowed_steps += usize::from(overflow > 0);
         }
+        let stats = latency_stats(&step_ms);
+        report.gpu_step_ms = stats.total_ms;
+        report.step_min_ms = stats.min_ms;
+        report.step_median_ms = stats.median_ms;
+        report.step_p95_ms = stats.p95_ms;
+        report.step_p99_ms = stats.p99_ms;
+        report.step_max_ms = stats.max_ms;
+        report.step_jitter_ratio = stats.jitter_ratio;
+    } else {
+        let started = Instant::now();
+        for _ in 0..cfg.steps {
+            if let Some(bind_group) = gaussian_bind_group.as_ref() {
+                executor.step_state_into_gaussian_bind_group(&mut state, bind_group)?;
+            } else {
+                executor.step_state(&mut state)?;
+            }
+        }
+        executor.wait_idle()?;
+        report.gpu_step_ms = started.elapsed().as_secs_f64() * 1000.0;
     }
-    executor.wait_idle()?;
-    report.gpu_step_ms = started.elapsed().as_secs_f64() * 1000.0;
     report.grid_overflow_count = executor.read_grid_overflow(&state)?;
+    report.grid_max_overflow_count = report
+        .grid_max_overflow_count
+        .max(report.grid_overflow_count);
+    report.grid_overflowed_steps += usize::from(!cfg.step_timing && report.grid_overflow_count > 0);
     let output = executor.read_state(&state)?;
     report.final_mean_dx = output
         .next_positions
@@ -245,6 +291,57 @@ pub(crate) fn gpu_rollout_bench(
 }
 
 #[cfg(feature = "gpu_wgpu")]
+#[derive(Clone, Copy, Debug, Default)]
+struct LatencyStats {
+    total_ms: f64,
+    min_ms: f64,
+    median_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    jitter_ratio: f64,
+}
+
+#[cfg(feature = "gpu_wgpu")]
+fn latency_stats(samples: &[f64]) -> LatencyStats {
+    if samples.is_empty() {
+        return LatencyStats::default();
+    }
+    let total_ms = samples.iter().sum();
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+    let min_ms = sorted[0];
+    let median_ms = percentile_nearest_rank(&sorted, 50.0);
+    let p95_ms = percentile_nearest_rank(&sorted, 95.0);
+    let p99_ms = percentile_nearest_rank(&sorted, 99.0);
+    let max_ms = *sorted.last().unwrap_or(&0.0);
+    let jitter_ratio = if median_ms > 0.0 {
+        max_ms / median_ms
+    } else {
+        0.0
+    };
+    LatencyStats {
+        total_ms,
+        min_ms,
+        median_ms,
+        p95_ms,
+        p99_ms,
+        max_ms,
+        jitter_ratio,
+    }
+}
+
+#[cfg(feature = "gpu_wgpu")]
+fn percentile_nearest_rank(sorted_samples: &[f64], percentile: f64) -> f64 {
+    if sorted_samples.is_empty() {
+        return 0.0;
+    }
+    let percentile = percentile.clamp(0.0, 100.0);
+    let rank = (percentile / 100.0 * sorted_samples.len() as f64).ceil() as usize;
+    sorted_samples[rank.saturating_sub(1).min(sorted_samples.len() - 1)]
+}
+
+#[cfg(feature = "gpu_wgpu")]
 pub(crate) fn wgpu_neighbor_mode(
     mode: NeighborModeArg,
     bucket_capacity: Option<usize>,
@@ -263,6 +360,9 @@ pub(crate) fn wgpu_neighbor_mode(
             capacity: bucket_capacity.unwrap_or(256),
         },
         NeighborModeArg::SortedCells => crate::gpu::WgpuNeighborMode::SortedCells,
+        NeighborModeArg::CooperativeSortedCells => {
+            crate::gpu::WgpuNeighborMode::CooperativeSortedCells
+        }
         NeighborModeArg::Bvh => crate::gpu::WgpuNeighborMode::Bvh {
             leaf_size: bucket_capacity.unwrap_or(16),
         },
@@ -375,6 +475,10 @@ pub(crate) fn apply_bench_geometry(
         let local_idx = idx % particles.max(1);
         *position = match geometry {
             BenchGeometryArg::Seed => *position,
+            BenchGeometryArg::Point => [0.0, 0.0, 0.0, 0.0],
+            BenchGeometryArg::MicroCluster => {
+                micro_cluster_position(&mut rng, spatial_dims, grid.eps)
+            }
             BenchGeometryArg::Dense | BenchGeometryArg::ShiftedDense => {
                 dense_ball_position(&mut rng, spatial_dims, scale)
             }
@@ -406,6 +510,16 @@ pub(crate) fn dense_ball_position(rng: &mut StdRng, spatial_dims: usize, scale: 
         let r = rng.random::<f32>().cbrt() * scale;
         [dir[0] * r, dir[1] * r, dir[2] * r, 0.0]
     }
+}
+
+pub(crate) fn micro_cluster_position(rng: &mut StdRng, spatial_dims: usize, eps: f32) -> [f32; 4] {
+    let mut position = [0.0; 4];
+    let center = 0.25 * eps;
+    let radius = 0.0625 * eps;
+    for value in position.iter_mut().take(spatial_dims) {
+        *value = center + rng.random_range(-radius..radius);
+    }
+    position
 }
 
 pub(crate) fn uniform_box_position(rng: &mut StdRng, spatial_dims: usize, scale: f32) -> [f32; 4] {
@@ -611,4 +725,79 @@ pub(crate) fn stochastic_mask(count: usize, update_prob: f32, rng: &mut StdRng) 
     (0..count)
         .map(|_| f32::from(rng.random::<f32>() < update_prob))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn occupancy_stats(bin_offsets: &[usize]) -> (usize, usize) {
+        bin_offsets
+            .windows(2)
+            .map(|window| window[1] - window[0])
+            .fold((0usize, 0usize), |(nonempty, max), count| {
+                (nonempty + usize::from(count > 0), max.max(count))
+            })
+    }
+
+    #[test]
+    fn point_bench_geometry_collapses_to_one_hashgrid_cell() {
+        let grid = crate::kernels::HashGridConfig::growing_2d();
+        let particles = 256;
+        let mut positions = vec![[1.0, -1.0, 0.5, 0.0]; particles];
+
+        apply_bench_geometry(
+            &mut positions,
+            2,
+            particles,
+            0.5,
+            &grid,
+            BenchGeometryArg::Point,
+            7,
+        );
+
+        assert!(positions.iter().all(|position| position[..2] == [0.0, 0.0]));
+        let snapshot = crate::kernels::build_hashgrid(&positions, 1, particles, &grid).unwrap();
+        assert_eq!(occupancy_stats(&snapshot.bin_offsets), (1, particles));
+    }
+
+    #[test]
+    fn micro_cluster_bench_geometry_stays_inside_one_particle_cell() {
+        let grid = crate::kernels::HashGridConfig::growing_3dgs();
+        let particles = 512;
+        let mut positions = vec![[0.0; 4]; particles];
+
+        apply_bench_geometry(
+            &mut positions,
+            3,
+            particles,
+            0.5,
+            &grid,
+            BenchGeometryArg::MicroCluster,
+            11,
+        );
+
+        for position in &positions {
+            for coordinate in position.iter().take(3) {
+                assert!(*coordinate > 0.0);
+                assert!(*coordinate < grid.eps);
+            }
+        }
+        let snapshot = crate::kernels::build_hashgrid(&positions, 1, particles, &grid).unwrap();
+        assert_eq!(occupancy_stats(&snapshot.bin_offsets), (1, particles));
+    }
+
+    #[cfg(feature = "gpu_wgpu")]
+    #[test]
+    fn latency_stats_reports_tail_step_spikes() {
+        let stats = latency_stats(&[1.0, 2.0, 3.0, 100.0]);
+
+        assert_eq!(stats.total_ms, 106.0);
+        assert_eq!(stats.min_ms, 1.0);
+        assert_eq!(stats.median_ms, 2.0);
+        assert_eq!(stats.p95_ms, 100.0);
+        assert_eq!(stats.p99_ms, 100.0);
+        assert_eq!(stats.max_ms, 100.0);
+        assert_eq!(stats.jitter_ratio, 50.0);
+    }
 }

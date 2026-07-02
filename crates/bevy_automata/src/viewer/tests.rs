@@ -167,7 +167,7 @@ fn catalog_registers_teapot_as_blocked_growth_artifact() {
 
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 #[test]
-fn catalog_3d_default_uses_sorted_gpu_neighbor_mode() {
+fn catalog_3d_default_uses_auto_gpu_neighbor_mode() {
     let mut runtime = AutomataRuntime::default();
     let (config, hashgrid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);
     runtime.model = NpaModel::seeded(config, 42);
@@ -181,7 +181,7 @@ fn catalog_3d_default_uses_sorted_gpu_neighbor_mode() {
     };
     assert_eq!(
         effective_gpu_neighbor_mode(&runtime, &settings),
-        WgpuNeighborMode::SortedCells
+        WgpuNeighborMode::Auto
     );
 
     settings.particle_count = 4096;
