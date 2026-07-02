@@ -108,7 +108,9 @@ fn growth_3d_validation_rejects_mismatched_target_lineage() {
 
     assert!(report.local_conditionless_lineage);
     assert!(!report.target_conditionless_lineage);
+    assert!(!report.target_seed_conditionless_lineage);
     assert!(!report.strict_checks.target_conditionless_lineage);
+    assert!(!report.strict_checks.target_seed_conditionless_lineage);
     assert!(!report.strict_passed);
     assert!(
         report
@@ -118,6 +120,7 @@ fn growth_3d_validation_rejects_mismatched_target_lineage() {
         "target-mismatched local artifacts should fail strict validation explicitly"
     );
     assert!(!report.robustness.all_target_conditionless_lineage);
+    assert!(!report.robustness.all_target_seed_conditionless_lineage);
     assert!(
         report
             .robustness
@@ -153,7 +156,9 @@ fn growth_3d_validation_rejects_mismatched_target_seed_mode() {
 
     assert!(report.local_conditionless_lineage);
     assert!(report.target_conditionless_lineage);
+    assert!(!report.target_seed_conditionless_lineage);
     assert!(!report.target_growth_seed_mode);
+    assert!(!report.strict_checks.target_seed_conditionless_lineage);
     assert!(!report.strict_checks.target_growth_seed_mode);
     assert!(!report.strict_passed);
     assert!(
@@ -164,6 +169,7 @@ fn growth_3d_validation_rejects_mismatched_target_seed_mode() {
         "target validation must fail when a teapot artifact is evaluated with a torus seed family"
     );
     assert!(!report.robustness.all_target_growth_seed_mode);
+    assert!(!report.robustness.all_target_seed_conditionless_lineage);
     assert!(
         report
             .robustness
@@ -171,6 +177,49 @@ fn growth_3d_validation_rejects_mismatched_target_seed_mode() {
             .iter()
             .all(|seed| !seed.target_growth_seed_mode)
     );
+    assert!(!growth_3d_fail_on_validation_passed(&report));
+}
+
+#[test]
+fn growth_3d_validation_rejects_mismatched_seed_source_topology() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let model = NpaModel {
+        config: config.clone(),
+        weights: NpaWeights::zeros(&config),
+    };
+    let path = bin_temp_path("mismatched_seed_source_topology_growth3d.bpk");
+    let manifest = BpkModelManifest::from_model(
+        &model,
+        grid,
+        Some(format!(
+            "render-refined-rust:{TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE}"
+        )),
+    );
+    crate::import::save_manifest(&path, &manifest).unwrap();
+
+    let report = growth_3d_validation_report(
+        &path,
+        MeshTargetArg::Teapot,
+        growth_validation_test_config(ParticleSeed::TeapotLocalSubstrateGrowth3d),
+    )
+    .unwrap();
+    std::fs::remove_file(&path).ok();
+
+    assert!(report.local_conditionless_lineage);
+    assert!(report.target_conditionless_lineage);
+    assert!(report.target_growth_seed_mode);
+    assert!(!report.target_seed_conditionless_lineage);
+    assert!(!report.strict_checks.target_seed_conditionless_lineage);
+    assert!(!report.strict_passed);
+    assert!(
+        report
+            .strict_checks
+            .failure_reasons
+            .contains(&"target_seed_conditionless_lineage"),
+        "strict validation must reject random-ball lineage when evaluating a no-scaffold substrate seed"
+    );
+    assert!(!report.robustness.all_target_seed_conditionless_lineage);
     assert!(!growth_3d_fail_on_validation_passed(&report));
 }
 
@@ -245,6 +294,7 @@ fn growth_3d_strict_checks_accept_one_eighth_active_seed_boundary() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,
@@ -324,6 +374,7 @@ fn growth_3d_strict_checks_reject_seed_coordinate_scaffold() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,
@@ -418,6 +469,7 @@ fn growth_3d_strict_checks_reject_tiny_active_extent() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,

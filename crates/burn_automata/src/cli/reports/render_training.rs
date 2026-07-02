@@ -56,6 +56,7 @@ pub(crate) struct CliRenderTrainingGateSummary {
     pub(crate) no_position_features: bool,
     pub(crate) local_conditionless_lineage: bool,
     pub(crate) target_conditionless_lineage: bool,
+    pub(crate) target_seed_conditionless_lineage: bool,
     pub(crate) target_growth_seed_mode: bool,
     pub(crate) no_seed_coordinate_scaffold: bool,
     pub(crate) neutral_non_opacity_seed_state: bool,
@@ -120,6 +121,9 @@ impl CliRenderTrainingGateSummary {
             no_position_features: report.strict_checks.no_position_features,
             local_conditionless_lineage: report.strict_checks.local_conditionless_lineage,
             target_conditionless_lineage: report.strict_checks.target_conditionless_lineage,
+            target_seed_conditionless_lineage: report
+                .strict_checks
+                .target_seed_conditionless_lineage,
             target_growth_seed_mode: report.strict_checks.target_growth_seed_mode,
             no_seed_coordinate_scaffold: report.strict_checks.no_seed_coordinate_scaffold,
             neutral_non_opacity_seed_state: report.strict_checks.neutral_non_opacity_seed_state,

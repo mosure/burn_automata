@@ -52,6 +52,7 @@ fn growth_3d_strict_checks_reject_transparent_target_coverage() {
         true,
         true,
         true,
+        true,
         false,
         0.0,
         passing_growth_3d_opacity_stats(),
@@ -156,6 +157,7 @@ fn growth_3d_strict_checks_reject_transparent_normal_support() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,

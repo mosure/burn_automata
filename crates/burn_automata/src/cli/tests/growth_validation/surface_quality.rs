@@ -63,6 +63,7 @@ fn growth_3d_strict_checks_report_torus_angular_diagnostics_without_generic_reje
         true,
         true,
         true,
+        true,
         false,
         0.0,
         passing_growth_3d_opacity_stats(),
@@ -103,6 +104,7 @@ fn growth_3d_strict_checks_report_torus_angular_diagnostics_without_generic_reje
     };
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,
@@ -265,6 +267,7 @@ fn growth_3d_strict_checks_reject_missing_surface_normal_coverage() {
         true,
         true,
         true,
+        true,
         false,
         0.0,
         passing_growth_3d_opacity_stats(),
@@ -364,6 +367,7 @@ fn growth_3d_strict_checks_reject_gaussian_scale_budget_abuse() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,

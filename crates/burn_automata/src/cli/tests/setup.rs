@@ -274,7 +274,7 @@ fn train_render3d_exposes_material_gains_separately_from_opacity_gain() {
 fn render_training_source_preserves_local_refinement_lineage() {
     let local_source = render_training_source(
         MeshTargetArg::Torus,
-        Some(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+        Some(UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE),
         ParticleSeed::TorusGrowth3d,
     );
     assert!(local_source.starts_with("render-refined-rust:"));
@@ -323,6 +323,16 @@ fn render_training_source_does_not_preserve_mismatched_target_lineage() {
         MeshTargetArg::Torus,
         TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE
     ));
+    assert!(target_seed_conditionless_lineage(
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+    ));
+    assert!(!target_seed_conditionless_lineage(
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE
+    ));
 
     let mismatched_source = render_training_source(
         MeshTargetArg::Teapot,
@@ -347,6 +357,18 @@ fn render_training_source_does_not_preserve_mismatched_target_lineage() {
     );
     assert!(mismatched_seed_source.contains("Teapot"));
     assert!(mismatched_seed_source.contains("TorusLocalSubstrateGrowth3d"));
+
+    let mismatched_seed_topology_source = render_training_source(
+        MeshTargetArg::Teapot,
+        Some(TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE),
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+    );
+    assert!(
+        mismatched_seed_topology_source.starts_with("render-proxy-rust:"),
+        "target-local lineage must not be preserved when source topology is random-ball but seed mode is no-scaffold substrate"
+    );
+    assert!(mismatched_seed_topology_source.contains("Teapot"));
+    assert!(mismatched_seed_topology_source.contains(TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE));
 }
 
 #[test]
@@ -609,7 +631,7 @@ fn catalog_bound_render_training_rejects_mismatched_target_lineage() {
         catalog_path,
         MeshTargetArg::Teapot,
         ParticleSeed::TeapotLocalSubstrateGrowth3d,
-        Some(TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+        Some(TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE),
     )
     .unwrap();
 }
@@ -739,7 +761,8 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     )
     .unwrap();
 
-    let local_source = format!("render-refined-rust:{TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE}");
+    let local_source =
+        format!("render-refined-rust:{TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE}");
     validate_catalog_bound_render_training_output(
         Path::new("assets/models/teapot_growth_3d.bpk"),
         MeshTargetArg::Teapot,
@@ -756,6 +779,20 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     )
     .unwrap_err();
     assert!(field_seed_error.to_string().contains("local growth seed"));
+
+    let source_seed_mismatch_error = validate_catalog_bound_render_training_output(
+        Path::new("assets/models/render_trained_3d.bpk"),
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        Some(TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE),
+    )
+    .unwrap_err();
+    assert!(
+        source_seed_mismatch_error
+            .to_string()
+            .contains("matching seed_mode"),
+        "catalog promotion should reject a random-ball source when evaluating a no-scaffold substrate seed"
+    );
 
     let scaffold_seed_error = validate_catalog_bound_render_training_output(
         Path::new("assets/models/render_trained_3d.bpk"),

@@ -19,6 +19,7 @@ pub(crate) fn growth_3d_robustness_seed_report(
         catalog_sanity_passed: report.catalog_sanity.passed,
         strict_score: report.strict_score.score,
         target_conditionless_lineage: report.strict_checks.target_conditionless_lineage,
+        target_seed_conditionless_lineage: report.strict_checks.target_seed_conditionless_lineage,
         target_growth_seed_mode: report.strict_checks.target_growth_seed_mode,
         no_seed_coordinate_scaffold: report.strict_checks.no_seed_coordinate_scaffold,
         render_loss: report.render_loss.total_loss,
@@ -133,6 +134,10 @@ pub(crate) fn growth_3d_robustness_report(
         seed_count > 0 && seeds.iter().all(|seed| seed.local_front_coherent);
     let all_target_conditionless_lineage =
         seed_count > 0 && seeds.iter().all(|seed| seed.target_conditionless_lineage);
+    let all_target_seed_conditionless_lineage = seed_count > 0
+        && seeds
+            .iter()
+            .all(|seed| seed.target_seed_conditionless_lineage);
     let all_target_growth_seed_mode =
         seed_count > 0 && seeds.iter().all(|seed| seed.target_growth_seed_mode);
     let all_no_seed_coordinate_scaffold =
@@ -364,6 +369,7 @@ pub(crate) fn growth_3d_robustness_report(
         all_temporal_geometry_progressive,
         all_local_front_coherent,
         all_target_conditionless_lineage,
+        all_target_seed_conditionless_lineage,
         all_target_growth_seed_mode,
         all_no_seed_coordinate_scaffold,
         all_active_extent_growth,

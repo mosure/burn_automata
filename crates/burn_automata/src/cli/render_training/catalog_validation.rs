@@ -215,11 +215,11 @@ pub(crate) fn render_training_source(
     if let Some(source) = base_source {
         if source.starts_with("render-refined-rust:")
             && local_growth_seed
-            && target_conditionless_lineage(target, source)
+            && target_seed_conditionless_lineage(target, seed_mode, source)
         {
             return source.to_string();
         }
-        if target_conditionless_lineage(target, source) && local_growth_seed {
+        if target_seed_conditionless_lineage(target, seed_mode, source) && local_growth_seed {
             return format!("render-refined-rust:{source}");
         }
         return format!("render-proxy-rust:{target:?}:base={source}:seed={seed_mode:?}");
@@ -367,6 +367,13 @@ pub(crate) fn validate_catalog_bound_render_training_output(
         ))
         .into());
     }
+    if !target_seed_conditionless_lineage(target, seed_mode, source) {
+        return Err(std::io::Error::other(format!(
+            "catalog-bound 3D render training output {} requires conditionless-local source lineage matching seed_mode={seed_mode:?}; source={source:?}",
+            model_output.display()
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -379,6 +386,18 @@ pub(crate) fn local_conditionless_lineage(source: &str) -> bool {
 
 pub(crate) fn target_conditionless_lineage(target: MeshTargetArg, source: &str) -> bool {
     local_conditionless_lineage(source) && source.contains(mesh_target_lineage_marker(target))
+}
+
+pub(crate) fn target_seed_conditionless_lineage(
+    target: MeshTargetArg,
+    seed_mode: ParticleSeed,
+    source: &str,
+) -> bool {
+    target_conditionless_lineage(target, source)
+        && target_growth_seed(target, seed_mode)
+        && source.contains(mesh_conditionless_local_target_source_for_seed(
+            target, seed_mode,
+        ))
 }
 
 pub(crate) fn load_conditionless_local_base_model(
@@ -418,6 +437,13 @@ pub(crate) fn load_conditionless_local_base_model(
     if !target_conditionless_lineage(target, source_text) {
         return Err(std::io::Error::other(format!(
             "local 3D continuation rejects target-mismatched lineage for {}: target={target:?} source={source_text:?}",
+            path.display()
+        ))
+        .into());
+    }
+    if !source_text.contains(target_source) {
+        return Err(std::io::Error::other(format!(
+            "local 3D continuation rejects seed-lineage mismatch for {}: target_source={target_source:?} source={source_text:?}",
             path.display()
         ))
         .into());

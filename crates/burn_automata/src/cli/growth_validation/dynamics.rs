@@ -10,6 +10,7 @@ pub(crate) fn growth_3d_empty_robustness_report(seed: u64) -> Growth3dRobustness
         catalog_sanity_passed: false,
         strict_score: f32::INFINITY,
         target_conditionless_lineage: false,
+        target_seed_conditionless_lineage: false,
         target_growth_seed_mode: false,
         no_seed_coordinate_scaffold: false,
         render_loss: f32::INFINITY,
