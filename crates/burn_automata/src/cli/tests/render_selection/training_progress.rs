@@ -93,7 +93,7 @@ fn render_selection_training_progress_rejects_morphology_only_continuation() {
 fn render_selection_training_progress_accepts_bounded_precursor_continuation() {
     let mut previous = render_selection_metrics_with_liveness(91.34, 0.75218, 1.39, 0.79);
     previous.material_active_mean_opacity = 1.64;
-    previous.material_visible_count = 37;
+    previous.material_visible_count = 4;
     previous.material_visible_target_mean_distance = 0.3482;
     previous.surface_covered_bin_fraction = 0.046875;
     previous.material_visible_surface_covered_bin_fraction = 0.0;
@@ -116,6 +116,42 @@ fn render_selection_training_progress_accepts_bounded_precursor_continuation() {
     assert!(
         render_selection_training_progress_beats(&continued, &previous),
         "bounded render, material, and local-front precursor progress should keep training moving"
+    );
+}
+
+#[test]
+fn render_selection_training_progress_rejects_mature_material_opacity_without_surface_progress() {
+    let mut previous = render_selection_metrics_with_liveness(91.34, 0.75218, 1.39, 0.79);
+    previous.material_active_mean_opacity = 1.64;
+    previous.material_visible_count = 16;
+    previous.material_visible_target_mean_distance = 0.3482;
+    previous.surface_covered_bin_fraction = 0.046875;
+    previous.material_visible_surface_covered_bin_fraction = 0.0;
+    previous.target_coverage_fraction = 0.005859375;
+    previous.material_visible_target_coverage_fraction = 0.0;
+
+    let mut opacity_only = previous.clone();
+    opacity_only.score = previous.score + 0.02;
+    opacity_only.render_loss = previous.render_loss - 0.0010;
+    opacity_only.density_psnr_db = previous.density_psnr_db + 0.015;
+    opacity_only.material_active_mean_opacity = previous.material_active_mean_opacity + 0.03;
+    opacity_only.max_front_liveness_margin = previous.max_front_liveness_margin;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&opacity_only, &previous),
+        "mature material opacity-only continuation should not be promoted"
+    );
+    assert!(
+        !render_selection_training_progress_beats(&opacity_only, &previous),
+        "mature visible-material continuation should not keep training on core opacity alone"
+    );
+
+    let mut surface_approach = opacity_only;
+    surface_approach.material_visible_target_mean_distance =
+        previous.material_visible_target_mean_distance - 0.006;
+    assert!(
+        render_selection_training_progress_beats(&surface_approach, &previous),
+        "mature material continuation remains valid once visible material moves toward target support"
     );
 }
 

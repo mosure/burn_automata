@@ -18,6 +18,7 @@ use strict_morphology::render_selection_strict_morphology_progress_beats;
 
 const PRECURSOR_STRICT_SURFACE_MATERIAL_MEAN_PROGRESS: f32 = 0.01;
 const PRECURSOR_STRICT_SURFACE_MATERIAL_MARGIN_PROGRESS: f32 = 0.01;
+const MATURE_VISIBLE_MATERIAL_COUNT: usize = 8;
 
 pub(crate) fn render_selection_candidate_beats(
     selection_score: f32,
@@ -188,7 +189,10 @@ pub(crate) fn render_selection_training_progress_beats(
         && selection.material_visible_surface_covered_bin_fraction
             + PRECURSOR_SURFACE_BIN_REGRESSION_SLACK
             >= previous.material_visible_surface_covered_bin_fraction;
-    let material_precursor_improved = precursor_render_improved && material_precursor_improved;
+    let material_precursor_improved = precursor_render_improved
+        && material_precursor_improved
+        && (previous.material_visible_count < MATURE_VISIBLE_MATERIAL_COUNT
+            || material_surface_support_progressed(selection, previous));
     let strict_surface_material_precursor_improved = strict_surface_material_progress > 0.0
         && render_selection_render_within_strict_surface_materialization_slack(
             selection.render_loss,
@@ -346,7 +350,6 @@ pub(crate) fn render_selection_material_precursor_beats(
     selection: &RenderSelectionMetrics,
     best: &RenderSelectionMetrics,
 ) -> bool {
-    const MATURE_VISIBLE_MATERIAL_COUNT: usize = 8;
     const MATERIAL_MEAN_IMPROVEMENT: f32 = 0.05;
     let visible_count_improved = selection.material_visible_count > best.material_visible_count;
     let active_mean_improved = selection.material_active_mean_opacity.is_finite()
