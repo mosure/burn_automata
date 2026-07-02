@@ -352,8 +352,13 @@ fn temporal_local_front_weights_can_expand_to_activation_deficit() {
 fn temporal_front_candidate_budget_scales_but_stays_bounded() {
     assert_eq!(temporal_front_candidate_count(0, 64), 0);
     assert_eq!(temporal_front_candidate_count(64, 64), 16);
-    assert_eq!(temporal_front_candidate_count(1024, 1024), 128);
-    assert_eq!(temporal_front_candidate_count(8192, 8192), 512);
+    assert_eq!(
+        temporal_front_candidate_count(128, 128),
+        32,
+        "short 3D rollout probes need enough temporal candidates to grow beyond the initial seed shell"
+    );
+    assert_eq!(temporal_front_candidate_count(1024, 1024), 256);
+    assert_eq!(temporal_front_candidate_count(8192, 8192), 1024);
     assert_eq!(
         temporal_front_candidate_count(8192, 7),
         7,
