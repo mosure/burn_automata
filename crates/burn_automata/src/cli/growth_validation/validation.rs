@@ -180,6 +180,20 @@ pub(crate) fn growth_3d_validation_report_single(
         coverage_samples,
         target_coverage_threshold,
     );
+    let initial_strict_surface_materialization = active_strict_surface_materialization_report(
+        &seed_positions,
+        &seed_states,
+        model.config.state_dims,
+        &target,
+        target_coverage_threshold,
+    );
+    let final_strict_surface_materialization = active_strict_surface_materialization_report(
+        &trace.positions,
+        &trace.states,
+        trace.state_dims,
+        &target,
+        target_coverage_threshold,
+    );
     let final_active_surface_coverage_profile = active_surface_coverage_profile(
         &trace.positions,
         &trace.states,
@@ -410,6 +424,8 @@ pub(crate) fn growth_3d_validation_report_single(
         final_active_target_coverage,
         initial_material_visible_target_coverage,
         final_material_visible_target_coverage,
+        initial_strict_surface_materialization,
+        final_strict_surface_materialization,
         final_active_surface_coverage_profile,
         final_material_visible_surface_coverage_profile,
         final_active_surface_normal_coverage,

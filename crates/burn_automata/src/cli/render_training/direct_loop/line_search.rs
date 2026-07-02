@@ -250,8 +250,11 @@ fn update_direct_line_search_state(
         *best_selection = candidate.selection;
     } else if progress_candidate
         && (best_progress_model.is_none()
-            || candidate.selection.render_loss < best_progress_selection.render_loss
-            || candidate.selection.score < best_progress_selection.score)
+            || render_selection_progress_candidate_preferred(
+                &candidate.selection,
+                best_progress_selection,
+                no_op_selection,
+            ))
     {
         *best_progress_model = Some(candidate.model);
         *best_progress_report = Some(candidate.report);

@@ -143,6 +143,23 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
         "bounded strict-band material margin progress should keep material-only training from rolling back"
     );
 
+    let mut larger_bounded_step = continued.clone();
+    larger_bounded_step.render_loss = previous.render_loss + 0.0024;
+    larger_bounded_step.density_psnr_db = previous.density_psnr_db - 0.014;
+    larger_bounded_step.strict_surface_material_mean_opacity = -2.95;
+    larger_bounded_step.strict_surface_material_visible_margin = 1.95;
+    assert!(
+        render_selection_training_progress_beats(&larger_bounded_step, &previous),
+        "larger strict-band material progress should earn a tightly capped render slack"
+    );
+
+    let mut render_degraded = larger_bounded_step.clone();
+    render_degraded.render_loss = previous.render_loss + 0.004;
+    assert!(
+        !render_selection_training_progress_beats(&render_degraded, &previous),
+        "strict-band material progress must still reject larger render degradation"
+    );
+
     let mut tail_regressed = continued.clone();
     tail_regressed.material_visible_surface_tail_over_threshold_fraction = 0.05;
     assert!(
@@ -155,6 +172,46 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
     assert!(
         !render_selection_training_progress_beats(&coverage_collapsed, &previous),
         "strict-band material progress must not carry active surface coverage collapse"
+    );
+}
+
+#[test]
+fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
+    let mut no_op = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
+    no_op.strict_surface_active_count = 24;
+    no_op.strict_surface_materialized_fraction = 0.0;
+    no_op.strict_surface_material_mean_opacity = -3.20;
+    no_op.strict_surface_material_visible_margin = 2.20;
+    no_op.strict_surface_material_max_visible_margin = 2.80;
+    no_op.material_visible_target_coverage_fraction = 0.0;
+    no_op.material_visible_surface_covered_bin_fraction = 0.0;
+
+    let mut render_preferred = no_op.clone();
+    render_preferred.render_loss = no_op.render_loss + 0.001;
+    render_preferred.density_psnr_db = no_op.density_psnr_db - 0.007;
+    render_preferred.strict_surface_material_mean_opacity = -3.185;
+    render_preferred.strict_surface_material_visible_margin = 2.185;
+
+    let mut material_preferred = no_op.clone();
+    material_preferred.render_loss = no_op.render_loss + 0.0024;
+    material_preferred.density_psnr_db = no_op.density_psnr_db - 0.014;
+    material_preferred.strict_surface_material_mean_opacity = -3.17;
+    material_preferred.strict_surface_material_visible_margin = 2.17;
+
+    assert!(
+        render_selection_progress_candidate_preferred(
+            &material_preferred,
+            &render_preferred,
+            &no_op,
+        ),
+        "bounded progress selection should prefer the candidate that closes more strict-band material margin"
+    );
+
+    let mut degraded = material_preferred.clone();
+    degraded.render_loss = no_op.render_loss + 0.004;
+    assert!(
+        !render_selection_progress_candidate_preferred(&degraded, &render_preferred, &no_op),
+        "strict-band material progress should not win the tie-breaker outside render slack"
     );
 }
 

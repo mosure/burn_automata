@@ -50,6 +50,8 @@ pub(crate) struct CliGrowth3dValidationReport {
     pub(crate) final_active_target_coverage: TargetCoverageStats,
     pub(crate) initial_material_visible_target_coverage: TargetCoverageStats,
     pub(crate) final_material_visible_target_coverage: TargetCoverageStats,
+    pub(crate) initial_strict_surface_materialization: Growth3dStrictSurfaceMaterializationReport,
+    pub(crate) final_strict_surface_materialization: Growth3dStrictSurfaceMaterializationReport,
     pub(crate) final_active_surface_coverage_profile: SurfaceCoverageProfileReport,
     pub(crate) final_material_visible_surface_coverage_profile: SurfaceCoverageProfileReport,
     pub(crate) final_active_surface_normal_coverage: SurfaceNormalCoverageReport,
