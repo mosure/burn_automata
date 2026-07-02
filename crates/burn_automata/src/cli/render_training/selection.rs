@@ -487,6 +487,13 @@ pub(crate) fn render_selection_training_progress_beats(
     const SURFACE_MAX_SLACK: f32 = 0.30;
     const MATERIAL_TAIL_SLACK: f32 = 0.02;
     const MIN_LOCAL_FRONT_FRACTION: f32 = 0.50;
+    const PRECURSOR_RENDER_LOSS_PROGRESS: f32 = 5.0e-4;
+    const PRECURSOR_DENSITY_PSNR_PROGRESS_DB: f32 = 0.01;
+    const PRECURSOR_MATERIAL_MEAN_PROGRESS: f32 = 0.02;
+    const PRECURSOR_MATERIAL_DISTANCE_PROGRESS: f32 = 1.0e-3;
+    const PRECURSOR_FRONT_MARGIN_PROGRESS: f32 = 0.02;
+    const PRECURSOR_COVERAGE_REGRESSION_SLACK: f32 = 0.005;
+    const PRECURSOR_SURFACE_BIN_REGRESSION_SLACK: f32 = 0.001;
 
     if !selection.render_loss.is_finite()
         || !previous.render_loss.is_finite()
@@ -496,9 +503,10 @@ pub(crate) fn render_selection_training_progress_beats(
     }
     let render_improved = selection.render_loss + RENDER_LOSS_PROGRESS <= previous.render_loss
         || selection.density_psnr_db >= previous.density_psnr_db + 0.05;
-    if !render_improved {
-        return false;
-    }
+    let precursor_render_improved = selection.render_loss + PRECURSOR_RENDER_LOSS_PROGRESS
+        <= previous.render_loss
+        || selection.density_psnr_db
+            >= previous.density_psnr_db + PRECURSOR_DENSITY_PSNR_PROGRESS_DB;
 
     let coverage_improved = selection.surface_covered_bin_fraction
         >= previous.surface_covered_bin_fraction + COVERAGE_PROGRESS
@@ -521,7 +529,58 @@ pub(crate) fn render_selection_training_progress_beats(
             >= previous.min_active_extent_min_axis_ratio + EXTENT_PROGRESS;
     let activation_improved = selection.min_final_active_count > previous.min_final_active_count
         && selection.min_newly_activated_fraction >= previous.min_newly_activated_fraction;
-    if !(coverage_improved || material_distance_improved || extent_improved || activation_improved)
+    let material_precursor_improved = selection.material_visible_count
+        > previous.material_visible_count
+        || (selection.material_active_mean_opacity.is_finite()
+            && previous.material_active_mean_opacity.is_finite()
+            && selection.material_active_mean_opacity
+                >= previous.material_active_mean_opacity + PRECURSOR_MATERIAL_MEAN_PROGRESS)
+        || (previous.material_visible_target_mean_distance.is_finite()
+            && selection.material_visible_target_mean_distance.is_finite()
+            && selection.material_visible_target_mean_distance
+                + PRECURSOR_MATERIAL_DISTANCE_PROGRESS
+                <= previous.material_visible_target_mean_distance);
+    let liveness_precursor_improved = precursor_front_liveness_margin_improved(
+        selection.max_front_liveness_margin,
+        previous.max_front_liveness_margin,
+        selection.min_front_liveness_candidate_count,
+        PRECURSOR_FRONT_MARGIN_PROGRESS,
+    ) || precursor_front_liveness_margin_improved(
+        selection.max_temporal_front_liveness_margin,
+        previous.max_temporal_front_liveness_margin,
+        selection.min_temporal_front_liveness_candidate_count,
+        PRECURSOR_FRONT_MARGIN_PROGRESS,
+    ) || precursor_front_liveness_margin_improved(
+        selection.max_extent_front_liveness_margin,
+        previous.max_extent_front_liveness_margin,
+        selection.min_extent_front_liveness_candidate_count,
+        PRECURSOR_FRONT_MARGIN_PROGRESS,
+    ) || precursor_front_liveness_margin_improved(
+        selection.max_temporal_extent_front_liveness_margin,
+        previous.max_temporal_extent_front_liveness_margin,
+        selection.min_temporal_extent_front_liveness_candidate_count,
+        PRECURSOR_FRONT_MARGIN_PROGRESS,
+    );
+    let precursor_non_regressed = selection.target_coverage_fraction
+        + PRECURSOR_COVERAGE_REGRESSION_SLACK
+        >= previous.target_coverage_fraction
+        && selection.material_visible_target_coverage_fraction
+            + PRECURSOR_COVERAGE_REGRESSION_SLACK
+            >= previous.material_visible_target_coverage_fraction
+        && selection.surface_covered_bin_fraction + PRECURSOR_SURFACE_BIN_REGRESSION_SLACK
+            >= previous.surface_covered_bin_fraction
+        && selection.material_visible_surface_covered_bin_fraction
+            + PRECURSOR_SURFACE_BIN_REGRESSION_SLACK
+            >= previous.material_visible_surface_covered_bin_fraction;
+    let precursor_improved = precursor_render_improved
+        && precursor_non_regressed
+        && (material_precursor_improved || liveness_precursor_improved);
+    if !((render_improved
+        && (coverage_improved
+            || material_distance_improved
+            || extent_improved
+            || activation_improved))
+        || precursor_improved)
     {
         return false;
     }
@@ -542,6 +601,18 @@ pub(crate) fn render_selection_training_progress_beats(
         || selection.min_front_local_newly_activated_fraction
             >= previous.min_front_local_newly_activated_fraction - 0.02;
     temporal_ok && surface_ok && material_tail_ok && local_front_ok
+}
+
+fn precursor_front_liveness_margin_improved(
+    selection_margin: f32,
+    previous_margin: f32,
+    candidate_count: usize,
+    min_improvement: f32,
+) -> bool {
+    candidate_count > 0
+        && selection_margin.is_finite()
+        && previous_margin.is_finite()
+        && selection_margin + min_improvement <= previous_margin
 }
 
 pub(crate) fn render_selection_liveness_precursor_beats(
