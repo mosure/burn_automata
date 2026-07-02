@@ -113,6 +113,7 @@ pub(crate) struct MeshTargetTrainingProfile {
     pub(crate) local_motion_gain: f32,
     pub(crate) local_color_gain: f32,
     pub(crate) conditionless_local_target_source: &'static str,
+    pub(crate) lineage_marker: &'static str,
 }
 
 pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetTrainingProfile {
@@ -128,6 +129,7 @@ pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetT
             local_motion_gain: LOCAL_TORUS_MOTION_GAIN,
             local_color_gain: LOCAL_TORUS_COLOR_GAIN,
             conditionless_local_target_source: UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            lineage_marker: "uv-torus-3d",
         },
         MeshTargetArg::Teapot => MeshTargetTrainingProfile {
             target,
@@ -140,6 +142,7 @@ pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetT
             local_motion_gain: LOCAL_TEAPOT_MOTION_GAIN,
             local_color_gain: LOCAL_TEAPOT_COLOR_GAIN,
             conditionless_local_target_source: TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            lineage_marker: "utah-teapot-2026",
         },
     }
 }
@@ -172,6 +175,10 @@ pub(crate) fn mesh_target_render_training_seed_scale(target: MeshTargetArg) -> f
 
 pub(crate) fn mesh_conditionless_local_target_source(target: MeshTargetArg) -> &'static str {
     mesh_target_training_profile(target).conditionless_local_target_source
+}
+
+pub(crate) fn mesh_target_lineage_marker(target: MeshTargetArg) -> &'static str {
+    mesh_target_training_profile(target).lineage_marker
 }
 
 pub(crate) fn mesh_conditionless_local_target_source_for_seed(

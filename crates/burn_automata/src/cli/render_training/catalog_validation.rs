@@ -223,10 +223,13 @@ pub(crate) fn render_training_source(
             | ParticleSeed::TeapotLocalSubstrateGrowth3d
     );
     if let Some(source) = base_source {
-        if source.starts_with("render-refined-rust:") && local_growth_seed {
+        if source.starts_with("render-refined-rust:")
+            && local_growth_seed
+            && target_conditionless_lineage(target, source)
+        {
             return source.to_string();
         }
-        if source.contains("conditionless-local") && local_growth_seed {
+        if target_conditionless_lineage(target, source) && local_growth_seed {
             return format!("render-refined-rust:{source}");
         }
         return format!("render-proxy-rust:{target:?}:base={source}:seed={seed_mode:?}");
@@ -358,6 +361,13 @@ pub(crate) fn validate_catalog_bound_render_training_output(
         ))
         .into());
     }
+    if !target_conditionless_lineage(target, source) {
+        return Err(std::io::Error::other(format!(
+            "catalog-bound 3D render training output {} requires a conditionless-local base model for target {target:?}; source={source:?}",
+            model_output.display()
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -366,6 +376,10 @@ pub(crate) fn local_conditionless_lineage(source: &str) -> bool {
         && !source.contains("position-field")
         && !source.contains("seed-frame")
         && !source.contains("render-proxy-rust")
+}
+
+pub(crate) fn target_conditionless_lineage(target: MeshTargetArg, source: &str) -> bool {
+    local_conditionless_lineage(source) && source.contains(mesh_target_lineage_marker(target))
 }
 
 pub(crate) fn load_conditionless_local_base_model(

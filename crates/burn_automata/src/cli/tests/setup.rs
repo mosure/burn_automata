@@ -306,6 +306,38 @@ fn render_training_source_preserves_local_refinement_lineage() {
 }
 
 #[test]
+fn render_training_source_does_not_preserve_mismatched_target_lineage() {
+    assert!(target_conditionless_lineage(
+        MeshTargetArg::Torus,
+        UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    ));
+    assert!(target_conditionless_lineage(
+        MeshTargetArg::Teapot,
+        TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    ));
+    assert!(!target_conditionless_lineage(
+        MeshTargetArg::Teapot,
+        UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    ));
+    assert!(!target_conditionless_lineage(
+        MeshTargetArg::Torus,
+        TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE
+    ));
+
+    let mismatched_source = render_training_source(
+        MeshTargetArg::Teapot,
+        Some(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+    );
+    assert!(
+        mismatched_source.starts_with("render-proxy-rust:"),
+        "target-mismatched local lineage must not be preserved as a render refinement"
+    );
+    assert!(mismatched_source.contains("Teapot"));
+    assert!(mismatched_source.contains(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE));
+}
+
+#[test]
 fn render_training_defaults_match_model_family() {
     assert_eq!(
         render_training_default_seed_mode(MeshTargetArg::Torus),
@@ -356,6 +388,7 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
         torus.conditionless_local_target_source,
         UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE
     );
+    assert_eq!(torus.lineage_marker, "uv-torus-3d");
 
     let teapot = mesh_target_training_profile(MeshTargetArg::Teapot);
     assert_eq!(teapot.target, MeshTargetArg::Teapot);
@@ -374,6 +407,7 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
         teapot.conditionless_local_target_source,
         TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE
     );
+    assert_eq!(teapot.lineage_marker, "utah-teapot-2026");
     assert_ne!(
         teapot.field_seed_mode, torus.field_seed_mode,
         "generic profile lookup must not reuse torus seed modes for teapot"
@@ -544,6 +578,28 @@ fn catalog_bound_render_training_uses_app_scale_particle_and_step_floor() {
         render_training_rollout_steps_for_output(catalog_path, 128),
         128
     );
+}
+
+#[test]
+fn catalog_bound_render_training_rejects_mismatched_target_lineage() {
+    let catalog_path = Path::new("assets/models/teapot_growth_3d.bpk");
+    let mismatch = validate_catalog_bound_render_training_output(
+        catalog_path,
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        Some(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(mismatch.contains("requires a conditionless-local base model for target Teapot"));
+
+    validate_catalog_bound_render_training_output(
+        catalog_path,
+        MeshTargetArg::Teapot,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        Some(TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+    )
+    .unwrap();
 }
 
 #[test]
