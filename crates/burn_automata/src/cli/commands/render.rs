@@ -377,6 +377,9 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         seed_mode,
         base_source.as_deref(),
     )?;
+    let training_particles = render_training_particle_count_for_output(&model_output, particles);
+    let training_rollout_steps =
+        render_training_rollout_steps_for_output(&model_output, rollout_steps);
     let coverage_gap_gain = coverage_gap_gain.unwrap_or(coverage_repulsion_gain);
     let render = RenderLossConfig {
         image_size,
@@ -406,8 +409,8 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
             target,
             rounds,
             supervised_steps_per_round,
-            particles,
-            rollout_steps,
+            particles: training_particles,
+            rollout_steps: training_rollout_steps,
             gradient_particles,
             gradient_mode,
             finite_diff_eps,
@@ -515,8 +518,8 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         &model_output,
         target,
         Growth3dValidationConfig {
-            particle_count: particles,
-            steps: rollout_steps,
+            particle_count: training_particles,
+            steps: training_rollout_steps,
             seed: 0x005a_173d,
             extra_seeds: validation_extra_seeds,
             seed_scale,
@@ -530,8 +533,8 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         &loaded_hashgrid,
         &target_mesh,
         RenderLossEvalConfig {
-            particle_count: particles,
-            steps: rollout_steps,
+            particle_count: training_particles,
+            steps: training_rollout_steps,
             seed: 0x005a_173d,
             extra_seeds: Vec::new(),
             seed_scale,
@@ -544,8 +547,8 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         target,
         base_model: base_model.as_ref().map(|path| path.display().to_string()),
         model_output: model_output.display().to_string(),
-        particle_count: particles,
-        rollout_steps,
+        particle_count: training_particles,
+        rollout_steps: training_rollout_steps,
         seed_scale,
         seed_mode,
         sgd,

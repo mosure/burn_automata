@@ -404,6 +404,37 @@ fn catalog_promotion_validation_configs_match_app_scale() {
 }
 
 #[test]
+fn catalog_bound_render_training_uses_app_scale_particle_and_step_floor() {
+    let catalog_path = Path::new("assets/models/uv_torus_growth_3d.bpk");
+    let diagnostic_path = Path::new("artifacts/uv_torus_growth_3d.bpk");
+
+    assert_eq!(
+        render_training_particle_count_for_output(catalog_path, 512),
+        CATALOG_3D_VALIDATION_PARTICLES
+    );
+    assert_eq!(
+        render_training_rollout_steps_for_output(catalog_path, 32),
+        CATALOG_3D_PROMOTION_STEPS.iter().copied().max().unwrap()
+    );
+    assert_eq!(
+        render_training_particle_count_for_output(diagnostic_path, 512),
+        512
+    );
+    assert_eq!(
+        render_training_rollout_steps_for_output(diagnostic_path, 32),
+        32
+    );
+    assert_eq!(
+        render_training_particle_count_for_output(catalog_path, 4096),
+        4096
+    );
+    assert_eq!(
+        render_training_rollout_steps_for_output(catalog_path, 128),
+        128
+    );
+}
+
+#[test]
 fn render_training_base_defaults_to_conditionless_local_growth() {
     let target = uv_torus_mesh_target(UV_TORUS_FIELD_SCALE);
     let (model, source) = render_training_base_model(

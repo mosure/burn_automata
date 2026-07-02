@@ -152,6 +152,36 @@ pub(crate) fn catalog_promotion_validation_configs(
         .collect()
 }
 
+pub(crate) fn render_training_particle_count_for_output(
+    model_output: &Path,
+    particle_count: usize,
+) -> usize {
+    if is_catalog_model_output_path(model_output) {
+        particle_count.max(CATALOG_3D_VALIDATION_PARTICLES)
+    } else {
+        particle_count
+    }
+}
+
+pub(crate) fn render_training_rollout_steps_for_output(
+    model_output: &Path,
+    rollout_steps: usize,
+) -> usize {
+    if is_catalog_model_output_path(model_output) {
+        rollout_steps.max(catalog_promotion_max_steps())
+    } else {
+        rollout_steps
+    }
+}
+
+fn catalog_promotion_max_steps() -> usize {
+    CATALOG_3D_PROMOTION_STEPS
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+}
+
 pub(crate) fn require_catalog_promotion_validations_pass(
     validations: &[CliGrowth3dValidationReport],
     model_output: &Path,
