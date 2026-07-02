@@ -151,7 +151,11 @@ normalization terms, and `render_loss` unit tests compare the full
 density/color/depth position, opacity, color-state, and learned-scale gradients
 against finite differences. The `train-render3d --gradient-mode finite-diff`
 fallback now also emits color-state gradients instead of silently optimizing
-only position/opacity/scale channels. The
+only position/opacity/scale channels. For `--gaussian-decode-mode learned-sh0`,
+direct-rollout training also applies a trajectory-time learned-scale budget
+objective to predicted scale updates, and `direct_objective_diagnostics`
+serializes `scale_budget_rms` plus `scale_post_cap_rms` so learned-scale 3DGS
+experiments can verify scale pressure is present before catalog promotion. The
 remaining backend gap is differentiable or WGPU training through the full
 rollout dynamics.
 

@@ -315,6 +315,58 @@ fn direct_rollout_objective_diagnostics_reports_channel_pressure() {
     assert!(diagnostics.phase_post_cap_rms > 0.0);
     assert!(diagnostics.material_post_cap_rms > 0.0);
 }
+
+#[test]
+fn direct_rollout_objective_diagnostics_reports_learned_scale_pressure() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let render = RenderLossConfig {
+        gaussian_decode_mode: GaussianDecodeMode::GaussianSh0LearnedScale,
+        sigma: 1.0,
+        min_sigma: 0.25,
+        max_sigma: 6.0,
+        image_size: 8,
+        target_samples: 16,
+        world_scale: 1.08,
+        ..RenderLossConfig::default()
+    };
+    let mut model = NpaModel {
+        config: config.clone(),
+        weights: NpaWeights::zeros(&config),
+    };
+    let scale_output = growth_3d_scale_output_channel(&config, render).unwrap();
+    model.weights.b2[scale_output] = 1.0;
+    let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.54);
+    let cfg = RenderProxyTrainingConfig {
+        particles: 16,
+        rollout_steps: 2,
+        gradient_particles: 8,
+        scale_budget_weight: 0.5,
+        max_opacity_update: 0.25,
+        render,
+        seed: 47,
+        seed_scale: 0.54,
+        seed_mode: ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ..direct_rollout_test_config()
+    };
+    let (_, trajectory) = render_training_trajectory(&model, &grid, &cfg, 0).unwrap();
+
+    let diagnostics = direct_rollout_objective_diagnostics(&model, &target, &trajectory, &cfg)
+        .expect("diagnostics should expose scale-budget pressure");
+
+    assert!(
+        diagnostics.scale_budget_rms > 0.0,
+        "learned-scale trajectory objective should report pre-cap scale pressure"
+    );
+    assert!(diagnostics.scale_budget_nonzero_fraction > 0.0);
+    assert!(
+        diagnostics.scale_post_cap_rms > 0.0,
+        "combined post-cap diagnostics should include the scale output channel"
+    );
+    let serialized = serde_json::to_value(diagnostics).unwrap();
+    assert!(serialized["scale_budget_rms"].as_f64().unwrap() > 0.0);
+    assert!(serialized["scale_post_cap_rms"].as_f64().unwrap() > 0.0);
+}
 #[test]
 fn direct_rollout_training_honors_supervised_steps_per_round() {
     let config = NpaConfig::growing_3dgs();

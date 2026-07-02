@@ -600,6 +600,25 @@ pub(super) fn add_direct_step_output_objectives(
         &mut surface_color_output_gradients,
     );
     add_output_gradients(step_output_gradients, &surface_color_output_gradients);
+    let mut scale_budget_output_gradients = vec![0.0; particle_count * output_dims];
+    if let Some(scale_output) = add_gaussian_scale_budget_output_objective(
+        &model.config,
+        &snapshot.states,
+        updates,
+        cfg.render,
+        cfg.scale_budget_weight,
+        cfg.max_opacity_update,
+        &mut scale_budget_output_gradients,
+    ) {
+        boost_sparse_output_channel_rms(
+            &mut scale_budget_output_gradients,
+            output_dims,
+            [scale_output],
+            cfg.direct_output_gradient_rms_cap * 0.5,
+            16.0,
+        );
+    }
+    add_output_gradients(step_output_gradients, &scale_budget_output_gradients);
     boost_sparse_output_channel_rms(
         step_output_gradients,
         output_dims,

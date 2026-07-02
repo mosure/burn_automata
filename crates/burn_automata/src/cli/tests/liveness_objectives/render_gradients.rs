@@ -238,3 +238,59 @@ fn learned_scale_budget_adjoint_penalizes_oversized_particles() {
     assert!(state_adjoint[scale_channel] > 0.0);
     assert!(state_adjoint[config.state_dims + scale_channel] > 0.0);
 }
+
+#[test]
+fn learned_scale_budget_output_objective_penalizes_predicted_oversize() {
+    let config = NpaConfig::growing_3dgs();
+    let output_dims = config.update_dims();
+    let scale_channel = config.state_dims - 5;
+    let scale_output = config.spatial_dims + scale_channel;
+    let states = vec![0.0; 2 * config.state_dims];
+    let mut raw_updates = vec![0.0; 2 * output_dims];
+    raw_updates[scale_output] = 1.0;
+    raw_updates[output_dims + scale_output] = -1.0;
+    let mut output_gradients = vec![0.0; 2 * output_dims];
+    let render = RenderLossConfig {
+        gaussian_decode_mode: GaussianDecodeMode::GaussianSh0LearnedScale,
+        sigma: 1.0,
+        min_sigma: 0.25,
+        max_sigma: 6.0,
+        ..RenderLossConfig::default()
+    };
+
+    let detected_output = add_gaussian_scale_budget_output_objective(
+        &config,
+        &states,
+        &raw_updates,
+        render,
+        0.5,
+        0.25,
+        &mut output_gradients,
+    );
+
+    assert_eq!(detected_output, Some(scale_output));
+    assert!(
+        output_gradients[scale_output] > raw_updates[scale_output],
+        "oversized predicted scale should train a negative scale update"
+    );
+    assert_eq!(
+        output_gradients[output_dims + scale_output],
+        0.0,
+        "undersized predicted scale should not be penalized by the oversize budget"
+    );
+
+    let mut fixed_scale_gradients = vec![0.0; 2 * output_dims];
+    assert_eq!(
+        add_gaussian_scale_budget_output_objective(
+            &config,
+            &states,
+            &raw_updates,
+            RenderLossConfig::default(),
+            0.5,
+            0.25,
+            &mut fixed_scale_gradients,
+        ),
+        None
+    );
+    assert!(fixed_scale_gradients.iter().all(|value| *value == 0.0));
+}
