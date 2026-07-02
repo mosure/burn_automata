@@ -322,14 +322,11 @@ pub(crate) fn growth_3d_validation_report_single(
         cfg.particle_count,
         render_loss.passed,
     );
-    apply_dormant_drift_strict_check(&mut strict_checks, dormant_drift);
-    apply_material_liveness_strict_check(&mut strict_checks, final_material_liveness);
-    apply_material_visible_surface_tail_strict_check(
+    apply_dynamic_growth_3d_strict_checks(
         &mut strict_checks,
+        dormant_drift,
+        final_material_liveness,
         final_material_visible_surface_tail,
-    );
-    apply_surface_profile_strict_check(
-        &mut strict_checks,
         &final_active_surface_coverage_profile,
         &final_material_visible_surface_coverage_profile,
     );

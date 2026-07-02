@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn dynamic_growth_3d_strict_checks_apply_all_runtime_blockers() {
+    let mut checks = passing_growth_3d_strict_checks();
+    let dormant_drift = Growth3dDormantDriftReport {
+        drifting_rows: 3,
+        drifting_fraction: 0.25,
+        max_dormant_displacement: 0.4,
+        passed: false,
+        ..passing_growth_3d_dormant_drift_report()
+    };
+    let material_liveness = Growth3dMaterialLivenessReport {
+        material_visible_count: 8,
+        inactive_material_visible_count: 2,
+        inactive_material_visible_fraction: 0.25,
+        inactive_material_logit_threshold: 0.0,
+        max_inactive_material_opacity: 1.5,
+        passed: false,
+    };
+    let material_visible_tail = Growth3dSurfaceTailReport {
+        p99_distance: GROWTH_3D_SURFACE_MAX_DISTANCE + 0.2,
+        over_threshold_fraction: 0.10,
+        opacity_weighted_over_threshold_fraction: 0.08,
+        ..passing_growth_3d_surface_tail_report()
+    };
+    let sparse_active = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.25,
+        mean_bin_covered_fraction: 0.20,
+        empty_bins: 48,
+        ..passing_surface_coverage_profile_report()
+    };
+    let sparse_material = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.30,
+        mean_bin_covered_fraction: 0.25,
+        empty_bins: 45,
+        ..passing_surface_coverage_profile_report()
+    };
+
+    apply_dynamic_growth_3d_strict_checks(
+        &mut checks,
+        dormant_drift,
+        material_liveness,
+        material_visible_tail,
+        &sparse_active,
+        &sparse_material,
+    );
+
+    assert!(!checks.passed);
+    assert!(!checks.dormant_drift_bounded);
+    assert!(!checks.material_visible_particles_live);
+    assert!(!checks.material_visible_surface_tail_bounded);
+    assert!(!checks.surface_coverage_profile);
+    assert!(!checks.material_visible_surface_coverage_profile);
+    for reason in [
+        "dormant_drift_bounded",
+        "material_visible_particles_live",
+        "material_visible_surface_tail_bounded",
+        "surface_coverage_profile",
+        "material_visible_surface_coverage_profile",
+    ] {
+        assert!(
+            checks.failure_reasons.contains(&reason),
+            "dynamic strict gate should report {reason}"
+        );
+    }
+}
+
+#[test]
 fn growth_3d_strict_checks_reject_sparse_surface_profile_coverage() {
     let mut checks = passing_growth_3d_strict_checks();
     let sparse_active = SurfaceCoverageProfileReport {

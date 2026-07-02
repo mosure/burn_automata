@@ -766,6 +766,20 @@ pub(crate) fn apply_surface_profile_strict_check(
     checks.passed = checks.failure_reasons.is_empty();
 }
 
+pub(crate) fn apply_dynamic_growth_3d_strict_checks(
+    checks: &mut Growth3dStrictChecksReport,
+    dormant_drift: Growth3dDormantDriftReport,
+    material_liveness: Growth3dMaterialLivenessReport,
+    material_visible_surface_tail: Growth3dSurfaceTailReport,
+    active_profile: &SurfaceCoverageProfileReport,
+    material_visible_profile: &SurfaceCoverageProfileReport,
+) {
+    apply_dormant_drift_strict_check(checks, dormant_drift);
+    apply_material_liveness_strict_check(checks, material_liveness);
+    apply_material_visible_surface_tail_strict_check(checks, material_visible_surface_tail);
+    apply_surface_profile_strict_check(checks, active_profile, material_visible_profile);
+}
+
 pub(crate) fn surface_profile_passes_strict_coverage(
     profile: &SurfaceCoverageProfileReport,
 ) -> bool {

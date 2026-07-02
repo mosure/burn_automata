@@ -265,17 +265,14 @@ pub(crate) fn render_selection_case_metrics(
         cfg.particles,
         render_loss.passed,
     );
-    apply_material_liveness_strict_check(&mut strict_checks, material_liveness);
-    apply_material_visible_surface_tail_strict_check(
+    apply_dynamic_growth_3d_strict_checks(
         &mut strict_checks,
+        dormant_drift,
+        material_liveness,
         material_visible_surface_tail,
-    );
-    apply_surface_profile_strict_check(
-        &mut strict_checks,
         &surface_coverage_profile,
         &material_visible_surface_coverage_profile,
     );
-    apply_dormant_drift_strict_check(&mut strict_checks, dormant_drift);
     let mut strict_score = growth_3d_strict_score_report(
         &strict_checks,
         initial_active_surface,
