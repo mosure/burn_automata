@@ -153,12 +153,17 @@ fn material_opacity_bias_line_search_candidates_follow_strict_margin() {
 
     let candidates = material_opacity_bias_line_search_candidates(&selection, &cfg);
 
-    assert_eq!(candidates.len(), 3);
+    assert_eq!(candidates.len(), 4);
     assert!(candidates.iter().all(|candidate| *candidate > 0.0));
     assert!(candidates.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(
-        candidates[2] <= cfg.material_max_opacity_update * 0.25 + 1.0e-6,
-        "material bias line search should remain bounded by a conservative fraction of the material update cap"
+        candidates[3] <= cfg.material_max_opacity_update * 0.50 + 1.0e-6,
+        "material bias line search should remain bounded by a partial material update cap"
+    );
+    assert!(
+        candidates.iter().any(|candidate| *candidate
+            >= selection.strict_surface_material_visible_margin / cfg.rollout_steps as f32),
+        "material bias line search should include a candidate that can close the strict-surface material margin over the rollout"
     );
 
     selection.strict_surface_materialized_fraction = 1.0;

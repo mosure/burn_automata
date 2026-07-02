@@ -52,9 +52,9 @@ pub(crate) fn material_opacity_bias_line_search_candidates(
     selection: &RenderSelectionMetrics,
     cfg: &RenderProxyTrainingConfig,
 ) -> Vec<f32> {
-    const BIAS_FRACTIONS: [f32; 3] = [0.25, 0.5, 1.0];
-    const MAX_ABSOLUTE_BIAS: f32 = 0.25;
-    const MATERIAL_CAP_FRACTION: f32 = 0.25;
+    const BIAS_FRACTIONS: [f32; 4] = [0.25, 0.5, 1.0, 1.25];
+    const MAX_ABSOLUTE_BIAS: f32 = 0.50;
+    const MATERIAL_CAP_FRACTION: f32 = 0.50;
     if selection.strict_surface_active_count == 0
         || selection.strict_surface_materialized_fraction >= 1.0
         || !selection.strict_surface_material_visible_margin.is_finite()

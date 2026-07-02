@@ -9,6 +9,8 @@ use material_bias::{
 };
 
 pub(crate) const DIRECT_LINE_SEARCH_KIND_SGD: &str = "sgd-scale";
+const DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_BIAS: &str = "sgd-scale-liveness-bias";
+const DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_MATERIAL_BIAS: &str = "sgd-scale-liveness-material-bias";
 
 fn relative_f32_eq(lhs: f32, rhs: f32) -> bool {
     ((lhs - rhs).abs() / lhs.abs().max(rhs.abs()).max(1.0e-6)) < 1.0e-5
@@ -84,6 +86,8 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
     let mut best_progress_selection = no_op_selection.clone();
     let mut best_progress_key = None::<DirectLineSearchCandidateKey>;
     let mut candidate_reports = Vec::with_capacity(scales.len());
+    let mut liveness_refinement_sources = Vec::new();
+    let mut liveness_material_refinement_sources = Vec::new();
 
     for scale in scales {
         let Some(candidate) = evaluate_direct_line_search_candidate(
@@ -102,6 +106,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
         else {
             continue;
         };
+        collect_liveness_suppression_source(&candidate, cfg, &mut liveness_refinement_sources);
         update_direct_line_search_state(
             candidate,
             &mut best_model,
@@ -137,6 +142,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
         else {
             continue;
         };
+        collect_liveness_suppression_source(&candidate, cfg, &mut liveness_refinement_sources);
         update_direct_line_search_state(
             candidate,
             &mut best_model,
@@ -150,6 +156,43 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             &mut candidate_reports,
             &no_op_selection,
         );
+    }
+
+    for (source_model, source_scale) in liveness_refinement_sources {
+        for liveness_bias in liveness_suppression_line_search_candidates(cfg) {
+            let Some(candidate) = evaluate_liveness_suppression_line_search_candidate(
+                &source_model,
+                grid,
+                target,
+                cfg,
+                gradient,
+                render_cfg,
+                selection_baseline,
+                source_scale,
+                liveness_bias,
+            )?
+            else {
+                continue;
+            };
+            collect_liveness_material_refinement_source(
+                &candidate,
+                cfg,
+                &mut liveness_material_refinement_sources,
+            );
+            update_direct_line_search_state(
+                candidate,
+                &mut best_model,
+                &mut best_report,
+                &mut best_selection,
+                &mut best_key,
+                &mut best_progress_model,
+                &mut best_progress_report,
+                &mut best_progress_selection,
+                &mut best_progress_key,
+                &mut candidate_reports,
+                &no_op_selection,
+            );
+        }
     }
 
     for material_opacity_bias in material_opacity_bias_line_search_candidates(&no_op_selection, cfg)
@@ -189,27 +232,39 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
         && key.kind == DIRECT_LINE_SEARCH_KIND_SGD
         && key.scale > 0.0
     {
-        material_refinement_sources.push((best_model.clone(), best_selection.clone(), key.scale));
+        material_refinement_sources.push((
+            best_model.clone(),
+            best_selection.clone(),
+            key.scale,
+            DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS,
+        ));
     }
     if let (Some(progress_model), Some(key)) = (&best_progress_model, best_progress_key)
         && key.kind == DIRECT_LINE_SEARCH_KIND_SGD
         && key.scale > 0.0
         && !material_refinement_sources
             .iter()
-            .any(|(_, _, scale)| relative_f32_eq(*scale, key.scale))
+            .any(|(_, _, scale, kind)| {
+                *kind == DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS
+                    && relative_f32_eq(*scale, key.scale)
+            })
     {
         material_refinement_sources.push((
             progress_model.clone(),
             best_progress_selection.clone(),
             key.scale,
+            DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS,
         ));
     }
-    for (source_model, source_selection, source_scale) in material_refinement_sources {
+    material_refinement_sources.extend(liveness_material_refinement_sources);
+    for (source_model, source_selection, source_scale, candidate_kind) in
+        material_refinement_sources
+    {
         for material_opacity_bias in
             material_opacity_bias_line_search_candidates(&source_selection, cfg)
         {
             let Some(candidate) = evaluate_material_opacity_bias_line_search_candidate(
-                DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS,
+                candidate_kind,
                 &source_model,
                 grid,
                 target,
@@ -373,7 +428,12 @@ fn update_direct_line_search_state(
     let morphology_recovery = best_key.is_none()
         && render_selection_morphology_recovery_beats(&candidate.selection, best_selection);
     let progress_candidate =
-        render_selection_training_progress_beats(&candidate.selection, no_op_selection);
+        render_selection_training_progress_beats(&candidate.selection, no_op_selection)
+            && direct_line_search_progress_candidate_supported(
+                &candidate.candidate_report,
+                &candidate.selection,
+                no_op_selection,
+            );
     candidate.candidate_report.checkpoint_candidate = candidate_beats || morphology_recovery;
     candidate.candidate_report.progress_candidate = progress_candidate;
     if candidate_beats || morphology_recovery {
@@ -395,6 +455,203 @@ fn update_direct_line_search_state(
         *best_progress_selection = candidate.selection;
     }
     candidate_reports.push(candidate.candidate_report);
+}
+
+fn collect_liveness_suppression_source(
+    candidate: &DirectLineSearchCandidate,
+    cfg: &RenderProxyTrainingConfig,
+    sources: &mut Vec<(NpaModel, f32)>,
+) {
+    if !line_search_candidate_needs_liveness_suppression(&candidate.selection, cfg) {
+        return;
+    }
+    let source_scale = candidate.candidate_report.scale;
+    if !source_scale.is_finite()
+        || source_scale <= 0.0
+        || sources
+            .iter()
+            .any(|(_, scale)| relative_f32_eq(*scale, source_scale))
+    {
+        return;
+    }
+    sources.push((candidate.model.clone(), source_scale));
+}
+
+fn collect_liveness_material_refinement_source(
+    candidate: &DirectLineSearchCandidate,
+    cfg: &RenderProxyTrainingConfig,
+    sources: &mut Vec<(NpaModel, RenderSelectionMetrics, f32, &'static str)>,
+) {
+    if !line_search_candidate_can_use_material_refinement(&candidate.selection, cfg) {
+        return;
+    }
+    let source_scale = candidate.candidate_report.scale;
+    if !source_scale.is_finite() || source_scale <= 0.0 {
+        return;
+    }
+    let duplicate = sources.iter().any(|(_, _, scale, kind)| {
+        *kind == DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_MATERIAL_BIAS
+            && relative_f32_eq(*scale, source_scale)
+    });
+    if duplicate {
+        return;
+    }
+    sources.push((
+        candidate.model.clone(),
+        candidate.selection.clone(),
+        source_scale,
+        DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_MATERIAL_BIAS,
+    ));
+}
+
+fn line_search_candidate_needs_liveness_suppression(
+    selection: &RenderSelectionMetrics,
+    cfg: &RenderProxyTrainingConfig,
+) -> bool {
+    let allowed_active =
+        ((cfg.particles as f32) * temporal_activation_allowed_fraction(1.0)).ceil() as usize;
+    selection.min_final_active_count > allowed_active
+        && line_search_material_visible_support(selection) > 0.0
+}
+
+fn line_search_candidate_can_use_material_refinement(
+    selection: &RenderSelectionMetrics,
+    cfg: &RenderProxyTrainingConfig,
+) -> bool {
+    let allowed_active =
+        ((cfg.particles as f32) * temporal_activation_allowed_fraction(1.0)).ceil() as usize;
+    selection.min_final_active_count <= allowed_active
+        && selection.strict_surface_active_count > 0
+        && selection.strict_surface_material_visible_margin.is_finite()
+        && selection.strict_surface_material_visible_margin > 0.0
+}
+
+fn liveness_suppression_line_search_candidates(cfg: &RenderProxyTrainingConfig) -> Vec<f32> {
+    const SUPPRESSION_FRACTIONS: [f32; 4] = [0.125, 0.25, 0.5, 1.0];
+    const MAX_ABSOLUTE_BIAS: f32 = 1.0;
+    const LIVENESS_CAP_FRACTION: f32 = 0.50;
+    let liveness_cap = liveness_max_update(cfg.max_opacity_update, cfg.liveness_update_multiplier);
+    let cap = if liveness_cap.is_finite() && liveness_cap > 0.0 {
+        (liveness_cap * LIVENESS_CAP_FRACTION).min(MAX_ABSOLUTE_BIAS)
+    } else {
+        MAX_ABSOLUTE_BIAS
+    };
+    if cap <= 0.0 || !cap.is_finite() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for fraction in SUPPRESSION_FRACTIONS {
+        let bias = -(cap * fraction).clamp(1.0e-5, cap);
+        if bias.is_finite()
+            && !candidates.iter().any(|existing: &f32| {
+                ((*existing - bias).abs() / existing.abs().max(bias.abs()).max(1.0e-6)) < 1.0e-5
+            })
+        {
+            candidates.push(bias);
+        }
+    }
+    candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_liveness_suppression_line_search_candidate(
+    base_model: &NpaModel,
+    grid: &crate::kernels::HashGridConfig,
+    target: &TriangleMeshTarget,
+    cfg: &RenderProxyTrainingConfig,
+    gradient: &RenderProxyGradientRows,
+    render_cfg: RenderLossConfig,
+    selection_baseline: &[RenderSelectionBaselineCase],
+    source_scale: f32,
+    liveness_bias: f32,
+) -> Result<Option<DirectLineSearchCandidate>, Box<dyn std::error::Error>> {
+    if !liveness_bias.is_finite() || liveness_bias >= 0.0 {
+        return Ok(None);
+    }
+    let mut candidate = base_model.clone();
+    if add_growth_3d_opacity_update_bias(&mut candidate, liveness_bias).is_err() {
+        return Ok(None);
+    }
+    let selection = render_selection_metrics(
+        &candidate,
+        grid,
+        target,
+        cfg,
+        render_cfg,
+        Some(selection_baseline),
+    )?;
+    let report = render_direct_rollout_noop_report(selection.render_loss, gradient);
+    let candidate_report = direct_line_search_candidate_report(
+        DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_BIAS,
+        source_scale,
+        liveness_bias,
+        &selection,
+        &report,
+    );
+    Ok(Some(DirectLineSearchCandidate {
+        model: candidate,
+        report,
+        selection,
+        candidate_report,
+    }))
+}
+
+fn direct_line_search_progress_candidate_supported(
+    report: &DirectLineSearchCandidateReport,
+    selection: &RenderSelectionMetrics,
+    baseline: &RenderSelectionMetrics,
+) -> bool {
+    if report.candidate_kind != DIRECT_LINE_SEARCH_KIND_MATERIAL_BIAS
+        && report.candidate_kind != DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS
+        && report.candidate_kind != DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_BIAS
+        && report.candidate_kind != DIRECT_LINE_SEARCH_KIND_SGD_LIVENESS_MATERIAL_BIAS
+    {
+        return true;
+    }
+    material_visible_support_progressed_for_line_search(selection, baseline)
+}
+
+fn material_visible_support_progressed_for_line_search(
+    selection: &RenderSelectionMetrics,
+    baseline: &RenderSelectionMetrics,
+) -> bool {
+    const MATERIAL_TARGET_COVERAGE_PROGRESS: f32 = 5.0e-3;
+    const MATERIAL_SURFACE_BIN_PROGRESS: f32 = 5.0e-3;
+
+    (selection
+        .material_visible_target_coverage_fraction
+        .is_finite()
+        && baseline
+            .material_visible_target_coverage_fraction
+            .is_finite()
+        && selection.material_visible_target_coverage_fraction
+            >= baseline.material_visible_target_coverage_fraction
+                + MATERIAL_TARGET_COVERAGE_PROGRESS)
+        || (selection
+            .material_visible_surface_covered_bin_fraction
+            .is_finite()
+            && baseline
+                .material_visible_surface_covered_bin_fraction
+                .is_finite()
+            && selection.material_visible_surface_covered_bin_fraction
+                >= baseline.material_visible_surface_covered_bin_fraction
+                    + MATERIAL_SURFACE_BIN_PROGRESS)
+        || (selection
+            .material_visible_surface_normal_covered_bin_fraction
+            .is_finite()
+            && baseline
+                .material_visible_surface_normal_covered_bin_fraction
+                .is_finite()
+            && selection.material_visible_surface_normal_covered_bin_fraction
+                >= baseline.material_visible_surface_normal_covered_bin_fraction
+                    + MATERIAL_SURFACE_BIN_PROGRESS)
+}
+
+fn line_search_material_visible_support(selection: &RenderSelectionMetrics) -> f32 {
+    selection
+        .material_visible_target_coverage_fraction
+        .max(selection.material_visible_surface_covered_bin_fraction)
+        .max(selection.material_visible_surface_normal_covered_bin_fraction)
 }
 
 pub(crate) fn direct_line_search_candidate_report(

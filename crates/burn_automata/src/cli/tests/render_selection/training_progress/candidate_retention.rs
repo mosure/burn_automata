@@ -28,6 +28,7 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
     );
     material_preferred.strict_surface_material_mean_opacity = -3.17;
     material_preferred.strict_surface_material_visible_margin = 2.17;
+    material_preferred.material_visible_target_coverage_fraction = 0.02;
 
     assert!(
         render_selection_progress_candidate_preferred(
@@ -69,6 +70,69 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
 }
 
 #[test]
+fn render_selection_progress_rejects_strict_material_tiebreak_without_visible_coverage() {
+    let mut no_op = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
+    no_op.strict_surface_active_count = 24;
+    no_op.strict_surface_materialized_fraction = 0.0;
+    no_op.strict_surface_material_mean_opacity = -3.20;
+    no_op.strict_surface_material_visible_margin = 2.20;
+    no_op.material_visible_target_coverage_fraction = 0.0;
+    no_op.material_visible_surface_covered_bin_fraction = 0.0;
+    no_op.material_visible_surface_normal_covered_bin_fraction = 0.0;
+
+    let mut render_preferred = no_op.clone();
+    set_render_selection_metrics_render(
+        &mut render_preferred,
+        no_op.render_loss + 0.001,
+        no_op.density_psnr_db - 0.007,
+    );
+    render_preferred.strict_surface_material_mean_opacity = -3.185;
+    render_preferred.strict_surface_material_visible_margin = 2.185;
+
+    let mut opacity_only = no_op.clone();
+    set_render_selection_metrics_render(
+        &mut opacity_only,
+        no_op.render_loss + 0.002,
+        no_op.density_psnr_db - 0.010,
+    );
+    opacity_only.strict_surface_material_mean_opacity = -3.17;
+    opacity_only.strict_surface_material_visible_margin = 2.17;
+    opacity_only.strict_surface_materialized_fraction = 0.20;
+
+    assert!(
+        !render_selection_progress_candidate_preferred(&opacity_only, &render_preferred, &no_op),
+        "strict-band material progress should not win unless visible material coverage also improves"
+    );
+}
+
+#[test]
+fn render_selection_training_progress_rejects_opacity_only_strict_material_precursor() {
+    let mut previous = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
+    previous.strict_surface_active_count = 24;
+    previous.strict_surface_materialized_fraction = 0.0;
+    previous.strict_surface_material_mean_opacity = -3.20;
+    previous.strict_surface_material_visible_margin = 2.20;
+    previous.material_visible_target_coverage_fraction = 0.0;
+    previous.material_visible_surface_covered_bin_fraction = 0.0;
+    previous.material_visible_surface_normal_covered_bin_fraction = 0.0;
+
+    let mut opacity_only = previous.clone();
+    set_render_selection_metrics_render(
+        &mut opacity_only,
+        previous.render_loss - 0.001,
+        previous.density_psnr_db + 0.02,
+    );
+    opacity_only.strict_surface_material_mean_opacity = -3.17;
+    opacity_only.strict_surface_material_visible_margin = 2.17;
+    opacity_only.strict_surface_materialized_fraction = 0.20;
+
+    assert!(
+        !render_selection_training_progress_beats(&opacity_only, &previous),
+        "strict material precursor progress should require visible material support, not opacity-only margin movement"
+    );
+}
+
+#[test]
 fn render_selection_progress_rejects_strict_material_tiebreak_with_score_regression() {
     let mut no_op = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
     no_op.strict_surface_active_count = 24;
@@ -102,6 +166,45 @@ fn render_selection_progress_rejects_strict_material_tiebreak_with_score_regress
     assert!(
         !render_selection_progress_candidate_preferred(&material_only, &better_score, &no_op),
         "strict-band materialization is a tie-breaker and must not override a large strict-score regression"
+    );
+}
+
+#[test]
+fn render_selection_progress_preserves_visible_material_support_over_lower_score() {
+    let mut no_op = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
+    no_op.strict_surface_active_count = 24;
+    no_op.strict_surface_materialized_fraction = 0.0;
+    no_op.strict_surface_material_mean_opacity = -3.20;
+    no_op.strict_surface_material_visible_margin = 2.20;
+    no_op.material_visible_target_coverage_fraction = 0.0;
+    no_op.material_visible_surface_covered_bin_fraction = 0.0;
+    no_op.material_visible_surface_normal_covered_bin_fraction = 0.0;
+
+    let mut material_supported = no_op.clone();
+    material_supported.score = 201.0;
+    set_render_selection_metrics_render(
+        &mut material_supported,
+        no_op.render_loss - 0.02,
+        no_op.density_psnr_db + 0.05,
+    );
+    material_supported.material_visible_target_coverage_fraction = 0.008;
+    material_supported.material_visible_surface_covered_bin_fraction = 0.06;
+    material_supported.material_visible_surface_normal_covered_bin_fraction = 0.07;
+
+    let mut zero_support = material_supported.clone();
+    zero_support.score = 191.0;
+    set_render_selection_metrics_render(
+        &mut zero_support,
+        material_supported.render_loss - 0.10,
+        material_supported.density_psnr_db + 0.10,
+    );
+    zero_support.material_visible_target_coverage_fraction = 0.0;
+    zero_support.material_visible_surface_covered_bin_fraction = 0.0;
+    zero_support.material_visible_surface_normal_covered_bin_fraction = 0.0;
+
+    assert!(
+        !render_selection_progress_candidate_preferred(&zero_support, &material_supported, &no_op),
+        "progress retention should not discard visible material support just because a later candidate has lower strict score/render loss"
     );
 }
 
