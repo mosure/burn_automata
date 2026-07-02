@@ -85,6 +85,8 @@ pub(crate) fn render_selection_training_progress_beats(
     const MATERIAL_DISTANCE_PROGRESS: f32 = 0.02;
     const EXTENT_PROGRESS: f32 = 0.05;
     const TEMPORAL_ERROR_SLACK: f32 = 0.035;
+    const GEOMETRY_TEMPORAL_ERROR_SLACK: f32 = 0.075;
+    const GEOMETRY_TEMPORAL_ERROR_MAX: f32 = 0.15;
     const SURFACE_MAX_SLACK: f32 = 0.30;
     const MATERIAL_TAIL_SLACK: f32 = 0.02;
     const MIN_LOCAL_FRONT_FRACTION: f32 = 0.50;
@@ -195,6 +197,12 @@ pub(crate) fn render_selection_training_progress_beats(
         && previous.max_temporal_activation_schedule_error.is_finite()
         && selection.max_temporal_activation_schedule_error
             <= previous.max_temporal_activation_schedule_error + TEMPORAL_ERROR_SLACK;
+    let geometry_temporal_ok = geometry_progressed
+        && selection.max_temporal_activation_schedule_error.is_finite()
+        && previous.max_temporal_activation_schedule_error.is_finite()
+        && selection.max_temporal_activation_schedule_error <= GEOMETRY_TEMPORAL_ERROR_MAX
+        && selection.max_temporal_activation_schedule_error
+            <= previous.max_temporal_activation_schedule_error + GEOMETRY_TEMPORAL_ERROR_SLACK;
     let surface_ok = selection.active_surface_max.is_finite()
         && previous.active_surface_max.is_finite()
         && selection.active_surface_max
@@ -206,7 +214,7 @@ pub(crate) fn render_selection_training_progress_beats(
         >= MIN_LOCAL_FRONT_FRACTION
         || selection.min_front_local_newly_activated_fraction
             >= previous.min_front_local_newly_activated_fraction - 0.02;
-    temporal_ok && surface_ok && material_tail_ok && local_front_ok
+    (temporal_ok || geometry_temporal_ok) && surface_ok && material_tail_ok && local_front_ok
 }
 
 pub(crate) fn render_selection_activation_breakthrough_beats(

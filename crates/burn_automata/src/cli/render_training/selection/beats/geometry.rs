@@ -82,7 +82,7 @@ fn geometry_expansion_continuation(
     selection: &RenderSelectionMetrics,
     previous: &RenderSelectionMetrics,
 ) -> bool {
-    const SCORE_REGRESSION_SLACK: f32 = 5.0;
+    const SCORE_REGRESSION_SLACK: f32 = 10.0;
     const RENDER_LOSS_SLACK_ABS: f32 = 0.015;
     const RENDER_LOSS_SLACK_FRACTION: f32 = 0.02;
     const DENSITY_PSNR_SLACK_DB: f32 = 0.10;
@@ -91,7 +91,7 @@ fn geometry_expansion_continuation(
     const SURFACE_BIN_PROGRESS: f32 = 0.015;
     const NORMAL_BIN_PROGRESS: f32 = 0.05;
     const ACTIVATION_PROGRESS: f32 = 0.10;
-    const MIN_LOCAL_FRONT_FRACTION: f32 = 0.85;
+    const MIN_LOCAL_FRONT_FRACTION: f32 = 0.65;
 
     selection.score <= previous.score + SCORE_REGRESSION_SLACK
         && render_selection_render_within_geometry_expansion_slack(

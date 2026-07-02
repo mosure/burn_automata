@@ -260,6 +260,70 @@ fn render_selection_can_retain_geometry_growth_before_material_visibility() {
 }
 
 #[test]
+fn render_selection_can_continue_bounded_surface_support_expansion() {
+    let mut previous = render_selection_metrics_with_liveness(101.402_374, 0.676_347_6, 1.991, 0.0);
+    previous.morphology_non_regressed = false;
+    previous.active_surface_max = 0.348_897_04;
+    previous.target_coverage_fraction = 0.048_828_125;
+    previous.surface_covered_bin_fraction = 0.109_375;
+    previous.surface_normal_covered_bin_fraction = 0.384;
+    previous.material_visible_target_coverage_fraction = 0.0;
+    previous.material_visible_surface_covered_bin_fraction = 0.0;
+    previous.material_visible_surface_normal_covered_bin_fraction = 0.0;
+    previous.min_active_extent_bbox_ratio = 0.287;
+    previous.min_active_extent_min_axis_ratio = 0.184;
+    previous.min_final_active_count = 55;
+    previous.min_newly_activated_fraction = 0.392;
+    previous.min_front_local_newly_activated_fraction = 0.957_446_8;
+    previous.max_temporal_activation_schedule_error = 0.072_395_83;
+    previous.material_visible_surface_tail_over_threshold_fraction = 0.0;
+
+    let mut bounded = previous.clone();
+    bounded.score = 108.680_3;
+    bounded.render_loss = 0.689_317_1;
+    bounded.density_psnr_db = 1.914_362_3;
+    bounded.active_surface_max = 0.402_585_36;
+    bounded.target_coverage_fraction = 0.058_593_75;
+    bounded.surface_covered_bin_fraction = 0.171_875;
+    bounded.surface_normal_covered_bin_fraction = 0.461_538_46;
+    bounded.min_active_extent_bbox_ratio = 0.597_709_06;
+    bounded.min_active_extent_min_axis_ratio = 0.489_307_8;
+    bounded.min_final_active_count = 90;
+    bounded.min_newly_activated_fraction = 0.683_333_34;
+    bounded.min_front_local_newly_activated_fraction = 0.674_698_77;
+    bounded.max_temporal_activation_schedule_error = 0.142_534_73;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&bounded, &previous),
+        "moderate score-regressing surface expansion should not become a selected checkpoint"
+    );
+    assert!(
+        render_selection_training_progress_beats(&bounded, &previous),
+        "bounded active support expansion should continue training before material coverage catches up"
+    );
+
+    let mut bursty = bounded.clone();
+    bursty.score = 118.882_69;
+    bursty.render_loss = 0.694_972_16;
+    bursty.density_psnr_db = 1.881_357;
+    bursty.active_surface_max = 0.451_338_35;
+    bursty.target_coverage_fraction = 0.070_312_5;
+    bursty.surface_covered_bin_fraction = 0.218_75;
+    bursty.surface_normal_covered_bin_fraction = 0.5;
+    bursty.min_active_extent_bbox_ratio = 0.800_067_3;
+    bursty.min_active_extent_min_axis_ratio = 0.688_672_8;
+    bursty.min_final_active_count = 119;
+    bursty.min_newly_activated_fraction = 0.925;
+    bursty.min_front_local_newly_activated_fraction = 0.522_522_5;
+    bursty.max_temporal_activation_schedule_error = 0.279_687_52;
+
+    assert!(
+        !render_selection_training_progress_beats(&bursty, &previous),
+        "surface expansion continuation must still reject bursty, nonlocal activation"
+    );
+}
+
+#[test]
 fn render_selection_can_continue_bounded_geometry_expansion_without_checkpointing() {
     let mut previous = render_selection_metrics_with_liveness(101.40, 0.6763, 1.991, 0.0);
     previous.morphology_non_regressed = true;
