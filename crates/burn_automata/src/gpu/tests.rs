@@ -120,7 +120,7 @@ fn adaptive_auto_uses_sorted_cells_for_small_collapsed_3d_particle_grid_cells() 
 #[test]
 fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_3d_cells() {
     let grid = HashGridConfig::growing_3dgs();
-    let particle_count = 1024;
+    let particle_count = 8192;
     let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
 
     let (capacity, mode) =
@@ -133,7 +133,7 @@ fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_3d_cells() {
 
 #[test]
 fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_3d_throughput_range() {
-    let particle_count = 1024;
+    let particle_count = 8192;
     let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);
     let (positions, _) = seed_particles_scaled(
         1,
@@ -162,7 +162,7 @@ fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_3d_throughput_range
 #[test]
 fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_2d_cells() {
     let grid = HashGridConfig::growing_2d();
-    let particle_count = 4096;
+    let particle_count = 8192;
     let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
 
     let (capacity, mode) =
@@ -175,7 +175,7 @@ fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_2d_cells() {
 
 #[test]
 fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_2d_throughput_range() {
-    let particle_count = 1024;
+    let particle_count = 8192;
     let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
     let (positions, _) = seed_particles_scaled(
         1,
@@ -204,7 +204,7 @@ fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_2d_throughput_range
 #[test]
 fn adaptive_auto_rejects_unvalidated_oversized_cooperative_cells() {
     let grid = HashGridConfig::growing_2d();
-    let particle_count = 8192;
+    let particle_count = 16_384;
     let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
 
     let err =
@@ -221,7 +221,7 @@ fn adaptive_auto_rejects_unvalidated_oversized_cooperative_cells() {
 #[test]
 fn adaptive_auto_rejects_unvalidated_oversized_3d_cooperative_cells() {
     let grid = HashGridConfig::growing_3dgs();
-    let particle_count = 8192;
+    let particle_count = 16_384;
     let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
 
     let err =

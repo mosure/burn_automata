@@ -13,7 +13,7 @@ use crate::gpu::helpers::util::u32_checked;
 const MAX_AUTO_EXACT_CELL_OCCUPANCY: usize = 512;
 const MAX_AUTO_TILED_CELL_OCCUPANCY: usize = 2048;
 const MIN_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 512;
-const MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 4096;
+const MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 8192;
 
 pub(in crate::gpu) fn resolve_bucket_capacity(
     grid: &HashGridConfig,
