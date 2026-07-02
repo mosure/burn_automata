@@ -326,6 +326,12 @@ pub(crate) fn growth_3d_validation_report_single(
         final_gaussian_volume,
     );
     apply_temporal_activation_strict_score(&mut strict_score, &temporal, rollout_steps);
+    apply_morphogenesis_dynamics_strict_score(
+        &mut strict_score,
+        &motion,
+        mean_final_displacement,
+        cfg.seed_scale,
+    );
     apply_material_liveness_strict_score(&mut strict_score, final_material_liveness);
     apply_material_visible_surface_tail_strict_score(
         &mut strict_score,

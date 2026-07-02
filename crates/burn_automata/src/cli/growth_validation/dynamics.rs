@@ -664,6 +664,45 @@ pub(crate) fn apply_temporal_activation_strict_score(
     score.score += penalty;
 }
 
+pub(crate) fn apply_morphogenesis_dynamics_strict_score(
+    score: &mut Growth3dStrictScoreReport,
+    motion: &Growth3dMotionReport,
+    mean_final_displacement: f32,
+    seed_scale: f32,
+) {
+    const MOTION_PEAK_TARGET: f32 = 0.01;
+    const ACTIVE_STEP_TARGET: f32 = 0.50;
+    const SUSTAINED_STEP_TARGET: f32 = 0.25;
+
+    let displacement_target = growth_3d_seed_radius(seed_scale).max(1.0e-6);
+    let peak_penalty = relative_shortfall(MOTION_PEAK_TARGET, motion.peak_mean_dx);
+    let active_step_penalty = relative_shortfall(ACTIVE_STEP_TARGET, motion.active_step_fraction);
+    let sustained_step_penalty =
+        relative_shortfall(SUSTAINED_STEP_TARGET, motion.sustained_step_fraction);
+    let displacement_penalty = relative_shortfall(displacement_target, mean_final_displacement);
+
+    score.motion_peak_mean_dx = motion.peak_mean_dx;
+    score.motion_peak_penalty = peak_penalty;
+    score.motion_active_step_fraction = motion.active_step_fraction;
+    score.motion_active_step_penalty = active_step_penalty;
+    score.motion_sustained_step_fraction = motion.sustained_step_fraction;
+    score.motion_sustained_step_penalty = sustained_step_penalty;
+    score.mean_final_displacement = mean_final_displacement;
+    score.mean_final_displacement_penalty = displacement_penalty;
+    score.score +=
+        peak_penalty + active_step_penalty + sustained_step_penalty + displacement_penalty;
+}
+
+fn relative_shortfall(target: f32, value: f32) -> f32 {
+    if !target.is_finite() || target <= 0.0 {
+        return 0.0;
+    }
+    if !value.is_finite() {
+        return 1.0;
+    }
+    ((target - value) / target).clamp(0.0, 1.0)
+}
+
 pub(crate) fn apply_material_visible_surface_tail_strict_check(
     checks: &mut Growth3dStrictChecksReport,
     material_visible_surface_tail: Growth3dSurfaceTailReport,

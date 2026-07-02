@@ -583,7 +583,7 @@ pub(crate) fn cap_output_gradient_channel_rms(
     output_dims: usize,
     rms_cap: f32,
 ) -> usize {
-    cap_output_gradient_channel_rms_impl(output_gradients, output_dims, rms_cap, None)
+    cap_output_gradient_channel_rms_impl(output_gradients, output_dims, rms_cap, &[])
 }
 
 pub(crate) fn cap_output_gradient_channel_rms_with_liveness_cap(
@@ -592,6 +592,24 @@ pub(crate) fn cap_output_gradient_channel_rms_with_liveness_cap(
     output_dims: usize,
     rms_cap: f32,
     liveness_rms_cap: f32,
+) -> usize {
+    cap_output_gradient_channel_rms_with_state_caps(
+        config,
+        output_gradients,
+        output_dims,
+        rms_cap,
+        liveness_rms_cap,
+        rms_cap,
+    )
+}
+
+pub(crate) fn cap_output_gradient_channel_rms_with_state_caps(
+    config: &NpaConfig,
+    output_gradients: &mut [f32],
+    output_dims: usize,
+    rms_cap: f32,
+    liveness_rms_cap: f32,
+    material_rms_cap: f32,
 ) -> usize {
     let liveness_output = if config.state_dims > GROWTH_3D_LIVENESS_CHANNEL {
         Some(config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL)
@@ -603,19 +621,29 @@ pub(crate) fn cap_output_gradient_channel_rms_with_liveness_cap(
     } else {
         None
     };
-    cap_output_gradient_channel_rms_impl(
-        output_gradients,
-        output_dims,
-        rms_cap,
+    let material_output = growth_3d_material_opacity_channel(config.state_dims)
+        .map(|channel| config.spatial_dims + channel)
+        .filter(|channel| *channel < output_dims && Some(*channel) != liveness_output);
+    let material_cap = if material_rms_cap.is_finite() && material_rms_cap > rms_cap {
+        Some(material_rms_cap)
+    } else {
+        None
+    };
+    let overrides = [
         liveness_output.zip(liveness_cap),
-    )
+        material_output.zip(material_cap),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    cap_output_gradient_channel_rms_impl(output_gradients, output_dims, rms_cap, &overrides)
 }
 
 pub(crate) fn cap_output_gradient_channel_rms_impl(
     output_gradients: &mut [f32],
     output_dims: usize,
     rms_cap: f32,
-    channel_override: Option<(usize, f32)>,
+    channel_overrides: &[(usize, f32)],
 ) -> usize {
     if output_dims == 0
         || output_gradients.is_empty()
@@ -628,8 +656,10 @@ pub(crate) fn cap_output_gradient_channel_rms_impl(
     let rows = output_gradients.len() / output_dims;
     let mut capped = 0usize;
     for output in 0..output_dims {
-        let channel_cap = channel_override
-            .filter(|(channel, cap)| *channel == output && *cap > 0.0 && cap.is_finite())
+        let channel_cap = channel_overrides
+            .iter()
+            .copied()
+            .find(|(channel, cap)| *channel == output && *cap > 0.0 && cap.is_finite())
             .map(|(_, cap)| cap)
             .unwrap_or(rms_cap);
         let rms = ((0..rows)

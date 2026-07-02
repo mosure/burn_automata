@@ -830,6 +830,12 @@ pub(crate) fn render_selection_case_metrics(
         final_gaussian_volume,
     );
     apply_temporal_activation_strict_score(&mut strict_score, &temporal, cfg.rollout_steps);
+    apply_morphogenesis_dynamics_strict_score(
+        &mut strict_score,
+        &motion,
+        mean_final_displacement,
+        cfg.seed_scale,
+    );
     apply_material_liveness_strict_score(&mut strict_score, material_liveness);
     apply_material_visible_surface_tail_strict_score(
         &mut strict_score,

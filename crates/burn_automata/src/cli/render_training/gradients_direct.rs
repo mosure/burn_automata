@@ -834,12 +834,13 @@ pub(crate) fn render_direct_rollout_training_step(
             cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_SPATIAL_MOTION_RMS_TARGET_FRACTION,
             8.0,
         );
-        cap_output_gradient_channel_rms_with_liveness_cap(
+        cap_output_gradient_channel_rms_with_state_caps(
             &model.config,
             &mut step_output_gradients,
             output_dims,
             cfg.direct_output_gradient_rms_cap,
             liveness_update_cap,
+            cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_MATERIAL_OUTPUT_RMS_CAP_MULTIPLIER,
         );
 
         let step_gradients =

@@ -132,6 +132,58 @@ fn output_gradient_liveness_cap_preserves_sparse_temporal_signal() {
         "liveness output should use the larger temporal-growth cap instead of the default render cap"
     );
 }
+
+#[test]
+fn output_gradient_state_caps_preserve_materialization_signal() {
+    let config = NpaConfig::growing_3dgs();
+    let output_dims = config.update_dims();
+    let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
+    let material_output =
+        config.spatial_dims + growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let mut gradients = vec![0.0_f32; 4 * output_dims];
+    for row in 0..4 {
+        gradients[row * output_dims] = 10.0;
+        gradients[row * output_dims + liveness_output] = 8.0;
+        gradients[row * output_dims + material_output] = 7.0;
+    }
+
+    let capped = cap_output_gradient_channel_rms_with_state_caps(
+        &config,
+        &mut gradients,
+        output_dims,
+        2.0,
+        6.0,
+        5.0,
+    );
+
+    assert_eq!(capped, 3);
+    let motion_rms = ((0..4)
+        .map(|row| gradients[row * output_dims].powi(2))
+        .sum::<f32>()
+        / 4.0)
+        .sqrt();
+    let liveness_rms = ((0..4)
+        .map(|row| gradients[row * output_dims + liveness_output].powi(2))
+        .sum::<f32>()
+        / 4.0)
+        .sqrt();
+    let material_rms = ((0..4)
+        .map(|row| gradients[row * output_dims + material_output].powi(2))
+        .sum::<f32>()
+        / 4.0)
+        .sqrt();
+
+    assert!(motion_rms <= 2.0 + 1.0e-6);
+    assert!(
+        (liveness_rms - 6.0).abs() <= 1.0e-6,
+        "liveness cap should remain independently configurable"
+    );
+    assert!(
+        (material_rms - 5.0).abs() <= 1.0e-6,
+        "material cap should keep visible-material supervision from being capped like motion"
+    );
+}
+
 #[test]
 fn direct_rollout_gradient_normalization_averages_by_rows() {
     let mut gradients = SupervisedGradients {

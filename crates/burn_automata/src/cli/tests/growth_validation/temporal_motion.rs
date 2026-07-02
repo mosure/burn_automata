@@ -335,3 +335,97 @@ fn growth_3d_strict_checks_reject_surface_max_escape() {
     assert!(!checks.passed);
     assert!(checks.failure_reasons.contains(&"surface_max_bounded"));
 }
+
+#[test]
+fn morphogenesis_dynamics_strict_score_tracks_motion_progress() {
+    let checks = passing_growth_3d_strict_checks();
+    let render = synthetic_render_loss(0.0, 10.0, 12.0, 14.0);
+    let mut weak = growth_3d_strict_score_report(
+        &checks,
+        Growth3dSurfaceStats {
+            mean_distance: 0.2,
+            max_distance: 0.2,
+        },
+        Growth3dSurfaceStats {
+            mean_distance: 0.16,
+            max_distance: 0.3,
+        },
+        passing_growth_3d_surface_tail_report(),
+        TargetCoverageStats {
+            mean_distance: 1.0,
+            max_distance: 1.0,
+            covered_fraction: 0.1,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.8,
+            max_distance: 0.7,
+            covered_fraction: 0.6,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.8,
+            max_distance: 0.7,
+            covered_fraction: 0.6,
+        },
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &render,
+        GaussianVolumeStats::default(),
+    );
+    let mut strong = growth_3d_strict_score_report(
+        &checks,
+        Growth3dSurfaceStats {
+            mean_distance: 0.2,
+            max_distance: 0.2,
+        },
+        Growth3dSurfaceStats {
+            mean_distance: 0.16,
+            max_distance: 0.3,
+        },
+        passing_growth_3d_surface_tail_report(),
+        TargetCoverageStats {
+            mean_distance: 1.0,
+            max_distance: 1.0,
+            covered_fraction: 0.1,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.8,
+            max_distance: 0.7,
+            covered_fraction: 0.6,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.8,
+            max_distance: 0.7,
+            covered_fraction: 0.6,
+        },
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &render,
+        GaussianVolumeStats::default(),
+    );
+
+    apply_morphogenesis_dynamics_strict_score(
+        &mut weak,
+        &growth_3d_motion_report(&[0.001, 0.002, 0.001, 0.0]),
+        0.04,
+        0.72,
+    );
+    apply_morphogenesis_dynamics_strict_score(
+        &mut strong,
+        &growth_3d_motion_report(&[0.012, 0.013, 0.011, 0.010]),
+        0.20,
+        0.72,
+    );
+
+    assert!(weak.motion_peak_penalty > 0.0);
+    assert!(weak.mean_final_displacement_penalty > 0.0);
+    assert_eq!(strong.motion_peak_penalty, 0.0);
+    assert_eq!(strong.mean_final_displacement_penalty, 0.0);
+    assert!(
+        strong.score < weak.score,
+        "strict-score ranking should prefer candidates with stronger realized morphogenesis dynamics"
+    );
+}
