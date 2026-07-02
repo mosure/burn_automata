@@ -522,7 +522,21 @@ fn direct_rollout_training_honors_supervised_steps_per_round() {
     assert_ne!(model.weights.w2, before);
 }
 #[test]
-fn direct_multiseed_training_reports_actual_averaged_model_loss() {
+fn direct_multiseed_loss_weights_emphasize_worse_rollout_seeds() {
+    let weights = direct_rollout_multiseed_loss_weights(&[1.0, 3.0, 1.0]);
+
+    assert!((weights.iter().sum::<f32>() - 1.0).abs() <= 1.0e-6);
+    assert!(weights[1] > weights[0]);
+    assert!((weights[0] - weights[2]).abs() <= 1.0e-6);
+
+    let uniform = direct_rollout_multiseed_loss_weights(&[2.0, 2.0]);
+    assert_eq!(uniform, vec![0.5, 0.5]);
+
+    let invalid = direct_rollout_multiseed_loss_weights(&[f32::NAN, f32::INFINITY]);
+    assert_eq!(invalid, vec![0.5, 0.5]);
+}
+#[test]
+fn direct_multiseed_training_reports_actual_weighted_model_loss() {
     let config = NpaConfig::growing_3dgs();
     let grid = crate::kernels::HashGridConfig::growing_3dgs();
     let mut model =
@@ -594,6 +608,16 @@ fn direct_multiseed_training_reports_actual_averaged_model_loss() {
     let seeds = render_direct_rollout_training_seeds(&cfg, 0);
     let (trace, trajectory) = render_training_trajectory(&model, &grid, &cfg, 0).unwrap();
     let gradient = render_position_gradient(&trace, &target, cfg.render, &cfg).unwrap();
+    let initial_losses = seeds
+        .iter()
+        .map(|seed| {
+            let trace = render_training_trace_for_seed(&model, &grid, &cfg, *seed).unwrap();
+            mesh_multiview_render_loss_from_trace(&trace, &target, cfg.render)
+                .unwrap()
+                .total_loss
+        })
+        .collect::<Vec<_>>();
+    let seed_weights = direct_rollout_multiseed_loss_weights(&initial_losses);
 
     let report = render_direct_rollout_multiseed_training_step(
         &mut model,
@@ -606,8 +630,19 @@ fn direct_multiseed_training_reports_actual_averaged_model_loss() {
         &gradient,
     )
     .unwrap();
-    let actual_final_loss = render_direct_rollout_average_loss_for_seeds(
-        &model, &grid, &target, &cfg, cfg.render, &seeds,
+    let expected_initial_loss = initial_losses
+        .iter()
+        .zip(seed_weights.iter())
+        .map(|(loss, weight)| loss * weight)
+        .sum::<f32>();
+    let actual_final_loss = render_direct_rollout_weighted_loss_for_seeds(
+        &model,
+        &grid,
+        &target,
+        &cfg,
+        cfg.render,
+        &seeds,
+        &seed_weights,
     )
     .unwrap();
 
@@ -617,8 +652,12 @@ fn direct_multiseed_training_reports_actual_averaged_model_loss() {
     assert!(report.initial_loss.is_finite());
     assert!(report.final_loss.is_finite());
     assert!(
+        (report.initial_loss - expected_initial_loss).abs() <= 1.0e-6,
+        "multiseed report should use the loss-weighted robust objective"
+    );
+    assert!(
         (report.final_loss - actual_final_loss).abs() <= 1.0e-6,
-        "multiseed report should evaluate the averaged model that is kept"
+        "multiseed report should evaluate the loss-weighted model objective that is kept"
     );
     assert_eq!(report.history[0].loss, report.final_loss);
     assert_eq!(report.best_loss, report.initial_loss.min(report.final_loss));

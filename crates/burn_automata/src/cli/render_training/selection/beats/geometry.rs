@@ -22,16 +22,16 @@ pub(super) fn render_selection_geometry_growth_precursor_beats(
         && selection.score.is_finite()
         && best.score.is_finite()
         && (render_selection_render_non_regressed(
-            selection.render_loss,
-            best.render_loss,
-            selection.density_psnr_db,
-            best.density_psnr_db,
+            selection.max_render_loss,
+            best.max_render_loss,
+            selection.min_density_psnr_db,
+            best.min_density_psnr_db,
         ) || render_selection_render_within_strict_improvement_slack(
             strict_score_improvement,
-            selection.render_loss,
-            best.render_loss,
-            selection.density_psnr_db,
-            best.density_psnr_db,
+            selection.max_render_loss,
+            best.max_render_loss,
+            selection.min_density_psnr_db,
+            best.min_density_psnr_db,
         ))
         && selection.target_coverage_fraction + TARGET_COVERAGE_REGRESSION_SLACK
             >= best.target_coverage_fraction
@@ -96,10 +96,10 @@ fn geometry_expansion_continuation(
 
     selection.score <= previous.score + SCORE_REGRESSION_SLACK
         && render_selection_render_within_geometry_expansion_slack(
-            selection.render_loss,
-            previous.render_loss,
-            selection.density_psnr_db,
-            previous.density_psnr_db,
+            selection.max_render_loss,
+            previous.max_render_loss,
+            selection.min_density_psnr_db,
+            previous.min_density_psnr_db,
             RENDER_LOSS_SLACK_ABS,
             RENDER_LOSS_SLACK_FRACTION,
             DENSITY_PSNR_SLACK_DB,

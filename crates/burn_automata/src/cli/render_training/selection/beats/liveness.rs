@@ -28,10 +28,10 @@ pub(super) fn render_selection_liveness_precursor_beats(
         return false;
     }
     if !render_selection_render_within_liveness_precursor_slack(
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
+        selection.max_render_loss,
+        best.max_render_loss,
+        selection.min_density_psnr_db,
+        best.min_density_psnr_db,
     ) {
         return false;
     }

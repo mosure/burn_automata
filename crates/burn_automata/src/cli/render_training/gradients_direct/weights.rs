@@ -1,23 +1,29 @@
 use super::*;
 
-pub(crate) fn accumulate_weight_delta(
+pub(crate) fn accumulate_scaled_weight_delta(
     delta: &mut NpaWeights,
     before: &NpaWeights,
     after: &NpaWeights,
+    scale: f32,
 ) {
-    accumulate_weight_delta_slice(&mut delta.w1, &before.w1, &after.w1);
-    accumulate_weight_delta_slice(&mut delta.b1, &before.b1, &after.b1);
-    accumulate_weight_delta_slice(&mut delta.w2, &before.w2, &after.w2);
-    accumulate_weight_delta_slice(&mut delta.b2, &before.b2, &after.b2);
+    accumulate_scaled_weight_delta_slice(&mut delta.w1, &before.w1, &after.w1, scale);
+    accumulate_scaled_weight_delta_slice(&mut delta.b1, &before.b1, &after.b1, scale);
+    accumulate_scaled_weight_delta_slice(&mut delta.w2, &before.w2, &after.w2, scale);
+    accumulate_scaled_weight_delta_slice(&mut delta.b2, &before.b2, &after.b2, scale);
 }
 
-pub(crate) fn accumulate_weight_delta_slice(delta: &mut [f32], before: &[f32], after: &[f32]) {
+pub(crate) fn accumulate_scaled_weight_delta_slice(
+    delta: &mut [f32],
+    before: &[f32],
+    after: &[f32],
+    scale: f32,
+) {
     debug_assert_eq!(delta.len(), before.len());
     debug_assert_eq!(before.len(), after.len());
     for ((delta_value, before_value), after_value) in
         delta.iter_mut().zip(before.iter()).zip(after.iter())
     {
-        *delta_value += after_value - before_value;
+        *delta_value += (after_value - before_value) * scale;
     }
 }
 

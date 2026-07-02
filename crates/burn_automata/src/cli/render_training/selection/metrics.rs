@@ -6,8 +6,10 @@ use super::*;
 #[derive(Clone)]
 pub(crate) struct RenderSelectionMetrics {
     pub(crate) render_loss: f32,
+    pub(crate) max_render_loss: f32,
     pub(crate) score: f32,
     pub(crate) density_psnr_db: f32,
+    pub(crate) min_density_psnr_db: f32,
     pub(crate) active_surface_max: f32,
     pub(crate) target_coverage_fraction: f32,
     pub(crate) material_visible_target_mean_distance: f32,
@@ -113,7 +115,9 @@ pub(crate) fn render_selection_metrics(
     let mut score = f32::NEG_INFINITY;
     let mut worst_seed = base_seed;
     let mut worst_failure_reasons = Vec::new();
+    let mut max_render_loss = f32::NEG_INFINITY;
     let mut density_psnr_db = 0.0_f32;
+    let mut min_density_psnr_db = f32::INFINITY;
     let mut active_surface_max = f32::NEG_INFINITY;
     let mut target_coverage_fraction = f32::INFINITY;
     let mut material_visible_target_mean_distance = f32::NEG_INFINITY;
@@ -170,6 +174,7 @@ pub(crate) fn render_selection_metrics(
             &owned_case
         };
         render_loss += selection_case.render_loss.total_loss;
+        max_render_loss = max_render_loss.max(selection_case.render_loss.total_loss);
         let selection_score =
             render_selection_case_score_with_baseline(*seed, selection_case, baseline);
         if !selection_score.morphology_non_regressed {
@@ -184,6 +189,7 @@ pub(crate) fn render_selection_metrics(
         }
         score = score.max(selection_score.score);
         density_psnr_db += selection_case.render_loss.density_psnr_db;
+        min_density_psnr_db = min_density_psnr_db.min(selection_case.render_loss.density_psnr_db);
         active_surface_max = active_surface_max.max(selection_case.active_surface.max_distance);
         target_coverage_fraction =
             target_coverage_fraction.min(selection_case.target_coverage.covered_fraction);
@@ -346,8 +352,10 @@ pub(crate) fn render_selection_metrics(
 
     Ok(RenderSelectionMetrics {
         render_loss: finite_report_metric(render_loss / count, RENDER_SELECTION_BAD_SCORE),
+        max_render_loss: finite_report_metric(max_render_loss, RENDER_SELECTION_BAD_SCORE),
         score: finite_report_metric(score, RENDER_SELECTION_BAD_SCORE),
         density_psnr_db: finite_report_metric(density_psnr_db / count, -RENDER_SELECTION_BAD_SCORE),
+        min_density_psnr_db: finite_report_metric(min_density_psnr_db, -RENDER_SELECTION_BAD_SCORE),
         active_surface_max: finite_report_metric(active_surface_max, RENDER_SELECTION_BAD_SCORE),
         target_coverage_fraction: finite_report_metric(target_coverage_fraction, 0.0),
         material_visible_target_mean_distance: finite_report_metric(

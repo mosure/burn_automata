@@ -88,6 +88,13 @@ fn render_selection_metrics_average_base_and_selection_seed_with_morphology_pena
             .abs()
             <= 1.0e-6
     );
+    assert_eq!(
+        selection.max_render_loss,
+        base.render_loss
+            .total_loss
+            .max(heldout.render_loss.total_loss)
+            .max(extra.render_loss.total_loss)
+    );
     assert_eq!(render_proxy_selection_seeds(&cfg), vec![cfg.seed, 19, 23]);
     let base_scored = render_selection_case_score_with_baseline(cfg.seed, &base, Some(&baseline));
     let heldout_scored = render_selection_case_score_with_baseline(19, &heldout, Some(&baseline));
@@ -135,6 +142,13 @@ fn render_selection_metrics_average_base_and_selection_seed_with_morphology_pena
                 / 3.0)
             .abs()
             <= 1.0e-6
+    );
+    assert_eq!(
+        selection.min_density_psnr_db,
+        base.render_loss
+            .density_psnr_db
+            .min(heldout.render_loss.density_psnr_db)
+            .min(extra.render_loss.density_psnr_db)
     );
     assert_eq!(
         selection.active_surface_max,

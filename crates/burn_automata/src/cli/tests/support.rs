@@ -49,8 +49,10 @@ pub(super) fn render_selection_metrics_with_liveness(
 ) -> RenderSelectionMetrics {
     RenderSelectionMetrics {
         render_loss,
+        max_render_loss: render_loss,
         score,
         density_psnr_db,
+        min_density_psnr_db: density_psnr_db,
         active_surface_max: 0.12,
         target_coverage_fraction: 0.82,
         material_visible_target_mean_distance: 0.05,
@@ -103,6 +105,18 @@ pub(super) fn render_selection_metrics_with_liveness(
         #[cfg(test)]
         base_report: synthetic_render_loss(render_loss, density_psnr_db, 20.0, 20.0),
     }
+}
+
+pub(super) fn set_render_selection_metrics_render(
+    metrics: &mut RenderSelectionMetrics,
+    render_loss: f32,
+    density_psnr_db: f32,
+) {
+    metrics.render_loss = render_loss;
+    metrics.max_render_loss = render_loss;
+    metrics.density_psnr_db = density_psnr_db;
+    metrics.min_density_psnr_db = density_psnr_db;
+    metrics.base_report = synthetic_render_loss(render_loss, density_psnr_db, 20.0, 20.0);
 }
 
 pub(super) fn render_selection_case_with_front_liveness_margin(

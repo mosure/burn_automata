@@ -28,10 +28,10 @@ pub(super) fn render_selection_strict_morphology_progress_beats(
     }
     if !render_selection_render_within_strict_improvement_slack(
         strict_score_improvement,
-        selection.render_loss,
-        previous.render_loss,
-        selection.density_psnr_db,
-        previous.density_psnr_db,
+        selection.max_render_loss,
+        previous.max_render_loss,
+        selection.min_density_psnr_db,
+        previous.min_density_psnr_db,
     ) {
         return false;
     }

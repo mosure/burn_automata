@@ -16,8 +16,11 @@ fn render_selection_training_progress_accepts_bounded_strict_target_coverage() {
 
     let mut coverage = previous.clone();
     coverage.score = previous.score - 0.50;
-    coverage.render_loss = previous.render_loss + 0.003;
-    coverage.density_psnr_db = previous.density_psnr_db - 0.08;
+    set_render_selection_metrics_render(
+        &mut coverage,
+        previous.render_loss + 0.003,
+        previous.density_psnr_db - 0.08,
+    );
     coverage.target_coverage_fraction = previous.target_coverage_fraction + 0.03;
     coverage.surface_covered_bin_fraction = previous.surface_covered_bin_fraction + 0.025;
 
@@ -38,7 +41,11 @@ fn render_selection_training_progress_accepts_bounded_strict_target_coverage() {
     );
 
     let mut render_regressed = coverage;
-    render_regressed.render_loss = previous.render_loss + 0.030;
+    set_render_selection_metrics_render(
+        &mut render_regressed,
+        previous.render_loss + 0.030,
+        previous.density_psnr_db - 0.08,
+    );
     assert!(
         !render_selection_training_progress_beats(&render_regressed, &previous),
         "strict target coverage progress still needs bounded render slack"
@@ -63,8 +70,11 @@ fn render_selection_training_progress_accepts_bounded_temporal_schedule_progress
 
     let mut scheduled = previous.clone();
     scheduled.score = previous.score - 0.70;
-    scheduled.render_loss = previous.render_loss + 0.004;
-    scheduled.density_psnr_db = previous.density_psnr_db - 0.11;
+    set_render_selection_metrics_render(
+        &mut scheduled,
+        previous.render_loss + 0.004,
+        previous.density_psnr_db - 0.11,
+    );
     scheduled.max_temporal_activation_schedule_error = 0.19;
 
     assert!(

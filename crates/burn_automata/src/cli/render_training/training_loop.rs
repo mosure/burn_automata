@@ -213,17 +213,21 @@ pub(crate) fn run_render_proxy_training(
             before_loss: before.total_loss,
             after_loss: after.total_loss,
             before_selection_loss: before_selection.render_loss,
+            before_selection_max_render_loss: before_selection.max_render_loss,
             before_selection_score: before_selection.score,
             before_selection_density_psnr_db: before_selection.density_psnr_db,
+            before_selection_min_density_psnr_db: before_selection.min_density_psnr_db,
             before_selection_min_active_extent_bbox_ratio: before_selection
                 .min_active_extent_bbox_ratio,
             before_selection_min_active_extent_min_axis_ratio: before_selection
                 .min_active_extent_min_axis_ratio,
             selection_loss: selection.render_loss,
+            selection_max_render_loss: selection.max_render_loss,
             selection_score: selection.score,
             before_density_psnr_db: before.density_psnr_db,
             after_density_psnr_db: after.density_psnr_db,
             selection_density_psnr_db: selection.density_psnr_db,
+            selection_min_density_psnr_db: selection.min_density_psnr_db,
             selection_active_surface_max: selection.active_surface_max,
             selection_target_coverage_fraction: selection.target_coverage_fraction,
             selection_material_visible_target_mean_distance: selection

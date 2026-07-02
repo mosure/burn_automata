@@ -19,8 +19,7 @@ fn render_selection_training_progress_can_continue_non_promotable_refinement() {
     let mut continued = previous.clone();
     continued.morphology_non_regressed = false;
     continued.score = 110.5;
-    continued.render_loss = 0.790;
-    continued.density_psnr_db = 0.39;
+    set_render_selection_metrics_render(&mut continued, 0.790, 0.39);
     continued.active_surface_max = 0.61;
     continued.min_active_extent_bbox_ratio = 0.95;
     continued.min_active_extent_min_axis_ratio = 0.88;
@@ -74,8 +73,11 @@ fn render_selection_training_progress_rejects_morphology_only_continuation() {
 
     let mut render_only = previous.clone();
     render_only.morphology_non_regressed = true;
-    render_only.render_loss = previous.render_loss - 0.010;
-    render_only.density_psnr_db = previous.density_psnr_db + 0.10;
+    set_render_selection_metrics_render(
+        &mut render_only,
+        previous.render_loss - 0.010,
+        previous.density_psnr_db + 0.10,
+    );
     assert!(
         !render_selection_training_progress_beats(&render_only, &previous),
         "render-only improvement should not count as rollout training progress without geometry/material/activation progress"
@@ -102,8 +104,11 @@ fn render_selection_training_progress_accepts_bounded_precursor_continuation() {
 
     let mut continued = previous.clone();
     continued.score = previous.score + 0.02;
-    continued.render_loss = previous.render_loss - 0.0010;
-    continued.density_psnr_db = previous.density_psnr_db + 0.015;
+    set_render_selection_metrics_render(
+        &mut continued,
+        previous.render_loss - 0.0010,
+        previous.density_psnr_db + 0.015,
+    );
     continued.material_active_mean_opacity = previous.material_active_mean_opacity + 0.03;
     continued.material_visible_target_mean_distance =
         previous.material_visible_target_mean_distance - 0.0015;
@@ -132,8 +137,11 @@ fn render_selection_training_progress_rejects_mature_material_opacity_without_su
 
     let mut opacity_only = previous.clone();
     opacity_only.score = previous.score + 0.02;
-    opacity_only.render_loss = previous.render_loss - 0.0010;
-    opacity_only.density_psnr_db = previous.density_psnr_db + 0.015;
+    set_render_selection_metrics_render(
+        &mut opacity_only,
+        previous.render_loss - 0.0010,
+        previous.density_psnr_db + 0.015,
+    );
     opacity_only.material_active_mean_opacity = previous.material_active_mean_opacity + 0.03;
     opacity_only.max_front_liveness_margin = previous.max_front_liveness_margin;
 
@@ -177,8 +185,11 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
 
     let mut continued = previous.clone();
     continued.score = previous.score + 0.01;
-    continued.render_loss = previous.render_loss + 0.001;
-    continued.density_psnr_db = previous.density_psnr_db - 0.007;
+    set_render_selection_metrics_render(
+        &mut continued,
+        previous.render_loss + 0.001,
+        previous.density_psnr_db - 0.007,
+    );
     continued.strict_surface_material_mean_opacity = -3.05;
     continued.strict_surface_material_visible_margin = 2.05;
 
@@ -197,8 +208,11 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
     );
 
     let mut larger_bounded_step = continued.clone();
-    larger_bounded_step.render_loss = previous.render_loss + 0.0024;
-    larger_bounded_step.density_psnr_db = previous.density_psnr_db - 0.014;
+    set_render_selection_metrics_render(
+        &mut larger_bounded_step,
+        previous.render_loss + 0.0024,
+        previous.density_psnr_db - 0.014,
+    );
     larger_bounded_step.strict_surface_material_mean_opacity = -2.95;
     larger_bounded_step.strict_surface_material_visible_margin = 1.95;
     larger_bounded_step.all_temporal_geometry_progressive = true;
@@ -208,7 +222,11 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
     );
 
     let mut render_degraded = larger_bounded_step.clone();
-    render_degraded.render_loss = previous.render_loss + 0.004;
+    set_render_selection_metrics_render(
+        &mut render_degraded,
+        previous.render_loss + 0.004,
+        previous.density_psnr_db - 0.014,
+    );
     assert!(
         !render_selection_training_progress_beats(&render_degraded, &previous),
         "strict-band material progress must still reject larger render degradation"
@@ -248,14 +266,20 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
     no_op.material_visible_surface_covered_bin_fraction = 0.0;
 
     let mut render_preferred = no_op.clone();
-    render_preferred.render_loss = no_op.render_loss + 0.001;
-    render_preferred.density_psnr_db = no_op.density_psnr_db - 0.007;
+    set_render_selection_metrics_render(
+        &mut render_preferred,
+        no_op.render_loss + 0.001,
+        no_op.density_psnr_db - 0.007,
+    );
     render_preferred.strict_surface_material_mean_opacity = -3.185;
     render_preferred.strict_surface_material_visible_margin = 2.185;
 
     let mut material_preferred = no_op.clone();
-    material_preferred.render_loss = no_op.render_loss + 0.0024;
-    material_preferred.density_psnr_db = no_op.density_psnr_db - 0.014;
+    set_render_selection_metrics_render(
+        &mut material_preferred,
+        no_op.render_loss + 0.0024,
+        no_op.density_psnr_db - 0.014,
+    );
     material_preferred.strict_surface_material_mean_opacity = -3.17;
     material_preferred.strict_surface_material_visible_margin = 2.17;
 
@@ -276,7 +300,11 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
     );
 
     let mut degraded = material_preferred.clone();
-    degraded.render_loss = no_op.render_loss + 0.004;
+    set_render_selection_metrics_render(
+        &mut degraded,
+        no_op.render_loss + 0.004,
+        no_op.density_psnr_db - 0.014,
+    );
     assert!(
         !render_selection_progress_candidate_preferred(&degraded, &render_preferred, &no_op),
         "strict-band material progress should not win the tie-breaker outside render slack"
@@ -302,8 +330,11 @@ fn render_selection_training_progress_rejects_precursor_coverage_collapse() {
     previous.target_coverage_fraction = 0.005859375;
 
     let mut collapsed = previous.clone();
-    collapsed.render_loss = previous.render_loss - 0.01;
-    collapsed.density_psnr_db = previous.density_psnr_db + 0.05;
+    set_render_selection_metrics_render(
+        &mut collapsed,
+        previous.render_loss - 0.01,
+        previous.density_psnr_db + 0.05,
+    );
     collapsed.material_active_mean_opacity = previous.material_active_mean_opacity + 0.20;
     collapsed.max_front_liveness_margin = previous.max_front_liveness_margin - 0.20;
     collapsed.surface_covered_bin_fraction = 0.015625;
@@ -393,8 +424,7 @@ fn render_selection_can_retain_geometry_growth_before_material_visibility() {
 
     let mut geometry = previous.clone();
     geometry.score = 104.12;
-    geometry.render_loss = 0.646;
-    geometry.density_psnr_db = previous.density_psnr_db - 0.08;
+    set_render_selection_metrics_render(&mut geometry, 0.646, previous.density_psnr_db - 0.08);
     geometry.active_surface_max = 0.61;
     geometry.min_active_extent_bbox_ratio = 0.284;
     geometry.min_active_extent_min_axis_ratio = 0.175;
@@ -462,8 +492,7 @@ fn render_selection_can_continue_bounded_surface_support_expansion() {
 
     let mut bounded = previous.clone();
     bounded.score = 108.680_3;
-    bounded.render_loss = 0.689_317_1;
-    bounded.density_psnr_db = 1.914_362_3;
+    set_render_selection_metrics_render(&mut bounded, 0.689_317_1, 1.914_362_3);
     bounded.active_surface_max = 0.402_585_36;
     bounded.target_coverage_fraction = 0.058_593_75;
     bounded.surface_covered_bin_fraction = 0.171_875;
@@ -486,8 +515,7 @@ fn render_selection_can_continue_bounded_surface_support_expansion() {
 
     let mut bursty = bounded.clone();
     bursty.score = 118.882_69;
-    bursty.render_loss = 0.694_972_16;
-    bursty.density_psnr_db = 1.881_357;
+    set_render_selection_metrics_render(&mut bursty, 0.694_972_16, 1.881_357);
     bursty.active_surface_max = 0.451_338_35;
     bursty.target_coverage_fraction = 0.070_312_5;
     bursty.surface_covered_bin_fraction = 0.218_75;
@@ -526,8 +554,11 @@ fn render_selection_can_continue_bounded_geometry_expansion_without_checkpointin
     let mut expanded = previous.clone();
     expanded.morphology_non_regressed = false;
     expanded.score = 105.29;
-    expanded.render_loss = previous.render_loss + 0.009;
-    expanded.density_psnr_db = previous.density_psnr_db - 0.055;
+    set_render_selection_metrics_render(
+        &mut expanded,
+        previous.render_loss + 0.009,
+        previous.density_psnr_db - 0.055,
+    );
     expanded.active_surface_max = 0.402;
     expanded.min_active_extent_bbox_ratio = 0.490;
     expanded.min_active_extent_min_axis_ratio = 0.349;
@@ -547,8 +578,11 @@ fn render_selection_can_continue_bounded_geometry_expansion_without_checkpointin
     );
 
     let mut bursty = expanded.clone();
-    bursty.render_loss = previous.render_loss + 0.019;
-    bursty.density_psnr_db = previous.density_psnr_db - 0.12;
+    set_render_selection_metrics_render(
+        &mut bursty,
+        previous.render_loss + 0.019,
+        previous.density_psnr_db - 0.12,
+    );
     bursty.min_final_active_count = 119;
     bursty.min_newly_activated_fraction = 0.925;
     bursty.min_front_local_newly_activated_fraction = 0.52;
@@ -568,8 +602,11 @@ fn render_selection_morphology_recovery_requires_strict_score_improvement() {
 
     let mut same_score_recovery = regressed.clone();
     same_score_recovery.morphology_non_regressed = true;
-    same_score_recovery.render_loss = regressed.render_loss - 0.001;
-    same_score_recovery.density_psnr_db = regressed.density_psnr_db + 0.001;
+    set_render_selection_metrics_render(
+        &mut same_score_recovery,
+        regressed.render_loss - 0.001,
+        regressed.density_psnr_db + 0.001,
+    );
     assert!(
         !render_selection_morphology_recovery_beats(&same_score_recovery, &regressed),
         "line search should not accept morphology recovery without strict-score improvement"
@@ -583,7 +620,11 @@ fn render_selection_morphology_recovery_requires_strict_score_improvement() {
     );
 
     let mut render_regressed = strict_recovery;
-    render_regressed.render_loss = regressed.render_loss + 0.02;
+    set_render_selection_metrics_render(
+        &mut render_regressed,
+        regressed.render_loss + 0.02,
+        regressed.density_psnr_db + 0.001,
+    );
     assert!(
         !render_selection_morphology_recovery_beats(&render_regressed, &regressed),
         "strict-score recovery should not hide render regression"
@@ -599,8 +640,7 @@ fn render_selection_candidate_can_retain_bounded_material_precursor() {
 
     let mut improved = best.clone();
     improved.material_active_mean_opacity = -3.40;
-    improved.render_loss = 0.91881;
-    improved.density_psnr_db = 0.39799;
+    set_render_selection_metrics_render(&mut improved, 0.91881, 0.39799);
 
     assert!(
         render_selection_candidate_metrics_beats(&improved, &best),
@@ -636,8 +676,7 @@ fn render_selection_candidate_rejects_mature_material_opacity_without_surface_pr
     let mut opacity_only = best.clone();
     opacity_only.score = best.score + 0.01;
     opacity_only.material_active_mean_opacity = -3.40;
-    opacity_only.render_loss = 0.91881;
-    opacity_only.density_psnr_db = 0.39799;
+    set_render_selection_metrics_render(&mut opacity_only, 0.91881, 0.39799);
 
     assert!(
         !render_selection_candidate_metrics_beats(&opacity_only, &best),
@@ -703,8 +742,7 @@ fn render_selection_candidate_can_refine_after_activation_breakthrough() {
 
     let mut refined = best.clone();
     refined.score = 66.73771;
-    refined.render_loss = 0.91643715;
-    refined.density_psnr_db = 0.39857513;
+    set_render_selection_metrics_render(&mut refined, 0.91643715, 0.39857513);
 
     assert!(
         render_selection_candidate_metrics_beats(&refined, &best),
@@ -732,8 +770,7 @@ fn render_selection_rejects_post_activation_refinement_timing_regression() {
 
     let mut refined = best.clone();
     refined.score = 66.73771;
-    refined.render_loss = 0.91643715;
-    refined.density_psnr_db = 0.39857513;
+    set_render_selection_metrics_render(&mut refined, 0.91643715, 0.39857513);
     refined.max_temporal_activation_schedule_error = 0.35;
     refined.all_temporal_activation_progressive = false;
 

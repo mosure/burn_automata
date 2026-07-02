@@ -61,10 +61,10 @@ pub(crate) fn render_selection_candidate_metrics_beats(
             selection.score,
             best.score,
             selection.morphology_non_regressed,
-            selection.render_loss,
-            best.render_loss,
-            selection.density_psnr_db,
-            best.density_psnr_db,
+            selection.max_render_loss,
+            best.max_render_loss,
+            selection.min_density_psnr_db,
+            best.min_density_psnr_db,
         )
         && render_selection_checkpoint_morphogenesis_progressed(selection, best))
         || render_selection_liveness_precursor_beats(selection, best)
@@ -84,10 +84,10 @@ pub(crate) fn render_selection_morphology_recovery_beats(
         && best.score.is_finite()
         && selection.score < best.score
         && render_selection_render_non_regressed(
-            selection.render_loss,
-            best.render_loss,
-            selection.density_psnr_db,
-            best.density_psnr_db,
+            selection.max_render_loss,
+            best.max_render_loss,
+            selection.min_density_psnr_db,
+            best.min_density_psnr_db,
         )
 }
 
@@ -113,18 +113,19 @@ pub(crate) fn render_selection_training_progress_beats(
     const PRECURSOR_COVERAGE_REGRESSION_SLACK: f32 = 0.005;
     const PRECURSOR_SURFACE_BIN_REGRESSION_SLACK: f32 = 0.001;
 
-    if !selection.render_loss.is_finite()
-        || !previous.render_loss.is_finite()
+    if !selection.max_render_loss.is_finite()
+        || !previous.max_render_loss.is_finite()
         || !selection.score.is_finite()
     {
         return false;
     }
-    let render_improved = selection.render_loss + RENDER_LOSS_PROGRESS <= previous.render_loss
-        || selection.density_psnr_db >= previous.density_psnr_db + 0.05;
-    let precursor_render_improved = selection.render_loss + PRECURSOR_RENDER_LOSS_PROGRESS
-        <= previous.render_loss
-        || selection.density_psnr_db
-            >= previous.density_psnr_db + PRECURSOR_DENSITY_PSNR_PROGRESS_DB;
+    let render_improved = selection.max_render_loss + RENDER_LOSS_PROGRESS
+        <= previous.max_render_loss
+        || selection.min_density_psnr_db >= previous.min_density_psnr_db + 0.05;
+    let precursor_render_improved = selection.max_render_loss + PRECURSOR_RENDER_LOSS_PROGRESS
+        <= previous.max_render_loss
+        || selection.min_density_psnr_db
+            >= previous.min_density_psnr_db + PRECURSOR_DENSITY_PSNR_PROGRESS_DB;
 
     let coverage_improved = selection.surface_covered_bin_fraction
         >= previous.surface_covered_bin_fraction + COVERAGE_PROGRESS
@@ -202,10 +203,10 @@ pub(crate) fn render_selection_training_progress_beats(
             || material_surface_support_progressed(selection, previous));
     let strict_surface_material_precursor_improved = strict_surface_material_progress > 0.0
         && render_selection_render_within_strict_surface_materialization_slack(
-            selection.render_loss,
-            previous.render_loss,
-            selection.density_psnr_db,
-            previous.density_psnr_db,
+            selection.max_render_loss,
+            previous.max_render_loss,
+            selection.min_density_psnr_db,
+            previous.min_density_psnr_db,
             strict_surface_material_progress,
         );
     let precursor_improved = precursor_non_regressed
@@ -285,10 +286,10 @@ pub(crate) fn render_selection_progress_candidate_preferred(
         && render_selection_inactive_material_not_regressed(candidate, no_op)
         && render_selection_dormant_drift_not_regressed(candidate, no_op)
         && render_selection_render_within_strict_surface_materialization_slack(
-            candidate.render_loss,
-            no_op.render_loss,
-            candidate.density_psnr_db,
-            no_op.density_psnr_db,
+            candidate.max_render_loss,
+            no_op.max_render_loss,
+            candidate.min_density_psnr_db,
+            no_op.min_density_psnr_db,
             candidate_strict_progress,
         )
     {
@@ -299,7 +300,8 @@ pub(crate) fn render_selection_progress_candidate_preferred(
         return false;
     }
 
-    candidate.render_loss < best_progress.render_loss || candidate.score < best_progress.score
+    candidate.max_render_loss < best_progress.max_render_loss
+        || candidate.score < best_progress.score
 }
 
 pub(crate) fn render_selection_activation_breakthrough_beats(
@@ -329,16 +331,16 @@ pub(crate) fn render_selection_activation_breakthrough_beats(
     }
     let strict_score_improvement = best.score - selection.score;
     if !(render_selection_render_non_regressed(
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
+        selection.max_render_loss,
+        best.max_render_loss,
+        selection.min_density_psnr_db,
+        best.min_density_psnr_db,
     ) || render_selection_render_within_strict_improvement_slack(
         strict_score_improvement,
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
+        selection.max_render_loss,
+        best.max_render_loss,
+        selection.min_density_psnr_db,
+        best.min_density_psnr_db,
     )) {
         return false;
     }
@@ -379,10 +381,10 @@ pub(crate) fn render_selection_material_precursor_beats(
         return false;
     }
     if !render_selection_render_within_liveness_precursor_slack(
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
+        selection.max_render_loss,
+        best.max_render_loss,
+        selection.min_density_psnr_db,
+        best.min_density_psnr_db,
     ) {
         return false;
     }
@@ -553,16 +555,16 @@ pub(crate) fn render_selection_post_activation_refinement_beats(
     }
     let strict_score_improvement = best.score - selection.score;
     if !(render_selection_render_non_regressed(
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
+        selection.max_render_loss,
+        best.max_render_loss,
+        selection.min_density_psnr_db,
+        best.min_density_psnr_db,
     ) || render_selection_render_within_strict_improvement_slack(
         strict_score_improvement,
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
+        selection.max_render_loss,
+        best.max_render_loss,
+        selection.min_density_psnr_db,
+        best.min_density_psnr_db,
     )) {
         return false;
     }

@@ -35,8 +35,7 @@ fn render_selection_candidate_rejects_render_only_metric_improvement() {
 
     let mut render_only = best.clone();
     render_only.score = 98.0;
-    render_only.render_loss = 0.910;
-    render_only.density_psnr_db = 0.40;
+    set_render_selection_metrics_render(&mut render_only, 0.910, 0.40);
     assert!(
         render_selection_candidate_beats(
             render_only.score,
@@ -59,6 +58,16 @@ fn render_selection_candidate_rejects_render_only_metric_improvement() {
     assert!(
         render_selection_candidate_metrics_beats(&surface_progress, &best),
         "strict score/render progress remains selectable once it also improves morphology"
+    );
+
+    let mut hidden_seed_regressed = surface_progress;
+    hidden_seed_regressed.render_loss = 0.900;
+    hidden_seed_regressed.density_psnr_db = 0.45;
+    hidden_seed_regressed.max_render_loss = 1.000;
+    hidden_seed_regressed.min_density_psnr_db = 0.20;
+    assert!(
+        !render_selection_candidate_metrics_beats(&hidden_seed_regressed, &best),
+        "checkpoint selection must reject candidates whose worst seed regresses despite better average render metrics"
     );
 }
 
@@ -100,7 +109,7 @@ fn render_selection_candidate_can_retain_bounded_liveness_precursor_progress() {
     ));
 
     let mut render_regressed = improved.clone();
-    render_regressed.render_loss = 0.930;
+    set_render_selection_metrics_render(&mut render_regressed, 0.930, improved.density_psnr_db);
     assert!(!render_selection_candidate_metrics_beats(
         &render_regressed,
         &best
@@ -288,8 +297,9 @@ fn render_selection_candidate_can_carry_bounded_temporal_front_precursor_through
         &best
     ));
 
+    let improved_density_psnr_db = improved.density_psnr_db;
     let mut render_regressed = improved;
-    render_regressed.render_loss = 0.930;
+    set_render_selection_metrics_render(&mut render_regressed, 0.930, improved_density_psnr_db);
     assert!(!render_selection_candidate_metrics_beats(
         &render_regressed,
         &best
