@@ -2,7 +2,8 @@ use crate::cli::prelude::GROWTH_3D_SURFACE_MAX_DISTANCE;
 use crate::cli::render_training::selection::RenderSelectionMetrics;
 
 use super::{
-    render_selection_render_non_regressed, render_selection_render_within_strict_improvement_slack,
+    render_selection_dormant_drift_not_regressed, render_selection_render_non_regressed,
+    render_selection_render_within_strict_improvement_slack,
 };
 
 pub(super) fn render_selection_geometry_growth_precursor_beats(
@@ -209,6 +210,7 @@ fn render_selection_geometry_growth_safe(
         && selection.material_visible_inactive_fraction
             <= previous.material_visible_inactive_fraction + INACTIVE_MATERIAL_SLACK
         && selection.material_visible_surface_tail_over_threshold_fraction <= MATERIAL_TAIL_MAX
+        && render_selection_dormant_drift_not_regressed(selection, previous)
 }
 
 fn finite_progress(selection: f32, previous: f32, min_progress: f32) -> bool {

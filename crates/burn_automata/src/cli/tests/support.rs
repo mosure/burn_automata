@@ -218,6 +218,16 @@ pub(super) fn render_selection_baseline_case_from_metrics(
     }
 }
 
+pub(super) fn mark_selection_dormant_drift_unbounded(selection: &mut RenderSelectionMetrics) {
+    selection.all_dormant_drift_bounded = false;
+    selection.max_dormant_drift_fraction = 0.125;
+    selection.max_dormant_drift = 0.24;
+    selection.morphology_non_regressed = false;
+    selection
+        .worst_failure_reasons
+        .push("dormant_drift_bounded");
+}
+
 pub(super) fn robustness_seed_report_with_surface_normal_coverage(
     seed: u64,
     surface_normal_coverage: bool,

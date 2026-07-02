@@ -1,6 +1,8 @@
 use crate::cli::prelude::GROWTH_3D_SURFACE_MAX_DISTANCE;
 use crate::cli::render_training::selection::RenderSelectionMetrics;
 
+use super::render_selection_dormant_drift_not_regressed;
+
 pub(super) fn render_selection_color_training_progress_beats(
     selection: &RenderSelectionMetrics,
     previous: &RenderSelectionMetrics,
@@ -78,6 +80,7 @@ fn render_selection_color_progress_safe(
             <= previous.material_visible_inactive_fraction + INACTIVE_MATERIAL_SLACK
         && selection.material_visible_surface_tail_over_threshold_fraction
             <= previous.material_visible_surface_tail_over_threshold_fraction + MATERIAL_TAIL_SLACK
+        && render_selection_dormant_drift_not_regressed(selection, previous)
         && selection.min_final_active_count >= previous.min_final_active_count.saturating_sub(1)
 }
 

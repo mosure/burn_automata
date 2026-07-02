@@ -1,7 +1,10 @@
 use crate::cli::prelude::GROWTH_3D_SURFACE_MAX_DISTANCE;
 use crate::cli::render_training::selection::RenderSelectionMetrics;
 
-use super::render_selection_temporal_activation_not_regressed;
+use super::{
+    render_selection_dormant_drift_not_regressed,
+    render_selection_temporal_activation_not_regressed,
+};
 
 pub(super) fn precursor_front_liveness_margin_improved(
     selection_margin: f32,
@@ -124,4 +127,5 @@ fn render_selection_bounded_temporal_front_precursor(
         && selection.material_visible_inactive_fraction
             <= best.material_visible_inactive_fraction + 0.01
         && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
+        && render_selection_dormant_drift_not_regressed(selection, best)
 }

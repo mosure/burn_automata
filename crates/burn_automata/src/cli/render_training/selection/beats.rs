@@ -49,15 +49,17 @@ pub(crate) fn render_selection_candidate_metrics_beats(
     selection: &RenderSelectionMetrics,
     best: &RenderSelectionMetrics,
 ) -> bool {
-    render_selection_candidate_beats(
-        selection.score,
-        best.score,
-        selection.morphology_non_regressed,
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
-    ) || render_selection_liveness_precursor_beats(selection, best)
+    (render_selection_dormant_drift_not_regressed(selection, best)
+        && render_selection_candidate_beats(
+            selection.score,
+            best.score,
+            selection.morphology_non_regressed,
+            selection.render_loss,
+            best.render_loss,
+            selection.density_psnr_db,
+            best.density_psnr_db,
+        ))
+        || render_selection_liveness_precursor_beats(selection, best)
         || render_selection_activation_breakthrough_beats(selection, best)
         || render_selection_material_precursor_beats(selection, best)
         || render_selection_geometry_growth_precursor_beats(selection, best)
@@ -244,6 +246,7 @@ pub(crate) fn render_selection_training_progress_beats(
         && surface_ok
         && material_tail_ok
         && inactive_material_ok
+        && render_selection_dormant_drift_not_regressed(selection, previous)
         && local_front_ok
 }
 
@@ -268,6 +271,7 @@ pub(crate) fn render_selection_progress_candidate_preferred(
     );
     if candidate_strict_progress >= best_strict_progress + STRICT_SURFACE_MATERIAL_PROGRESS_TIEBREAK
         && render_selection_inactive_material_not_regressed(candidate, no_op)
+        && render_selection_dormant_drift_not_regressed(candidate, no_op)
         && render_selection_render_within_strict_surface_materialization_slack(
             candidate.render_loss,
             no_op.render_loss,
@@ -332,6 +336,7 @@ pub(crate) fn render_selection_activation_breakthrough_beats(
     selection.all_temporal_activation_progressive
         && selection.active_surface_max.is_finite()
         && selection.active_surface_max <= GROWTH_3D_SURFACE_MAX_DISTANCE + 0.05
+        && render_selection_dormant_drift_not_regressed(selection, best)
         && selection.material_visible_inactive_fraction
             <= best.material_visible_inactive_fraction + 0.01
         && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
@@ -367,6 +372,7 @@ pub(crate) fn render_selection_material_precursor_beats(
     selection.material_visible_inactive_fraction
         <= best.material_visible_inactive_fraction.max(0.0) + 0.01
         && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
+        && render_selection_dormant_drift_not_regressed(selection, best)
         && selection.active_surface_max.is_finite()
         && selection.active_surface_max <= GROWTH_3D_SURFACE_MAX_DISTANCE + 0.05
 }
@@ -507,6 +513,7 @@ pub(crate) fn render_selection_post_activation_refinement_beats(
     }
     selection.active_surface_max.is_finite()
         && selection.active_surface_max <= GROWTH_3D_SURFACE_MAX_DISTANCE + 0.05
+        && render_selection_dormant_drift_not_regressed(selection, best)
         && selection.material_visible_inactive_fraction
             <= best.material_visible_inactive_fraction + 0.01
         && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
@@ -527,6 +534,23 @@ pub(crate) fn render_selection_temporal_activation_not_regressed(
     selection.max_temporal_activation_schedule_error
         <= best.max_temporal_activation_schedule_error
             + TEMPORAL_ACTIVATION_SELECTION_REGRESSION_SLACK
+}
+
+pub(super) fn render_selection_dormant_drift_not_regressed(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+) -> bool {
+    const DRIFT_FRACTION_SLACK: f32 = 0.005;
+    const DRIFT_DISTANCE_SLACK: f32 = 0.02;
+
+    selection.all_dormant_drift_bounded
+        && selection.max_dormant_drift_fraction.is_finite()
+        && previous.max_dormant_drift_fraction.is_finite()
+        && selection.max_dormant_drift.is_finite()
+        && previous.max_dormant_drift.is_finite()
+        && selection.max_dormant_drift_fraction
+            <= previous.max_dormant_drift_fraction.max(0.0) + DRIFT_FRACTION_SLACK
+        && selection.max_dormant_drift <= previous.max_dormant_drift.max(0.0) + DRIFT_DISTANCE_SLACK
 }
 
 pub(crate) fn render_selection_render_non_regressed(

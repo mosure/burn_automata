@@ -52,6 +52,13 @@ fn render_selection_candidate_can_retain_bounded_liveness_precursor_progress() {
         "metric-aware selection should be able to accumulate bounded local-front liveness progress"
     );
 
+    let mut dormant_drift = improved.clone();
+    mark_selection_dormant_drift_unbounded(&mut dormant_drift);
+    assert!(
+        !render_selection_candidate_metrics_beats(&dormant_drift, &best),
+        "selection must not retain local-front progress by moving far dormant particles"
+    );
+
     let mut morphology_regressed = improved.clone();
     morphology_regressed.morphology_non_regressed = false;
     assert!(!render_selection_candidate_metrics_beats(
@@ -216,6 +223,13 @@ fn render_selection_candidate_can_carry_bounded_temporal_front_precursor_through
     assert!(
         render_selection_candidate_metrics_beats(&improved, &best),
         "bounded temporal-front liveness progress should survive temporary strict morphology failure"
+    );
+
+    let mut dormant_drift = improved.clone();
+    mark_selection_dormant_drift_unbounded(&mut dormant_drift);
+    assert!(
+        !render_selection_candidate_metrics_beats(&dormant_drift, &best),
+        "temporal-front precursor selection must remain bounded by dormant-drift safety"
     );
 
     let mut activated_burst = improved.clone();

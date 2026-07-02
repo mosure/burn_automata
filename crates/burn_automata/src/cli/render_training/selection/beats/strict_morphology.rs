@@ -2,7 +2,7 @@ use crate::cli::prelude::GROWTH_3D_SURFACE_MAX_DISTANCE;
 use crate::cli::render_training::selection::RenderSelectionMetrics;
 
 use super::{
-    render_selection_inactive_material_not_regressed,
+    render_selection_dormant_drift_not_regressed, render_selection_inactive_material_not_regressed,
     render_selection_render_within_strict_improvement_slack,
 };
 
@@ -96,6 +96,7 @@ pub(super) fn render_selection_strict_morphology_progress_beats(
                 .max(previous.active_surface_max + SURFACE_MAX_SLACK)
         && selection.material_visible_surface_tail_over_threshold_fraction
             <= previous.material_visible_surface_tail_over_threshold_fraction + MATERIAL_TAIL_SLACK
+        && render_selection_dormant_drift_not_regressed(selection, previous)
         && render_selection_inactive_material_not_regressed(selection, previous)
         && (selection.min_front_local_newly_activated_fraction >= MIN_LOCAL_FRONT_FRACTION
             || selection.min_front_local_newly_activated_fraction

@@ -43,6 +43,13 @@ fn render_selection_training_progress_can_continue_non_promotable_refinement() {
         "bounded render, coverage, extent, and activation progress should continue training even before strict gates pass"
     );
 
+    let mut dormant_drift = continued.clone();
+    mark_selection_dormant_drift_unbounded(&mut dormant_drift);
+    assert!(
+        !render_selection_training_progress_beats(&dormant_drift, &previous),
+        "training continuation must not use far dormant-particle drift as a progress mechanism"
+    );
+
     let mut bursty = continued.clone();
     bursty.active_surface_max = 0.90;
     bursty.max_temporal_activation_schedule_error = 0.27;
@@ -212,6 +219,13 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
             &no_op,
         ),
         "bounded progress selection should prefer the candidate that closes more strict-band material margin"
+    );
+
+    let mut dormant_drift = material_preferred.clone();
+    mark_selection_dormant_drift_unbounded(&mut dormant_drift);
+    assert!(
+        !render_selection_progress_candidate_preferred(&dormant_drift, &render_preferred, &no_op),
+        "progress tie-breakers must not prefer strict-band material progress with nonlocal dormant drift"
     );
 
     let mut degraded = material_preferred.clone();
