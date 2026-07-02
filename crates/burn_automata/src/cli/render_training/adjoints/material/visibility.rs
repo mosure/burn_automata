@@ -68,6 +68,8 @@ pub(crate) fn material_visible_liveness_target_updates(
         f32::INFINITY
     };
     let material_visible_threshold = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.0;
+    let strict_threshold = surface_threshold.max(1.0e-6);
+    let soft_threshold = (strict_threshold * 3.0).max(strict_threshold);
     for (row, position) in positions.iter().enumerate() {
         let state_base = row * config.state_dims;
         let liveness = states[state_base + GROWTH_3D_LIVENESS_CHANNEL];
@@ -76,10 +78,14 @@ pub(crate) fn material_visible_liveness_target_updates(
             continue;
         }
         let projection = target.project(position3(*position));
-        if !projection.distance.is_finite() || projection.distance > surface_threshold {
+        if !projection.distance.is_finite() {
             continue;
         }
-        let surface_weight = (1.0 - projection.distance / surface_threshold).clamp(0.0, 1.0);
+        let surface_weight =
+            soft_material_assignment_weight(projection.distance, strict_threshold, soft_threshold);
+        if surface_weight <= 0.0 {
+            continue;
+        }
         let material_weight =
             ((material_opacity - material_visible_threshold) / 4.0).clamp(0.25, 1.0);
         let target_liveness = 0.0_f32;

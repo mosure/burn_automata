@@ -39,6 +39,14 @@ fn material_visible_liveness_adjoint_activates_near_surface_material_only() {
     let config = NpaConfig::growing_3dgs();
     let target = mesh_target_for_arg(MeshTargetArg::Teapot, 0.72);
     let sample = target.surface_sample(0);
+    let strict_threshold = target_coverage_threshold(0.72);
+    let soft_band_offset = strict_threshold * 2.0;
+    let soft_band_position = [
+        sample.position[0] + sample.normal[0] * soft_band_offset,
+        sample.position[1] + sample.normal[1] * soft_band_offset,
+        sample.position[2] + sample.normal[2] * soft_band_offset,
+        0.0,
+    ];
     let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
     let positions = vec![
         [
@@ -47,6 +55,7 @@ fn material_visible_liveness_adjoint_activates_near_surface_material_only() {
             sample.position[2],
             0.0,
         ],
+        soft_band_position,
         [10.0_f32, 10.0, 10.0, 0.0],
         [
             sample.position[0],
@@ -60,8 +69,10 @@ fn material_visible_liveness_adjoint_activates_near_surface_material_only() {
     states[material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
     states[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
     states[config.state_dims + material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
-    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = 0.0;
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
     states[2 * config.state_dims + material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
+    states[3 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = 0.0;
+    states[3 * config.state_dims + material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
     let mut adjoint = vec![0.0; states.len()];
 
     add_material_visible_liveness_state_adjoint(
@@ -79,13 +90,17 @@ fn material_visible_liveness_adjoint_activates_near_surface_material_only() {
         adjoint[GROWTH_3D_LIVENESS_CHANNEL] < 0.0,
         "near-surface dormant material-visible particles should be trained live"
     );
+    assert!(
+        adjoint[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] < 0.0,
+        "soft-band dormant material-visible particles should also be trained live"
+    );
     assert_eq!(
-        adjoint[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL],
+        adjoint[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL],
         0.0,
         "off-surface dormant material-visible particles should be left to material-tail suppression"
     );
     assert_eq!(
-        adjoint[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL],
+        adjoint[3 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL],
         0.0,
         "already-live material-visible particles should not receive this liveness correction"
     );
