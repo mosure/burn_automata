@@ -466,9 +466,9 @@ pub(crate) fn material_visible_surface_approach_updates(
         if !projection.distance.is_finite() {
             continue;
         }
-        let surface_weight = surface_escape_weight(
+        let surface_weight = material_visible_surface_approach_weight(
             projection.distance,
-            GROWTH_3D_SURFACE_MAX_DISTANCE,
+            seed_scale,
             surface_escape_gain,
         );
         for axis in 0..config.spatial_dims {
@@ -478,6 +478,65 @@ pub(crate) fn material_visible_surface_approach_updates(
         clamp_update_row(&mut updates, row, max_update_norm);
     }
     updates
+}
+
+pub(crate) fn material_visible_surface_approach_weight(
+    distance: f32,
+    seed_scale: f32,
+    surface_escape_gain: f32,
+) -> f32 {
+    let escape_weight = surface_escape_weight(
+        distance,
+        GROWTH_3D_SURFACE_MAX_DISTANCE,
+        surface_escape_gain,
+    );
+    if !distance.is_finite() || !seed_scale.is_finite() || seed_scale <= 0.0 {
+        return escape_weight;
+    }
+
+    let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
+    let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
+    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
+    if distance <= strict_threshold || distance >= frontier_threshold {
+        return escape_weight;
+    }
+
+    let band_weight = if distance <= soft_threshold {
+        (distance - strict_threshold) / (soft_threshold - strict_threshold).max(1.0e-6)
+    } else {
+        1.0 - (distance - soft_threshold) / (frontier_threshold - soft_threshold).max(1.0e-6)
+    }
+    .clamp(0.0, 1.0);
+
+    escape_weight.max(1.0 + 3.0 * band_weight)
+}
+
+pub(crate) fn material_visible_surface_materialization_weight(
+    distance: f32,
+    seed_scale: f32,
+) -> f32 {
+    if !distance.is_finite() || !seed_scale.is_finite() || seed_scale <= 0.0 {
+        return 0.0;
+    }
+
+    let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
+    let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
+    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
+    if distance <= strict_threshold {
+        return 1.0;
+    }
+    if distance >= frontier_threshold {
+        return 0.0;
+    }
+
+    if distance <= soft_threshold {
+        let ratio = (distance - strict_threshold) / (soft_threshold - strict_threshold).max(1.0e-6);
+        return (1.0 - 0.25 * ratio).clamp(0.0, 1.0);
+    }
+
+    let frontier_ratio =
+        1.0 - (distance - soft_threshold) / (frontier_threshold - soft_threshold).max(1.0e-6);
+    (0.75 * frontier_ratio).clamp(0.0, 1.0)
 }
 
 #[allow(clippy::too_many_arguments)]

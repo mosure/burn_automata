@@ -228,9 +228,6 @@ pub(crate) fn add_active_surface_materialization_output_objective(
         return;
     }
 
-    let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
-    let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
-    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
     let front_weights = if front_radius > 0.0 && front_radius.is_finite() {
         Some(local_front_weights(config, positions, states, front_radius))
     } else {
@@ -269,12 +266,8 @@ pub(crate) fn add_active_surface_materialization_output_objective(
         }
 
         let projection = target.project(position3(*position));
-        let surface_weight = frontier_material_assignment_weight(
-            projection.distance,
-            strict_threshold,
-            soft_threshold,
-            frontier_threshold,
-        );
+        let surface_weight =
+            material_visible_surface_materialization_weight(projection.distance, seed_scale);
         if surface_weight <= 0.0 {
             continue;
         }

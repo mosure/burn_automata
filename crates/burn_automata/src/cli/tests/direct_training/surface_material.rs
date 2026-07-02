@@ -96,6 +96,80 @@ fn material_visible_surface_approach_updates_pull_visible_active_particles_towar
         "material-visible projection update should respect max_update_norm"
     );
 }
+
+#[test]
+fn material_visible_surface_approach_weight_prioritizes_strict_coverage_band() {
+    let seed_scale = 1.0;
+    let strict = target_coverage_threshold(seed_scale);
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    let frontier = material_training_frontier_coverage_threshold(seed_scale);
+
+    let inside_strict = material_visible_surface_approach_weight(strict * 0.5, seed_scale, 0.0);
+    let mid_band = material_visible_surface_approach_weight((strict + soft) * 0.5, seed_scale, 0.0);
+    let near_frontier =
+        material_visible_surface_approach_weight((soft + frontier) * 0.5, seed_scale, 0.0);
+    let outside_frontier =
+        material_visible_surface_approach_weight(frontier * 1.1, seed_scale, 0.0);
+
+    assert_eq!(
+        inside_strict, 1.0,
+        "rows already inside strict coverage should not get extra material-surface boost"
+    );
+    assert!(
+        mid_band > inside_strict,
+        "rows between strict and soft coverage should be pulled harder toward strict support"
+    );
+    assert!(
+        near_frontier > inside_strict,
+        "rows inside the bounded material frontier should retain a generic surface pull"
+    );
+    assert_eq!(
+        outside_frontier, 1.0,
+        "the strict-band boost must not create a nonlocal target assignment outside the frontier"
+    );
+}
+
+#[test]
+fn material_visible_surface_approach_updates_boost_rows_before_strict_coverage() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_scale = 1.0;
+    let strict = target_coverage_threshold(seed_scale);
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    let distance = (strict + soft) * 0.5;
+    let target = TriangleMeshTarget::new(
+        vec![
+            [distance, -0.1, 0.0],
+            [distance, 0.1, 0.0],
+            [distance, 0.0, 0.2],
+        ],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let positions = vec![[0.0_f32, 0.0, 0.0, 0.0]];
+    let mut states = vec![0.0; config.state_dims];
+    states[material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
+
+    let updates = material_visible_surface_approach_updates(
+        &config,
+        &target,
+        &positions,
+        &states,
+        None,
+        1.0,
+        0.0,
+        f32::INFINITY,
+        seed_scale,
+        0.20,
+        None,
+    );
+
+    assert!(
+        updates[0][0] > distance * 1.5,
+        "visible rows outside strict coverage should receive a stronger bounded pull into the surface band: distance={distance} updates={updates:?}"
+    );
+}
+
 #[test]
 fn material_visible_surface_approach_updates_do_not_move_far_dormant_material() {
     let config = NpaConfig::growing_3dgs();
