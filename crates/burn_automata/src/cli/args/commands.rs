@@ -517,8 +517,12 @@ pub(crate) enum Command {
         shared_base_cycles: Option<usize>,
         #[arg(long, default_value_t = 0x005a_173d)]
         shared_base_seed: u64,
-        #[arg(long, value_delimiter = ',', default_value = "torus,teapot")]
+        #[arg(long, default_value = "core")]
+        target_set: MeshTargetSetArg,
+        #[arg(long, value_delimiter = ',')]
         targets: Vec<MeshTargetArg>,
+        #[arg(long, value_delimiter = ',')]
+        holdout_targets: Vec<MeshTargetArg>,
         #[arg(long, default_value = "artifacts/render_3d_adapter_suite")]
         output_dir: PathBuf,
         #[arg(long, default_value = "artifacts/render_3d_adapter_suite_report.json")]

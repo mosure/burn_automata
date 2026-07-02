@@ -29,7 +29,10 @@ pub(crate) struct CliRenderAdapterSuiteReport {
     pub(crate) shared_base_cycles: usize,
     pub(crate) shared_base_training: Vec<CliRenderAdapterSuiteBaseEntry>,
     pub(crate) output_dir: String,
+    pub(crate) target_set: MeshTargetSetArg,
     pub(crate) targets: Vec<MeshTargetArg>,
+    pub(crate) shared_base_targets: Vec<MeshTargetArg>,
+    pub(crate) holdout_targets: Vec<MeshTargetArg>,
     pub(crate) particle_count: usize,
     pub(crate) rollout_steps: usize,
     pub(crate) sgd: SgdConfig,
@@ -39,6 +42,14 @@ pub(crate) struct CliRenderAdapterSuiteReport {
     pub(crate) materialized_parameter_count: usize,
     pub(crate) adapter_parameter_count: usize,
     pub(crate) adapter_to_full_ratio: f32,
+    pub(crate) target_count: usize,
+    pub(crate) shared_base_target_count: usize,
+    pub(crate) holdout_target_count: usize,
+    pub(crate) adapter_total_parameter_count: usize,
+    pub(crate) full_bank_parameter_count: usize,
+    pub(crate) shared_plus_adapter_parameter_count: usize,
+    pub(crate) shared_plus_adapter_to_full_bank_ratio: f32,
+    pub(crate) shared_plus_adapter_savings_ratio: f32,
     pub(crate) entries: Vec<CliRenderAdapterSuiteEntry>,
 }
 
@@ -54,6 +65,7 @@ pub(crate) struct CliRenderAdapterSuiteBaseEntry {
 #[derive(Serialize)]
 pub(crate) struct CliRenderAdapterSuiteEntry {
     pub(crate) target: MeshTargetArg,
+    pub(crate) split: CliRenderAdapterSuiteSplit,
     pub(crate) adapter_output: String,
     pub(crate) materialized_model_output: String,
     pub(crate) seed_scale: f32,
@@ -62,6 +74,13 @@ pub(crate) struct CliRenderAdapterSuiteEntry {
     pub(crate) final_render_loss: MultiViewRenderLossReport,
     pub(crate) strict_gate_summary: CliRenderTrainingGateSummary,
     pub(crate) growth_validation: CliGrowth3dValidationReport,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CliRenderAdapterSuiteSplit {
+    SharedBaseTrain,
+    HoldoutAdapterOnly,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -10,7 +10,9 @@ pub(crate) fn run_train_render_3d_adapters(
         shared_base_output,
         shared_base_cycles,
         shared_base_seed,
+        target_set,
         targets,
+        holdout_targets,
         output_dir,
         report_output,
         rounds,
@@ -64,7 +66,14 @@ pub(crate) fn run_train_render_3d_adapters(
         ))
         .into());
     }
-    let targets = unique_targets(targets)?;
+    let targets = resolve_adapter_suite_targets(targets, target_set)?;
+    let holdout_targets = unique_targets(holdout_targets);
+    validate_holdout_targets(&targets, &holdout_targets)?;
+    let shared_base_targets = targets
+        .iter()
+        .copied()
+        .filter(|target| !holdout_targets.contains(target))
+        .collect::<Vec<_>>();
     let shared_base_output =
         shared_base_output.unwrap_or_else(|| output_dir.join("shared_base.bpk"));
     if is_catalog_model_output_path(&shared_base_output) {
@@ -75,6 +84,12 @@ pub(crate) fn run_train_render_3d_adapters(
         .into());
     }
     let shared_base_cycles = shared_base_cycles.unwrap_or(usize::from(base_model.is_none()));
+    if shared_base_cycles > 0 && shared_base_targets.is_empty() {
+        return Err(std::io::Error::other(
+            "adapter suite shared-base training requires at least one non-holdout target",
+        )
+        .into());
+    }
     let direct_selection_seed_training = resolve_direct_selection_seed_training(
         direct_selection_seed_training,
         no_direct_selection_seed_training,
@@ -114,7 +129,7 @@ pub(crate) fn run_train_render_3d_adapters(
         render_training_default_extra_selection_seeds(selection_seed, &extra_selection_seeds);
     let mut shared_base_training = Vec::new();
     for cycle in 0..shared_base_cycles {
-        for (target_index, target) in targets.iter().copied().enumerate() {
+        for (target_index, target) in shared_base_targets.iter().copied().enumerate() {
             let target_seed_scale =
                 seed_scale.unwrap_or_else(|| mesh_target_render_training_seed_scale(target));
             let target_mesh = mesh_target_for_arg(target, target_seed_scale);
@@ -189,7 +204,7 @@ pub(crate) fn run_train_render_3d_adapters(
                     adapter_seed: adapter_seed.wrapping_add(target_index as u64),
                     direct_selection_seed_training,
                     seed: shared_base_seed
-                        .wrapping_add((cycle * targets.len() + target_index) as u64),
+                        .wrapping_add((cycle * shared_base_targets.len() + target_index) as u64),
                     selection_seed: Some(selection_seed),
                     selection_seeds: training_selection_seeds.clone(),
                     seed_scale: target_seed_scale,
@@ -209,7 +224,7 @@ pub(crate) fn run_train_render_3d_adapters(
     }
     let base_source = if shared_base_initialized || shared_base_cycles > 0 {
         Some(shared_render_adapter_base_source(
-            &targets,
+            &shared_base_targets,
             shared_base_cycles,
         ))
     } else {
@@ -366,6 +381,7 @@ pub(crate) fn run_train_render_3d_adapters(
         let strict_gate_summary = CliRenderTrainingGateSummary::from_validation(&growth_validation);
         entries.push(CliRenderAdapterSuiteEntry {
             target,
+            split: adapter_suite_split(target, &holdout_targets),
             adapter_output: adapter_output.display().to_string(),
             materialized_model_output: materialized_model_output.display().to_string(),
             seed_scale: target_seed_scale,
@@ -390,6 +406,16 @@ pub(crate) fn run_train_render_3d_adapters(
     } else {
         adapter_parameter_count as f32 / materialized_parameter_count as f32
     };
+    let target_count = entries.len();
+    let adapter_total_parameter_count = adapter_parameter_count * target_count;
+    let full_bank_parameter_count = materialized_parameter_count * target_count;
+    let shared_plus_adapter_parameter_count = base_parameter_count + adapter_total_parameter_count;
+    let shared_plus_adapter_to_full_bank_ratio = if full_bank_parameter_count == 0 {
+        0.0
+    } else {
+        shared_plus_adapter_parameter_count as f32 / full_bank_parameter_count as f32
+    };
+    let shared_plus_adapter_savings_ratio = 1.0 - shared_plus_adapter_to_full_bank_ratio;
     let suite_report = CliRenderAdapterSuiteReport {
         base_model_input,
         base_model: shared_base_output.display().to_string(),
@@ -398,7 +424,10 @@ pub(crate) fn run_train_render_3d_adapters(
         shared_base_cycles,
         shared_base_training,
         output_dir: output_dir.display().to_string(),
+        target_set,
         targets,
+        shared_base_targets,
+        holdout_targets,
         particle_count: particles,
         rollout_steps,
         sgd,
@@ -408,6 +437,14 @@ pub(crate) fn run_train_render_3d_adapters(
         materialized_parameter_count,
         adapter_parameter_count,
         adapter_to_full_ratio,
+        target_count,
+        shared_base_target_count: suite_report_shared_base_target_count(&entries),
+        holdout_target_count: suite_report_holdout_target_count(&entries),
+        adapter_total_parameter_count,
+        full_bank_parameter_count,
+        shared_plus_adapter_parameter_count,
+        shared_plus_adapter_to_full_bank_ratio,
+        shared_plus_adapter_savings_ratio,
         entries,
     };
     std::fs::write(&report_output, serde_json::to_string_pretty(&suite_report)?)?;
@@ -422,7 +459,7 @@ pub(crate) fn run_train_render_3d_adapters(
         "wrote {} with {} adapters adapter/full={:.4} failed_targets={:?}",
         report_output.display(),
         suite_report.entries.len(),
-        suite_report.adapter_to_full_ratio,
+        suite_report.shared_plus_adapter_to_full_bank_ratio,
         failed_targets
     );
     if fail_on_validation && !failed_targets.is_empty() {
@@ -436,17 +473,69 @@ pub(crate) fn run_train_render_3d_adapters(
     Ok(())
 }
 
-fn unique_targets(
-    targets: Vec<MeshTargetArg>,
-) -> Result<Vec<MeshTargetArg>, Box<dyn std::error::Error>> {
-    if targets.is_empty() {
-        return Err(std::io::Error::other("adapter suite requires at least one target").into());
-    }
+fn unique_targets(targets: Vec<MeshTargetArg>) -> Vec<MeshTargetArg> {
     let mut unique = Vec::with_capacity(targets.len());
     for target in targets {
         if !unique.contains(&target) {
             unique.push(target);
         }
     }
-    Ok(unique)
+    unique
+}
+
+fn resolve_adapter_suite_targets(
+    targets: Vec<MeshTargetArg>,
+    target_set: MeshTargetSetArg,
+) -> Result<Vec<MeshTargetArg>, Box<dyn std::error::Error>> {
+    let mut resolved = Vec::new();
+    if targets.is_empty() || target_set != MeshTargetSetArg::Core {
+        resolved.extend(mesh_target_set_targets(target_set));
+    }
+    resolved.extend(targets);
+    let resolved = unique_targets(resolved);
+    if resolved.is_empty() {
+        return Err(std::io::Error::other("adapter suite requires at least one target").into());
+    }
+    Ok(resolved)
+}
+
+fn validate_holdout_targets(
+    targets: &[MeshTargetArg],
+    holdout_targets: &[MeshTargetArg],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for holdout_target in holdout_targets {
+        if !targets.contains(holdout_target) {
+            return Err(std::io::Error::other(format!(
+                "holdout target {} is not part of the adapter suite targets",
+                mesh_target_slug(*holdout_target)
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn adapter_suite_split(
+    target: MeshTargetArg,
+    holdout_targets: &[MeshTargetArg],
+) -> CliRenderAdapterSuiteSplit {
+    if holdout_targets.contains(&target) {
+        CliRenderAdapterSuiteSplit::HoldoutAdapterOnly
+    } else {
+        CliRenderAdapterSuiteSplit::SharedBaseTrain
+    }
+}
+
+fn suite_report_shared_base_target_count(entries: &[CliRenderAdapterSuiteEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.split == CliRenderAdapterSuiteSplit::SharedBaseTrain)
+        .count()
+}
+
+fn suite_report_holdout_target_count(entries: &[CliRenderAdapterSuiteEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.split == CliRenderAdapterSuiteSplit::HoldoutAdapterOnly)
+        .count()
 }

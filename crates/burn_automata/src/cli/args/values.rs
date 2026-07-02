@@ -71,6 +71,22 @@ pub(crate) enum MeshTrainingModeArg {
 pub(crate) enum MeshTargetArg {
     Torus,
     Teapot,
+    Sphere,
+    Ellipsoid,
+    Cube,
+    Cylinder,
+    Cone,
+    Capsule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum MeshTargetSetArg {
+    #[value(name = "core")]
+    Core,
+    #[value(name = "primitives", alias = "primitive")]
+    Primitives,
+    #[value(name = "many", alias = "all")]
+    Many,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]

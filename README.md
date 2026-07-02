@@ -142,15 +142,20 @@ provided local-growth BPK as a frozen shared base and trains a LoRA-style
 low-rank object adapter (`--adapter-rank`, `--adapter-alpha`,
 `--adapter-seed`). Reports serialize the adapter parameter count and base/full
 parameter counts; the exported `.bpk` is a materialized compatibility model.
-For many-object shared-base sweeps, use `train-render3d-adapters --targets
-torus,teapot`. Without `--base-model`, the suite initializes an object-agnostic
-conditionless-local 3D growth base, alternates full-weight shared-base training
-for `--shared-base-cycles` cycles, saves `shared_base.bpk`, then freezes that
-base and trains one compact `.adapter.json` LoRA artifact per target. With
-`--base-model`, the suite freezes the supplied base by default; pass
-`--shared-base-cycles` to continue shared-base training before adapter fitting.
-Materialized validation/viewer BPKs are written beside the adapters, and the
-suite report records adapter-to-full parameter efficiency. Use
+For many-object shared-base sweeps, use `train-render3d-adapters`. The default
+`--target-set core` covers torus and teapot; `--target-set primitives` expands
+to sphere, ellipsoid, cube, cylinder, cone, and capsule; `--target-set many`
+uses both groups. Explicit `--targets` can run focused subsets, and
+`--holdout-targets` removes targets from shared-base cycles while still fitting
+adapter-only held-out objects. Without `--base-model`, the suite initializes an
+object-agnostic conditionless-local 3D growth base, alternates full-weight
+shared-base training for `--shared-base-cycles` cycles, saves
+`shared_base.bpk`, then freezes that base and trains one compact
+`.adapter.json` LoRA artifact per target. With `--base-model`, the suite
+freezes the supplied base by default; pass `--shared-base-cycles` to continue
+shared-base training before adapter fitting. Materialized validation/viewer
+BPKs are written beside the adapters, and the suite report records both
+single-adapter efficiency and shared-base-plus-adapter-bank efficiency. Use
 `--weight-update-mode full` only for
 legacy full-model ablations. The backend
 backpropagates the deterministic CPU multi-view splat loss analytically to

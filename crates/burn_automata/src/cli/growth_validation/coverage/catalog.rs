@@ -7,6 +7,12 @@ pub(crate) fn growth_3d_catalog_sanity_report(
     let (max_total_loss, min_density_psnr_db, min_color_psnr_db, min_depth_psnr_db) = match target {
         MeshTargetArg::Torus => (0.90, 0.95, 16.0, 14.8),
         MeshTargetArg::Teapot => (0.85, 0.95, 18.0, 18.0),
+        MeshTargetArg::Sphere
+        | MeshTargetArg::Ellipsoid
+        | MeshTargetArg::Cube
+        | MeshTargetArg::Cylinder
+        | MeshTargetArg::Cone
+        | MeshTargetArg::Capsule => (0.90, 0.95, 16.0, 14.8),
     };
     let passed = render_loss.total_loss <= max_total_loss
         && render_loss.density_psnr_db >= min_density_psnr_db

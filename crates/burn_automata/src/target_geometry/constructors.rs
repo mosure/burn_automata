@@ -4,6 +4,132 @@ use super::{
 use crate::AutomataResult;
 
 impl TriangleMeshTarget {
+    pub fn sphere(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let segments = segments.max(8);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_uv_sphere(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, 0.0],
+            [scale, scale, scale],
+            segments,
+            segments * 2,
+        );
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn ellipsoid(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let segments = segments.max(8);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_uv_sphere(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, 0.0],
+            [0.72 * scale, 0.48 * scale, scale],
+            segments,
+            segments * 2,
+        );
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn cube(scale: f32) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let vertices = vec![
+            [-scale, -scale, -scale],
+            [scale, -scale, -scale],
+            [scale, scale, -scale],
+            [-scale, scale, -scale],
+            [-scale, -scale, scale],
+            [scale, -scale, scale],
+            [scale, scale, scale],
+            [-scale, scale, scale],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn cylinder(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_tapered_cylinder(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, -scale],
+            [0.0, 0.0, scale],
+            0.62 * scale,
+            0.62 * scale,
+            segments.max(12),
+        );
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn cone(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_tapered_cylinder(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, -scale],
+            [0.0, 0.0, scale],
+            0.75 * scale,
+            0.04 * scale,
+            segments.max(12),
+        );
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn capsule(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let segments = segments.max(8);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_uv_sphere(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, -0.48 * scale],
+            [0.48 * scale, 0.48 * scale, 0.48 * scale],
+            segments,
+            segments * 2,
+        );
+        append_uv_sphere(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, 0.48 * scale],
+            [0.48 * scale, 0.48 * scale, 0.48 * scale],
+            segments,
+            segments * 2,
+        );
+        append_tapered_cylinder(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, -0.48 * scale],
+            [0.0, 0.0, 0.48 * scale],
+            0.48 * scale,
+            0.48 * scale,
+            segments * 2,
+        );
+        colored_mesh(vertices, faces)
+    }
+
     pub fn torus(major: f32, minor: f32, rings: usize, tubes: usize) -> AutomataResult<Self> {
         let major = major.max(1.0e-4);
         let minor = minor.max(1.0e-4);
@@ -250,4 +376,34 @@ fn teapot_like_color(position: [f32; 3], scale: f32) -> [f32; 3] {
         (position[1] / (1.1 * scale) + 0.5).clamp(0.0, 1.0),
         (position[2] / (1.3 * scale) + 0.44).clamp(0.0, 1.0),
     ]
+}
+
+fn colored_mesh(
+    vertices: Vec<[f32; 3]>,
+    faces: Vec<[u32; 3]>,
+) -> AutomataResult<TriangleMeshTarget> {
+    let target = TriangleMeshTarget::new(vertices, faces)?;
+    let (bounds_min, bounds_max) = target.bounds();
+    let colors = target
+        .vertices
+        .iter()
+        .map(|position| normalized_position_color(*position, bounds_min, bounds_max))
+        .collect::<Vec<_>>();
+    target.with_vertex_colors(colors)
+}
+
+fn normalized_position_color(
+    position: [f32; 3],
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+) -> [f32; 3] {
+    [
+        normalize_bound(position[0], bounds_min[0], bounds_max[0]),
+        normalize_bound(position[1], bounds_min[1], bounds_max[1]),
+        normalize_bound(position[2], bounds_min[2], bounds_max[2]),
+    ]
+}
+
+fn normalize_bound(value: f32, min: f32, max: f32) -> f32 {
+    ((value - min) / (max - min).max(EPS)).clamp(0.0, 1.0)
 }

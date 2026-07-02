@@ -100,6 +100,30 @@ pub(crate) const TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
     "utah-teapot-2026:conditionless-local-substrate-rollout-ablation";
 pub(crate) const TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
     "utah-teapot-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const SPHERE_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "sphere-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const SPHERE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "sphere-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const ELLIPSOID_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "ellipsoid-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const ELLIPSOID_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "ellipsoid-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const CUBE_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "cube-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const CUBE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "cube-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const CYLINDER_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "cylinder-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const CYLINDER_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "cylinder-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const CONE_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "cone-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const CONE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "cone-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const CAPSULE_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "capsule-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const CAPSULE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "capsule-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MeshTargetTrainingProfile {
@@ -156,6 +180,84 @@ pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetT
             conditionless_local_target_source: TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
             lineage_marker: "utah-teapot-2026",
         },
+        MeshTargetArg::Sphere => primitive_mesh_target_training_profile(
+            target,
+            SPHERE_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "sphere-primitive-2026",
+        ),
+        MeshTargetArg::Ellipsoid => primitive_mesh_target_training_profile(
+            target,
+            ELLIPSOID_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "ellipsoid-primitive-2026",
+        ),
+        MeshTargetArg::Cube => primitive_mesh_target_training_profile(
+            target,
+            CUBE_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "cube-primitive-2026",
+        ),
+        MeshTargetArg::Cylinder => primitive_mesh_target_training_profile(
+            target,
+            CYLINDER_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "cylinder-primitive-2026",
+        ),
+        MeshTargetArg::Cone => primitive_mesh_target_training_profile(
+            target,
+            CONE_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "cone-primitive-2026",
+        ),
+        MeshTargetArg::Capsule => primitive_mesh_target_training_profile(
+            target,
+            CAPSULE_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "capsule-primitive-2026",
+        ),
+    }
+}
+
+pub(crate) fn mesh_target_set_targets(target_set: MeshTargetSetArg) -> Vec<MeshTargetArg> {
+    match target_set {
+        MeshTargetSetArg::Core => vec![MeshTargetArg::Torus, MeshTargetArg::Teapot],
+        MeshTargetSetArg::Primitives => vec![
+            MeshTargetArg::Sphere,
+            MeshTargetArg::Ellipsoid,
+            MeshTargetArg::Cube,
+            MeshTargetArg::Cylinder,
+            MeshTargetArg::Cone,
+            MeshTargetArg::Capsule,
+        ],
+        MeshTargetSetArg::Many => vec![
+            MeshTargetArg::Torus,
+            MeshTargetArg::Teapot,
+            MeshTargetArg::Sphere,
+            MeshTargetArg::Ellipsoid,
+            MeshTargetArg::Cube,
+            MeshTargetArg::Cylinder,
+            MeshTargetArg::Cone,
+            MeshTargetArg::Capsule,
+        ],
+    }
+}
+
+fn primitive_mesh_target_training_profile(
+    target: MeshTargetArg,
+    conditionless_local_target_source: &'static str,
+    lineage_marker: &'static str,
+) -> MeshTargetTrainingProfile {
+    MeshTargetTrainingProfile {
+        target,
+        field_scale: DEFAULT_3D_MESH_FIELD_SCALE,
+        render_training_scale: DEFAULT_3D_MESH_FIELD_SCALE,
+        field_seed_mode: ParticleSeed::LocalSubstrateGrowth3d,
+        conditionless_local_seed_mode: ParticleSeed::LocalSubstrateGrowth3d,
+        field_motion_gain: LOCAL_TEAPOT_MOTION_GAIN,
+        field_color_gain: LOCAL_TEAPOT_COLOR_GAIN,
+        local_motion_gain: LOCAL_TEAPOT_MOTION_GAIN,
+        local_color_gain: LOCAL_TEAPOT_COLOR_GAIN,
+        position_field_target_source: conditionless_local_target_source,
+        rollout_field_target_source: conditionless_local_target_source,
+        morphogen_baseline_target_source: conditionless_local_target_source,
+        morphogen_rollout_target_source: conditionless_local_target_source,
+        conditionless_local_target_source,
+        lineage_marker,
     }
 }
 
@@ -178,6 +280,19 @@ pub(crate) fn mesh_target_for_arg(target: MeshTargetArg, scale: f32) -> Triangle
     match target {
         MeshTargetArg::Torus => uv_torus_mesh_target(scale),
         MeshTargetArg::Teapot => utah_teapot_mesh_target(scale),
+        MeshTargetArg::Sphere => TriangleMeshTarget::sphere(scale, 32)
+            .expect("sphere target mesh generation should be valid"),
+        MeshTargetArg::Ellipsoid => TriangleMeshTarget::ellipsoid(scale, 32)
+            .expect("ellipsoid target mesh generation should be valid"),
+        MeshTargetArg::Cube => {
+            TriangleMeshTarget::cube(scale).expect("cube target mesh generation should be valid")
+        }
+        MeshTargetArg::Cylinder => TriangleMeshTarget::cylinder(scale, 48)
+            .expect("cylinder target mesh generation should be valid"),
+        MeshTargetArg::Cone => TriangleMeshTarget::cone(scale, 48)
+            .expect("cone target mesh generation should be valid"),
+        MeshTargetArg::Capsule => TriangleMeshTarget::capsule(scale, 24)
+            .expect("capsule target mesh generation should be valid"),
     }
 }
 
@@ -185,6 +300,12 @@ pub(crate) fn mesh_target_slug(target: MeshTargetArg) -> &'static str {
     match target {
         MeshTargetArg::Torus => "torus",
         MeshTargetArg::Teapot => "teapot",
+        MeshTargetArg::Sphere => "sphere",
+        MeshTargetArg::Ellipsoid => "ellipsoid",
+        MeshTargetArg::Cube => "cube",
+        MeshTargetArg::Cylinder => "cylinder",
+        MeshTargetArg::Cone => "cone",
+        MeshTargetArg::Capsule => "capsule",
     }
 }
 
@@ -222,6 +343,24 @@ pub(crate) fn mesh_conditionless_local_target_source_for_seed(
         }
         (MeshTargetArg::Teapot, ParticleSeed::LocalSubstrateGrowth3d) => {
             TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Sphere, ParticleSeed::LocalSubstrateGrowth3d) => {
+            SPHERE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Ellipsoid, ParticleSeed::LocalSubstrateGrowth3d) => {
+            ELLIPSOID_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Cube, ParticleSeed::LocalSubstrateGrowth3d) => {
+            CUBE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Cylinder, ParticleSeed::LocalSubstrateGrowth3d) => {
+            CYLINDER_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Cone, ParticleSeed::LocalSubstrateGrowth3d) => {
+            CONE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Capsule, ParticleSeed::LocalSubstrateGrowth3d) => {
+            CAPSULE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
         }
         (MeshTargetArg::Torus, ParticleSeed::TorusGrowth3d) => {
             UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE

@@ -18,6 +18,14 @@ other condition. New target support should add mesh/loss metadata and adapter
 training cases, not new object-named particle seeds or full independent weight
 sets.
 
+`train-render3d-adapters --target-set many` is the current scaling harness for
+this direction. It trains one shared conditionless-local base over the selected
+training targets, optionally reserves `--holdout-targets` for adapter-only
+generalization checks, and emits a shared BPK plus compact LoRA adapter JSON
+files. The built-in primitive set (sphere, ellipsoid, cube, cylinder, cone, and
+capsule) exists to stress shared local dynamics across more than torus/teapot
+without introducing object-specific particle seeds.
+
 ## Alignment Contract
 
 The local 3D path must keep these properties:

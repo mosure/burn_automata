@@ -415,9 +415,14 @@ as the final Hyper-NPA target:
   path for both single-target training and `train-render3d-adapters` shared-base
   suites. The suite can initialize and train an object-agnostic shared local 3D
   growth base across the target list before freezing it for per-object adapter
-  fitting. The suite output is the desired bridge artifact for HyperNPA: a
-  shared BPK plus many compact `.adapter.json` object adapters, with
-  materialized BPKs treated as validation/viewer compatibility outputs.
+  fitting. It now supports built-in target sets (`core`, `primitives`, `many`)
+  and held-out adapter-only targets, so reports can separate shared-dynamics
+  training quality from LoRA specialization/generalization quality. The suite
+  output is the desired bridge artifact for HyperNPA: a shared BPK plus many
+  compact `.adapter.json` object adapters, with materialized BPKs treated as
+  validation/viewer compatibility outputs. A conditional HyperNPA should learn
+  to predict this adapter bank distribution first, before attempting full
+  per-object weight generation.
 - Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
   `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
   seed modes are legacy diagnostics for existing BPK lineage and should not be

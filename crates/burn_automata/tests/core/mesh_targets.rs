@@ -273,3 +273,39 @@ fn utah_teapot_mesh_target_exposes_body_spout_handle_and_lid() {
         );
     }
 }
+
+#[test]
+fn procedural_mesh_targets_are_sampleable_and_colored() {
+    for target in [
+        TriangleMeshTarget::sphere(0.72, 16).unwrap(),
+        TriangleMeshTarget::ellipsoid(0.72, 16).unwrap(),
+        TriangleMeshTarget::cube(0.72).unwrap(),
+        TriangleMeshTarget::cylinder(0.72, 24).unwrap(),
+        TriangleMeshTarget::cone(0.72, 24).unwrap(),
+        TriangleMeshTarget::capsule(0.72, 12).unwrap(),
+    ] {
+        assert!(!target.vertices.is_empty());
+        assert!(!target.faces.is_empty());
+        assert_eq!(target.colors.as_ref().unwrap().len(), target.vertices.len());
+        let (bounds_min, bounds_max) = target.bounds();
+        for axis in 0..3 {
+            assert!(bounds_min[axis].is_finite());
+            assert!(bounds_max[axis].is_finite());
+            assert!(bounds_max[axis] > bounds_min[axis]);
+        }
+        for sample_idx in 0..64 {
+            let sample = target.surface_sample(sample_idx);
+            let projection = target.project(sample.position);
+            assert!(projection.distance.is_finite());
+            assert!(
+                projection.distance <= 0.12,
+                "procedural target sample should project near its source surface"
+            );
+            assert!((dot3(sample.normal, sample.normal).sqrt() - 1.0).abs() < 5.0e-3);
+            assert!(
+                sample.color.iter().all(|value| (0.0..=1.0).contains(value)),
+                "procedural target color out of range"
+            );
+        }
+    }
+}

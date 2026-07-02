@@ -127,12 +127,18 @@ Use `--weight-update-mode full` for legacy full-model ablations only.
 For shared-weight experiments, `train-render3d-adapters` is the preferred
 multi-object harness. Without `--base-model`, it initializes an object-agnostic
 conditionless-local 3D growth base, alternates full-weight shared-base training
-over the target list for `--shared-base-cycles`, saves that base, then freezes
-it while fitting one compact LoRA adapter per target. With `--base-model`,
-shared-base cycles default to zero so the supplied base is preserved unless
-continuation is requested explicitly. The suite report records the shared-base
-training entries separately from each adapter's strict growth/render
-validation; these artifacts still remain diagnostic until the strict gates pass.
+over the training split for `--shared-base-cycles`, saves that base, then
+freezes it while fitting one compact LoRA adapter per target. `--target-set
+core` covers torus and teapot, `--target-set primitives` covers sphere,
+ellipsoid, cube, cylinder, cone, and capsule, and `--target-set many` combines
+both groups. `--holdout-targets` excludes named targets from shared-base cycles
+but still trains adapters for them, giving a direct adapter-only generalization
+probe. With `--base-model`, shared-base cycles default to zero so the supplied
+base is preserved unless continuation is requested explicitly. The suite report
+records the shared-base training entries separately from each adapter's strict
+growth/render validation, plus the full-bank parameter count versus
+shared-base-plus-adapter-bank count; these artifacts still remain diagnostic
+until the strict gates pass.
 
 The direct backend uses analytic CPU gradients from render loss to final
 particle positions, opacity, and color, then applies those adjoints through

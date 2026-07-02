@@ -233,7 +233,9 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
         base_model,
         shared_base_output,
         shared_base_cycles,
+        target_set,
         targets,
+        holdout_targets,
         output_dir,
         training_backend,
         adapter_rank,
@@ -247,7 +249,9 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
     assert_eq!(base_model, None);
     assert_eq!(shared_base_output, None);
     assert_eq!(shared_base_cycles, None);
-    assert_eq!(targets, vec![MeshTargetArg::Torus, MeshTargetArg::Teapot]);
+    assert_eq!(target_set, MeshTargetSetArg::Core);
+    assert!(targets.is_empty());
+    assert!(holdout_targets.is_empty());
     assert_eq!(
         output_dir,
         PathBuf::from("artifacts/render_3d_adapter_suite")
@@ -276,6 +280,31 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
     };
     assert_eq!(base_model, Some(PathBuf::from("artifacts/shared_base.bpk")));
     assert_eq!(shared_base_cycles, Some(2));
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d-adapters",
+        "--target-set",
+        "many",
+        "--holdout-targets",
+        "capsule,teapot",
+    ])
+    .unwrap();
+    let Command::TrainRender3dAdapters {
+        target_set,
+        targets,
+        holdout_targets,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d-adapters command");
+    };
+    assert_eq!(target_set, MeshTargetSetArg::Many);
+    assert!(targets.is_empty());
+    assert_eq!(
+        holdout_targets,
+        vec![MeshTargetArg::Capsule, MeshTargetArg::Teapot]
+    );
 }
 
 #[test]
@@ -669,6 +698,61 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
         teapot.morphogen_rollout_target_source, torus.morphogen_rollout_target_source,
         "target profile rollout sources must identify the actual mesh target"
     );
+}
+
+#[test]
+fn mesh_target_sets_expand_to_many_object_suites() {
+    assert_eq!(
+        mesh_target_set_targets(MeshTargetSetArg::Core),
+        vec![MeshTargetArg::Torus, MeshTargetArg::Teapot]
+    );
+    assert_eq!(
+        mesh_target_set_targets(MeshTargetSetArg::Primitives),
+        vec![
+            MeshTargetArg::Sphere,
+            MeshTargetArg::Ellipsoid,
+            MeshTargetArg::Cube,
+            MeshTargetArg::Cylinder,
+            MeshTargetArg::Cone,
+            MeshTargetArg::Capsule,
+        ]
+    );
+    let many = mesh_target_set_targets(MeshTargetSetArg::Many);
+    assert_eq!(many.len(), 8);
+    assert!(many.contains(&MeshTargetArg::Torus));
+    assert!(many.contains(&MeshTargetArg::Teapot));
+    assert!(many.contains(&MeshTargetArg::Sphere));
+    assert!(many.contains(&MeshTargetArg::Capsule));
+}
+
+#[test]
+fn primitive_mesh_target_profiles_use_object_agnostic_growth_seeds() {
+    for target in mesh_target_set_targets(MeshTargetSetArg::Primitives) {
+        let profile = mesh_target_training_profile(target);
+        assert_eq!(profile.target, target);
+        assert_eq!(
+            profile.conditionless_local_seed_mode,
+            ParticleSeed::LocalSubstrateGrowth3d
+        );
+        assert_eq!(
+            profile.field_seed_mode,
+            ParticleSeed::LocalSubstrateGrowth3d,
+            "primitive targets should not add object-specific field seed shortcuts"
+        );
+        assert!(
+            profile
+                .conditionless_local_target_source
+                .contains("conditionless-local")
+        );
+        assert!(profile.lineage_marker.contains("primitive-2026"));
+        assert!(
+            mesh_conditionless_local_target_source_for_seed(
+                target,
+                ParticleSeed::LocalSubstrateGrowth3d
+            )
+            .contains("no-scaffold")
+        );
+    }
 }
 
 #[test]

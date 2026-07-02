@@ -268,10 +268,7 @@ pub(crate) fn is_catalog_model_output_path(path: &Path) -> bool {
 }
 
 pub(crate) fn catalog_bound_candidate_path(target: MeshTargetArg, process_id: u32) -> PathBuf {
-    let target_label = match target {
-        MeshTargetArg::Torus => "torus",
-        MeshTargetArg::Teapot => "teapot",
-    };
+    let target_label = mesh_target_slug(target);
     PathBuf::from("target").join(format!(
         "catalog_{target_label}_render3d_candidate_{process_id}.bpk"
     ))
