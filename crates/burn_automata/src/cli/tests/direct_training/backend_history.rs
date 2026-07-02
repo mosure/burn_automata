@@ -696,6 +696,12 @@ fn render_proxy_history_records_direct_rollout_inner_steps() {
         round.train_grad_scale
     );
     assert!(round.train_loss_history.iter().all(|loss| loss.is_finite()));
+    assert!(round.direct_train_objective_signal_rms.is_finite());
+    assert!(round.train_signal_grad_norm_per_row.is_finite());
+    assert!(round.direct_train_objective_signal_rms > 0.0);
+    assert!(round.train_signal_nonzero);
+    assert!(!round.train_signal_missing);
+    assert!(round.train_signal_grad_norm_per_row > 0.0);
     assert!(round.before_selection_loss.is_finite());
     assert!(round.before_selection_score.is_finite());
     assert!(round.before_selection_density_psnr_db.is_finite());

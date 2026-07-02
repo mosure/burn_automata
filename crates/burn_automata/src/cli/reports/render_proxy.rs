@@ -154,6 +154,10 @@ pub(crate) struct RenderProxyTrainingHistoryEntry {
     pub(crate) train_grad_scale: f32,
     pub(crate) train_grad_scale_history: Vec<f32>,
     pub(crate) train_step_scale: f32,
+    pub(crate) direct_train_objective_signal_rms: f32,
+    pub(crate) train_signal_grad_norm_per_row: f32,
+    pub(crate) train_signal_nonzero: bool,
+    pub(crate) train_signal_missing: bool,
     pub(crate) direct_line_search_candidates: Vec<DirectLineSearchCandidateReport>,
     pub(crate) train_motion_output_delta_norm: f32,
     pub(crate) train_motion_memory_output_delta_norm: f32,
@@ -304,4 +308,25 @@ pub(crate) struct DirectRolloutObjectiveDiagnostics {
     pub(crate) material_post_cap_rms: f32,
     pub(crate) scale_post_cap_rms: f32,
     pub(crate) color_post_cap_rms: f32,
+}
+
+impl DirectRolloutObjectiveDiagnostics {
+    pub(crate) fn output_signal_rms(self) -> f32 {
+        let sum = [
+            self.combined_post_cap_rms,
+            self.mesh_motion_post_cap_rms,
+            self.residual_velocity_post_cap_rms,
+            self.motion_memory_post_cap_rms,
+            self.liveness_post_cap_rms,
+            self.phase_post_cap_rms,
+            self.material_post_cap_rms,
+            self.scale_post_cap_rms,
+            self.color_post_cap_rms,
+        ]
+        .into_iter()
+        .filter(|value| value.is_finite())
+        .map(|value| value * value)
+        .sum::<f32>();
+        sum.sqrt()
+    }
 }

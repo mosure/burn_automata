@@ -140,6 +140,16 @@ growth/render validation, plus the full-bank parameter count versus
 shared-base-plus-adapter-bank count; these artifacts still remain diagnostic
 until the strict gates pass.
 
+Each direct-rollout history entry also reports
+`direct_train_objective_signal_rms`, `train_signal_grad_norm_per_row`,
+`train_signal_nonzero`, and `train_signal_missing`. These fields compare
+enabled render/mesh/liveness objective pressure against the actual full-weight
+or LoRA SGD gradient. A healthy training round should have nonzero objective
+signal and nonzero trainable signal; `train_signal_missing=true` means the
+configured objective produced pressure that did not reach the trainable
+MLP/adapter parameters and should be treated as a training-path bug or dead
+configuration, not as a strict-gate pass.
+
 The direct backend uses analytic CPU gradients from render loss to final
 particle positions, opacity, and color, then applies those adjoints through
 stored rollout MLP outputs and a fixed-neighborhood SPH state-perception

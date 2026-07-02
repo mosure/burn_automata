@@ -5,6 +5,8 @@ struct RenderTrainingAdapterState {
     adapter: NpaLowRankAdapter,
 }
 
+const DIRECT_TRAIN_SIGNAL_EPS: f32 = 1.0e-12;
+
 impl RenderTrainingAdapterState {
     fn new(
         model: &NpaModel,
@@ -280,6 +282,28 @@ pub(crate) fn run_render_proxy_training(
         } else {
             train_step_scale
         };
+        let train_grad_norm = train_report
+            .history
+            .last()
+            .map(|entry| entry.grad_norm)
+            .unwrap_or(0.0);
+        let train_grad_scale = train_report
+            .history
+            .last()
+            .map(|entry| entry.grad_scale)
+            .unwrap_or(1.0);
+        let train_signal_grad_norm_per_row = train_grad_norm / train_report.rows.max(1) as f32;
+        let train_signal_nonzero = train_grad_norm > DIRECT_TRAIN_SIGNAL_EPS;
+        let direct_train_objective_signal_rms = direct_train_objective_signal_rms(
+            &cfg,
+            gradient_rms,
+            opacity_gradient_rms,
+            scale_gradient_rms,
+            direct_objective_diagnostics,
+        );
+        let train_signal_missing = cfg.training_backend == RenderTrainingBackendArg::DirectRollout
+            && direct_train_objective_signal_rms > DIRECT_TRAIN_SIGNAL_EPS
+            && !train_signal_nonzero;
         history.push(RenderProxyTrainingHistoryEntry {
             round,
             before_loss: before.total_loss,
@@ -393,27 +417,23 @@ pub(crate) fn run_render_proxy_training(
                 .iter()
                 .map(|entry| entry.loss)
                 .collect(),
-            train_grad_norm: train_report
-                .history
-                .last()
-                .map(|entry| entry.grad_norm)
-                .unwrap_or(0.0),
+            train_grad_norm,
             train_grad_norm_history: train_report
                 .history
                 .iter()
                 .map(|entry| entry.grad_norm)
                 .collect(),
-            train_grad_scale: train_report
-                .history
-                .last()
-                .map(|entry| entry.grad_scale)
-                .unwrap_or(1.0),
+            train_grad_scale,
             train_grad_scale_history: train_report
                 .history
                 .iter()
                 .map(|entry| entry.grad_scale)
                 .collect(),
             train_step_scale: reported_train_step_scale,
+            direct_train_objective_signal_rms,
+            train_signal_grad_norm_per_row,
+            train_signal_nonzero,
+            train_signal_missing,
             direct_line_search_candidates,
             train_motion_output_delta_norm,
             train_motion_memory_output_delta_norm,
@@ -525,4 +545,34 @@ fn model_parameter_count(model: &NpaModel) -> usize {
         + model.weights.b1.len()
         + model.weights.w2.len()
         + model.weights.b2.len()
+}
+
+fn direct_train_objective_signal_rms(
+    cfg: &RenderProxyTrainingConfig,
+    gradient_rms: f32,
+    opacity_gradient_rms: f32,
+    scale_gradient_rms: f32,
+    diagnostics: DirectRolloutObjectiveDiagnostics,
+) -> f32 {
+    if cfg.training_backend != RenderTrainingBackendArg::DirectRollout {
+        return 0.0;
+    }
+    let weighted_render_motion = gradient_rms * cfg.motion_gain;
+    let weighted_opacity = opacity_gradient_rms
+        * (cfg.opacity_gain
+            + cfg.material_liveness_gain
+            + cfg.material_tail_gain
+            + cfg.liveness_gain);
+    let weighted_scale = scale_gradient_rms * (cfg.scale_gain + cfg.scale_budget_weight);
+    [
+        weighted_render_motion,
+        weighted_opacity,
+        weighted_scale,
+        diagnostics.output_signal_rms(),
+    ]
+    .into_iter()
+    .filter(|value| value.is_finite())
+    .map(|value| value * value)
+    .sum::<f32>()
+    .sqrt()
 }
