@@ -227,6 +227,16 @@ pub(crate) fn render_training_source(
     format!("render-proxy-rust:{target:?}:field-baseline")
 }
 
+pub(crate) fn render_adapter_training_source(
+    target: MeshTargetArg,
+    base_source: Option<&str>,
+    seed_mode: ParticleSeed,
+) -> String {
+    let target_source = mesh_conditionless_local_target_source_for_seed(target, seed_mode);
+    let base = base_source.unwrap_or("unknown");
+    format!("render-adapter-rust:{target_source}:shared-base={base}")
+}
+
 pub(crate) fn is_catalog_model_output_path(path: &Path) -> bool {
     let parts = path
         .components()

@@ -181,9 +181,10 @@ pub(crate) fn run_train_render_3d_adapters(
             &base_manifest,
             Some(base_model.display().to_string()),
             adapter,
-            Some(format!(
-                "render-proxy-lora-suite-rust:{target:?}:base={}",
-                base_source.as_deref().unwrap_or("unknown")
+            Some(render_adapter_training_source(
+                target,
+                base_source.as_deref(),
+                target_seed_mode,
             )),
         )?;
         crate::import::save_adapter_manifest(&adapter_output, &adapter_manifest)?;

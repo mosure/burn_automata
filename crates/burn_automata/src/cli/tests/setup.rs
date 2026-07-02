@@ -413,6 +413,40 @@ fn render_training_source_preserves_local_refinement_lineage() {
 }
 
 #[test]
+fn render_adapter_training_source_marks_target_adapter_without_proxy_lineage() {
+    let source = render_adapter_training_source(
+        MeshTargetArg::Torus,
+        Some("shared-3d-base:conditionless-local"),
+        ParticleSeed::LocalSubstrateGrowth3d,
+    );
+
+    assert!(source.starts_with("render-adapter-rust:"));
+    assert!(source.contains("shared-base=shared-3d-base:conditionless-local"));
+    assert!(!source.contains("render-proxy-rust"));
+    assert!(target_conditionless_lineage(MeshTargetArg::Torus, &source));
+    assert!(target_seed_conditionless_lineage(
+        MeshTargetArg::Torus,
+        ParticleSeed::LocalSubstrateGrowth3d,
+        &source
+    ));
+    assert!(!target_conditionless_lineage(
+        MeshTargetArg::Teapot,
+        &source
+    ));
+
+    let teapot_source = render_adapter_training_source(
+        MeshTargetArg::Teapot,
+        Some("shared-3d-base:conditionless-local"),
+        ParticleSeed::LocalSubstrateGrowth3d,
+    );
+    assert!(target_seed_conditionless_lineage(
+        MeshTargetArg::Teapot,
+        ParticleSeed::LocalSubstrateGrowth3d,
+        &teapot_source
+    ));
+}
+
+#[test]
 fn render_training_source_does_not_preserve_mismatched_target_lineage() {
     assert!(target_conditionless_lineage(
         MeshTargetArg::Torus,
