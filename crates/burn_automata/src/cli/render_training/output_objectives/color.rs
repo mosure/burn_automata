@@ -91,7 +91,7 @@ pub(crate) fn add_surface_color_output_objective(
 
         let row_weight = color_gain * activity_weight * surface_weight;
         for channel in 0..3 {
-            let target_state = 2.0 * projection.color[channel].clamp(0.0, 1.0) - 1.0;
+            let target_state = projection.color[channel].clamp(0.0, 1.0) - 0.5;
             let state_index = state_base + color_state + channel;
             let output_index = output_base + color_output + channel;
             let target_update =

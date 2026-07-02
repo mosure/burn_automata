@@ -100,3 +100,40 @@ fn surface_color_output_objective_requires_local_front_for_dormant_rows() {
         "far dormant rows should not be globally pre-colored"
     );
 }
+
+#[test]
+fn surface_color_output_objective_uses_tail_plus_half_rgb_convention() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap()
+    .with_vertex_colors(vec![[1.0, 0.0, 0.5]; 3])
+    .unwrap();
+    let output_dims = config.update_dims();
+    let color_state = config.state_dims - 3;
+    let color_output = config.spatial_dims + color_state;
+    let positions = vec![[0.0_f32, 0.0, 0.0, 0.0]];
+    let states = vec![0.0; config.state_dims];
+    let raw_updates = vec![0.0_f32; output_dims];
+    let mut output_gradients = vec![0.0_f32; output_dims];
+
+    add_surface_color_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        1.0,
+        1.0,
+        0.0,
+        None,
+        &mut output_gradients,
+    );
+
+    assert!((output_gradients[color_output] + 0.5).abs() <= 1.0e-6);
+    assert!((output_gradients[color_output + 1] - 0.5).abs() <= 1.0e-6);
+    assert!(output_gradients[color_output + 2].abs() <= 1.0e-6);
+}

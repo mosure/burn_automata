@@ -166,6 +166,23 @@ pub(crate) fn run_render_proxy_training(
                     )
                 })
                 .unwrap_or(0.0);
+        let train_color_output_delta_norm = growth_3d_color_output_channels(&model.config)
+            .map(|channels| {
+                channels
+                    .into_iter()
+                    .map(|channel| {
+                        output_channel_delta_norm(
+                            &before_training_weights,
+                            &model.weights,
+                            model.config.hidden_dims,
+                            channel,
+                        )
+                        .powi(2)
+                    })
+                    .sum::<f32>()
+                    .sqrt()
+            })
+            .unwrap_or(0.0);
         let after_trace = render_training_trace(model, grid, &cfg, round)?;
         let after = mesh_multiview_render_loss_from_trace(&after_trace, target, render_cfg)?;
         let selection = render_selection_metrics(
@@ -221,6 +238,9 @@ pub(crate) fn run_render_proxy_training(
                 .material_visible_max_inactive_opacity,
             selection_material_active_mean_opacity: selection.material_active_mean_opacity,
             selection_material_visible_count: selection.material_visible_count,
+            selection_active_color_state_mean_abs: selection.active_color_state_mean_abs,
+            selection_active_color_state_max_abs: selection.active_color_state_max_abs,
+            selection_active_color_state_stddev_mean: selection.active_color_state_stddev_mean,
             selection_surface_covered_bin_fraction: selection.surface_covered_bin_fraction,
             selection_surface_mean_bin_covered_fraction: selection
                 .surface_mean_bin_covered_fraction,
@@ -312,6 +332,7 @@ pub(crate) fn run_render_proxy_training(
             train_liveness_output_delta_norm,
             train_phase_output_delta_norm,
             train_material_output_delta_norm,
+            train_color_output_delta_norm,
             direct_objective_diagnostics,
             gradient_rms,
             opacity_gradient_rms,

@@ -412,6 +412,7 @@ mod tests {
             },
         );
         assert_eq!(learned_gaussian[0].spherical_harmonic.len(), 1);
+        assert_eq!(learned_gaussian[0].spherical_harmonic[0], [0.75, 0.25, 0.5]);
         assert!(learned_gaussian[0].scale_opacity[0] > 0.01);
         assert!(learned_gaussian[0].scale_opacity[3] > 0.5);
         assert_eq!(learned_gaussian[0].rotation, [1.0, 0.0, 0.0, 0.0]);

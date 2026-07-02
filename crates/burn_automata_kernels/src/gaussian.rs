@@ -142,9 +142,9 @@ fn decode_sh(
         let base = color_start + coeff * 3;
         let color = match cfg.mode {
             GaussianDecodeMode::GaussianSh0Oriented => [
-                0.5 + 0.5 * state[base],
-                0.5 + 0.5 * state[base + 1],
-                0.5 + 0.5 * state[base + 2],
+                (state[base] + 0.5).clamp(0.0, 1.0),
+                (state[base + 1] + 0.5).clamp(0.0, 1.0),
+                (state[base + 2] + 0.5).clamp(0.0, 1.0),
             ],
             _ => [
                 (state[base] + 0.5).clamp(0.0, 1.0),

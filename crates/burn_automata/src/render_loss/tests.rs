@@ -14,9 +14,9 @@ fn multiview_render_loss_accepts_mesh_samples_against_themselves() {
     for (idx, color) in samples.colors.iter().enumerate() {
         states[idx * state_dims + opacity_channel] = 8.0;
         let base = idx * state_dims + state_dims - 3;
-        states[base] = 2.0 * color[0] - 1.0;
-        states[base + 1] = 2.0 * color[1] - 1.0;
-        states[base + 2] = 2.0 * color[2] - 1.0;
+        states[base] = color[0] - 0.5;
+        states[base + 1] = color[1] - 0.5;
+        states[base + 2] = color[2] - 0.5;
     }
     let trace = RolloutTrace {
         batch_size: 1,
@@ -112,9 +112,9 @@ fn render_loss_weights_particles_by_opacity_state() {
         hidden_states[idx * state_dims + opacity_channel] = -8.0;
         let base = idx * state_dims + state_dims - 3;
         for states in [&mut visible_states, &mut hidden_states] {
-            states[base] = 2.0 * color[0] - 1.0;
-            states[base + 1] = 2.0 * color[1] - 1.0;
-            states[base + 2] = 2.0 * color[2] - 1.0;
+            states[base] = color[0] - 0.5;
+            states[base + 1] = color[1] - 0.5;
+            states[base + 2] = color[2] - 0.5;
         }
     }
     let visible = RolloutTrace {
@@ -159,9 +159,9 @@ fn render_opacity_logit_bias_calibrates_material_decoder_without_state_mutation(
     let mut states = vec![0.0; samples.positions.len() * state_dims];
     for (idx, color) in samples.colors.iter().enumerate() {
         let base = idx * state_dims + state_dims - 3;
-        states[base] = 2.0 * color[0] - 1.0;
-        states[base + 1] = 2.0 * color[1] - 1.0;
-        states[base + 2] = 2.0 * color[2] - 1.0;
+        states[base] = color[0] - 0.5;
+        states[base + 1] = color[1] - 0.5;
+        states[base + 2] = color[2] - 0.5;
     }
     let trace = RolloutTrace {
         batch_size: 1,
@@ -213,9 +213,9 @@ fn learned_scale_decode_changes_render_footprint_without_moving_particles() {
         let state_base = idx * state_dims;
         states[state_base + opacity_channel] = 8.0;
         let color_base = state_base + state_dims - 3;
-        states[color_base] = 2.0 * color[0] - 1.0;
-        states[color_base + 1] = 2.0 * color[1] - 1.0;
-        states[color_base + 2] = 2.0 * color[2] - 1.0;
+        states[color_base] = color[0] - 0.5;
+        states[color_base + 1] = color[1] - 0.5;
+        states[color_base + 2] = color[2] - 0.5;
     }
     let matching = RolloutTrace {
         batch_size: 1,
@@ -470,7 +470,7 @@ fn render_gradient_matches_full_loss_finite_difference() {
     plus.states[color_base] += eps;
     minus.states[color_base] -= eps;
     let finite_difference = finite_difference_render_loss(&plus, &minus, &target, cfg, eps);
-    let analytic = 0.5 * gradient.color_gradients[0][0];
+    let analytic = gradient.color_gradients[0][0];
     assert_gradient_close("color", 0, analytic, finite_difference, 0.05, 0.20);
 
     let mut plus = trace.clone();

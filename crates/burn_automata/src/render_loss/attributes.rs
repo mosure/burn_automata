@@ -42,9 +42,9 @@ pub(super) fn state_tail_render_attributes(
     for idx in 0..count {
         let base = idx * state_dims + tail;
         colors.push([
-            (0.5 + 0.5 * states[base]).clamp(0.0, 1.0),
-            (0.5 + 0.5 * states[base + 1]).clamp(0.0, 1.0),
-            (0.5 + 0.5 * states[base + 2]).clamp(0.0, 1.0),
+            (states[base] + 0.5).clamp(0.0, 1.0),
+            (states[base + 1] + 0.5).clamp(0.0, 1.0),
+            (states[base + 2] + 0.5).clamp(0.0, 1.0),
         ]);
         let opacity = if let Some(channel) = growth_3d_material_opacity_channel(state_dims) {
             sigmoid(states[idx * state_dims + channel] + cfg.opacity_logit_bias)

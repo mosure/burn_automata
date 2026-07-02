@@ -49,7 +49,7 @@ pub(crate) fn terminal_render_state_adjoint(
                 let state_value = trace.states[state_base + tail + channel];
                 if state_value > -1.0 && state_value < 1.0 {
                     state_adjoint[state_base + tail + channel] +=
-                        0.5 * gradient.color_gradients[gradient_row][channel];
+                        gradient.color_gradients[gradient_row][channel];
                 }
             }
         }

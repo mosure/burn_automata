@@ -162,7 +162,8 @@ pub(crate) fn render_position_gradient(
                         let minus_loss =
                             mesh_multiview_render_loss_from_trace(&minus, target, render_cfg)?
                                 .total_loss;
-                        color_gradient[gradient_idx][channel] = (plus_loss - minus_loss) / eps;
+                        color_gradient[gradient_idx][channel] =
+                            (plus_loss - minus_loss) / (2.0 * eps);
                     }
                 }
             }

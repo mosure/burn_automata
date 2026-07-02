@@ -288,6 +288,9 @@ fn direct_line_search_candidate_report(
         material_visible_max_inactive_opacity: selection.material_visible_max_inactive_opacity,
         material_active_mean_opacity: selection.material_active_mean_opacity,
         material_visible_count: selection.material_visible_count,
+        active_color_state_mean_abs: selection.active_color_state_mean_abs,
+        active_color_state_max_abs: selection.active_color_state_max_abs,
+        active_color_state_stddev_mean: selection.active_color_state_stddev_mean,
         surface_covered_bin_fraction: selection.surface_covered_bin_fraction,
         surface_mean_bin_covered_fraction: selection.surface_mean_bin_covered_fraction,
         material_visible_surface_covered_bin_fraction: selection
