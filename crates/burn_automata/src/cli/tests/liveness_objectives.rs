@@ -354,11 +354,11 @@ fn temporal_front_candidate_budget_scales_but_stays_bounded() {
     assert_eq!(temporal_front_candidate_count(64, 64), 16);
     assert_eq!(
         temporal_front_candidate_count(128, 128),
-        32,
+        64,
         "short 3D rollout probes need enough temporal candidates to grow beyond the initial seed shell"
     );
-    assert_eq!(temporal_front_candidate_count(1024, 1024), 256);
-    assert_eq!(temporal_front_candidate_count(8192, 8192), 1024);
+    assert_eq!(temporal_front_candidate_count(1024, 1024), 512);
+    assert_eq!(temporal_front_candidate_count(8192, 8192), 4096);
     assert_eq!(
         temporal_front_candidate_count(8192, 7),
         7,
@@ -1239,6 +1239,85 @@ fn material_coverage_materialization_output_objective_promotes_candidate_rows_on
         gradients[2 * output_dims + material_output],
         0.0,
         "already visible candidate should not receive more material pressure"
+    );
+}
+
+#[test]
+fn material_target_coverage_opacity_updates_include_bounded_frontier_rows() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[0.0, -0.1, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.2]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let positions = vec![[0.80_f32, 0.0, 0.0, 0.0], [1.60, 0.0, 0.0, 0.0]];
+    let states = vec![GROWTH_3D_INACTIVE_OPACITY_LOGIT; positions.len() * config.state_dims];
+    let row_weights = vec![1.0_f32, 1.0];
+
+    let updates = material_target_coverage_opacity_updates_weighted(
+        &config,
+        &target,
+        &positions,
+        &states,
+        Some(&row_weights),
+        1.0,
+        128,
+        1.0,
+        GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
+        0.25,
+    );
+
+    assert!(
+        updates[0] > 0.0,
+        "near-frontier rows should receive weak material pressure before strict coverage"
+    );
+    assert!(
+        updates[0] <= 0.25 + 1.0e-6,
+        "frontier material pressure should respect the update cap"
+    );
+    assert_eq!(
+        updates[1], 0.0,
+        "far rows outside the bounded frontier must not receive nonlocal material pressure"
+    );
+    assert_eq!(
+        states[material_channel], GROWTH_3D_INACTIVE_OPACITY_LOGIT,
+        "test sanity: material should start inactive"
+    );
+}
+
+#[test]
+fn material_surface_strata_opacity_updates_include_bounded_frontier_rows() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[0.0, -0.1, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.2]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let positions = vec![[0.80_f32, 0.0, 0.0, 0.0], [1.60, 0.0, 0.0, 0.0]];
+    let states = vec![GROWTH_3D_INACTIVE_OPACITY_LOGIT; positions.len() * config.state_dims];
+    let row_weights = vec![1.0_f32, 1.0];
+
+    let updates = material_surface_strata_opacity_updates_weighted(
+        &config,
+        &target,
+        &positions,
+        &states,
+        Some(&row_weights),
+        1.0,
+        128,
+        1.0,
+        GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
+        0.25,
+    );
+
+    assert!(
+        updates[0] > 0.0,
+        "frontier rows assigned to an uncovered stratum should receive material pressure"
+    );
+    assert_eq!(
+        updates[1], 0.0,
+        "strata material pressure should remain bounded to the mesh frontier"
     );
 }
 

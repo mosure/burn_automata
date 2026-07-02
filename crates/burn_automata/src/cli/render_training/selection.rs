@@ -863,6 +863,11 @@ pub(crate) fn material_training_soft_coverage_threshold(seed_scale: f32) -> f32 
     (strict * 3.0).min(seed_scale.max(strict)).max(strict)
 }
 
+pub(crate) fn material_training_frontier_coverage_threshold(seed_scale: f32) -> f32 {
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    soft.max(seed_scale.max(soft) * 1.25).max(soft)
+}
+
 pub(crate) fn direct_trajectory_geometry_weight(step_fraction: f32) -> f32 {
     let schedule = step_fraction.clamp(0.0, 1.0);
     0.5 + 0.5 * schedule
@@ -892,4 +897,23 @@ pub(crate) fn soft_material_assignment_weight(
     } else {
         (1.0 - (distance - strict) / (soft - strict).max(1.0e-6)).clamp(0.0, 1.0)
     }
+}
+
+pub(crate) fn frontier_material_assignment_weight(
+    distance: f32,
+    strict_threshold: f32,
+    soft_threshold: f32,
+    frontier_threshold: f32,
+) -> f32 {
+    let soft_weight = soft_material_assignment_weight(distance, strict_threshold, soft_threshold);
+    if soft_weight > 0.0 || !distance.is_finite() {
+        return soft_weight;
+    }
+    let soft = soft_threshold.max(strict_threshold.max(1.0e-6));
+    let frontier = frontier_threshold.max(soft);
+    if distance >= frontier {
+        return 0.0;
+    }
+    let falloff = 1.0 - (distance - soft) / (frontier - soft).max(1.0e-6);
+    0.25 * falloff.clamp(0.0, 1.0).powi(2)
 }

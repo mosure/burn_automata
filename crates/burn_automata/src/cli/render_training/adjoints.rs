@@ -392,7 +392,8 @@ pub(crate) fn material_target_coverage_opacity_updates_weighted(
 
     let threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
     let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
-    let soft_threshold2 = soft_threshold * soft_threshold;
+    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
+    let frontier_threshold2 = frontier_threshold * frontier_threshold;
     let sample_count = coverage_samples.max(candidate_rows.len().max(512));
     let mut assigned_weights = vec![0.0_f32; positions.len()];
     let mut assigned_counts = vec![0usize; positions.len()];
@@ -411,12 +412,16 @@ pub(crate) fn material_target_coverage_opacity_updates_weighted(
                 best_row = row;
             }
         }
-        if !best_distance2.is_finite() || best_distance2 > soft_threshold2 {
+        if !best_distance2.is_finite() || best_distance2 > frontier_threshold2 {
             continue;
         }
         let distance = best_distance2.sqrt();
-        assigned_weights[best_row] +=
-            soft_material_assignment_weight(distance, threshold, soft_threshold);
+        assigned_weights[best_row] += frontier_material_assignment_weight(
+            distance,
+            threshold,
+            soft_threshold,
+            frontier_threshold,
+        );
         assigned_counts[best_row] += 1;
     }
 
@@ -567,7 +572,8 @@ pub(crate) fn material_surface_strata_opacity_updates_weighted(
     let threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
     let threshold2 = threshold * threshold;
     let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
-    let soft_threshold2 = soft_threshold * soft_threshold;
+    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
+    let frontier_threshold2 = frontier_threshold * frontier_threshold;
     let mut bin_samples = vec![0usize; bin_count];
     let mut bin_material_covered = vec![0usize; bin_count];
     let mut bin_candidate = vec![None::<(usize, f32)>; bin_count];
@@ -604,7 +610,7 @@ pub(crate) fn material_surface_strata_opacity_updates_weighted(
             bin_material_covered[bin] += 1;
         }
         if let Some((row, distance2)) = best_active
-            && distance2 <= soft_threshold2
+            && distance2 <= frontier_threshold2
             && bin_candidate[bin].is_none_or(|(_, current_distance2)| distance2 < current_distance2)
         {
             bin_candidate[bin] = Some((row, distance2));
@@ -635,7 +641,12 @@ pub(crate) fn material_surface_strata_opacity_updates_weighted(
         let state_base = row * config.state_dims;
         let current_opacity = states[state_base + material_channel];
         let distance = distance2.sqrt();
-        let surface_weight = soft_material_assignment_weight(distance, threshold, soft_threshold);
+        let surface_weight = frontier_material_assignment_weight(
+            distance,
+            threshold,
+            soft_threshold,
+            frontier_threshold,
+        );
         let opacity_gap = (target_opacity_logit - current_opacity).max(0.0);
         let row_weight = row_weights
             .and_then(|weights| weights.get(row))
@@ -1135,12 +1146,15 @@ pub(crate) fn temporal_front_candidate_count(rows: usize, deficit: usize) -> usi
     if rows == 0 || deficit == 0 {
         return 0;
     }
-    let local_budget = rows.div_ceil(TEMPORAL_FRONT_CANDIDATE_ROW_FRACTION);
-    let scaled_cap = rows
-        .div_ceil(TEMPORAL_FRONT_CANDIDATE_CAP_ROW_FRACTION)
-        .clamp(
-            TEMPORAL_FRONT_CANDIDATE_MIN_CAP,
-            TEMPORAL_FRONT_CANDIDATE_MAX_CAP,
-        );
+    let row_fraction = if rows < TEMPORAL_FRONT_CANDIDATE_WIDE_MIN_ROWS {
+        TEMPORAL_FRONT_CANDIDATE_SMALL_ROW_FRACTION
+    } else {
+        TEMPORAL_FRONT_CANDIDATE_ROW_FRACTION
+    };
+    let local_budget = rows.div_ceil(row_fraction);
+    let scaled_cap = rows.div_ceil(row_fraction).clamp(
+        TEMPORAL_FRONT_CANDIDATE_MIN_CAP,
+        TEMPORAL_FRONT_CANDIDATE_MAX_CAP,
+    );
     deficit.min(local_budget.min(scaled_cap).max(1))
 }
