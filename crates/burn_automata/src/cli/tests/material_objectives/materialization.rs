@@ -89,6 +89,61 @@ fn temporal_materialization_target_follows_rollout_schedule() {
 }
 
 #[test]
+fn temporal_materialization_keeps_dormant_pending_rows_below_visible_threshold() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [0.08_f32, 0.0, 0.0, 0.0],
+        [0.10_f32, 0.0, 0.0, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    states[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[config.state_dims + material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.2;
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    let mut raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    raw_updates[2 * output_dims + liveness_output] = 8.0;
+    let candidate_weights = vec![1.0_f32, 1.0, 1.0];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_temporal_materialization_output_objective_with_candidate_weights(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        1.0,
+        0.20,
+        &candidate_weights,
+        1.0,
+        0.25,
+        &mut output_gradients,
+    );
+
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "dormant row already above the precursor ceiling should not be pushed further visible"
+    );
+    assert!(
+        output_gradients[2 * output_dims + material_output] < 0.0,
+        "predicted-active row may continue materializing toward render-visible target"
+    );
+}
+
+#[test]
 fn active_surface_materialization_promotes_active_surface_rows_only() {
     let config = NpaConfig::growing_3dgs();
     let target = TriangleMeshTarget::new(

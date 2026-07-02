@@ -156,6 +156,7 @@ pub(crate) fn add_material_visibility_output_objective(
     } else {
         None
     };
+    let material_visible_threshold = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.0;
     let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
     let liveness_enabled = liveness_output < output_dims
         && material_liveness_gain > 0.0
@@ -252,6 +253,8 @@ pub(crate) fn add_material_visibility_output_objective(
             .copied()
             .unwrap_or(0.0);
         let candidate_weight = material_candidate_weights[row];
+        let predicted_live = liveness > -1.0 || predicted_liveness[row] > -1.0;
+        let pending_liveness = liveness <= -1.0 && predicted_liveness[row] <= -1.0;
         let material_candidate = candidate_weight > 0.0;
         let material_index = state_base + material_channel;
         let material_opacity = states[material_index];
@@ -279,10 +282,21 @@ pub(crate) fn add_material_visibility_output_objective(
                     * material_normal_updates.get(row).copied().unwrap_or(0.0);
             }
         }
+        if pending_liveness && material_delta > 0.0 {
+            material_delta =
+                material_delta.min((material_precursor_ceiling() - material_opacity).max(0.0));
+        }
         if material_liveness_gain > 0.0
             && material_liveness_gain.is_finite()
-            && liveness <= -1.0
-            && predicted_liveness[row] <= -1.0
+            && pending_liveness
+            && material_opacity > material_visible_threshold
+        {
+            material_delta -=
+                material_liveness_gain * (material_opacity - material_visible_threshold);
+        }
+        if material_liveness_gain > 0.0
+            && material_liveness_gain.is_finite()
+            && pending_liveness
             && front_weight <= 0.0
             && material_opacity > GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT
         {
@@ -302,9 +316,8 @@ pub(crate) fn add_material_visibility_output_objective(
         }
         if liveness_enabled
             && liveness_deficit > 0
-            && material_delta > 0.0
-            && liveness <= -1.0
-            && predicted_liveness[row] <= -1.0
+            && (material_delta > 0.0 || material_opacity > material_visible_threshold)
+            && !predicted_live
             && front_weight > 0.0
         {
             if liveness_surface_weight > 0.0 {
