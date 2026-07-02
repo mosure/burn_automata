@@ -359,6 +359,30 @@ pub(crate) fn direct_rollout_objective_diagnostics(
                 [liveness_output],
             );
         }
+        let mut material_visible_liveness_output_gradients =
+            vec![0.0; particle_count * output_dims];
+        add_material_visible_liveness_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.material_liveness_gain,
+            target_coverage_threshold(cfg.seed_scale),
+            liveness_update_cap,
+            cfg.liveness_front_radius,
+            1.0,
+            &mut material_visible_liveness_output_gradients,
+        );
+        if liveness_output < output_dims {
+            accumulate_output_channels(
+                &mut accumulators.material_visible_liveness,
+                &material_visible_liveness_output_gradients,
+                particle_count,
+                output_dims,
+                [liveness_output],
+            );
+        }
         let mut surface_escape_liveness_output_gradients = vec![0.0; particle_count * output_dims];
         add_surface_escape_liveness_output_objective(
             &model.config,
@@ -419,6 +443,15 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &liveness_candidate_weights,
             &material_coverage_candidate_weights,
         );
+        let material_visible_liveness_candidate_weights = liveness_candidate_weights_from_gradients(
+            output_dims,
+            liveness_output,
+            &material_visible_liveness_output_gradients,
+        );
+        let liveness_candidate_weights = max_candidate_weights(
+            &liveness_candidate_weights,
+            &material_visible_liveness_candidate_weights,
+        );
         let liveness_candidate_weights = temporal_liveness_candidate_weights_with_local_front_floor(
             &model.config,
             &snapshot.positions,
@@ -467,6 +500,10 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         add_output_gradients(
             &mut liveness_phase_driver_gradients,
             &material_coverage_liveness_output_gradients,
+        );
+        add_output_gradients(
+            &mut liveness_phase_driver_gradients,
+            &material_visible_liveness_output_gradients,
         );
         add_output_gradients(
             &mut liveness_phase_driver_gradients,
@@ -743,11 +780,12 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             );
         }
 
-        let combined_additions: [&[f32]; 23] = [
+        let combined_additions: [&[f32]; 24] = [
             &mesh_liveness_output_gradients,
             &surface_escape_liveness_output_gradients,
             &target_coverage_liveness_output_gradients,
             &material_coverage_liveness_output_gradients,
+            &material_visible_liveness_output_gradients,
             &extent_front_output_gradients,
             &phase_output_gradients,
             &liveness_phase_memory_output_gradients,

@@ -236,6 +236,8 @@ pub(crate) struct DirectRolloutObjectiveDiagnostics {
     pub(crate) target_coverage_liveness_nonzero_fraction: f32,
     pub(crate) material_coverage_liveness_rms: f32,
     pub(crate) material_coverage_liveness_nonzero_fraction: f32,
+    pub(crate) material_visible_liveness_rms: f32,
+    pub(crate) material_visible_liveness_nonzero_fraction: f32,
     pub(crate) extent_front_liveness_rms: f32,
     pub(crate) extent_front_liveness_nonzero_fraction: f32,
     pub(crate) phase_rms: f32,

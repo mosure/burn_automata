@@ -52,6 +52,40 @@ pub(crate) fn mesh_motion_candidate_weights(
     motion_norms
 }
 
+pub(crate) fn liveness_candidate_weights_from_gradients(
+    output_dims: usize,
+    liveness_output: usize,
+    output_gradients: &[f32],
+) -> Vec<f32> {
+    if output_dims == 0
+        || liveness_output >= output_dims
+        || output_gradients.len() % output_dims != 0
+    {
+        return Vec::new();
+    }
+    let rows = output_gradients.len() / output_dims;
+    let mut weights = vec![0.0_f32; rows];
+    let mut max_weight = 0.0_f32;
+    for row in 0..rows {
+        let gradient = output_gradients[row * output_dims + liveness_output];
+        if !gradient.is_finite() || gradient >= 0.0 {
+            continue;
+        }
+        let weight = -gradient;
+        weights[row] = weight;
+        max_weight = max_weight.max(weight);
+    }
+    if max_weight <= 1.0e-12 || !max_weight.is_finite() {
+        return weights;
+    }
+    for weight in &mut weights {
+        if *weight > 0.0 {
+            *weight = (*weight / max_weight).sqrt().clamp(0.0, 1.0);
+        }
+    }
+    weights
+}
+
 pub(crate) fn mesh_motion_candidate_weights_with_local_front_floor(
     config: &NpaConfig,
     positions: &[[f32; 4]],

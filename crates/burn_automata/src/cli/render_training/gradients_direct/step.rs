@@ -275,6 +275,31 @@ pub(super) fn add_direct_step_output_objectives(
         liveness_update_cap,
         step_output_gradients,
     );
+    let mut material_visible_liveness_output_gradients = vec![0.0; particle_count * output_dims];
+    add_material_visible_liveness_output_objective(
+        &model.config,
+        target,
+        &snapshot.positions,
+        &snapshot.states,
+        updates,
+        cfg.material_liveness_gain,
+        target_coverage_threshold(cfg.seed_scale),
+        liveness_update_cap,
+        cfg.liveness_front_radius,
+        1.0,
+        &mut material_visible_liveness_output_gradients,
+    );
+    boost_sparse_output_channel_rms(
+        &mut material_visible_liveness_output_gradients,
+        output_dims,
+        [model.config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL],
+        cfg.direct_output_gradient_rms_cap * 0.5,
+        16.0,
+    );
+    add_output_gradients(
+        step_output_gradients,
+        &material_visible_liveness_output_gradients,
+    );
     add_surface_escape_liveness_output_objective(
         &model.config,
         target,
@@ -314,6 +339,15 @@ pub(super) fn add_direct_step_output_objectives(
     let liveness_candidate_weights = max_candidate_weights(
         &liveness_candidate_weights,
         &material_coverage_candidate_weights,
+    );
+    let material_visible_liveness_candidate_weights = liveness_candidate_weights_from_gradients(
+        output_dims,
+        model.config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL,
+        &material_visible_liveness_output_gradients,
+    );
+    let liveness_candidate_weights = max_candidate_weights(
+        &liveness_candidate_weights,
+        &material_visible_liveness_candidate_weights,
     );
     let liveness_candidate_weights = temporal_liveness_candidate_weights_with_local_front_floor(
         &model.config,

@@ -8,6 +8,7 @@ pub(super) struct DirectObjectiveAccumulators {
     pub(super) surface_escape_liveness: OutputGradientAccumulator,
     pub(super) target_coverage_liveness: OutputGradientAccumulator,
     pub(super) material_coverage_liveness: OutputGradientAccumulator,
+    pub(super) material_visible_liveness: OutputGradientAccumulator,
     pub(super) extent_front_liveness: OutputGradientAccumulator,
     pub(super) phase_progress: OutputGradientAccumulator,
     pub(super) liveness_phase_memory: OutputGradientAccumulator,
@@ -70,6 +71,10 @@ impl DirectObjectiveAccumulators {
             material_coverage_liveness_rms: self.material_coverage_liveness.rms(),
             material_coverage_liveness_nonzero_fraction: self
                 .material_coverage_liveness
+                .nonzero_fraction(),
+            material_visible_liveness_rms: self.material_visible_liveness.rms(),
+            material_visible_liveness_nonzero_fraction: self
+                .material_visible_liveness
                 .nonzero_fraction(),
             extent_front_liveness_rms: self.extent_front_liveness.rms(),
             extent_front_liveness_nonzero_fraction: self.extent_front_liveness.nonzero_fraction(),

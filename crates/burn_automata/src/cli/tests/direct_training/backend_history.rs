@@ -230,6 +230,11 @@ fn direct_rollout_objective_diagnostics_reports_channel_pressure() {
     );
     assert!(diagnostics.material_coverage_liveness_nonzero_fraction > 0.0);
     assert!(
+        diagnostics.material_visible_liveness_rms > 0.0,
+        "material-visible liveness objective should activate dormant surface rows that should render as material"
+    );
+    assert!(diagnostics.material_visible_liveness_nonzero_fraction > 0.0);
+    assert!(
         diagnostics.phase_rms > 0.0,
         "phase objective should be visible before MLP backprop"
     );
