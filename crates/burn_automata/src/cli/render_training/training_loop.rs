@@ -33,7 +33,6 @@ pub(crate) fn run_render_proxy_training(
         Some(&selection_baseline),
     )?;
     let mut best_model = model.clone();
-    let mut best_render_loss = initial_render_loss.clone();
     let mut best_selection = initial_selection.clone();
     let mut selected_round = None;
     let mut history = Vec::with_capacity(cfg.rounds);
@@ -181,7 +180,6 @@ pub(crate) fn run_render_proxy_training(
             render_selection_candidate_metrics_beats(&selection, &best_selection);
         if selected_checkpoint {
             best_model = model.clone();
-            best_render_loss = selection.base_report.clone();
             best_selection = selection.clone();
             selected_round = Some(round);
         }
@@ -323,16 +321,11 @@ pub(crate) fn run_render_proxy_training(
             *model = best_model.clone();
         }
     }
-    let final_render_loss = if selected_round.is_some() {
-        *model = best_model;
-        best_render_loss
-    } else {
-        mesh_multiview_render_loss_from_trace(
-            &render_training_trace(model, grid, &cfg, 0)?,
-            target,
-            render_cfg,
-        )?
-    };
+    let final_render_loss = mesh_multiview_render_loss_from_trace(
+        &render_training_trace(model, grid, &cfg, 0)?,
+        target,
+        render_cfg,
+    )?;
     let final_trace = render_training_trace(model, grid, &cfg, 0)?;
     let final_gaussian_volume = gaussian_volume_stats_for_trace(&final_trace, render_cfg);
 

@@ -134,6 +134,130 @@ fn render_selection_training_progress_rejects_precursor_coverage_collapse() {
 }
 
 #[test]
+fn render_selection_can_retain_geometry_growth_before_material_visibility() {
+    let mut previous = render_selection_metrics_with_liveness(112.13, 0.6346, 2.26, 0.0);
+    previous.morphology_non_regressed = false;
+    previous.active_surface_max = 0.43;
+    previous.min_active_extent_bbox_ratio = 0.09;
+    previous.min_active_extent_min_axis_ratio = 0.07;
+    previous.min_final_active_count = 43;
+    previous.min_newly_activated_fraction = 0.29;
+    previous.min_front_local_newly_activated_fraction = 0.62;
+    previous.target_coverage_fraction = 0.048;
+    previous.surface_covered_bin_fraction = 0.078;
+    previous.surface_normal_covered_bin_fraction = 0.269;
+    previous.material_visible_target_coverage_fraction = 0.019;
+    previous.material_visible_surface_covered_bin_fraction = 0.062;
+    previous.material_visible_surface_normal_covered_bin_fraction = 0.153;
+    previous.max_temporal_activation_schedule_error = 0.18;
+
+    let mut geometry = previous.clone();
+    geometry.score = 104.12;
+    geometry.render_loss = 0.646;
+    geometry.density_psnr_db = previous.density_psnr_db - 0.08;
+    geometry.active_surface_max = 0.61;
+    geometry.min_active_extent_bbox_ratio = 0.284;
+    geometry.min_active_extent_min_axis_ratio = 0.175;
+    geometry.min_final_active_count = 54;
+    geometry.min_newly_activated_fraction = 0.383;
+    geometry.target_coverage_fraction = previous.target_coverage_fraction;
+    geometry.surface_covered_bin_fraction = 0.109;
+    geometry.surface_normal_covered_bin_fraction = 0.384;
+    geometry.material_visible_target_coverage_fraction = 0.0;
+    geometry.material_visible_surface_covered_bin_fraction = 0.0;
+    geometry.material_visible_surface_normal_covered_bin_fraction = 0.0;
+    geometry.max_temporal_activation_schedule_error =
+        previous.max_temporal_activation_schedule_error;
+
+    assert!(
+        render_selection_candidate_metrics_beats(&geometry, &previous),
+        "strict-score-backed active geometry growth should be retained even when surface-gated material is temporarily invisible"
+    );
+    assert!(
+        render_selection_training_progress_beats(&geometry, &previous),
+        "geometry-first progress should keep training moving while materialization catches up"
+    );
+
+    let mut target_collapse = geometry.clone();
+    target_collapse.target_coverage_fraction = previous.target_coverage_fraction - 0.02;
+    assert!(
+        !render_selection_candidate_metrics_beats(&target_collapse, &previous),
+        "geometry precursor selection must not accept target support collapse"
+    );
+    assert!(!render_selection_training_progress_beats(
+        &target_collapse,
+        &previous
+    ));
+
+    let mut material_leak = geometry;
+    material_leak.material_visible_surface_tail_over_threshold_fraction = 0.02;
+    assert!(
+        !render_selection_candidate_metrics_beats(&material_leak, &previous),
+        "geometry precursor selection must remain bounded by material-visible tail safety"
+    );
+    assert!(!render_selection_training_progress_beats(
+        &material_leak,
+        &previous
+    ));
+}
+
+#[test]
+fn render_selection_can_continue_bounded_geometry_expansion_without_checkpointing() {
+    let mut previous = render_selection_metrics_with_liveness(101.40, 0.6763, 1.991, 0.0);
+    previous.morphology_non_regressed = true;
+    previous.active_surface_max = 0.348;
+    previous.min_active_extent_bbox_ratio = 0.287;
+    previous.min_active_extent_min_axis_ratio = 0.184;
+    previous.min_final_active_count = 55;
+    previous.min_newly_activated_fraction = 0.392;
+    previous.min_front_local_newly_activated_fraction = 0.90;
+    previous.target_coverage_fraction = 0.0488;
+    previous.surface_covered_bin_fraction = 0.109;
+    previous.surface_normal_covered_bin_fraction = 0.384;
+    previous.material_visible_target_coverage_fraction = 0.0;
+    previous.material_visible_surface_covered_bin_fraction = 0.0;
+    previous.material_visible_surface_normal_covered_bin_fraction = 0.0;
+    previous.max_temporal_activation_schedule_error = 0.068;
+
+    let mut expanded = previous.clone();
+    expanded.morphology_non_regressed = false;
+    expanded.score = 105.29;
+    expanded.render_loss = previous.render_loss + 0.009;
+    expanded.density_psnr_db = previous.density_psnr_db - 0.055;
+    expanded.active_surface_max = 0.402;
+    expanded.min_active_extent_bbox_ratio = 0.490;
+    expanded.min_active_extent_min_axis_ratio = 0.349;
+    expanded.min_final_active_count = 74;
+    expanded.min_newly_activated_fraction = 0.55;
+    expanded.min_front_local_newly_activated_fraction = 0.88;
+    expanded.surface_covered_bin_fraction = 0.125;
+    expanded.max_temporal_activation_schedule_error = 0.096;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&expanded, &previous),
+        "bounded render-regressing geometry expansion should not become a selected checkpoint"
+    );
+    assert!(
+        render_selection_training_progress_beats(&expanded, &previous),
+        "bounded local-front geometry expansion should continue training even before render/material metrics improve"
+    );
+
+    let mut bursty = expanded.clone();
+    bursty.render_loss = previous.render_loss + 0.019;
+    bursty.density_psnr_db = previous.density_psnr_db - 0.12;
+    bursty.min_final_active_count = 119;
+    bursty.min_newly_activated_fraction = 0.925;
+    bursty.min_front_local_newly_activated_fraction = 0.52;
+    bursty.max_temporal_activation_schedule_error = previous.max_temporal_activation_schedule_error
+        + TEMPORAL_ACTIVATION_SELECTION_REGRESSION_SLACK
+        + 0.10;
+    assert!(
+        !render_selection_training_progress_beats(&bursty, &previous),
+        "geometry expansion continuation must still reject bursty timing and excessive render regression"
+    );
+}
+
+#[test]
 fn render_selection_morphology_recovery_requires_strict_score_improvement() {
     let mut regressed = render_selection_metrics_with_liveness(125.047, 0.87312, 0.6845, 0.0);
     regressed.morphology_non_regressed = false;

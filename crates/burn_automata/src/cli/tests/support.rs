@@ -89,6 +89,7 @@ pub(super) fn render_selection_metrics_with_liveness(
         morphology_non_regressed: true,
         worst_seed: 0,
         worst_failure_reasons: Vec::new(),
+        #[cfg(test)]
         base_report: synthetic_render_loss(render_loss, density_psnr_db, 20.0, 20.0),
     }
 }

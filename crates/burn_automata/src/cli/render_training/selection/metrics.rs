@@ -46,6 +46,7 @@ pub(crate) struct RenderSelectionMetrics {
     pub(crate) morphology_non_regressed: bool,
     pub(crate) worst_seed: u64,
     pub(crate) worst_failure_reasons: Vec<&'static str>,
+    #[cfg(test)]
     pub(crate) base_report: MultiViewRenderLossReport,
 }
 
@@ -410,6 +411,7 @@ pub(crate) fn render_selection_metrics(
         morphology_non_regressed,
         worst_seed,
         worst_failure_reasons,
+        #[cfg(test)]
         base_report: base_case.render_loss,
     })
 }

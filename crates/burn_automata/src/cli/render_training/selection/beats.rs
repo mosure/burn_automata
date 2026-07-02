@@ -1,5 +1,17 @@
 use super::*;
 
+mod geometry;
+mod liveness;
+
+use geometry::{
+    render_selection_geometry_growth_precursor_beats,
+    render_selection_geometry_training_progress_beats,
+};
+use liveness::{
+    precursor_front_liveness_margin_improved, render_selection_liveness_precursor_beats,
+    render_selection_render_within_liveness_precursor_slack,
+};
+
 pub(crate) fn render_selection_candidate_beats(
     selection_score: f32,
     best_selection_score: f32,
@@ -41,6 +53,7 @@ pub(crate) fn render_selection_candidate_metrics_beats(
     ) || render_selection_liveness_precursor_beats(selection, best)
         || render_selection_activation_breakthrough_beats(selection, best)
         || render_selection_material_precursor_beats(selection, best)
+        || render_selection_geometry_growth_precursor_beats(selection, best)
         || render_selection_post_activation_refinement_beats(selection, best)
 }
 
@@ -161,12 +174,15 @@ pub(crate) fn render_selection_training_progress_beats(
     let precursor_improved = precursor_render_improved
         && precursor_non_regressed
         && (material_precursor_improved || liveness_precursor_improved);
+    let geometry_progressed =
+        render_selection_geometry_training_progress_beats(selection, previous);
     if !((render_improved
         && (coverage_improved
             || material_distance_improved
             || extent_improved
             || activation_improved))
-        || precursor_improved)
+        || precursor_improved
+        || geometry_progressed)
     {
         return false;
     }
@@ -187,137 +203,6 @@ pub(crate) fn render_selection_training_progress_beats(
         || selection.min_front_local_newly_activated_fraction
             >= previous.min_front_local_newly_activated_fraction - 0.02;
     temporal_ok && surface_ok && material_tail_ok && local_front_ok
-}
-
-fn precursor_front_liveness_margin_improved(
-    selection_margin: f32,
-    previous_margin: f32,
-    candidate_count: usize,
-    min_improvement: f32,
-) -> bool {
-    candidate_count > 0
-        && selection_margin.is_finite()
-        && previous_margin.is_finite()
-        && selection_margin + min_improvement <= previous_margin
-}
-
-pub(crate) fn render_selection_liveness_precursor_beats(
-    selection: &RenderSelectionMetrics,
-    best: &RenderSelectionMetrics,
-) -> bool {
-    const MIN_FRONT_MARGIN_IMPROVEMENT: f32 = 0.05;
-
-    if selection.score >= best.score {
-        return false;
-    }
-    if !render_selection_render_within_liveness_precursor_slack(
-        selection.render_loss,
-        best.render_loss,
-        selection.density_psnr_db,
-        best.density_psnr_db,
-    ) {
-        return false;
-    }
-
-    let front_margin_improvement = if selection.max_front_liveness_margin.is_finite()
-        && best.max_front_liveness_margin.is_finite()
-    {
-        best.max_front_liveness_margin - selection.max_front_liveness_margin
-    } else {
-        0.0
-    };
-    let temporal_front_margin_improvement =
-        if selection.max_temporal_front_liveness_margin.is_finite()
-            && best.max_temporal_front_liveness_margin.is_finite()
-        {
-            best.max_temporal_front_liveness_margin - selection.max_temporal_front_liveness_margin
-        } else {
-            0.0
-        };
-    let temporal_extent_front_margin_improvement = if selection
-        .max_temporal_extent_front_liveness_margin
-        .is_finite()
-        && best.max_temporal_extent_front_liveness_margin.is_finite()
-    {
-        best.max_temporal_extent_front_liveness_margin
-            - selection.max_temporal_extent_front_liveness_margin
-    } else {
-        0.0
-    };
-    let extent_front_margin_improvement = if selection.max_extent_front_liveness_margin.is_finite()
-        && best.max_extent_front_liveness_margin.is_finite()
-    {
-        best.max_extent_front_liveness_margin - selection.max_extent_front_liveness_margin
-    } else {
-        0.0
-    };
-    let newly_activated_improvement = selection.min_newly_activated_fraction.is_finite()
-        && best.min_newly_activated_fraction.is_finite()
-        && selection.min_newly_activated_fraction > best.min_newly_activated_fraction + 1.0e-4;
-    let local_front_improvement = selection
-        .min_front_local_newly_activated_fraction
-        .is_finite()
-        && best.min_front_local_newly_activated_fraction.is_finite()
-        && selection.min_front_local_newly_activated_fraction
-            > best.min_front_local_newly_activated_fraction + 1.0e-4;
-    let terminal_front_liveness_improvement = selection.min_front_liveness_candidate_count > 0
-        && front_margin_improvement >= MIN_FRONT_MARGIN_IMPROVEMENT;
-    let extent_front_liveness_improvement = selection.min_extent_front_liveness_candidate_count > 0
-        && extent_front_margin_improvement >= MIN_FRONT_MARGIN_IMPROVEMENT;
-    let temporal_front_liveness_improvement = selection.min_temporal_front_liveness_candidate_count
-        > 0
-        && temporal_front_margin_improvement >= MIN_FRONT_MARGIN_IMPROVEMENT;
-    let temporal_extent_front_liveness_improvement =
-        selection.min_temporal_extent_front_liveness_candidate_count > 0
-            && temporal_extent_front_margin_improvement >= MIN_FRONT_MARGIN_IMPROVEMENT;
-    let bounded_temporal_front_precursor = selection.morphology_non_regressed
-        || render_selection_bounded_temporal_front_precursor(selection, best);
-
-    (selection.morphology_non_regressed
-        && (newly_activated_improvement
-            || local_front_improvement
-            || terminal_front_liveness_improvement
-            || extent_front_liveness_improvement))
-        || (bounded_temporal_front_precursor
-            && (temporal_front_liveness_improvement || temporal_extent_front_liveness_improvement))
-}
-
-pub(crate) fn render_selection_bounded_temporal_front_precursor(
-    selection: &RenderSelectionMetrics,
-    best: &RenderSelectionMetrics,
-) -> bool {
-    render_selection_temporal_activation_not_regressed(selection, best)
-        && selection.min_final_active_count <= best.min_final_active_count.saturating_add(1)
-        && selection.min_newly_activated_fraction
-            <= best.min_newly_activated_fraction.max(0.0) + 0.02
-        && selection.active_surface_max.is_finite()
-        && selection.active_surface_max <= GROWTH_3D_SURFACE_MAX_DISTANCE + 0.05
-        && selection.material_visible_inactive_fraction
-            <= best.material_visible_inactive_fraction + 0.01
-        && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
-}
-
-pub(crate) fn render_selection_render_within_liveness_precursor_slack(
-    selection_render_loss: f32,
-    best_render_loss: f32,
-    selection_density_psnr_db: f32,
-    best_density_psnr_db: f32,
-) -> bool {
-    const RENDER_LOSS_SLACK_ABS: f32 = 5.0e-4;
-    const RENDER_LOSS_SLACK_FRACTION: f32 = 5.0e-4;
-    const DENSITY_PSNR_SLACK_DB: f32 = 0.01;
-
-    if !selection_render_loss.is_finite()
-        || !best_render_loss.is_finite()
-        || !selection_density_psnr_db.is_finite()
-        || !best_density_psnr_db.is_finite()
-    {
-        return false;
-    }
-    let render_loss_slack =
-        RENDER_LOSS_SLACK_ABS.max(best_render_loss.abs() * RENDER_LOSS_SLACK_FRACTION);
-    selection_render_loss <= best_render_loss + render_loss_slack
-        && selection_density_psnr_db + DENSITY_PSNR_SLACK_DB >= best_density_psnr_db
 }
 
 pub(crate) fn render_selection_activation_breakthrough_beats(
