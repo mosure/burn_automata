@@ -944,11 +944,30 @@ pub(crate) fn direct_trajectory_geometry_weight(step_fraction: f32) -> f32 {
     0.5 + 0.5 * schedule
 }
 
+pub(crate) fn direct_material_surface_motion_weight(
+    trajectory_mesh_gain: f32,
+    coverage_gain: f32,
+    step_fraction: f32,
+) -> f32 {
+    let schedule = direct_trajectory_geometry_weight(step_fraction);
+    let trajectory_weight = finite_positive(trajectory_mesh_gain)
+        .map(|gain| gain * schedule)
+        .unwrap_or(0.0);
+    let coverage_weight = finite_positive(coverage_gain)
+        .map(|gain| gain * DIRECT_GROWTH_MATERIAL_SURFACE_MOTION_COVERAGE_GAIN_FRACTION * schedule)
+        .unwrap_or(0.0);
+    trajectory_weight.max(coverage_weight)
+}
+
 pub(crate) fn direct_growth_phase_gain(cfg: &RenderProxyTrainingConfig) -> f32 {
     if cfg.liveness_gain <= 0.0 || !cfg.liveness_gain.is_finite() {
         return 0.0;
     }
     (cfg.liveness_gain * DIRECT_GROWTH_PHASE_GAIN_FRACTION).max(ROBUST_3D_PHASE_GAIN)
+}
+
+fn finite_positive(value: f32) -> Option<f32> {
+    (value > 0.0 && value.is_finite()).then_some(value)
 }
 
 pub(crate) fn soft_material_assignment_weight(

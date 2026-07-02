@@ -685,7 +685,11 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             cfg.seed_scale,
             cfg.liveness_front_radius,
             Some(&liveness_candidate_weights),
-            cfg.trajectory_mesh_gain * direct_trajectory_geometry_weight(snapshot.step_fraction),
+            direct_material_surface_motion_weight(
+                cfg.trajectory_mesh_gain,
+                cfg.coverage_gain,
+                snapshot.step_fraction,
+            ),
             &mut material_surface_motion_output_gradients,
         );
         add_material_visible_surface_coverage_output_objective(
@@ -706,14 +710,19 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             cfg.seed_scale,
             cfg.liveness_front_radius,
             Some(&liveness_candidate_weights),
-            cfg.trajectory_mesh_gain * direct_trajectory_geometry_weight(snapshot.step_fraction),
+            direct_material_surface_motion_weight(
+                cfg.trajectory_mesh_gain,
+                cfg.coverage_gain,
+                snapshot.step_fraction,
+            ),
             &mut material_surface_motion_output_gradients,
         );
         boost_sparse_output_channel_rms(
             &mut material_surface_motion_output_gradients,
             output_dims,
             0..model.config.spatial_dims,
-            cfg.direct_output_gradient_rms_cap * 0.5,
+            cfg.direct_output_gradient_rms_cap
+                * DIRECT_GROWTH_MATERIAL_SURFACE_MOTION_RMS_TARGET_FRACTION,
             16.0,
         );
         accumulate_output_channels(

@@ -67,6 +67,39 @@ fn direct_trajectory_geometry_weight_ramps_without_disabling_late_support() {
 }
 
 #[test]
+fn direct_material_surface_motion_weight_uses_coverage_floor() {
+    let early = direct_material_surface_motion_weight(
+        ROBUST_3D_TRAJECTORY_MESH_GAIN,
+        ROBUST_3D_COVERAGE_GAIN,
+        0.0,
+    );
+    let late = direct_material_surface_motion_weight(
+        ROBUST_3D_TRAJECTORY_MESH_GAIN,
+        ROBUST_3D_COVERAGE_GAIN,
+        1.0,
+    );
+    let old_late = ROBUST_3D_TRAJECTORY_MESH_GAIN * direct_trajectory_geometry_weight(1.0);
+
+    assert!(
+        early > ROBUST_3D_TRAJECTORY_MESH_GAIN,
+        "material-visible surface motion should not be limited to the old trajectory-only gain"
+    );
+    assert!(
+        late > old_late,
+        "coverage floor should strengthen late material-visible surface/coverage motion"
+    );
+    assert!(
+        (late / early - 2.0).abs() <= 1.0e-6,
+        "material-visible motion should preserve the trajectory ramp schedule"
+    );
+    assert_eq!(
+        direct_material_surface_motion_weight(0.2, 0.0, 1.0),
+        0.2,
+        "trajectory gain remains the fallback when coverage is disabled"
+    );
+}
+
+#[test]
 fn temporal_activation_schedule_error_penalizes_burst_growth() {
     let sample = |steps: usize, active_fraction: f32| Growth3dTemporalSampleReport {
         steps,
