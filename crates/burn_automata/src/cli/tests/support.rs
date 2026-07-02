@@ -78,6 +78,9 @@ pub(super) fn render_selection_metrics_with_liveness(
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.12,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        max_dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
+        all_dormant_drift_bounded: true,
         min_active_extent_bbox_ratio: 0.35,
         min_active_extent_min_axis_ratio: 0.15,
         min_final_active_count: 1,
@@ -137,6 +140,7 @@ pub(super) fn render_selection_case_with_front_liveness_margin(
         surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,
@@ -197,6 +201,8 @@ pub(super) fn render_selection_baseline_case_from_metrics(
         material_visible_surface_tail_over_threshold_fraction: case
             .material_visible_surface_tail
             .over_threshold_fraction,
+        dormant_drift_fraction: case.dormant_drift.drifting_fraction,
+        max_dormant_drift: case.dormant_drift.max_dormant_displacement,
         active_extent_bbox_ratio: case.extent.bbox_diagonal_ratio,
         active_extent_min_axis_ratio: case.extent.min_axis_extent_ratio,
         final_active_count: case.final_active_count,
@@ -319,6 +325,20 @@ pub(super) fn passing_growth_3d_strict_checks() -> Growth3dStrictChecksReport {
         gaussian_scale_budget: true,
         render_loss_passed: true,
         failure_reasons: Vec::new(),
+    }
+}
+
+pub(super) fn passing_growth_3d_dormant_drift_report() -> Growth3dDormantDriftReport {
+    Growth3dDormantDriftReport {
+        sampled_steps: 4,
+        checked_rows: 32,
+        drifting_rows: 0,
+        drifting_fraction: 0.0,
+        mean_dormant_displacement: 0.01,
+        max_dormant_displacement: 0.02,
+        max_allowed_displacement: 0.10,
+        finite: true,
+        passed: true,
     }
 }
 

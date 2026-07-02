@@ -268,6 +268,45 @@ fn growth_3d_strict_checks_reject_nonlocal_dormant_drift() {
     assert!(!checks.dormant_drift_bounded);
     assert!(!checks.passed);
     assert!(checks.failure_reasons.contains(&"dormant_drift_bounded"));
+
+    let score = growth_3d_strict_score_report(
+        &checks,
+        Growth3dSurfaceStats {
+            mean_distance: 1.0,
+            max_distance: 1.0,
+        },
+        Growth3dSurfaceStats {
+            mean_distance: 0.5,
+            max_distance: 0.2,
+        },
+        passing_growth_3d_surface_tail_report(),
+        TargetCoverageStats {
+            mean_distance: 1.0,
+            max_distance: 1.0,
+            covered_fraction: 0.0,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.5,
+            max_distance: 0.3,
+            covered_fraction: 0.75,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.5,
+            max_distance: 0.3,
+            covered_fraction: 0.75,
+        },
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &synthetic_render_loss(0.0, 20.0, 20.0, 20.0),
+        GaussianVolumeStats::default(),
+    );
+
+    assert!(
+        score.hard_failure_penalty >= 10.0,
+        "nonlocal dormant drift must contribute a hard strict-score penalty"
+    );
 }
 
 #[test]

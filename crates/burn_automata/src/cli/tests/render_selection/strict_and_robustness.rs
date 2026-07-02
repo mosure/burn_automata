@@ -90,6 +90,8 @@ fn render_selection_score_penalizes_material_visible_normal_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 64,
@@ -132,6 +134,7 @@ fn render_selection_score_penalizes_material_visible_normal_regression() {
             ..passing_surface_normal_coverage_report()
         },
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,
@@ -177,6 +180,8 @@ fn render_selection_score_penalizes_material_visible_tail_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 64,
@@ -220,6 +225,7 @@ fn render_selection_score_penalizes_material_visible_tail_regression() {
             opacity_weighted_over_threshold_fraction: 0.20,
             ..passing_growth_3d_surface_tail_report()
         },
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,

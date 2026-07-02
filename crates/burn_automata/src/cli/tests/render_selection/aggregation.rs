@@ -179,6 +179,24 @@ fn render_selection_metrics_average_base_and_selection_seed_with_morphology_pena
             .min(extra.surface_normal_coverage.mean_bin_covered_fraction)
     );
     assert_eq!(
+        selection.max_dormant_drift_fraction,
+        base.dormant_drift
+            .drifting_fraction
+            .max(heldout.dormant_drift.drifting_fraction)
+            .max(extra.dormant_drift.drifting_fraction)
+    );
+    assert_eq!(
+        selection.max_dormant_drift,
+        base.dormant_drift
+            .max_dormant_displacement
+            .max(heldout.dormant_drift.max_dormant_displacement)
+            .max(extra.dormant_drift.max_dormant_displacement)
+    );
+    assert_eq!(
+        selection.all_dormant_drift_bounded,
+        base.dormant_drift.passed && heldout.dormant_drift.passed && extra.dormant_drift.passed
+    );
+    assert_eq!(
         selection.min_final_active_count,
         base.final_active_count
             .min(heldout.final_active_count)

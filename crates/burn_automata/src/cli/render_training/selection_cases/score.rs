@@ -50,6 +50,21 @@ pub(crate) fn render_selection_case_score_with_baseline(
     )
     .clamp(0.0, RENDER_SELECTION_BAD_SCORE)
         * MATERIAL_VISIBLE_TARGET_MAX_DISTANCE_SCORE_WEIGHT;
+    let dormant_drift_fraction_penalty = finite_report_metric(
+        case.dormant_drift.drifting_fraction,
+        RENDER_SELECTION_BAD_SCORE,
+    )
+    .clamp(0.0, RENDER_SELECTION_BAD_SCORE)
+        * 10.0;
+    let dormant_drift_distance_penalty = if case.dormant_drift.max_dormant_displacement.is_finite()
+        && case.dormant_drift.max_allowed_displacement.is_finite()
+    {
+        (case.dormant_drift.max_dormant_displacement - case.dormant_drift.max_allowed_displacement)
+            .max(0.0)
+            * 10.0
+    } else {
+        RENDER_SELECTION_BAD_SCORE
+    };
     let mut score = finite_report_metric(case.score, RENDER_SELECTION_BAD_SCORE)
         + front_liveness_penalty
         + extent_front_liveness_penalty
@@ -57,7 +72,9 @@ pub(crate) fn render_selection_case_score_with_baseline(
         + temporal_extent_front_liveness_penalty
         + temporal_activation_penalty
         + material_visible_target_mean_distance_penalty
-        + material_visible_target_max_distance_penalty;
+        + material_visible_target_max_distance_penalty
+        + dormant_drift_fraction_penalty
+        + dormant_drift_distance_penalty;
     let mut morphology_non_regressed = true;
     if let Some(baseline_case) = baseline.and_then(|cases| {
         cases
@@ -278,6 +295,24 @@ pub(crate) fn render_selection_case_score_with_baseline(
         } else {
             RENDER_SELECTION_BAD_SCORE
         };
+        let dormant_drift_fraction_regression = if case.dormant_drift.drifting_fraction.is_finite()
+        {
+            (case.dormant_drift.drifting_fraction - baseline_case.dormant_drift_fraction - 0.005)
+                .max(0.0)
+        } else {
+            RENDER_SELECTION_BAD_SCORE
+        };
+        let max_dormant_drift_regression = if case
+            .dormant_drift
+            .max_dormant_displacement
+            .is_finite()
+            && baseline_case.max_dormant_drift.is_finite()
+        {
+            (case.dormant_drift.max_dormant_displacement - baseline_case.max_dormant_drift - 0.02)
+                .max(0.0)
+        } else {
+            RENDER_SELECTION_BAD_SCORE
+        };
         let active_extent_bbox_regression = if case.extent.bbox_diagonal_ratio.is_finite() {
             (baseline_case.active_extent_bbox_ratio - case.extent.bbox_diagonal_ratio - 0.02)
                 .max(0.0)
@@ -423,6 +458,8 @@ pub(crate) fn render_selection_case_score_with_baseline(
             || material_visible_normal_mean_regression > 0.0
             || material_visible_tail_p99_regression > 0.0
             || material_visible_tail_fraction_regression > 0.0
+            || dormant_drift_fraction_regression > 0.0
+            || max_dormant_drift_regression > 0.0
             || active_extent_bbox_regression > 0.0
             || active_extent_min_axis_regression > 0.0
             || active_count_regression > 0.0
@@ -455,6 +492,8 @@ pub(crate) fn render_selection_case_score_with_baseline(
             + material_visible_normal_mean_regression
             + material_visible_tail_p99_regression
             + material_visible_tail_fraction_regression
+            + dormant_drift_fraction_regression
+            + max_dormant_drift_regression
             + active_extent_bbox_regression
             + active_extent_min_axis_regression
             + active_count_regression

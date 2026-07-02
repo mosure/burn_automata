@@ -35,6 +35,9 @@ pub(crate) struct RenderSelectionMetrics {
     pub(crate) material_visible_surface_normal_mean_bin_covered_fraction: f32,
     pub(crate) material_visible_surface_tail_p99_distance: f32,
     pub(crate) material_visible_surface_tail_over_threshold_fraction: f32,
+    pub(crate) max_dormant_drift_fraction: f32,
+    pub(crate) max_dormant_drift: f32,
+    pub(crate) all_dormant_drift_bounded: bool,
     pub(crate) min_active_extent_bbox_ratio: f32,
     pub(crate) min_active_extent_min_axis_ratio: f32,
     pub(crate) min_final_active_count: usize,
@@ -78,6 +81,8 @@ pub(crate) struct RenderSelectionBaselineCase {
     pub(crate) material_visible_surface_normal_mean_bin_covered_fraction: f32,
     pub(crate) material_visible_surface_tail_p99_distance: f32,
     pub(crate) material_visible_surface_tail_over_threshold_fraction: f32,
+    pub(crate) dormant_drift_fraction: f32,
+    pub(crate) max_dormant_drift: f32,
     pub(crate) active_extent_bbox_ratio: f32,
     pub(crate) active_extent_min_axis_ratio: f32,
     pub(crate) final_active_count: usize,
@@ -136,6 +141,9 @@ pub(crate) fn render_selection_metrics(
     let mut material_visible_surface_normal_mean_bin_covered_fraction = f32::INFINITY;
     let mut material_visible_surface_tail_p99_distance = f32::NEG_INFINITY;
     let mut material_visible_surface_tail_over_threshold_fraction = f32::NEG_INFINITY;
+    let mut max_dormant_drift_fraction = f32::NEG_INFINITY;
+    let mut max_dormant_drift = f32::NEG_INFINITY;
+    let mut all_dormant_drift_bounded = true;
     let mut min_active_extent_bbox_ratio = f32::INFINITY;
     let mut min_active_extent_min_axis_ratio = f32::INFINITY;
     let mut min_final_active_count = usize::MAX;
@@ -286,6 +294,11 @@ pub(crate) fn render_selection_metrics(
                     .material_visible_surface_tail
                     .over_threshold_fraction,
             );
+        max_dormant_drift_fraction =
+            max_dormant_drift_fraction.max(selection_case.dormant_drift.drifting_fraction);
+        max_dormant_drift =
+            max_dormant_drift.max(selection_case.dormant_drift.max_dormant_displacement);
+        all_dormant_drift_bounded &= selection_case.dormant_drift.passed;
         min_active_extent_bbox_ratio =
             min_active_extent_bbox_ratio.min(selection_case.extent.bbox_diagonal_ratio);
         min_active_extent_min_axis_ratio =
@@ -421,6 +434,9 @@ pub(crate) fn render_selection_metrics(
             material_visible_surface_tail_over_threshold_fraction,
             1.0,
         ),
+        max_dormant_drift_fraction: finite_report_metric(max_dormant_drift_fraction, 1.0),
+        max_dormant_drift: finite_report_metric(max_dormant_drift, RENDER_SELECTION_BAD_SCORE),
+        all_dormant_drift_bounded,
         min_active_extent_bbox_ratio: finite_report_metric(min_active_extent_bbox_ratio, 0.0),
         min_active_extent_min_axis_ratio: finite_report_metric(
             min_active_extent_min_axis_ratio,

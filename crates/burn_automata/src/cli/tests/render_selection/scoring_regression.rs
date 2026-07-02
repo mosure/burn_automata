@@ -21,6 +21,8 @@ fn render_selection_score_penalizes_surface_normal_coverage_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 64,
@@ -63,6 +65,7 @@ fn render_selection_score_penalizes_surface_normal_coverage_regression() {
         },
         material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,
@@ -108,6 +111,8 @@ fn render_selection_score_penalizes_material_visible_coverage_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 64,
@@ -146,6 +151,7 @@ fn render_selection_score_penalizes_material_visible_coverage_regression() {
         surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,
@@ -221,6 +227,35 @@ fn render_selection_score_penalizes_material_visible_target_distance_regression(
 }
 
 #[test]
+fn render_selection_score_penalizes_dormant_drift_regression() {
+    let baseline_case = render_selection_case_with_front_liveness_margin(0.0);
+    let baseline = vec![render_selection_baseline_case_from_metrics(
+        7,
+        &baseline_case,
+    )];
+    let mut regressed = baseline_case;
+    regressed.dormant_drift = Growth3dDormantDriftReport {
+        sampled_steps: 4,
+        checked_rows: 32,
+        drifting_rows: 4,
+        drifting_fraction: 0.125,
+        mean_dormant_displacement: 0.04,
+        max_dormant_displacement: 0.24,
+        max_allowed_displacement: 0.10,
+        finite: true,
+        passed: false,
+    };
+
+    let scored = render_selection_case_score_with_baseline(7, &regressed, Some(&baseline));
+
+    assert!(!scored.morphology_non_regressed);
+    assert!(
+        scored.score > regressed.score + 3.0,
+        "nonlocal dormant drift should dominate small render/coverage gains during selection"
+    );
+}
+
+#[test]
 fn render_selection_score_penalizes_material_visible_liveness_regression() {
     let baseline = vec![RenderSelectionBaselineCase {
         seed: 7,
@@ -241,6 +276,8 @@ fn render_selection_score_penalizes_material_visible_liveness_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 64,
@@ -286,6 +323,7 @@ fn render_selection_score_penalizes_material_visible_liveness_regression() {
         surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,
@@ -331,6 +369,8 @@ fn render_selection_score_penalizes_growth_timing_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 96,
@@ -369,6 +409,7 @@ fn render_selection_score_penalizes_growth_timing_regression() {
         surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 48,
         newly_activated_fraction: 0.10,
@@ -414,6 +455,8 @@ fn render_selection_score_penalizes_surface_profile_regression() {
         material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
         material_visible_surface_tail_p99_distance: 0.20,
         material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
         active_extent_bbox_ratio: 0.35,
         active_extent_min_axis_ratio: 0.15,
         final_active_count: 64,
@@ -462,6 +505,7 @@ fn render_selection_score_penalizes_surface_profile_regression() {
         surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
         material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
         extent: passing_growth_3d_extent_report(),
         final_active_count: 64,
         newly_activated_fraction: 0.75,

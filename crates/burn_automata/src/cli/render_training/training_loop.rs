@@ -269,6 +269,9 @@ pub(crate) fn run_render_proxy_training(
                 .material_visible_surface_tail_p99_distance,
             selection_material_visible_surface_tail_over_threshold_fraction: selection
                 .material_visible_surface_tail_over_threshold_fraction,
+            selection_max_dormant_drift_fraction: selection.max_dormant_drift_fraction,
+            selection_max_dormant_drift: selection.max_dormant_drift,
+            selection_all_dormant_drift_bounded: selection.all_dormant_drift_bounded,
             selection_min_active_extent_bbox_ratio: selection.min_active_extent_bbox_ratio,
             selection_min_active_extent_min_axis_ratio: selection.min_active_extent_min_axis_ratio,
             selection_min_final_active_count: selection.min_final_active_count,

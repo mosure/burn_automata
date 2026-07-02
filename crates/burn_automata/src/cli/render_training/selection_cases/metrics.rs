@@ -14,6 +14,7 @@ pub(crate) struct RenderSelectionCaseMetrics {
     pub(crate) surface_normal_coverage: SurfaceNormalCoverageReport,
     pub(crate) material_visible_surface_normal_coverage: SurfaceNormalCoverageReport,
     pub(crate) material_visible_surface_tail: Growth3dSurfaceTailReport,
+    pub(crate) dormant_drift: Growth3dDormantDriftReport,
     pub(crate) extent: Growth3dExtentReport,
     pub(crate) final_active_count: usize,
     pub(crate) newly_activated_fraction: f32,
@@ -190,6 +191,15 @@ pub(crate) fn render_selection_case_metrics(
         coverage_samples,
         coverage_threshold,
     )?;
+    let dormant_drift = growth_3d_dormant_drift_report(
+        model,
+        grid,
+        rollout_cfg.clone(),
+        cfg.seed_mode,
+        &seed_positions,
+        &seed_states,
+        &trace,
+    )?;
     let permutation_consistency =
         growth_3d_permutation_report(model, grid, &rollout_cfg, cfg.seed_mode)?;
     let front = growth_3d_front_report(
@@ -265,6 +275,7 @@ pub(crate) fn render_selection_case_metrics(
         &surface_coverage_profile,
         &material_visible_surface_coverage_profile,
     );
+    apply_dormant_drift_strict_check(&mut strict_checks, dormant_drift);
     let mut strict_score = growth_3d_strict_score_report(
         &strict_checks,
         initial_active_surface,
@@ -313,6 +324,7 @@ pub(crate) fn render_selection_case_metrics(
         surface_normal_coverage,
         material_visible_surface_normal_coverage,
         material_visible_surface_tail,
+        dormant_drift,
         extent,
         final_active_count: activation.final_active_count,
         newly_activated_fraction: activation.newly_activated_fraction,

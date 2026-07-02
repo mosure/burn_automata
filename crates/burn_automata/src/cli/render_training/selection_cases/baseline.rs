@@ -63,6 +63,8 @@ pub(crate) fn render_selection_baseline(
             material_visible_surface_tail_over_threshold_fraction: selection_case
                 .material_visible_surface_tail
                 .over_threshold_fraction,
+            dormant_drift_fraction: selection_case.dormant_drift.drifting_fraction,
+            max_dormant_drift: selection_case.dormant_drift.max_dormant_displacement,
             active_extent_bbox_ratio: selection_case.extent.bbox_diagonal_ratio,
             active_extent_min_axis_ratio: selection_case.extent.min_axis_extent_ratio,
             final_active_count: selection_case.final_active_count,

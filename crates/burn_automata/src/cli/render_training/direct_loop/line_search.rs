@@ -389,6 +389,9 @@ fn direct_line_search_candidate_report(
             .material_visible_surface_tail_p99_distance,
         material_visible_surface_tail_over_threshold_fraction: selection
             .material_visible_surface_tail_over_threshold_fraction,
+        max_dormant_drift_fraction: selection.max_dormant_drift_fraction,
+        max_dormant_drift: selection.max_dormant_drift,
+        all_dormant_drift_bounded: selection.all_dormant_drift_bounded,
         min_active_extent_bbox_ratio: selection.min_active_extent_bbox_ratio,
         min_active_extent_min_axis_ratio: selection.min_active_extent_min_axis_ratio,
         min_final_active_count: selection.min_final_active_count,

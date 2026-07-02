@@ -234,6 +234,7 @@ pub(crate) fn growth_3d_strict_score_report(
         checks.nonzero_motion,
         checks.sustained_motion,
         checks.local_front_coherent,
+        checks.dormant_drift_bounded,
         checks.temporal_activation_progressive,
         checks.temporal_geometry_progressive,
         checks.mean_displacement_growth,
