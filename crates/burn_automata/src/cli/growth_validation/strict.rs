@@ -205,6 +205,7 @@ pub(crate) fn growth_3d_strict_score_report(
     seed_scale: f32,
     render_loss: &MultiViewRenderLossReport,
     final_gaussian_volume: GaussianVolumeStats,
+    torus_angular_coverage: Option<&TorusAngularCoverageReport>,
 ) -> Growth3dStrictScoreReport {
     let surface_mean_ratio = if initial_active_surface.mean_distance.is_finite()
         && initial_active_surface.mean_distance > 1.0e-6
@@ -294,6 +295,29 @@ pub(crate) fn growth_3d_strict_score_report(
         (GROWTH_3D_MIN_SURFACE_NORMAL_MEAN_BIN_COVERAGE
             - final_material_visible_surface_normal_coverage.mean_bin_covered_fraction)
             .max(0.0);
+    let (
+        torus_angular_joint_coverage_fraction,
+        torus_angular_joint_coverage_penalty,
+        torus_angular_tube_coverage_fraction,
+        torus_angular_tube_coverage_penalty,
+        torus_angular_max_tube_gap_fraction,
+        torus_angular_tube_gap_penalty,
+    ) = torus_angular_coverage.map_or((1.0, 0.0, 1.0, 0.0, 0.0, 0.0), |coverage| {
+        let max_allowed_tube_gap_fraction = 0.25;
+        let max_tube_gap_fraction = if coverage.tube_bins > 0 {
+            coverage.max_tube_gap_bins as f32 / coverage.tube_bins as f32
+        } else {
+            1.0
+        };
+        (
+            coverage.joint_coverage_fraction,
+            (0.60 - coverage.joint_coverage_fraction).max(0.0),
+            coverage.tube_coverage_fraction,
+            (0.75 - coverage.tube_coverage_fraction).max(0.0),
+            max_tube_gap_fraction,
+            (max_tube_gap_fraction - max_allowed_tube_gap_fraction).max(0.0),
+        )
+    });
     let gaussian_scale_budget_penalty =
         (final_gaussian_volume.scale_budget_loss - ROBUST_3D_MAX_SCALE_BUDGET_LOSS).max(0.0);
     let gaussian_oversize_penalty =
@@ -316,6 +340,9 @@ pub(crate) fn growth_3d_strict_score_report(
         + surface_normal_mean_penalty
         + material_visible_surface_normal_bin_penalty
         + material_visible_surface_normal_mean_penalty
+        + torus_angular_joint_coverage_penalty
+        + torus_angular_tube_coverage_penalty
+        + torus_angular_tube_gap_penalty
         + gaussian_scale_budget_penalty
         + gaussian_oversize_penalty
         + render_density_penalty
@@ -385,6 +412,12 @@ pub(crate) fn growth_3d_strict_score_report(
         material_visible_surface_normal_mean_bin_covered_fraction:
             final_material_visible_surface_normal_coverage.mean_bin_covered_fraction,
         material_visible_surface_normal_mean_penalty,
+        torus_angular_joint_coverage_fraction,
+        torus_angular_joint_coverage_penalty,
+        torus_angular_tube_coverage_fraction,
+        torus_angular_tube_coverage_penalty,
+        torus_angular_max_tube_gap_fraction,
+        torus_angular_tube_gap_penalty,
         gaussian_scale_budget_loss: final_gaussian_volume.scale_budget_loss,
         gaussian_scale_budget_penalty,
         gaussian_oversize_fraction: final_gaussian_volume.oversize_fraction,

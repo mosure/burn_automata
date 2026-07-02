@@ -186,6 +186,7 @@ fn material_visible_surface_tail_strict_check_rejects_render_visible_escape() {
         0.72,
         &synthetic_render_loss(0.1, 20.0, 20.0, 20.0),
         GaussianVolumeStats::default(),
+        None,
     );
     apply_material_visible_surface_tail_strict_score(&mut score, escaped);
 

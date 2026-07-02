@@ -101,6 +101,7 @@ fn dynamic_growth_3d_strict_score_applies_all_runtime_penalties() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     );
     let initial_score = score.score;
     let temporal = Growth3dTemporalReport {
@@ -230,6 +231,7 @@ fn growth_3d_strict_checks_reject_sparse_surface_profile_coverage() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     );
     apply_surface_profile_strict_score(&mut score, &sparse_active, &sparse_material);
 

@@ -155,6 +155,7 @@ fn material_liveness_strict_score_tracks_inactive_visible_material() {
         0.72,
         &synthetic_render_loss(0.1, 20.0, 20.0, 20.0),
         GaussianVolumeStats::default(),
+        None,
     );
     let base_score = score.score;
     let material_liveness = Growth3dMaterialLivenessReport {

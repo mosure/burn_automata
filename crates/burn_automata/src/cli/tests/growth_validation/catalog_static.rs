@@ -366,6 +366,7 @@ fn growth_3d_strict_checks_reject_tiny_active_extent() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     );
     assert!(score.active_extent_bbox_penalty > 0.0);
     assert!(score.active_extent_min_axis_penalty > 0.0);

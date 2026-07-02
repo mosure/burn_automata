@@ -345,6 +345,7 @@ pub(crate) fn growth_3d_validation_report_single(
         cfg.seed_scale,
         &render_loss,
         final_gaussian_volume,
+        torus_angular_coverage.as_ref(),
     );
     apply_dynamic_growth_3d_strict_score(
         &mut strict_score,

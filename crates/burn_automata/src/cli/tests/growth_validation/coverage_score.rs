@@ -100,6 +100,7 @@ fn growth_3d_strict_checks_reject_transparent_target_coverage() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     );
     assert!(score.material_visible_target_coverage_penalty > 0.0);
 }
@@ -204,6 +205,7 @@ fn growth_3d_strict_checks_reject_transparent_normal_support() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     );
     assert!(score.material_visible_surface_normal_bin_penalty > 0.0);
     assert!(score.material_visible_surface_normal_mean_penalty > 0.0);
@@ -280,6 +282,7 @@ fn growth_3d_strict_score_tracks_distance_to_gate() {
         0.72,
         &perfect_render,
         GaussianVolumeStats::default(),
+        None,
     );
     assert_eq!(perfect.score, 0.0);
 
@@ -324,6 +327,7 @@ fn growth_3d_strict_score_tracks_distance_to_gate() {
         0.72,
         &weak_render,
         GaussianVolumeStats::default(),
+        None,
     );
     assert!(weak.score > perfect.score);
     assert!(weak.surface_mean_penalty > 0.0);
@@ -363,6 +367,7 @@ fn growth_3d_strict_score_tracks_distance_to_gate() {
         0.72,
         &perfect_render,
         GaussianVolumeStats::default(),
+        None,
     );
     assert!(surface_max_only.surface_max_penalty > 0.0);
     assert_eq!(surface_max_only.score, surface_max_only.surface_max_penalty);
@@ -401,5 +406,6 @@ fn strict_score_for_gate_checks(checks: &Growth3dStrictChecksReport) -> Growth3d
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     )
 }

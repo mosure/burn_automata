@@ -301,6 +301,7 @@ fn growth_3d_strict_checks_reject_nonlocal_dormant_drift() {
         0.72,
         &synthetic_render_loss(0.0, 20.0, 20.0, 20.0),
         GaussianVolumeStats::default(),
+        None,
     );
 
     assert!(
@@ -433,6 +434,7 @@ fn morphogenesis_dynamics_strict_score_tracks_motion_progress() {
         0.72,
         &render,
         GaussianVolumeStats::default(),
+        None,
     );
     let mut strong = growth_3d_strict_score_report(
         &checks,
@@ -466,6 +468,7 @@ fn morphogenesis_dynamics_strict_score_tracks_motion_progress() {
         0.72,
         &render,
         GaussianVolumeStats::default(),
+        None,
     );
 
     apply_morphogenesis_dynamics_strict_score(

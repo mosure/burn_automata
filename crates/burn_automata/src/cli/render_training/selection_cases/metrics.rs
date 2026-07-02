@@ -287,6 +287,7 @@ pub(crate) fn render_selection_case_metrics(
         cfg.seed_scale,
         &render_loss,
         final_gaussian_volume,
+        torus_angular_coverage.as_ref(),
     );
     apply_dynamic_growth_3d_strict_score(
         &mut strict_score,

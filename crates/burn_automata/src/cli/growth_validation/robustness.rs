@@ -3,6 +3,15 @@ use super::*;
 pub(crate) fn growth_3d_robustness_seed_report(
     report: &CliGrowth3dValidationReport,
 ) -> Growth3dRobustnessSeedReport {
+    let (
+        torus_angular_joint_coverage_fraction,
+        torus_angular_tube_coverage_fraction,
+        torus_angular_tube_gap_fraction,
+    ) = report
+        .torus_angular_coverage
+        .as_ref()
+        .map_or((1.0, 1.0, 0.0), torus_angular_seed_metrics);
+
     Growth3dRobustnessSeedReport {
         seed: report.seed,
         gate_passed: report.gate_passed,
@@ -84,6 +93,9 @@ pub(crate) fn growth_3d_robustness_seed_report(
         final_material_visible_surface_normal_mean_bin_covered_fraction: report
             .final_material_visible_surface_normal_coverage
             .mean_bin_covered_fraction,
+        torus_angular_joint_coverage_fraction,
+        torus_angular_tube_coverage_fraction,
+        torus_angular_tube_gap_fraction,
         final_active_surface_max: report.final_active_surface.max_distance,
         material_visible_surface_tail_bounded: report
             .strict_checks
@@ -325,6 +337,18 @@ pub(crate) fn growth_3d_robustness_report(
         .iter()
         .map(|seed| seed.final_material_visible_surface_normal_mean_bin_covered_fraction)
         .fold(f32::INFINITY, f32::min);
+    let min_torus_angular_joint_coverage_fraction = seeds
+        .iter()
+        .map(|seed| seed.torus_angular_joint_coverage_fraction)
+        .fold(f32::INFINITY, f32::min);
+    let min_torus_angular_tube_coverage_fraction = seeds
+        .iter()
+        .map(|seed| seed.torus_angular_tube_coverage_fraction)
+        .fold(f32::INFINITY, f32::min);
+    let max_torus_angular_tube_gap_fraction = seeds
+        .iter()
+        .map(|seed| seed.torus_angular_tube_gap_fraction)
+        .fold(f32::NEG_INFINITY, f32::max);
     Growth3dRobustnessReport {
         seed_count,
         all_gate_passed,
@@ -540,6 +564,34 @@ pub(crate) fn growth_3d_robustness_report(
         } else {
             min_final_material_visible_surface_normal_mean_bin_covered_fraction
         },
+        min_torus_angular_joint_coverage_fraction: if seed_count == 0 {
+            1.0
+        } else {
+            min_torus_angular_joint_coverage_fraction
+        },
+        min_torus_angular_tube_coverage_fraction: if seed_count == 0 {
+            1.0
+        } else {
+            min_torus_angular_tube_coverage_fraction
+        },
+        max_torus_angular_tube_gap_fraction: if seed_count == 0 {
+            0.0
+        } else {
+            max_torus_angular_tube_gap_fraction
+        },
         seeds,
     }
+}
+
+fn torus_angular_seed_metrics(coverage: &TorusAngularCoverageReport) -> (f32, f32, f32) {
+    let tube_gap_fraction = if coverage.tube_bins > 0 {
+        coverage.max_tube_gap_bins as f32 / coverage.tube_bins as f32
+    } else {
+        1.0
+    };
+    (
+        coverage.joint_coverage_fraction,
+        coverage.tube_coverage_fraction,
+        tube_gap_fraction,
+    )
 }

@@ -133,6 +133,83 @@ fn growth_3d_strict_checks_reject_missing_torus_angular_coverage() {
 }
 
 #[test]
+fn growth_3d_strict_score_tracks_torus_angular_coverage() {
+    let checks = passing_growth_3d_strict_checks();
+    let initial_surface = Growth3dSurfaceStats {
+        mean_distance: 0.2,
+        max_distance: 0.2,
+    };
+    let final_surface = Growth3dSurfaceStats {
+        mean_distance: 0.16,
+        max_distance: 0.3,
+    };
+    let initial_coverage = TargetCoverageStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+        covered_fraction: 0.1,
+    };
+    let final_coverage = TargetCoverageStats {
+        mean_distance: 0.8,
+        max_distance: 0.7,
+        covered_fraction: 0.6,
+    };
+    let render = synthetic_render_loss(0.0, 10.0, 12.0, 14.0);
+    let missing_tube_support = TorusAngularCoverageReport {
+        ring_bins: 24,
+        tube_bins: 16,
+        threshold: 0.0972,
+        covered_joint_bins: 187,
+        covered_ring_bins: 24,
+        covered_tube_bins: 9,
+        joint_coverage_fraction: 0.486_979_16,
+        ring_coverage_fraction: 1.0,
+        tube_coverage_fraction: 0.5625,
+        max_ring_gap_bins: 0,
+        max_tube_gap_bins: 7,
+        mean_distance: 0.159,
+        max_distance: 0.420,
+    };
+
+    let baseline = growth_3d_strict_score_report(
+        &checks,
+        initial_surface,
+        final_surface,
+        passing_growth_3d_surface_tail_report(),
+        initial_coverage,
+        final_coverage,
+        final_coverage,
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &render,
+        GaussianVolumeStats::default(),
+        None,
+    );
+    let angular = growth_3d_strict_score_report(
+        &checks,
+        initial_surface,
+        final_surface,
+        passing_growth_3d_surface_tail_report(),
+        initial_coverage,
+        final_coverage,
+        final_coverage,
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &render,
+        GaussianVolumeStats::default(),
+        Some(&missing_tube_support),
+    );
+
+    assert!(angular.torus_angular_joint_coverage_penalty > 0.0);
+    assert!(angular.torus_angular_tube_coverage_penalty > 0.0);
+    assert!(angular.torus_angular_tube_gap_penalty > 0.0);
+    assert!(angular.score > baseline.score);
+}
+
+#[test]
 fn growth_3d_strict_checks_reject_missing_surface_normal_coverage() {
     let activation = Growth3dActivationReport {
         active_seed_count: 4,
@@ -226,6 +303,7 @@ fn growth_3d_strict_checks_reject_missing_surface_normal_coverage() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         GaussianVolumeStats::default(),
+        None,
     );
     assert!(score.surface_normal_bin_penalty > 0.0);
     assert!(score.surface_normal_mean_penalty > 0.0);
@@ -324,6 +402,7 @@ fn growth_3d_strict_checks_reject_gaussian_scale_budget_abuse() {
         0.72,
         &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
         oversized,
+        None,
     );
     assert!(score.gaussian_scale_budget_penalty > 0.0);
     assert!(score.gaussian_oversize_penalty > 0.0);
