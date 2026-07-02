@@ -19,6 +19,8 @@ use bevy_ui_widgets::{
 };
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use burn_automata::gpu::WgpuNeighborMode;
+#[cfg(all(feature = "splatting", not(feature = "gpu_wgpu")))]
+use burn_automata::rollout::growth_3d_material_opacity_channel;
 use burn_automata::{
     AutomataPreset, NpaConfig, NpaModel, ParticleSeed, RolloutBatchConfig, RolloutConfig,
     RolloutTrace, SgdConfig, SupervisedTarget, kernels::HashGridConfig, rollout_supervised_batch,

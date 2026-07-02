@@ -15,10 +15,10 @@ use crate::{AutomataError, AutomataResult, NpaModel};
 
 const WORKGROUP_SIZE: u32 = 128;
 const PARAM_COUNT: usize = 36;
-const MAX_STATE_DIMS: usize = 16;
+const MAX_STATE_DIMS: usize = 24;
 const MAX_HIDDEN_DIMS: usize = 256;
-const MAX_FEATURE_DIMS: usize = 96;
-const MAX_OUTPUT_DIMS: usize = 20;
+const MAX_FEATURE_DIMS: usize = 128;
+const MAX_OUTPUT_DIMS: usize = 32;
 pub const GAUSSIAN_SH_COEFF_COUNT: usize = 48;
 
 const PARAM_TOTAL: usize = 0;

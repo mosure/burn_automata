@@ -1,7 +1,7 @@
-const MAX_STATE_DIMS: u32 = 16u;
+const MAX_STATE_DIMS: u32 = 24u;
 const MAX_HIDDEN_DIMS: u32 = 256u;
-const MAX_FEATURE_DIMS: u32 = 96u;
-const MAX_OUTPUT_DIMS: u32 = 20u;
+const MAX_FEATURE_DIMS: u32 = 128u;
+const MAX_OUTPUT_DIMS: u32 = 32u;
 const MAX_DIMS: u32 = 3u;
 const GAUSSIAN_SH_COEFF_COUNT: u32 = 48u;
 const SH_C0: f32 = 0.28209479177387814;
