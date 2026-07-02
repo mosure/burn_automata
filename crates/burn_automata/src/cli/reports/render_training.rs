@@ -1,0 +1,120 @@
+use crate::cli::prelude::*;
+
+use super::{growth3d::CliGrowth3dValidationReport, render_proxy::RenderProxyTrainingReport};
+
+#[derive(Serialize)]
+pub(crate) struct CliRenderTrainingReport {
+    pub(crate) target: MeshTargetArg,
+    pub(crate) base_model: Option<String>,
+    pub(crate) model_output: String,
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) sgd: SgdConfig,
+    pub(crate) report: RenderProxyTrainingReport,
+    pub(crate) final_render_loss: MultiViewRenderLossReport,
+    pub(crate) strict_gate_summary: CliRenderTrainingGateSummary,
+    pub(crate) growth_validation: CliGrowth3dValidationReport,
+    pub(crate) catalog_promotion_validations: Vec<CliGrowth3dValidationReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CliRenderTrainingGateSummary {
+    pub(crate) target: MeshTargetArg,
+    pub(crate) source: Option<String>,
+    pub(crate) strict_passed: bool,
+    pub(crate) gate_passed: bool,
+    pub(crate) catalog_sanity_passed: bool,
+    pub(crate) strict_score: f32,
+    pub(crate) hard_failure_penalty: f32,
+    pub(crate) failure_reasons: Vec<&'static str>,
+    pub(crate) no_position_features: bool,
+    pub(crate) local_conditionless_lineage: bool,
+    pub(crate) no_seed_coordinate_scaffold: bool,
+    pub(crate) neutral_non_opacity_seed_state: bool,
+    pub(crate) active_seed_count: usize,
+    pub(crate) final_active_count: usize,
+    pub(crate) active_count_delta: isize,
+    pub(crate) newly_activated_fraction: f32,
+    pub(crate) active_extent_growth: bool,
+    pub(crate) active_extent_bbox_ratio: f32,
+    pub(crate) active_extent_min_axis_ratio: f32,
+    pub(crate) local_newly_activated_fraction: f32,
+    pub(crate) mean_final_displacement: f32,
+    pub(crate) peak_motion_per_step: f32,
+    pub(crate) final_motion_per_step: f32,
+    pub(crate) temporal_activation_progressive: bool,
+    pub(crate) temporal_geometry_progressive: bool,
+    pub(crate) target_coverage_mean_improvement: f32,
+    pub(crate) target_coverage_fraction_delta: f32,
+    pub(crate) target_coverage_fraction: f32,
+    pub(crate) material_visible_target_coverage_fraction: f32,
+    pub(crate) surface_covered_bin_fraction: f32,
+    pub(crate) material_visible_surface_covered_bin_fraction: f32,
+    pub(crate) surface_normal_covered_bin_fraction: f32,
+    pub(crate) material_visible_surface_normal_covered_bin_fraction: f32,
+    pub(crate) render_loss_passed: bool,
+    pub(crate) render_total_loss: f32,
+    pub(crate) render_density_psnr_db: f32,
+    pub(crate) render_color_psnr_db: f32,
+    pub(crate) render_depth_psnr_db: f32,
+}
+
+impl CliRenderTrainingGateSummary {
+    pub(crate) fn from_validation(report: &CliGrowth3dValidationReport) -> Self {
+        Self {
+            target: report.target,
+            source: report.source.clone(),
+            strict_passed: report.strict_passed,
+            gate_passed: report.gate_passed,
+            catalog_sanity_passed: report.catalog_sanity.passed,
+            strict_score: report.strict_score.score,
+            hard_failure_penalty: report.strict_score.hard_failure_penalty,
+            failure_reasons: report.strict_checks.failure_reasons.clone(),
+            no_position_features: report.strict_checks.no_position_features,
+            local_conditionless_lineage: report.strict_checks.local_conditionless_lineage,
+            no_seed_coordinate_scaffold: report.strict_checks.no_seed_coordinate_scaffold,
+            neutral_non_opacity_seed_state: report.strict_checks.neutral_non_opacity_seed_state,
+            active_seed_count: report.activation.active_seed_count,
+            final_active_count: report.activation.final_active_count,
+            active_count_delta: report.activation.final_active_count as isize
+                - report.activation.active_seed_count as isize,
+            newly_activated_fraction: report.activation.newly_activated_fraction,
+            active_extent_growth: report.strict_checks.active_extent_growth,
+            active_extent_bbox_ratio: report.extent.bbox_diagonal_ratio,
+            active_extent_min_axis_ratio: report.extent.min_axis_extent_ratio,
+            local_newly_activated_fraction: report.front.local_newly_activated_fraction,
+            mean_final_displacement: report.mean_final_displacement,
+            peak_motion_per_step: report.motion.peak_mean_dx,
+            final_motion_per_step: report.motion.final_step_mean_dx,
+            temporal_activation_progressive: report.temporal.progressive_activation,
+            temporal_geometry_progressive: report.temporal.geometry_progressive,
+            target_coverage_mean_improvement: report.initial_target_coverage.mean_distance
+                - report.final_target_coverage.mean_distance,
+            target_coverage_fraction_delta: report.final_target_coverage.covered_fraction
+                - report.initial_target_coverage.covered_fraction,
+            target_coverage_fraction: report.final_target_coverage.covered_fraction,
+            material_visible_target_coverage_fraction: report
+                .final_material_visible_target_coverage
+                .covered_fraction,
+            surface_covered_bin_fraction: report
+                .final_active_surface_coverage_profile
+                .covered_bin_fraction,
+            material_visible_surface_covered_bin_fraction: report
+                .final_material_visible_surface_coverage_profile
+                .covered_bin_fraction,
+            surface_normal_covered_bin_fraction: report
+                .final_active_surface_normal_coverage
+                .covered_target_bin_fraction,
+            material_visible_surface_normal_covered_bin_fraction: report
+                .final_material_visible_surface_normal_coverage
+                .covered_target_bin_fraction,
+            render_loss_passed: report.render_loss.passed,
+            render_total_loss: report.render_loss.total_loss,
+            render_density_psnr_db: report.render_loss.density_psnr_db,
+            render_color_psnr_db: report.render_loss.color_psnr_db,
+            render_depth_psnr_db: report.render_loss.depth_psnr_db,
+        }
+    }
+}
