@@ -11,6 +11,11 @@ use step::add_direct_step_output_objectives;
 pub(crate) use multiseed::*;
 pub(crate) use weights::*;
 
+struct DirectRolloutGradientStep {
+    gradients: SupervisedGradients,
+    initial_loss: f32,
+}
+
 pub(crate) fn render_direct_rollout_training_step(
     model: &mut NpaModel,
     grid: &crate::kernels::HashGridConfig,
@@ -21,6 +26,62 @@ pub(crate) fn render_direct_rollout_training_step(
     cfg: &RenderProxyTrainingConfig,
     rollout_seed: u64,
 ) -> Result<TrainingRunReport, Box<dyn std::error::Error>> {
+    let gradient_step = collect_direct_rollout_supervised_gradients(
+        model, grid, target, trace, trajectory, gradient, cfg,
+    )?;
+    let step = apply_sgd_gradients(model, &gradient_step.gradients, cfg.sgd)?;
+    direct_rollout_training_report_after_update(
+        model,
+        grid,
+        target,
+        cfg,
+        rollout_seed,
+        gradient_step.initial_loss,
+        step,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_direct_rollout_adapter_training_step(
+    base_model: &NpaModel,
+    adapter: &mut NpaLowRankAdapter,
+    model: &mut NpaModel,
+    grid: &crate::kernels::HashGridConfig,
+    target: &TriangleMeshTarget,
+    trace: &crate::RolloutTrace,
+    trajectory: &[RenderTrajectorySnapshot],
+    gradient: &RenderProxyGradientRows,
+    cfg: &RenderProxyTrainingConfig,
+    rollout_seed: u64,
+) -> Result<TrainingRunReport, Box<dyn std::error::Error>> {
+    let gradient_step = collect_direct_rollout_supervised_gradients(
+        model, grid, target, trace, trajectory, gradient, cfg,
+    )?;
+    let adapter_gradients =
+        project_low_rank_adapter_gradients(base_model, adapter, &gradient_step.gradients)?;
+    let step = apply_sgd_adapter_gradients(adapter, &adapter_gradients, cfg.sgd)?;
+    *model = adapter.apply_to_model(base_model)?;
+    direct_rollout_training_report_after_update(
+        model,
+        grid,
+        target,
+        cfg,
+        rollout_seed,
+        gradient_step.initial_loss,
+        step,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_direct_rollout_supervised_gradients(
+    model: &NpaModel,
+    grid: &crate::kernels::HashGridConfig,
+    target: &TriangleMeshTarget,
+    trace: &crate::RolloutTrace,
+    trajectory: &[RenderTrajectorySnapshot],
+    gradient: &RenderProxyGradientRows,
+    cfg: &RenderProxyTrainingConfig,
+) -> Result<DirectRolloutGradientStep, Box<dyn std::error::Error>> {
     if trajectory.is_empty() {
         return Err(std::io::Error::other(
             "direct rollout render training requires trajectory snapshots",
@@ -351,7 +412,25 @@ pub(crate) fn render_direct_rollout_training_step(
     if cfg.direct_material_output_only {
         retain_material_output_gradients(model, &mut accumulated_gradients)?;
     }
-    let step = apply_sgd_gradients(model, &accumulated_gradients, cfg.sgd)?;
+    Ok(DirectRolloutGradientStep {
+        gradients: accumulated_gradients,
+        initial_loss,
+    })
+}
+
+fn direct_rollout_training_report_after_update(
+    model: &NpaModel,
+    grid: &crate::kernels::HashGridConfig,
+    target: &TriangleMeshTarget,
+    cfg: &RenderProxyTrainingConfig,
+    rollout_seed: u64,
+    initial_loss: f32,
+    step: SupervisedStepReport,
+) -> Result<TrainingRunReport, Box<dyn std::error::Error>> {
+    let mut render_cfg = cfg.render;
+    if render_cfg.target_samples == 0 {
+        render_cfg.target_samples = cfg.particles;
+    }
     let final_trace = render_training_trace_for_seed(model, grid, cfg, rollout_seed)?;
     let final_loss =
         mesh_multiview_render_loss_from_trace(&final_trace, target, render_cfg)?.total_loss;

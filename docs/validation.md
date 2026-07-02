@@ -114,12 +114,22 @@ isometric views. Particle splats are weighted by the model opacity state using
 the same sigmoid opacity range as the Bevy/WGPU Gaussian path, so dormant
 particles no longer count as fully visible in render validation. This is a CPU
 correctness oracle and the objective used by `train-render3d`. The trainer now
-defaults to `--training-backend direct-rollout`, which uses analytic CPU
-gradients from render loss to final particle positions, opacity, and color,
-then applies those adjoints through stored rollout MLP outputs and a
-fixed-neighborhood SPH state-perception adjoint. The older supervised
-projection path is still available as `--training-backend proxy`, with finite
-differences left as an explicit regression fallback. The direct backend is
+defaults to `--training-backend direct-rollout` and
+`--weight-update-mode adapter`. Direct or proxy objectives first compute the
+same full MLP gradient used by legacy full-weight training, then project that
+gradient into a LoRA-style `NpaLowRankAdapter`; the shared base weights are
+kept frozen during the update. Reports record adapter rank, alpha, seed,
+adapter parameter count, base parameter count, and materialized parameter
+count. The saved BPK remains a materialized adapted model for viewer/catalog
+compatibility, so promotion gates validate the exact weights the app loads.
+Use `--weight-update-mode full` for legacy full-model ablations only.
+
+The direct backend uses analytic CPU gradients from render loss to final
+particle positions, opacity, and color, then applies those adjoints through
+stored rollout MLP outputs and a fixed-neighborhood SPH state-perception
+adjoint. The older supervised projection path is still available as
+`--training-backend proxy`, with finite differences left as an explicit
+regression fallback. The direct backend is
 still not true BPTT: direct Euler position integration is differentiated, but
 position-dependent perception, density-gradient position terms, future neighbor
 geometry, and rendering through time are treated as stop-gradient. The
@@ -323,10 +333,11 @@ the backward-compatible alias for `train_final_loss`. Each round also records
 rolled back before the next rollout so later rounds continue from the best
 strict-scored checkpoint rather than from a morphology-regressed update.
 When direct selection-seed training is enabled, each inner step accumulates
-per-seed weight deltas, applies their average, then measures `train_final_loss`
-by rerunning the actual averaged model over the training seed set. The reported
-loss is therefore the retained multiseed update, not the mean of independent
-per-seed candidate models.
+per-seed deltas in the active update parameterization: low-rank adapter deltas
+for adapter mode, full-weight deltas for legacy full mode. It then applies the
+average and measures `train_final_loss` by rerunning the actual averaged model
+over the training seed set. The reported loss is therefore the retained
+multiseed update, not the mean of independent per-seed candidate models.
 Direct-rollout training now defaults to strict-score line search over the
 configured `direct_line_search_scales`; a history `train_step_scale` of `0`
 means the no-op candidate was retained because no step improved the guarded

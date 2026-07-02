@@ -160,6 +160,13 @@ shared base NPA
   + generated rollout schedule
 ```
 
+This is now the preferred direction for 3D object training in this codebase:
+train a shared 3D NPA dynamics basis across mesh/object families, then train a
+small adapter for each object or chunk. Full per-object weight sets are useful
+diagnostics, but they should not be the default promotion path. Object-specific
+`ParticleSeed` variants should likewise stay legacy-only; target identity
+belongs in the target representation, condition tokens, or generated adapter.
+
 The generated parameter package should become an extension of `.bpk`, for example:
 
 ```text

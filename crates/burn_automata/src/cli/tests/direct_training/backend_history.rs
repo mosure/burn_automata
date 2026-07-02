@@ -60,6 +60,75 @@ fn render_direct_rollout_backend_applies_mlp_gradients() {
     assert!(report.history[0].grad_norm > 0.0);
     assert_ne!(model.weights.w2, before);
 }
+
+#[test]
+fn render_direct_rollout_adapter_step_keeps_shared_base_frozen() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let base_model =
+        local_growth_student_model(config, 19, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
+    let base_before = base_model.clone();
+    let mut adapter = NpaLowRankAdapter::zeros(&base_model.config, 2, 2.0);
+    let mut model = adapter.apply_to_model(&base_model).unwrap();
+    let materialized_before = model.weights.b2.clone();
+    let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
+    let cfg = RenderProxyTrainingConfig {
+        particles: 32,
+        rollout_steps: 2,
+        gradient_particles: 32,
+        perception_position_gain: 1.0,
+        coverage_samples: 0,
+        direct_line_search: false,
+        direct_selection_seed_training: false,
+        weight_update_mode: RenderWeightUpdateModeArg::Adapter,
+        seed_scale: 0.72,
+        seed_mode: ParticleSeed::UniformCircle,
+        render: RenderLossConfig {
+            image_size: 8,
+            target_samples: 128,
+            world_scale: 1.44,
+            ..RenderLossConfig::default()
+        },
+        sgd: SgdConfig {
+            learning_rate: 1.0e-3,
+            grad_clip_norm: 1.0,
+            weight_decay: 0.0,
+        },
+        ..direct_rollout_test_config()
+    };
+    let (trace, trajectory) = render_training_trajectory(&model, &grid, &cfg, 0).unwrap();
+    let gradient = RenderProxyGradientRows {
+        row_indices: (0..cfg.particles).collect(),
+        gradients: vec![[1.0, 0.25, -0.5]; cfg.particles],
+        opacity_gradients: vec![0.0; cfg.particles],
+        scale_gradients: vec![0.0; cfg.particles],
+        color_gradients: vec![[0.1, -0.2, 0.05]; cfg.particles],
+    };
+
+    let report = render_direct_rollout_adapter_training_step(
+        &base_model,
+        &mut adapter,
+        &mut model,
+        &grid,
+        &target,
+        &trace,
+        &trajectory,
+        &gradient,
+        &cfg,
+        cfg.seed,
+    )
+    .unwrap();
+
+    assert_eq!(base_model.weights.w1, base_before.weights.w1);
+    assert_eq!(base_model.weights.b1, base_before.weights.b1);
+    assert_eq!(base_model.weights.w2, base_before.weights.w2);
+    assert_eq!(base_model.weights.b2, base_before.weights.b2);
+    assert_eq!(report.rows, cfg.particles * cfg.rollout_steps);
+    assert!(report.history[0].grad_norm > 0.0);
+    assert_ne!(adapter.b2_delta, vec![0.0; adapter.b2_delta.len()]);
+    assert_ne!(model.weights.b2, materialized_before);
+}
+
 #[test]
 fn render_proxy_history_records_direct_line_search_candidates() {
     let config = NpaConfig::growing_3dgs();
@@ -141,6 +210,62 @@ fn render_proxy_history_records_direct_line_search_candidates() {
         candidates.len()
     );
 }
+
+#[test]
+fn render_proxy_report_records_adapter_weight_update_metadata() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let mut model =
+        local_growth_student_model(config, 21, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
+    let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
+    let cfg = RenderProxyTrainingConfig {
+        particles: 16,
+        rollout_steps: 1,
+        gradient_particles: 8,
+        direct_line_search: false,
+        direct_selection_seed_training: false,
+        weight_update_mode: RenderWeightUpdateModeArg::Adapter,
+        adapter_rank: 2,
+        adapter_alpha: 2.0,
+        adapter_seed: 17,
+        seed: 17,
+        seed_scale: 0.72,
+        seed_mode: ParticleSeed::UniformCircle,
+        render: RenderLossConfig {
+            image_size: 8,
+            target_samples: 32,
+            world_scale: 1.44,
+            ..RenderLossConfig::default()
+        },
+        sgd: SgdConfig {
+            learning_rate: 1.0e-3,
+            grad_clip_norm: 1.0,
+            weight_decay: 0.0,
+        },
+        ..direct_rollout_test_config()
+    };
+
+    let report = run_render_proxy_training(&mut model, &grid, &target, cfg).unwrap();
+
+    assert_eq!(
+        report.weight_update.mode,
+        RenderWeightUpdateModeArg::Adapter
+    );
+    assert_eq!(report.weight_update.adapter_rank, Some(2));
+    assert_eq!(report.weight_update.adapter_alpha, Some(2.0));
+    assert_eq!(report.weight_update.adapter_seed, Some(17));
+    assert!(report.weight_update.exported_materialized_model);
+    assert!(report.weight_update.adapter_parameter_count > 0);
+    assert_eq!(
+        report.weight_update.shared_base_parameter_count,
+        report.weight_update.materialized_parameter_count
+    );
+    assert!(
+        report.weight_update.adapter_parameter_count
+            < report.weight_update.materialized_parameter_count
+    );
+}
+
 #[test]
 fn adaptive_line_search_refines_underactive_to_bursty_scale_gap() {
     let reports = vec![

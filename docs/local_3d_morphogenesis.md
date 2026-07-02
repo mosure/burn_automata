@@ -126,13 +126,25 @@ The shared-base adapter path now has core training support:
   `NpaWeights`.
 - `project_low_rank_adapter_gradients` maps full MLP gradients from existing
   rollout/render losses into adapter-factor gradients.
-- `supervised_adapter_train_step` updates only adapter parameters while leaving
-  the shared base model unchanged.
+- `supervised_adapter_train_step` and `run_supervised_adapter_training` update
+  only adapter parameters while leaving the shared base model unchanged.
+- `train-render3d` defaults to `--weight-update-mode adapter`; both proxy and
+  direct-rollout backends project their objective gradients into the adapter,
+  including the direct multi-seed update path.
+- Adapter training reports record the rank, alpha, seed, adapter parameter
+  count, shared-base parameter count, materialized parameter count, and the
+  fact that the current BPK export is a materialized compatibility artifact.
 
 The next promotion-facing training experiments should use the same
 rollout/render objectives on a shared base model and train per-target adapters
 for torus, teapot, and future meshes before considering full-weight
 specialization.
+
+Object-specific particle seeds are explicitly not the desired abstraction for
+new models. They remain only to load and validate historical torus/teapot
+artifacts. New 3D targets should add target geometry, render/coverage losses,
+catalog metadata, and adapter training/evaluation cases while reusing generic
+neutral growth seeds and shared base dynamics.
 
 The app-scale promotion/regression harness is:
 

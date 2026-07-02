@@ -458,6 +458,14 @@ pub(crate) enum Command {
         direct_material_output_only: bool,
         #[arg(long, default_value = "direct-rollout")]
         training_backend: RenderTrainingBackendArg,
+        #[arg(long, default_value = "adapter")]
+        weight_update_mode: RenderWeightUpdateModeArg,
+        #[arg(long, default_value_t = 8)]
+        adapter_rank: usize,
+        #[arg(long, default_value_t = 8.0)]
+        adapter_alpha: f32,
+        #[arg(long, default_value_t = 0x00ad_a973)]
+        adapter_seed: u64,
         #[arg(long)]
         direct_selection_seed_training: bool,
         #[arg(long)]

@@ -182,6 +182,51 @@ fn train_render3d_defaults_to_strict_line_search_with_value_opt_out() {
 }
 
 #[test]
+fn train_render3d_defaults_to_shared_base_adapter_updates() {
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d {
+        weight_update_mode,
+        adapter_rank,
+        adapter_alpha,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(
+        weight_update_mode,
+        RenderWeightUpdateModeArg::Adapter,
+        "3D render training should prefer shared-base low-rank object adapters"
+    );
+    assert_eq!(adapter_rank, 8);
+    assert_eq!(adapter_alpha, 8.0);
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d",
+        "--weight-update-mode",
+        "full",
+        "--adapter-rank",
+        "4",
+        "--adapter-alpha",
+        "2.5",
+    ])
+    .unwrap();
+    let Command::TrainRender3d {
+        weight_update_mode,
+        adapter_rank,
+        adapter_alpha,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(weight_update_mode, RenderWeightUpdateModeArg::Full);
+    assert_eq!(adapter_rank, 4);
+    assert_eq!(adapter_alpha, 2.5);
+}
+
+#[test]
 fn train_render3d_exposes_robust_geometry_objective_gains() {
     let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
     let Command::TrainRender3d {

@@ -1,5 +1,40 @@
 use super::*;
 
+struct RenderTrainingAdapterState {
+    base_model: NpaModel,
+    adapter: NpaLowRankAdapter,
+}
+
+impl RenderTrainingAdapterState {
+    fn new(
+        model: &NpaModel,
+        cfg: &RenderProxyTrainingConfig,
+    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        if cfg.weight_update_mode == RenderWeightUpdateModeArg::Full {
+            return Ok(None);
+        }
+        if cfg.adapter_rank == 0 {
+            return Err(std::io::Error::other("adapter_rank must be greater than zero").into());
+        }
+        if !cfg.adapter_alpha.is_finite() || cfg.adapter_alpha <= 0.0 {
+            return Err(std::io::Error::other("adapter_alpha must be positive and finite").into());
+        }
+        Ok(Some(Self {
+            base_model: model.clone(),
+            adapter: NpaLowRankAdapter::seeded(
+                &model.config,
+                cfg.adapter_rank,
+                cfg.adapter_alpha,
+                cfg.adapter_seed,
+            ),
+        }))
+    }
+
+    fn materialized_model(&self) -> Result<NpaModel, Box<dyn std::error::Error>> {
+        Ok(self.adapter.apply_to_model(&self.base_model)?)
+    }
+}
+
 pub(crate) fn run_render_proxy_training(
     model: &mut NpaModel,
     grid: &crate::kernels::HashGridConfig,
@@ -14,6 +49,10 @@ pub(crate) fn run_render_proxy_training(
     }
     if !cfg.finite_diff_eps.is_finite() || cfg.finite_diff_eps <= 0.0 {
         return Err(std::io::Error::other("finite_diff_eps must be positive and finite").into());
+    }
+    let mut adapter_state = RenderTrainingAdapterState::new(model, &cfg)?;
+    if let Some(state) = adapter_state.as_ref() {
+        *model = state.materialized_model()?;
     }
     let mut render_cfg = cfg.render;
     if render_cfg.target_samples == 0 {
@@ -33,6 +72,7 @@ pub(crate) fn run_render_proxy_training(
         Some(&selection_baseline),
     )?;
     let mut best_model = model.clone();
+    let mut best_adapter = adapter_state.as_ref().map(|state| state.adapter.clone());
     let mut best_selection = initial_selection.clone();
     let mut selected_round = None;
     let mut history = Vec::with_capacity(cfg.rounds);
@@ -95,26 +135,57 @@ pub(crate) fn run_render_proxy_training(
                         &gradient,
                         &cfg,
                     )?;
-                    let report = run_supervised_training(
-                        model,
-                        &batch,
-                        TrainingRunConfig {
-                            steps: cfg.supervised_steps_per_round,
-                            report_interval: cfg.supervised_steps_per_round,
-                            sgd: cfg.sgd,
-                        },
-                    )?;
+                    let report = if let Some(state) = adapter_state.as_mut() {
+                        let report = run_supervised_adapter_training(
+                            &state.base_model,
+                            &mut state.adapter,
+                            &batch,
+                            TrainingRunConfig {
+                                steps: cfg.supervised_steps_per_round,
+                                report_interval: cfg.supervised_steps_per_round,
+                                sgd: cfg.sgd,
+                            },
+                        )?;
+                        *model = state.materialized_model()?;
+                        report
+                    } else {
+                        run_supervised_training(
+                            model,
+                            &batch,
+                            TrainingRunConfig {
+                                steps: cfg.supervised_steps_per_round,
+                                report_interval: cfg.supervised_steps_per_round,
+                                sgd: cfg.sgd,
+                            },
+                        )?
+                    };
                     (report, 1.0, Vec::new())
                 }
-                RenderTrainingBackendArg::DirectRollout => render_direct_rollout_training_steps(
-                    model,
-                    grid,
-                    target,
-                    &cfg,
-                    round,
-                    render_cfg,
-                    &selection_baseline,
-                )?,
+                RenderTrainingBackendArg::DirectRollout => {
+                    if let Some(state) = adapter_state.as_mut() {
+                        render_direct_rollout_adapter_training_steps(
+                            &state.base_model,
+                            &mut state.adapter,
+                            model,
+                            grid,
+                            target,
+                            &cfg,
+                            round,
+                            render_cfg,
+                            &selection_baseline,
+                        )?
+                    } else {
+                        render_direct_rollout_training_steps(
+                            model,
+                            grid,
+                            target,
+                            &cfg,
+                            round,
+                            render_cfg,
+                            &selection_baseline,
+                        )?
+                    }
+                }
             };
         let train_liveness_output_delta_norm = output_channel_delta_norm(
             &before_training_weights,
@@ -197,6 +268,7 @@ pub(crate) fn run_render_proxy_training(
             render_selection_candidate_metrics_beats(&selection, &best_selection);
         if selected_checkpoint {
             best_model = model.clone();
+            best_adapter = adapter_state.as_ref().map(|state| state.adapter.clone());
             best_selection = selection.clone();
             selected_round = Some(round);
         }
@@ -356,6 +428,9 @@ pub(crate) fn run_render_proxy_training(
         });
         if rolled_back_to_best_checkpoint {
             *model = best_model.clone();
+            if let (Some(state), Some(adapter)) = (adapter_state.as_mut(), best_adapter.as_ref()) {
+                state.adapter = adapter.clone();
+            }
         }
     }
     let final_render_loss = mesh_multiview_render_loss_from_trace(
@@ -408,6 +483,7 @@ pub(crate) fn run_render_proxy_training(
         direct_line_search_scales: sanitized_direct_line_search_scales(&cfg),
         direct_material_output_only: cfg.direct_material_output_only,
         training_backend: cfg.training_backend,
+        weight_update: render_weight_update_report(model, adapter_state.as_ref(), &cfg),
         direct_selection_seed_training: cfg.direct_selection_seed_training,
         selection_seed: cfg.selection_seed,
         selection_seeds: render_proxy_selection_seeds(&cfg),
@@ -418,4 +494,34 @@ pub(crate) fn run_render_proxy_training(
         selected_round,
         history,
     })
+}
+
+fn render_weight_update_report(
+    model: &NpaModel,
+    adapter_state: Option<&RenderTrainingAdapterState>,
+    cfg: &RenderProxyTrainingConfig,
+) -> RenderWeightUpdateReport {
+    let materialized_parameter_count = model_parameter_count(model);
+    let shared_base_parameter_count = adapter_state
+        .map(|state| model_parameter_count(&state.base_model))
+        .unwrap_or(materialized_parameter_count);
+    RenderWeightUpdateReport {
+        mode: cfg.weight_update_mode,
+        adapter_rank: adapter_state.map(|state| state.adapter.rank),
+        adapter_alpha: adapter_state.map(|state| state.adapter.alpha),
+        adapter_seed: adapter_state.map(|_| cfg.adapter_seed),
+        adapter_parameter_count: adapter_state
+            .map(|state| state.adapter.parameter_count())
+            .unwrap_or(0),
+        shared_base_parameter_count,
+        materialized_parameter_count,
+        exported_materialized_model: adapter_state.is_some(),
+    }
+}
+
+fn model_parameter_count(model: &NpaModel) -> usize {
+    model.weights.w1.len()
+        + model.weights.b1.len()
+        + model.weights.w2.len()
+        + model.weights.b2.len()
 }

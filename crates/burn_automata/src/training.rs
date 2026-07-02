@@ -187,6 +187,52 @@ pub fn run_supervised_training(
     })
 }
 
+pub fn run_supervised_adapter_training(
+    base_model: &NpaModel,
+    adapter: &mut NpaLowRankAdapter,
+    batch: &SupervisedBatch,
+    cfg: TrainingRunConfig,
+) -> AutomataResult<TrainingRunReport> {
+    validate_sgd_config(cfg.sgd)?;
+    let (rows, _) = validate_batch(&adapter.apply_to_model(base_model)?, batch)?;
+    let initial_loss = supervised_adapter_loss(base_model, adapter, batch)?;
+    let mut final_loss = initial_loss;
+    let mut best_loss = initial_loss;
+    let mut best_adapter = adapter.clone();
+    let report_interval = cfg.report_interval.max(1);
+    let mut history = Vec::new();
+
+    for step in 1..=cfg.steps {
+        let step_report = supervised_adapter_train_step(base_model, adapter, batch, cfg.sgd)?;
+        if step == cfg.steps || step.is_multiple_of(report_interval) {
+            final_loss = supervised_adapter_loss(base_model, adapter, batch)?;
+            if final_loss < best_loss {
+                best_loss = final_loss;
+                best_adapter = adapter.clone();
+            }
+            history.push(TrainingHistoryEntry {
+                step,
+                loss: final_loss,
+                grad_norm: step_report.grad_norm,
+                grad_scale: step_report.grad_scale,
+            });
+        }
+    }
+    if best_loss < final_loss {
+        *adapter = best_adapter;
+        final_loss = best_loss;
+    }
+
+    Ok(TrainingRunReport {
+        steps: cfg.steps,
+        rows,
+        initial_loss,
+        final_loss,
+        best_loss,
+        history,
+    })
+}
+
 pub fn supervised_loss(model: &NpaModel, batch: &SupervisedBatch) -> AutomataResult<f32> {
     let (rows, output_dims) = validate_batch(model, batch)?;
     let output = model.forward_update_from_features(&batch.features)?;
@@ -791,5 +837,51 @@ mod tests {
         assert!(after < before, "adapter step should reduce supervised loss");
         assert_eq!(report.rows, 1);
         assert!(report.grad_norm > 0.0);
+    }
+
+    #[test]
+    fn supervised_adapter_training_run_tracks_history_without_mutating_base() {
+        let mut config = NpaConfig::growing_3dgs();
+        config.hidden_dims = 4;
+        let base = NpaModel {
+            weights: NpaWeights::zeros(&config),
+            config,
+        };
+        let base_before = base.clone();
+        let mut adapter = NpaLowRankAdapter::zeros(&base.config, 2, 2.0);
+        let mut target_update = vec![0.0; base.config.update_dims()];
+        target_update[1] = -0.75;
+        let batch = SupervisedBatch {
+            features: vec![0.0; base.config.perception_dims()],
+            target_update,
+        };
+        let before = supervised_adapter_loss(&base, &adapter, &batch).unwrap();
+
+        let report = run_supervised_adapter_training(
+            &base,
+            &mut adapter,
+            &batch,
+            TrainingRunConfig {
+                steps: 3,
+                report_interval: 1,
+                sgd: SgdConfig {
+                    learning_rate: 0.1,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+            },
+        )
+        .unwrap();
+        let after = supervised_adapter_loss(&base, &adapter, &batch).unwrap();
+
+        assert_eq!(base.weights.w1, base_before.weights.w1);
+        assert_eq!(base.weights.b1, base_before.weights.b1);
+        assert_eq!(base.weights.w2, base_before.weights.w2);
+        assert_eq!(base.weights.b2, base_before.weights.b2);
+        assert_eq!(report.steps, 3);
+        assert_eq!(report.history.len(), 3);
+        assert!(report.best_loss <= before);
+        assert!(after <= before);
+        assert!(adapter.b2_delta[1] < 0.0);
     }
 }

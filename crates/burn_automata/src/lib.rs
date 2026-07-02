@@ -51,8 +51,8 @@ pub use training::{
     LowRankAdapterGradients, SgdConfig, SupervisedBatch, SupervisedGradients, SupervisedStepReport,
     TrainingHistoryEntry, TrainingRunConfig, TrainingRunReport, apply_sgd_adapter_gradients,
     apply_sgd_gradients, mlp_backward_from_output_gradients, project_low_rank_adapter_gradients,
-    run_supervised_training, supervised_adapter_loss, supervised_adapter_train_step,
-    supervised_backward, supervised_loss, supervised_train_step,
+    run_supervised_adapter_training, run_supervised_training, supervised_adapter_loss,
+    supervised_adapter_train_step, supervised_backward, supervised_loss, supervised_train_step,
 };
 
 pub fn version() -> &'static str {

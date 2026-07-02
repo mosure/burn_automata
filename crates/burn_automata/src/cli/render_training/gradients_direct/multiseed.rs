@@ -12,6 +12,11 @@ struct DirectRolloutSeedUpdate {
     report: TrainingRunReport,
 }
 
+struct DirectRolloutAdapterSeedUpdate {
+    adapter: NpaLowRankAdapter,
+    report: TrainingRunReport,
+}
+
 pub(crate) fn render_direct_rollout_multiseed_training_step(
     model: &mut NpaModel,
     grid: &crate::kernels::HashGridConfig,
@@ -86,6 +91,137 @@ pub(crate) fn render_direct_rollout_multiseed_training_step(
         accumulate_scaled_weight_delta(&mut delta, &base_weights, &update.weights, *weight);
     }
     apply_average_weight_delta(&mut model.weights, &base_weights, &delta, 1.0);
+
+    let reports = seed_updates
+        .iter()
+        .map(|update| &update.report)
+        .collect::<Vec<_>>();
+    let rows = reports.iter().map(|report| report.rows).sum();
+    let initial_loss = weighted_report_mean(&reports, &seed_weights, |report| report.initial_loss);
+    let final_loss = render_direct_rollout_weighted_loss_for_seeds(
+        model,
+        grid,
+        target,
+        cfg,
+        render_cfg,
+        &render_direct_rollout_training_seeds(cfg, round),
+        &seed_weights,
+    )?;
+    let best_loss = initial_loss.min(final_loss);
+    let grad_norm = weighted_report_mean(&reports, &seed_weights, |report| {
+        report
+            .history
+            .last()
+            .map(|entry| entry.grad_norm)
+            .unwrap_or(0.0)
+    });
+    let grad_scale = weighted_report_mean(&reports, &seed_weights, |report| {
+        report
+            .history
+            .last()
+            .map(|entry| entry.grad_scale)
+            .unwrap_or(1.0)
+    });
+
+    Ok(TrainingRunReport {
+        steps: 1,
+        rows,
+        initial_loss,
+        final_loss,
+        best_loss,
+        history: vec![TrainingHistoryEntry {
+            step: 1,
+            loss: final_loss,
+            grad_norm,
+            grad_scale,
+        }],
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_direct_rollout_adapter_multiseed_training_step(
+    base_model: &NpaModel,
+    adapter: &mut NpaLowRankAdapter,
+    model: &mut NpaModel,
+    grid: &crate::kernels::HashGridConfig,
+    target: &TriangleMeshTarget,
+    cfg: &RenderProxyTrainingConfig,
+    round: usize,
+    trace: &crate::RolloutTrace,
+    trajectory: &[RenderTrajectorySnapshot],
+    gradient: &RenderProxyGradientRows,
+) -> Result<TrainingRunReport, Box<dyn std::error::Error>> {
+    let training_seeds = render_direct_rollout_training_seeds(cfg, round);
+
+    let base_adapter = adapter.clone();
+    let base_materialized = model.clone();
+    let mut seed_updates = Vec::with_capacity(training_seeds.len());
+    let mut render_cfg = cfg.render;
+    if render_cfg.target_samples == 0 {
+        render_cfg.target_samples = cfg.particles;
+    }
+
+    let seed_selection_scores = direct_rollout_multiseed_selection_scores(
+        &base_materialized,
+        grid,
+        target,
+        cfg,
+        render_cfg,
+        &training_seeds,
+    )?;
+
+    for seed in training_seeds.iter().copied() {
+        let mut candidate_adapter = base_adapter.clone();
+        let mut candidate = candidate_adapter.apply_to_model(base_model)?;
+        let report = if seed == render_training_round_seed(cfg, round) {
+            render_direct_rollout_adapter_training_step(
+                base_model,
+                &mut candidate_adapter,
+                &mut candidate,
+                grid,
+                target,
+                trace,
+                trajectory,
+                gradient,
+                cfg,
+                seed,
+            )?
+        } else {
+            let (seed_trace, seed_trajectory) =
+                render_training_trajectory_for_seed(&candidate, grid, cfg, seed)?;
+            let seed_gradient = render_position_gradient(&seed_trace, target, render_cfg, cfg)?;
+            render_direct_rollout_adapter_training_step(
+                base_model,
+                &mut candidate_adapter,
+                &mut candidate,
+                grid,
+                target,
+                &seed_trace,
+                &seed_trajectory,
+                &seed_gradient,
+                cfg,
+                seed,
+            )?
+        };
+        seed_updates.push(DirectRolloutAdapterSeedUpdate {
+            adapter: candidate_adapter,
+            report,
+        });
+    }
+
+    let initial_losses = seed_updates
+        .iter()
+        .map(|update| update.report.initial_loss)
+        .collect::<Vec<_>>();
+    let seed_weights =
+        direct_rollout_multiseed_objective_weights(&initial_losses, &seed_selection_scores);
+    let mut delta =
+        NpaLowRankAdapter::zeros(&base_model.config, base_adapter.rank, base_adapter.alpha);
+    for (update, weight) in seed_updates.iter().zip(seed_weights.iter()) {
+        accumulate_scaled_adapter_delta(&mut delta, &base_adapter, &update.adapter, *weight);
+    }
+    apply_average_adapter_delta(adapter, &base_adapter, &delta, 1.0);
+    *model = adapter.apply_to_model(base_model)?;
 
     let reports = seed_updates
         .iter()

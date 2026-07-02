@@ -43,6 +43,7 @@ pub(crate) struct RenderProxyTrainingReport {
     pub(crate) direct_line_search_scales: Vec<f32>,
     pub(crate) direct_material_output_only: bool,
     pub(crate) training_backend: RenderTrainingBackendArg,
+    pub(crate) weight_update: RenderWeightUpdateReport,
     pub(crate) direct_selection_seed_training: bool,
     pub(crate) selection_seed: Option<u64>,
     pub(crate) selection_seeds: Vec<u64>,
@@ -52,6 +53,18 @@ pub(crate) struct RenderProxyTrainingReport {
     pub(crate) final_render_loss: MultiViewRenderLossReport,
     pub(crate) selected_round: Option<usize>,
     pub(crate) history: Vec<RenderProxyTrainingHistoryEntry>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RenderWeightUpdateReport {
+    pub(crate) mode: RenderWeightUpdateModeArg,
+    pub(crate) adapter_rank: Option<usize>,
+    pub(crate) adapter_alpha: Option<f32>,
+    pub(crate) adapter_seed: Option<u64>,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) shared_base_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
+    pub(crate) exported_materialized_model: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

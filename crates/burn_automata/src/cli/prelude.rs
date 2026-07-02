@@ -8,9 +8,9 @@ pub(crate) use std::{
 #[cfg(feature = "gpu_wgpu")]
 pub(crate) use crate::kernels::build_hashgrid;
 pub(crate) use crate::{
-    AutomataPreset, BpkModelManifest, FeatureBatchConfig, GaussianDecodeMode, NpaConfig, NpaModel,
-    NpaWeights, ParticleSeed, RolloutConfig, RolloutSupervisionConfig, SupervisedBatch,
-    SupervisedTarget, feature_supervised_batch, import_model,
+    AutomataPreset, BpkModelManifest, FeatureBatchConfig, GaussianDecodeMode, NpaConfig,
+    NpaLowRankAdapter, NpaModel, NpaWeights, ParticleSeed, RolloutConfig, RolloutSupervisionConfig,
+    SupervisedBatch, SupervisedTarget, feature_supervised_batch, import_model,
     kernels::perceive_adjoint_with_options,
     kernels::{PerceptionOptions, euler_step, perceive_with_options},
     mesh_objective::{
@@ -48,8 +48,10 @@ pub(crate) use crate::{
     rollout_supervised_batch_from_model, run_rollout,
     target_geometry::{TriangleMeshTarget, dot3},
     training::{
-        SgdConfig, SupervisedGradients, TrainingHistoryEntry, TrainingRunConfig, TrainingRunReport,
-        apply_sgd_gradients, mlp_backward_from_output_gradients, run_supervised_training,
+        SgdConfig, SupervisedGradients, SupervisedStepReport, TrainingHistoryEntry,
+        TrainingRunConfig, TrainingRunReport, apply_sgd_adapter_gradients, apply_sgd_gradients,
+        mlp_backward_from_output_gradients, project_low_rank_adapter_gradients,
+        run_supervised_adapter_training, run_supervised_training,
     },
 };
 pub(crate) use clap::{ArgAction, Parser, Subcommand, ValueEnum};

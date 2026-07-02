@@ -101,6 +101,14 @@ pub(crate) enum RenderTrainingBackendArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum RenderWeightUpdateModeArg {
+    #[value(name = "adapter", alias = "lora", alias = "low-rank")]
+    Adapter,
+    #[value(name = "full", alias = "full-weights")]
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
 pub(crate) enum CoverageUpdateModeArg {
     #[value(name = "hard-nearest", alias = "nearest", alias = "hard")]
     HardNearest,

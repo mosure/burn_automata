@@ -12,6 +12,40 @@ pub(crate) fn accumulate_scaled_weight_delta(
     accumulate_scaled_weight_delta_slice(&mut delta.b2, &before.b2, &after.b2, scale);
 }
 
+pub(crate) fn accumulate_scaled_adapter_delta(
+    delta: &mut NpaLowRankAdapter,
+    before: &NpaLowRankAdapter,
+    after: &NpaLowRankAdapter,
+    scale: f32,
+) {
+    accumulate_scaled_weight_delta_slice(
+        &mut delta.w1_down,
+        &before.w1_down,
+        &after.w1_down,
+        scale,
+    );
+    accumulate_scaled_weight_delta_slice(&mut delta.w1_up, &before.w1_up, &after.w1_up, scale);
+    accumulate_scaled_weight_delta_slice(
+        &mut delta.w2_down,
+        &before.w2_down,
+        &after.w2_down,
+        scale,
+    );
+    accumulate_scaled_weight_delta_slice(&mut delta.w2_up, &before.w2_up, &after.w2_up, scale);
+    accumulate_scaled_weight_delta_slice(
+        &mut delta.b1_delta,
+        &before.b1_delta,
+        &after.b1_delta,
+        scale,
+    );
+    accumulate_scaled_weight_delta_slice(
+        &mut delta.b2_delta,
+        &before.b2_delta,
+        &after.b2_delta,
+        scale,
+    );
+}
+
 pub(crate) fn accumulate_scaled_weight_delta_slice(
     delta: &mut [f32],
     before: &[f32],
@@ -75,6 +109,30 @@ pub(crate) fn apply_average_weight_delta(
     apply_average_weight_delta_slice(&mut weights.b1, &before.b1, &delta.b1, scale);
     apply_average_weight_delta_slice(&mut weights.w2, &before.w2, &delta.w2, scale);
     apply_average_weight_delta_slice(&mut weights.b2, &before.b2, &delta.b2, scale);
+}
+
+pub(crate) fn apply_average_adapter_delta(
+    adapter: &mut NpaLowRankAdapter,
+    before: &NpaLowRankAdapter,
+    delta: &NpaLowRankAdapter,
+    scale: f32,
+) {
+    apply_average_weight_delta_slice(&mut adapter.w1_down, &before.w1_down, &delta.w1_down, scale);
+    apply_average_weight_delta_slice(&mut adapter.w1_up, &before.w1_up, &delta.w1_up, scale);
+    apply_average_weight_delta_slice(&mut adapter.w2_down, &before.w2_down, &delta.w2_down, scale);
+    apply_average_weight_delta_slice(&mut adapter.w2_up, &before.w2_up, &delta.w2_up, scale);
+    apply_average_weight_delta_slice(
+        &mut adapter.b1_delta,
+        &before.b1_delta,
+        &delta.b1_delta,
+        scale,
+    );
+    apply_average_weight_delta_slice(
+        &mut adapter.b2_delta,
+        &before.b2_delta,
+        &delta.b2_delta,
+        scale,
+    );
 }
 
 pub(crate) fn apply_average_weight_delta_slice(

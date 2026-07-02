@@ -1,8 +1,10 @@
 use super::*;
 
+mod adapter;
 mod line_search;
 mod trajectory;
 
+pub(crate) use adapter::*;
 pub(crate) use line_search::*;
 pub(crate) use trajectory::*;
 

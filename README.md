@@ -134,10 +134,16 @@ The legacy projection/seed-frame batch is still available as
 `--training-mode rollout-local` remains available for local teacher
 distillation experiments. `--training-mode rollout-position-field` is available
 for rollout-state mesh rows, but those commands are no longer catalog defaults.
-`train-render3d` defaults to `--training-backend direct-rollout`. Without
-`--base-model`, it starts from a conditionless-local compact-growth prior with
-`position_features=false` and target-local growth seed defaults; with
-`--base-model`, it continues the provided local-growth BPK. The backend
+`train-render3d` defaults to `--training-backend direct-rollout` and
+`--weight-update-mode adapter`. Without `--base-model`, it starts from a
+conditionless-local compact-growth prior with `position_features=false` and
+target-agnostic local growth seed defaults; with `--base-model`, it treats the
+provided local-growth BPK as a frozen shared base and trains a LoRA-style
+low-rank object adapter (`--adapter-rank`, `--adapter-alpha`,
+`--adapter-seed`). Reports serialize the adapter parameter count and base/full
+parameter counts; the exported `.bpk` is still a materialized model until the
+compact adapter manifest format lands. Use `--weight-update-mode full` only for
+legacy full-model ablations. The backend
 backpropagates the deterministic CPU multi-view splat loss analytically to
 final particle positions, opacity, and color, and applies those adjoints through
 the stored rollout MLP outputs. It also
