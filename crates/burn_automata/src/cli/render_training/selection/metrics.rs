@@ -13,6 +13,11 @@ pub(crate) struct RenderSelectionMetrics {
     pub(crate) material_visible_target_mean_distance: f32,
     pub(crate) material_visible_target_max_distance: f32,
     pub(crate) material_visible_target_coverage_fraction: f32,
+    pub(crate) strict_surface_active_count: usize,
+    pub(crate) strict_surface_materialized_fraction: f32,
+    pub(crate) strict_surface_material_mean_opacity: f32,
+    pub(crate) strict_surface_material_visible_margin: f32,
+    pub(crate) strict_surface_material_max_visible_margin: f32,
     pub(crate) material_visible_inactive_fraction: f32,
     pub(crate) material_visible_max_inactive_opacity: f32,
     pub(crate) material_active_mean_opacity: f32,
@@ -109,6 +114,11 @@ pub(crate) fn render_selection_metrics(
     let mut material_visible_target_mean_distance = f32::NEG_INFINITY;
     let mut material_visible_target_max_distance = f32::NEG_INFINITY;
     let mut material_visible_target_coverage_fraction = f32::INFINITY;
+    let mut strict_surface_active_count = usize::MAX;
+    let mut strict_surface_materialized_fraction = f32::INFINITY;
+    let mut strict_surface_material_mean_opacity = f32::INFINITY;
+    let mut strict_surface_material_visible_margin = f32::NEG_INFINITY;
+    let mut strict_surface_material_max_visible_margin = f32::NEG_INFINITY;
     let mut material_visible_inactive_fraction = f32::NEG_INFINITY;
     let mut material_visible_max_inactive_opacity = f32::NEG_INFINITY;
     let mut material_active_mean_opacity = f32::INFINITY;
@@ -181,6 +191,32 @@ pub(crate) fn render_selection_metrics(
                 .material_visible_target_coverage
                 .covered_fraction,
         );
+        strict_surface_active_count = strict_surface_active_count.min(
+            selection_case
+                .strict_surface_materialization
+                .active_strict_count,
+        );
+        strict_surface_materialized_fraction = strict_surface_materialized_fraction.min(
+            selection_case
+                .strict_surface_materialization
+                .materialized_fraction,
+        );
+        strict_surface_material_mean_opacity = strict_surface_material_mean_opacity.min(
+            selection_case
+                .strict_surface_materialization
+                .mean_material_opacity,
+        );
+        strict_surface_material_visible_margin = strict_surface_material_visible_margin.max(
+            selection_case
+                .strict_surface_materialization
+                .mean_visible_margin,
+        );
+        strict_surface_material_max_visible_margin = strict_surface_material_max_visible_margin
+            .max(
+                selection_case
+                    .strict_surface_materialization
+                    .max_visible_margin,
+            );
         material_visible_inactive_fraction = material_visible_inactive_fraction.max(
             selection_case
                 .material_liveness
@@ -312,6 +348,27 @@ pub(crate) fn render_selection_metrics(
         material_visible_target_coverage_fraction: finite_report_metric(
             material_visible_target_coverage_fraction,
             0.0,
+        ),
+        strict_surface_active_count: if strict_surface_active_count == usize::MAX {
+            0
+        } else {
+            strict_surface_active_count
+        },
+        strict_surface_materialized_fraction: finite_report_metric(
+            strict_surface_materialized_fraction,
+            0.0,
+        ),
+        strict_surface_material_mean_opacity: finite_report_metric(
+            strict_surface_material_mean_opacity,
+            f32::NEG_INFINITY,
+        ),
+        strict_surface_material_visible_margin: finite_report_metric(
+            strict_surface_material_visible_margin,
+            RENDER_SELECTION_BAD_SCORE,
+        ),
+        strict_surface_material_max_visible_margin: finite_report_metric(
+            strict_surface_material_max_visible_margin,
+            RENDER_SELECTION_BAD_SCORE,
         ),
         material_visible_inactive_fraction: finite_report_metric(
             material_visible_inactive_fraction,

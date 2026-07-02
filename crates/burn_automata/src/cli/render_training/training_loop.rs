@@ -232,6 +232,15 @@ pub(crate) fn run_render_proxy_training(
                 .material_visible_target_max_distance,
             selection_material_visible_target_coverage_fraction: selection
                 .material_visible_target_coverage_fraction,
+            selection_strict_surface_active_count: selection.strict_surface_active_count,
+            selection_strict_surface_materialized_fraction: selection
+                .strict_surface_materialized_fraction,
+            selection_strict_surface_material_mean_opacity: selection
+                .strict_surface_material_mean_opacity,
+            selection_strict_surface_material_visible_margin: selection
+                .strict_surface_material_visible_margin,
+            selection_strict_surface_material_max_visible_margin: selection
+                .strict_surface_material_max_visible_margin,
             selection_material_visible_inactive_fraction: selection
                 .material_visible_inactive_fraction,
             selection_material_visible_max_inactive_opacity: selection

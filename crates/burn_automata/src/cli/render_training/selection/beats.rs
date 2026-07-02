@@ -93,6 +93,8 @@ pub(crate) fn render_selection_training_progress_beats(
     const PRECURSOR_RENDER_LOSS_PROGRESS: f32 = 5.0e-4;
     const PRECURSOR_DENSITY_PSNR_PROGRESS_DB: f32 = 0.01;
     const PRECURSOR_MATERIAL_MEAN_PROGRESS: f32 = 0.02;
+    const PRECURSOR_STRICT_SURFACE_MATERIAL_MEAN_PROGRESS: f32 = 0.01;
+    const PRECURSOR_STRICT_SURFACE_MATERIAL_MARGIN_PROGRESS: f32 = 0.01;
     const PRECURSOR_MATERIAL_DISTANCE_PROGRESS: f32 = 1.0e-3;
     const PRECURSOR_FRONT_MARGIN_PROGRESS: f32 = 0.02;
     const PRECURSOR_COVERAGE_REGRESSION_SLACK: f32 = 0.005;
@@ -132,6 +134,12 @@ pub(crate) fn render_selection_training_progress_beats(
             >= previous.min_active_extent_min_axis_ratio + EXTENT_PROGRESS;
     let activation_improved = selection.min_final_active_count > previous.min_final_active_count
         && selection.min_newly_activated_fraction >= previous.min_newly_activated_fraction;
+    let strict_surface_material_precursor_improved = strict_surface_materialization_improved(
+        selection,
+        previous,
+        PRECURSOR_STRICT_SURFACE_MATERIAL_MEAN_PROGRESS,
+        PRECURSOR_STRICT_SURFACE_MATERIAL_MARGIN_PROGRESS,
+    );
     let material_precursor_improved = selection.material_visible_count
         > previous.material_visible_count
         || (selection.material_active_mean_opacity.is_finite()
@@ -175,9 +183,18 @@ pub(crate) fn render_selection_training_progress_beats(
         && selection.material_visible_surface_covered_bin_fraction
             + PRECURSOR_SURFACE_BIN_REGRESSION_SLACK
             >= previous.material_visible_surface_covered_bin_fraction;
-    let precursor_improved = precursor_render_improved
-        && precursor_non_regressed
-        && (material_precursor_improved || liveness_precursor_improved);
+    let material_precursor_improved = precursor_render_improved && material_precursor_improved;
+    let strict_surface_material_precursor_improved = strict_surface_material_precursor_improved
+        && render_selection_render_within_strict_surface_materialization_slack(
+            selection.render_loss,
+            previous.render_loss,
+            selection.density_psnr_db,
+            previous.density_psnr_db,
+        );
+    let precursor_improved = precursor_non_regressed
+        && (material_precursor_improved
+            || strict_surface_material_precursor_improved
+            || (precursor_render_improved && liveness_precursor_improved));
     let geometry_progressed =
         render_selection_geometry_training_progress_beats(selection, previous);
     let color_progressed = render_selection_color_training_progress_beats(selection, previous);
@@ -300,6 +317,55 @@ pub(crate) fn render_selection_material_precursor_beats(
         && selection.material_visible_surface_tail_over_threshold_fraction <= 0.01
         && selection.active_surface_max.is_finite()
         && selection.active_surface_max <= GROWTH_3D_SURFACE_MAX_DISTANCE + 0.05
+}
+
+fn strict_surface_materialization_improved(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+    mean_opacity_progress: f32,
+    margin_progress: f32,
+) -> bool {
+    if selection.strict_surface_active_count == 0
+        || selection.strict_surface_active_count < previous.strict_surface_active_count
+    {
+        return false;
+    }
+    let fraction_improved = selection.strict_surface_materialized_fraction.is_finite()
+        && previous.strict_surface_materialized_fraction.is_finite()
+        && selection.strict_surface_materialized_fraction
+            > previous.strict_surface_materialized_fraction;
+    let mean_opacity_improved = selection.strict_surface_material_mean_opacity.is_finite()
+        && previous.strict_surface_material_mean_opacity.is_finite()
+        && selection.strict_surface_material_mean_opacity
+            >= previous.strict_surface_material_mean_opacity + mean_opacity_progress;
+    let margin_improved = selection.strict_surface_material_visible_margin.is_finite()
+        && previous.strict_surface_material_visible_margin.is_finite()
+        && selection.strict_surface_material_visible_margin + margin_progress
+            <= previous.strict_surface_material_visible_margin;
+    fraction_improved || mean_opacity_improved || margin_improved
+}
+
+fn render_selection_render_within_strict_surface_materialization_slack(
+    selection_render_loss: f32,
+    previous_render_loss: f32,
+    selection_density_psnr_db: f32,
+    previous_density_psnr_db: f32,
+) -> bool {
+    const RENDER_LOSS_SLACK_ABS: f32 = 1.5e-3;
+    const RENDER_LOSS_SLACK_FRACTION: f32 = 2.5e-3;
+    const DENSITY_PSNR_SLACK_DB: f32 = 0.02;
+
+    if !selection_render_loss.is_finite()
+        || !previous_render_loss.is_finite()
+        || !selection_density_psnr_db.is_finite()
+        || !previous_density_psnr_db.is_finite()
+    {
+        return false;
+    }
+    let render_loss_slack =
+        RENDER_LOSS_SLACK_ABS.max(previous_render_loss.abs() * RENDER_LOSS_SLACK_FRACTION);
+    selection_render_loss <= previous_render_loss + render_loss_slack
+        && selection_density_psnr_db + DENSITY_PSNR_SLACK_DB >= previous_density_psnr_db
 }
 
 pub(crate) fn render_selection_post_activation_refinement_beats(

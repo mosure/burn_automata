@@ -113,6 +113,52 @@ fn render_selection_training_progress_accepts_bounded_precursor_continuation() {
 }
 
 #[test]
+fn render_selection_training_progress_accepts_strict_surface_material_margin() {
+    let mut previous = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
+    previous.material_visible_count = 46;
+    previous.material_active_mean_opacity = 1.75;
+    previous.material_visible_target_coverage_fraction = 0.0;
+    previous.material_visible_surface_covered_bin_fraction = 0.0;
+    previous.strict_surface_active_count = 24;
+    previous.strict_surface_materialized_fraction = 0.0;
+    previous.strict_surface_material_mean_opacity = -3.20;
+    previous.strict_surface_material_visible_margin = 2.20;
+    previous.strict_surface_material_max_visible_margin = 2.80;
+    previous.surface_covered_bin_fraction = 0.140625;
+    previous.target_coverage_fraction = 0.060546875;
+
+    let mut continued = previous.clone();
+    continued.score = previous.score + 0.01;
+    continued.render_loss = previous.render_loss + 0.001;
+    continued.density_psnr_db = previous.density_psnr_db - 0.007;
+    continued.strict_surface_material_mean_opacity = -3.05;
+    continued.strict_surface_material_visible_margin = 2.05;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&continued, &previous),
+        "strict-band material margin alone should not promote a checkpoint before material visibility gates flip"
+    );
+    assert!(
+        render_selection_training_progress_beats(&continued, &previous),
+        "bounded strict-band material margin progress should keep material-only training from rolling back"
+    );
+
+    let mut tail_regressed = continued.clone();
+    tail_regressed.material_visible_surface_tail_over_threshold_fraction = 0.05;
+    assert!(
+        !render_selection_training_progress_beats(&tail_regressed, &previous),
+        "strict-band material progress must not hide material tail leaks"
+    );
+
+    let mut coverage_collapsed = continued;
+    coverage_collapsed.surface_covered_bin_fraction = previous.surface_covered_bin_fraction - 0.01;
+    assert!(
+        !render_selection_training_progress_beats(&coverage_collapsed, &previous),
+        "strict-band material progress must not carry active surface coverage collapse"
+    );
+}
+
+#[test]
 fn render_selection_training_progress_rejects_precursor_coverage_collapse() {
     let mut previous = render_selection_metrics_with_liveness(91.34, 0.75218, 1.39, 0.79);
     previous.material_active_mean_opacity = 1.64;

@@ -205,6 +205,16 @@ pub(crate) struct Growth3dMaterialLivenessReport {
     pub(crate) passed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub(crate) struct Growth3dStrictSurfaceMaterializationReport {
+    pub(crate) active_strict_count: usize,
+    pub(crate) materialized_count: usize,
+    pub(crate) materialized_fraction: f32,
+    pub(crate) mean_material_opacity: f32,
+    pub(crate) mean_visible_margin: f32,
+    pub(crate) max_visible_margin: f32,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct Growth3dColorStateReport {
     pub(crate) available: bool,

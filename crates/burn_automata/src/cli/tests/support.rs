@@ -56,6 +56,11 @@ pub(super) fn render_selection_metrics_with_liveness(
         material_visible_target_mean_distance: 0.05,
         material_visible_target_max_distance: 0.12,
         material_visible_target_coverage_fraction: 0.82,
+        strict_surface_active_count: 8,
+        strict_surface_materialized_fraction: 1.0,
+        strict_surface_material_mean_opacity: 1.0,
+        strict_surface_material_visible_margin: 0.0,
+        strict_surface_material_max_visible_margin: 0.0,
         material_visible_inactive_fraction: 0.0,
         material_visible_max_inactive_opacity: f32::NEG_INFINITY,
         material_active_mean_opacity: 0.0,
@@ -115,6 +120,14 @@ pub(super) fn render_selection_case_with_front_liveness_margin(
             mean_distance: 0.05,
             max_distance: 0.12,
             covered_fraction: 0.82,
+        },
+        strict_surface_materialization: Growth3dStrictSurfaceMaterializationReport {
+            active_strict_count: 8,
+            materialized_count: 8,
+            materialized_fraction: 1.0,
+            mean_material_opacity: 1.0,
+            mean_visible_margin: 0.0,
+            max_visible_margin: 0.0,
         },
         material_opacity: passing_growth_3d_opacity_stats(),
         material_liveness: passing_material_liveness_report(),
@@ -350,6 +363,18 @@ pub(super) fn passing_material_liveness_report() -> Growth3dMaterialLivenessRepo
         inactive_material_logit_threshold: GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.0,
         max_inactive_material_opacity: f32::NEG_INFINITY,
         passed: true,
+    }
+}
+
+pub(super) fn passing_strict_surface_materialization_report()
+-> Growth3dStrictSurfaceMaterializationReport {
+    Growth3dStrictSurfaceMaterializationReport {
+        active_strict_count: 8,
+        materialized_count: 8,
+        materialized_fraction: 1.0,
+        mean_material_opacity: 1.0,
+        mean_visible_margin: 0.0,
+        max_visible_margin: 0.0,
     }
 }
 

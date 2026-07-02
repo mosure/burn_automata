@@ -158,6 +158,13 @@ fn render_selection_metrics_average_base_and_selection_seed_with_morphology_pena
             .min(extra.material_visible_target_coverage.covered_fraction)
     );
     assert_eq!(
+        selection.strict_surface_material_visible_margin,
+        base.strict_surface_materialization
+            .mean_visible_margin
+            .max(heldout.strict_surface_materialization.mean_visible_margin)
+            .max(extra.strict_surface_materialization.mean_visible_margin)
+    );
+    assert_eq!(
         selection.surface_normal_covered_bin_fraction,
         base.surface_normal_coverage
             .covered_target_bin_fraction

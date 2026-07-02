@@ -284,6 +284,12 @@ fn direct_line_search_candidate_report(
         material_visible_target_max_distance: selection.material_visible_target_max_distance,
         material_visible_target_coverage_fraction: selection
             .material_visible_target_coverage_fraction,
+        strict_surface_active_count: selection.strict_surface_active_count,
+        strict_surface_materialized_fraction: selection.strict_surface_materialized_fraction,
+        strict_surface_material_mean_opacity: selection.strict_surface_material_mean_opacity,
+        strict_surface_material_visible_margin: selection.strict_surface_material_visible_margin,
+        strict_surface_material_max_visible_margin: selection
+            .strict_surface_material_max_visible_margin,
         material_visible_inactive_fraction: selection.material_visible_inactive_fraction,
         material_visible_max_inactive_opacity: selection.material_visible_max_inactive_opacity,
         material_active_mean_opacity: selection.material_active_mean_opacity,

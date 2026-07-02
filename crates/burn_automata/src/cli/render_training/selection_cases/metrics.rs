@@ -5,6 +5,7 @@ pub(crate) struct RenderSelectionCaseMetrics {
     pub(crate) active_surface: Growth3dSurfaceStats,
     pub(crate) target_coverage: TargetCoverageStats,
     pub(crate) material_visible_target_coverage: TargetCoverageStats,
+    pub(crate) strict_surface_materialization: Growth3dStrictSurfaceMaterializationReport,
     pub(crate) material_opacity: Growth3dOpacityStats,
     pub(crate) material_liveness: Growth3dMaterialLivenessReport,
     pub(crate) final_color_state: Growth3dColorStateReport,
@@ -107,6 +108,13 @@ pub(crate) fn render_selection_case_metrics(
         trace.state_dims,
         target,
         coverage_samples,
+        coverage_threshold,
+    );
+    let strict_surface_materialization = active_strict_surface_materialization_report(
+        &trace.positions,
+        &trace.states,
+        trace.state_dims,
+        target,
         coverage_threshold,
     );
     let surface_coverage_profile = active_surface_coverage_profile(
@@ -296,6 +304,7 @@ pub(crate) fn render_selection_case_metrics(
         active_surface,
         target_coverage,
         material_visible_target_coverage,
+        strict_surface_materialization,
         material_opacity,
         material_liveness,
         final_color_state,

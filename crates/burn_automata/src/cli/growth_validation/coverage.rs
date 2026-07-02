@@ -97,6 +97,75 @@ pub(crate) fn material_visible_target_coverage_stats(
     target_coverage_stats(&visible_positions, target, samples, threshold)
 }
 
+pub(crate) fn active_strict_surface_materialization_report(
+    positions: &[[f32; 4]],
+    states: &[f32],
+    state_dims: usize,
+    target: &TriangleMeshTarget,
+    threshold: f32,
+) -> Growth3dStrictSurfaceMaterializationReport {
+    let Some(material_channel) = growth_3d_material_opacity_channel(state_dims) else {
+        return Growth3dStrictSurfaceMaterializationReport::default();
+    };
+    if state_dims <= GROWTH_3D_LIVENESS_CHANNEL
+        || states.len() < positions.len().saturating_mul(state_dims)
+        || threshold <= 0.0
+        || !threshold.is_finite()
+    {
+        return Growth3dStrictSurfaceMaterializationReport::default();
+    }
+
+    let visible_gate = -1.0_f32;
+    let mut active_strict_count = 0usize;
+    let mut materialized_count = 0usize;
+    let mut material_sum = 0.0_f32;
+    let mut margin_sum = 0.0_f32;
+    let mut max_visible_margin = 0.0_f32;
+
+    for (row, position) in positions.iter().enumerate() {
+        let state_base = row * state_dims;
+        if states[state_base + GROWTH_3D_LIVENESS_CHANNEL] <= visible_gate {
+            continue;
+        }
+        let projection = target.project(position3(*position));
+        if !projection.distance.is_finite() || projection.distance > threshold {
+            continue;
+        }
+        let material_opacity = states[state_base + material_channel];
+        if !material_opacity.is_finite() {
+            continue;
+        }
+        active_strict_count += 1;
+        material_sum += material_opacity;
+        if material_opacity > visible_gate {
+            materialized_count += 1;
+        }
+        let margin = (visible_gate - material_opacity).max(0.0);
+        margin_sum += margin;
+        max_visible_margin = max_visible_margin.max(margin);
+    }
+
+    if active_strict_count == 0 {
+        return Growth3dStrictSurfaceMaterializationReport {
+            active_strict_count: 0,
+            materialized_count: 0,
+            materialized_fraction: 0.0,
+            mean_material_opacity: f32::NEG_INFINITY,
+            mean_visible_margin: f32::MAX,
+            max_visible_margin: f32::MAX,
+        };
+    }
+
+    Growth3dStrictSurfaceMaterializationReport {
+        active_strict_count,
+        materialized_count,
+        materialized_fraction: materialized_count as f32 / active_strict_count as f32,
+        mean_material_opacity: material_sum / active_strict_count as f32,
+        mean_visible_margin: margin_sum / active_strict_count as f32,
+        max_visible_margin,
+    }
+}
+
 pub(crate) fn active_surface_coverage_profile(
     positions: &[[f32; 4]],
     states: &[f32],
