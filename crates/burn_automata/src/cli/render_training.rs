@@ -11,17 +11,21 @@ mod adjoints;
 mod direct_loop;
 mod geometry_updates;
 mod gradients;
+mod gradients_direct;
 mod objective_diagnostics;
 mod output_objectives;
 mod selection;
+mod selection_cases;
 
 pub(crate) use adjoints::*;
 pub(crate) use direct_loop::*;
 pub(crate) use geometry_updates::*;
 pub(crate) use gradients::*;
+pub(crate) use gradients_direct::*;
 pub(crate) use objective_diagnostics::*;
 pub(crate) use output_objectives::*;
 pub(crate) use selection::*;
+pub(crate) use selection_cases::*;
 
 #[derive(Clone)]
 pub(crate) struct RenderLossEvalConfig {
