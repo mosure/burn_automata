@@ -130,6 +130,108 @@ impl TriangleMeshTarget {
         colored_mesh(vertices, faces)
     }
 
+    pub fn pyramid(scale: f32) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let vertices = vec![
+            [-0.72 * scale, -0.72 * scale, -0.60 * scale],
+            [0.72 * scale, -0.72 * scale, -0.60 * scale],
+            [0.72 * scale, 0.72 * scale, -0.60 * scale],
+            [-0.72 * scale, 0.72 * scale, -0.60 * scale],
+            [0.0, 0.0, 0.88 * scale],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [0, 1, 4],
+            [1, 2, 4],
+            [2, 3, 4],
+            [3, 0, 4],
+        ];
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn bicone(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let segments = segments.max(12);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_tapered_cylinder(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, -scale],
+            [0.0, 0.0, 0.0],
+            0.04 * scale,
+            0.72 * scale,
+            segments,
+        );
+        append_tapered_cylinder(
+            &mut vertices,
+            &mut faces,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, scale],
+            0.72 * scale,
+            0.04 * scale,
+            segments,
+        );
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn dumbbell(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let segments = segments.max(8);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        append_uv_sphere(
+            &mut vertices,
+            &mut faces,
+            [-0.54 * scale, 0.0, 0.0],
+            [0.38 * scale, 0.38 * scale, 0.38 * scale],
+            segments,
+            segments * 2,
+        );
+        append_uv_sphere(
+            &mut vertices,
+            &mut faces,
+            [0.54 * scale, 0.0, 0.0],
+            [0.38 * scale, 0.38 * scale, 0.38 * scale],
+            segments,
+            segments * 2,
+        );
+        append_tapered_cylinder(
+            &mut vertices,
+            &mut faces,
+            [-0.54 * scale, 0.0, 0.0],
+            [0.54 * scale, 0.0, 0.0],
+            0.18 * scale,
+            0.18 * scale,
+            segments * 2,
+        );
+        colored_mesh(vertices, faces)
+    }
+
+    pub fn cross(scale: f32, segments: usize) -> AutomataResult<Self> {
+        let scale = scale.max(1.0e-4);
+        let segments = segments.max(12);
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for (start, end) in [
+            ([-scale, 0.0, 0.0], [scale, 0.0, 0.0]),
+            ([0.0, -scale, 0.0], [0.0, scale, 0.0]),
+            ([0.0, 0.0, -scale], [0.0, 0.0, scale]),
+        ] {
+            append_tapered_cylinder(
+                &mut vertices,
+                &mut faces,
+                start,
+                end,
+                0.24 * scale,
+                0.24 * scale,
+                segments,
+            );
+        }
+        colored_mesh(vertices, faces)
+    }
+
     pub fn torus(major: f32, minor: f32, rings: usize, tubes: usize) -> AutomataResult<Self> {
         let major = major.max(1.0e-4);
         let minor = minor.max(1.0e-4);

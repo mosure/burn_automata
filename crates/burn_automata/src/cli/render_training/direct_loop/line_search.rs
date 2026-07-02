@@ -5,10 +5,10 @@ mod material_bias;
 use material_bias::evaluate_material_opacity_bias_line_search_candidate;
 pub(crate) use material_bias::material_opacity_bias_line_search_candidates;
 
-const DIRECT_LINE_SEARCH_KIND_SGD: &str = "sgd-scale";
+pub(crate) const DIRECT_LINE_SEARCH_KIND_SGD: &str = "sgd-scale";
 
 #[derive(Clone, Copy, Debug)]
-struct DirectLineSearchCandidateKey {
+pub(crate) struct DirectLineSearchCandidateKey {
     kind: &'static str,
     scale: f32,
     material_opacity_bias: f32,
@@ -333,7 +333,7 @@ fn update_direct_line_search_state(
     candidate_reports.push(candidate.candidate_report);
 }
 
-fn direct_line_search_candidate_report(
+pub(crate) fn direct_line_search_candidate_report(
     candidate_kind: &'static str,
     scale: f32,
     material_opacity_bias: f32,
@@ -423,7 +423,9 @@ fn direct_line_search_candidate_report(
     }
 }
 
-fn candidate_report_key(report: &DirectLineSearchCandidateReport) -> DirectLineSearchCandidateKey {
+pub(crate) fn candidate_report_key(
+    report: &DirectLineSearchCandidateReport,
+) -> DirectLineSearchCandidateKey {
     DirectLineSearchCandidateKey {
         kind: report.candidate_kind,
         scale: report.scale,
@@ -488,7 +490,7 @@ pub(crate) fn adaptive_direct_line_search_refinement_scales(
     scales
 }
 
-fn mark_selected_line_search_candidate(
+pub(crate) fn mark_selected_line_search_candidate(
     reports: &mut [DirectLineSearchCandidateReport],
     selected: DirectLineSearchCandidateKey,
     checkpoint: bool,
@@ -523,6 +525,18 @@ pub(crate) fn sanitized_direct_line_search_scales(cfg: &RenderProxyTrainingConfi
         scales.push(1.0);
     }
     scales
+}
+
+pub(crate) fn direct_line_search_followup_config(
+    cfg: &RenderProxyTrainingConfig,
+    selected_scale: Option<f32>,
+) -> RenderProxyTrainingConfig {
+    let mut followup = cfg.clone();
+    followup.direct_line_search = false;
+    if let Some(scale) = selected_scale.filter(|scale| scale.is_finite() && *scale > 0.0) {
+        followup.sgd.learning_rate *= scale;
+    }
+    followup
 }
 
 pub(crate) fn render_direct_rollout_noop_report(

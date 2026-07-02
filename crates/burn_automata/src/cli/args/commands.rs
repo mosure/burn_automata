@@ -517,16 +517,24 @@ pub(crate) enum Command {
         shared_base_cycles: Option<usize>,
         #[arg(long, default_value_t = 0x005a_173d)]
         shared_base_seed: u64,
-        #[arg(long, default_value = "core")]
+        #[arg(long, default_value = "many")]
         target_set: MeshTargetSetArg,
         #[arg(long, value_delimiter = ',')]
         targets: Vec<MeshTargetArg>,
         #[arg(long, value_delimiter = ',')]
         holdout_targets: Vec<MeshTargetArg>,
+        #[arg(long, default_value_t = 0)]
+        auto_holdout_stride: usize,
+        #[arg(long, default_value_t = 3)]
+        auto_holdout_offset: usize,
         #[arg(long, default_value = "artifacts/render_3d_adapter_suite")]
         output_dir: PathBuf,
         #[arg(long, default_value = "artifacts/render_3d_adapter_suite_report.json")]
         report_output: PathBuf,
+        #[arg(long)]
+        adapter_bank_output: Option<PathBuf>,
+        #[arg(long)]
+        skip_shared_base_eval: bool,
         #[arg(long, default_value_t = 4)]
         rounds: usize,
         #[arg(long, default_value_t = 32)]

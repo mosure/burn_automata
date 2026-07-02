@@ -61,6 +61,52 @@ fn render_selection_training_progress_can_continue_non_promotable_refinement() {
 }
 
 #[test]
+fn render_selection_training_progress_retains_mature_material_activation_breakthrough() {
+    let mut previous = render_selection_metrics_with_liveness(212.04, 0.5817, 2.476, 0.0);
+    previous.material_visible_count = 21;
+    previous.min_final_active_count = 21;
+    previous.min_newly_activated_fraction = 0.232;
+    previous.min_front_local_newly_activated_fraction = 1.0;
+    previous.max_temporal_activation_schedule_error = 0.071;
+    previous.all_temporal_activation_progressive = false;
+    previous.all_temporal_geometry_progressive = false;
+    previous.active_surface_max = 0.15;
+    previous.target_coverage_fraction = 0.009;
+    previous.material_visible_target_coverage_fraction = 0.005;
+    previous.surface_covered_bin_fraction = 0.046;
+    previous.material_visible_surface_covered_bin_fraction = 0.046;
+    previous.surface_normal_covered_bin_fraction = 0.076;
+    previous.material_visible_surface_normal_covered_bin_fraction = 0.076;
+
+    let mut continued = previous.clone();
+    continued.score = 200.83;
+    set_render_selection_metrics_render(&mut continued, 0.536, 2.840);
+    continued.material_visible_count = 24;
+    continued.min_final_active_count = 24;
+    continued.min_newly_activated_fraction = 0.286;
+    continued.max_temporal_activation_schedule_error = 0.062;
+    continued.target_coverage_fraction = 0.011;
+    continued.material_visible_target_coverage_fraction = 0.0058;
+    continued.surface_normal_covered_bin_fraction = 0.115;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&continued, &previous),
+        "non-progressive temporal geometry must not promote a mature-material checkpoint"
+    );
+    assert!(
+        render_selection_training_progress_beats(&continued, &previous),
+        "safe activation, render, strict-score, and temporal-error progress should not be rolled back before later geometry/render rounds can compound"
+    );
+
+    let mut bursty = continued.clone();
+    bursty.max_temporal_activation_schedule_error = previous.max_temporal_activation_schedule_error;
+    assert!(
+        !render_selection_training_progress_beats(&bursty, &previous),
+        "mature-material activation continuation still needs temporal schedule progress"
+    );
+}
+
+#[test]
 fn render_selection_training_progress_rejects_morphology_only_continuation() {
     let previous = render_selection_metrics_with_liveness(125.047, 0.87312, 0.6845, 0.0);
     let mut unchanged = previous.clone();

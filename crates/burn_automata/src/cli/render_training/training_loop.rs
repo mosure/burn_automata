@@ -76,6 +76,9 @@ pub(crate) fn run_render_proxy_training(
     let mut best_model = model.clone();
     let mut best_adapter = adapter_state.as_ref().map(|state| state.adapter.clone());
     let mut best_selection = initial_selection.clone();
+    let mut best_progress_model = None::<NpaModel>;
+    let mut best_progress_adapter = None::<Option<NpaLowRankAdapter>>;
+    let mut best_progress_selection = None::<RenderSelectionMetrics>;
     let mut selected_round = None;
     let mut history = Vec::with_capacity(cfg.rounds);
 
@@ -274,8 +277,18 @@ pub(crate) fn run_render_proxy_training(
             best_selection = selection.clone();
             selected_round = Some(round);
         }
-        let continue_training_checkpoint = selected_checkpoint
-            || render_selection_training_progress_beats(&selection, &before_selection);
+        let progress_continuation = !selected_checkpoint
+            && render_selection_training_progress_beats(&selection, &before_selection);
+        if progress_continuation
+            && best_progress_selection.as_ref().is_none_or(|best| {
+                render_selection_progress_candidate_preferred(&selection, best, &initial_selection)
+            })
+        {
+            best_progress_model = Some(model.clone());
+            best_progress_adapter = Some(adapter_state.as_ref().map(|state| state.adapter.clone()));
+            best_progress_selection = Some(selection.clone());
+        }
+        let continue_training_checkpoint = selected_checkpoint || progress_continuation;
         let rolled_back_to_best_checkpoint = !continue_training_checkpoint;
         let reported_train_step_scale = if rolled_back_to_best_checkpoint {
             0.0
@@ -451,6 +464,16 @@ pub(crate) fn run_render_proxy_training(
             if let (Some(state), Some(adapter)) = (adapter_state.as_mut(), best_adapter.as_ref()) {
                 state.adapter = adapter.clone();
             }
+        }
+    }
+    if selected_round.is_none()
+        && let Some(progress_model) = best_progress_model
+    {
+        *model = progress_model;
+        if let (Some(state), Some(progress_adapter)) =
+            (adapter_state.as_mut(), best_progress_adapter.flatten())
+        {
+            state.adapter = progress_adapter;
         }
     }
     let final_render_loss = mesh_multiview_render_loss_from_trace(

@@ -212,6 +212,114 @@ fn render_proxy_history_records_direct_line_search_candidates() {
 }
 
 #[test]
+fn direct_line_search_runs_once_per_round_with_multi_inner_steps() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let mut model =
+        local_growth_student_model(config, 22, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
+    let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
+    let cfg = RenderProxyTrainingConfig {
+        supervised_steps_per_round: 3,
+        particles: 24,
+        rollout_steps: 2,
+        gradient_particles: 24,
+        perception_position_gain: 1.0,
+        direct_line_search: true,
+        direct_line_search_scales: vec![0.5, 1.0, 2.0],
+        seed: 19,
+        seed_scale: 0.72,
+        seed_mode: ParticleSeed::UniformCircle,
+        render: RenderLossConfig {
+            image_size: 8,
+            target_samples: 48,
+            world_scale: 1.44,
+            ..RenderLossConfig::default()
+        },
+        sgd: SgdConfig {
+            learning_rate: 1.0e-3,
+            grad_clip_norm: 1.0,
+            weight_decay: 0.0,
+        },
+        ..direct_rollout_test_config()
+    };
+
+    let report = run_render_proxy_training(&mut model, &grid, &target, cfg).unwrap();
+    let history = &report.history[0];
+
+    assert_eq!(history.train_step_count, 3);
+    assert!(history.direct_line_search_candidates.len() >= 3);
+    assert!(
+        history
+            .direct_line_search_candidates
+            .iter()
+            .all(|candidate| candidate.inner_step == 0),
+        "strict line-search selection should be amortized once per round, not repeated for every inner step"
+    );
+}
+
+#[test]
+fn adapter_line_search_reports_candidates_once_per_round_with_multi_inner_steps() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let mut model =
+        local_growth_student_model(config, 24, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
+    let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
+    let cfg = RenderProxyTrainingConfig {
+        supervised_steps_per_round: 3,
+        particles: 24,
+        rollout_steps: 2,
+        gradient_particles: 24,
+        perception_position_gain: 1.0,
+        direct_line_search: true,
+        direct_line_search_scales: vec![0.5, 1.0, 2.0],
+        direct_selection_seed_training: false,
+        weight_update_mode: RenderWeightUpdateModeArg::Adapter,
+        adapter_rank: 2,
+        adapter_alpha: 2.0,
+        adapter_seed: 31,
+        seed: 23,
+        seed_scale: 0.72,
+        seed_mode: ParticleSeed::UniformCircle,
+        render: RenderLossConfig {
+            image_size: 8,
+            target_samples: 48,
+            world_scale: 1.44,
+            ..RenderLossConfig::default()
+        },
+        sgd: SgdConfig {
+            learning_rate: 1.0e-3,
+            grad_clip_norm: 1.0,
+            weight_decay: 0.0,
+        },
+        ..direct_rollout_test_config()
+    };
+
+    let report = run_render_proxy_training(&mut model, &grid, &target, cfg).unwrap();
+    let history = &report.history[0];
+
+    assert_eq!(
+        report.weight_update.mode,
+        RenderWeightUpdateModeArg::Adapter
+    );
+    assert_eq!(history.train_step_count, 3);
+    assert!(history.direct_line_search_candidates.len() >= 3);
+    assert!(
+        history
+            .direct_line_search_candidates
+            .iter()
+            .all(|candidate| candidate.inner_step == 0),
+        "adapter line-search selection should be amortized once per round, not repeated for every inner step"
+    );
+    let selected_count = history
+        .direct_line_search_candidates
+        .iter()
+        .filter(|candidate| candidate.selected_checkpoint || candidate.selected_progress)
+        .count();
+    assert!(selected_count <= 1);
+    assert!(report.trained_adapter.is_some());
+}
+
+#[test]
 fn render_proxy_report_records_adapter_weight_update_metadata() {
     let config = NpaConfig::growing_3dgs();
     let grid = crate::kernels::HashGridConfig::growing_3dgs();

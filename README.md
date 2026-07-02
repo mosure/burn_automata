@@ -107,7 +107,17 @@ matching local 3D growth seed; catalog-bound candidates are validated from a
 temporary `target/` path and only promoted after strict app-scale multi-seed
 growth validation passes at the 1024-particle catalog and viewer horizons.
 Legacy, ablation, and retiming 3D commands refuse
-catalog-bound output paths entirely:
+catalog-bound output paths entirely. The preferred scaling path is the
+many-object shared-base plus LoRA suite:
+
+```bash
+cargo run -p burn_automata --release --bin burn_automata -- train-render3d-adapters \
+  --target-set many \
+  --output-dir artifacts/render_3d_adapter_suite \
+  --report-output artifacts/render_3d_adapter_suite_report.json
+```
+
+Use single-target `train-render3d` commands for focused diagnostics:
 
 ```bash
 cargo run -p burn_automata --release --bin burn_automata -- train-render3d \
@@ -142,22 +152,37 @@ provided local-growth BPK as a frozen shared base and trains a LoRA-style
 low-rank object adapter (`--adapter-rank`, `--adapter-alpha`,
 `--adapter-seed`). Reports serialize the adapter parameter count and base/full
 parameter counts; the exported `.bpk` is a materialized compatibility model.
-For many-object shared-base sweeps, use `train-render3d-adapters`. The default
-`--target-set core` covers torus and teapot; `--target-set primitives` expands
-to sphere, ellipsoid, cube, cylinder, cone, and capsule; `--target-set many`
-uses both groups. Explicit `--targets` can run focused subsets, and
+For many-object shared-base sweeps, use `train-render3d-adapters`. It defaults
+to `--target-set many`, covering torus, teapot, sphere, ellipsoid, cube,
+cylinder, cone, capsule, pyramid, bicone, dumbbell, and cross. `--target-set
+core` is the smaller torus/teapot diagnostic set, and `--target-set primitives`
+expands to the ten object-agnostic procedural mesh classes. Explicit
+`--targets` runs focused subsets.
 `--holdout-targets` removes targets from shared-base cycles while still fitting
-adapter-only held-out objects. Without `--base-model`, the suite initializes an
-object-agnostic conditionless-local 3D growth base, alternates full-weight
-shared-base training for `--shared-base-cycles` cycles, saves
-`shared_base.bpk`, then freezes that base and trains one compact
-`.adapter.json` LoRA artifact per target. With `--base-model`, the suite
-freezes the supplied base by default; pass `--shared-base-cycles` to continue
-shared-base training before adapter fitting. Materialized validation/viewer
-BPKs are written beside the adapters, and the suite report records both
-single-adapter efficiency and shared-base-plus-adapter-bank efficiency. Use
-`--weight-update-mode full` only for
-legacy full-model ablations. The backend
+adapter-only held-out objects. By default, no-arg many-object suites use an
+effective `--auto-holdout-stride 4 --auto-holdout-offset 3`, holding out
+ellipsoid, capsule, and cross while keeping torus and teapot in shared-base
+training; override these flags for a different split. Without `--base-model`,
+the suite initializes an object-agnostic conditionless-local 3D growth base,
+alternates full-weight shared-base training for `--shared-base-cycles` cycles
+(`many` defaults to two cycles), saves `shared_base.bpk`, evaluates that frozen
+base on every target, then trains one compact `.adapter.json` LoRA artifact per
+target. With `--base-model`, the suite freezes the supplied base by default;
+pass `--shared-base-cycles` to continue shared-base training before adapter
+fitting. Materialized validation/viewer BPKs are written beside the adapters,
+and the suite report records shared-base generalization, adapted train/holdout
+quality, explicit shared/holdout/adapter target counts, single-adapter
+efficiency, and shared-base-plus-adapter-bank efficiency. The suite also writes
+`adapter_bank.json` by default; this compact manifest includes the same split
+counts and is the intended target format for future HyperNPA models that
+predict object LoRA adapters from conditions. Both the suite report and
+adapter-bank manifest include `strategy="shared_base_low_rank_object_adapters"`
+and a `contract` block. The no-arg many-object contract fails if the run
+collapses back to only torus/teapot, if too few non-core objects participate, or
+if adapters are not produced for every target. Use `train-render3d` for
+single-target diagnostics and `--target-set core` only for the small
+torus/teapot regression suite; use `--weight-update-mode full` only for legacy
+full-model ablations. The backend
 backpropagates the deterministic CPU multi-view splat loss analytically to
 final particle positions, opacity, and color, and applies those adjoints through
 the stored rollout MLP outputs. It also

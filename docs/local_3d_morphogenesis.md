@@ -22,9 +22,18 @@ sets.
 this direction. It trains one shared conditionless-local base over the selected
 training targets, optionally reserves `--holdout-targets` for adapter-only
 generalization checks, and emits a shared BPK plus compact LoRA adapter JSON
-files. The built-in primitive set (sphere, ellipsoid, cube, cylinder, cone, and
-capsule) exists to stress shared local dynamics across more than torus/teapot
-without introducing object-specific particle seeds.
+files. The built-in primitive set (sphere, ellipsoid, cube, cylinder, cone,
+capsule, pyramid, bicone, dumbbell, and cross) exists to stress shared local
+dynamics across more than torus/teapot without introducing object-specific
+particle seeds.
+
+The suite report and `adapter_bank.json` manifest include
+`strategy="shared_base_low_rank_object_adapters"` plus a coverage contract. The
+default no-arg `many` contract must include at least eight targets, at least six
+non-core targets, at least six shared-base split targets, at least two held-out
+adapter-only targets, and one adapter artifact for every target. Small
+torus/teapot runs remain available as `--target-set core` diagnostics, but they
+are no longer allowed to masquerade as the many-object scaling path.
 
 ## Alignment Contract
 
@@ -143,22 +152,28 @@ The shared-base adapter path now has core training support:
   count, shared-base parameter count, materialized parameter count, and the
   fact that the current BPK export is a materialized compatibility artifact.
 - Adapter manifests are now first-class JSON artifacts.
-  `train-render3d-adapters --targets torus,teapot` initializes an
-  object-agnostic conditionless-local 3D growth base when `--base-model` is
-  omitted, alternates full-weight shared-base training for
-  `--shared-base-cycles` cycles, saves `shared_base.bpk`, then freezes that base
-  and trains one LoRA adapter per target. With `--base-model`, shared-base
-  cycles default to zero so existing bases stay frozen unless continuation is
-  requested explicitly. The suite saves `<target>.adapter.json`, saves a
-  materialized `<target>_materialized.bpk` only for validation/viewer
-  compatibility, and writes a report with shared-base training entries,
-  adapter-to-full parameter efficiency, and strict growth/render validation for
-  each target.
+  `train-render3d-adapters` initializes an object-agnostic conditionless-local
+  3D growth base when `--base-model` is omitted, runs the full built-in
+  many-object target bank by default, alternates full-weight shared-base
+  training for
+  `--shared-base-cycles` cycles, saves `shared_base.bpk`, evaluates that frozen
+  base on all suite targets, then trains one LoRA adapter per target. With
+  `--base-model`, shared-base cycles default to zero so existing bases stay
+  frozen unless continuation is requested explicitly. `--target-set core` is
+  the smaller torus/teapot diagnostic subset. The no-arg many-object path
+  defaults to two shared-base cycles and an effective
+  `--auto-holdout-stride 4 --auto-holdout-offset 3`, giving held-out
+  adapter-only splits as the object bank grows. The suite saves
+  `<target>.adapter.json`, saves a materialized `<target>_materialized.bpk` only
+  for validation/viewer compatibility, writes aggregate shared-base and adapted
+  train/holdout summaries with explicit target/split counts, and emits
+  `adapter_bank.json` as the compact condition-to-LoRA supervision artifact for
+  HyperNPA experiments.
 
 The next promotion-facing training experiments should use the same
-rollout/render objectives on a shared base model and train per-target adapters
-for torus, teapot, and future meshes before considering full-weight
-specialization.
+rollout/render objectives on a shared base model, train per-target adapters for
+many objects, and evaluate both train and held-out adapter-only splits before
+considering full-weight specialization.
 
 Object-specific particle seeds are explicitly not the desired abstraction for
 new models. They remain only to load and validate historical torus/teapot

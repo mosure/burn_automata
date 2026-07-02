@@ -77,6 +77,10 @@ pub(crate) enum MeshTargetArg {
     Cylinder,
     Cone,
     Capsule,
+    Pyramid,
+    Bicone,
+    Dumbbell,
+    Cross,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]

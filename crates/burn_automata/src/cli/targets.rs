@@ -124,6 +124,22 @@ pub(crate) const CAPSULE_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
     "capsule-primitive-2026:conditionless-local-substrate-rollout-ablation";
 pub(crate) const CAPSULE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
     "capsule-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const PYRAMID_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "pyramid-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const PYRAMID_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "pyramid-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const BICONE_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "bicone-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const BICONE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "bicone-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const DUMBBELL_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "dumbbell-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const DUMBBELL_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "dumbbell-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
+pub(crate) const CROSS_CONDITIONLESS_LOCAL_TARGET_SOURCE: &str =
+    "cross-primitive-2026:conditionless-local-substrate-rollout-ablation";
+pub(crate) const CROSS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE: &str =
+    "cross-primitive-2026:conditionless-local-substrate-no-scaffold-rollout-ablation";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MeshTargetTrainingProfile {
@@ -210,6 +226,26 @@ pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetT
             CAPSULE_CONDITIONLESS_LOCAL_TARGET_SOURCE,
             "capsule-primitive-2026",
         ),
+        MeshTargetArg::Pyramid => primitive_mesh_target_training_profile(
+            target,
+            PYRAMID_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "pyramid-primitive-2026",
+        ),
+        MeshTargetArg::Bicone => primitive_mesh_target_training_profile(
+            target,
+            BICONE_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "bicone-primitive-2026",
+        ),
+        MeshTargetArg::Dumbbell => primitive_mesh_target_training_profile(
+            target,
+            DUMBBELL_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "dumbbell-primitive-2026",
+        ),
+        MeshTargetArg::Cross => primitive_mesh_target_training_profile(
+            target,
+            CROSS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+            "cross-primitive-2026",
+        ),
     }
 }
 
@@ -223,6 +259,10 @@ pub(crate) fn mesh_target_set_targets(target_set: MeshTargetSetArg) -> Vec<MeshT
             MeshTargetArg::Cylinder,
             MeshTargetArg::Cone,
             MeshTargetArg::Capsule,
+            MeshTargetArg::Pyramid,
+            MeshTargetArg::Bicone,
+            MeshTargetArg::Dumbbell,
+            MeshTargetArg::Cross,
         ],
         MeshTargetSetArg::Many => vec![
             MeshTargetArg::Torus,
@@ -233,6 +273,10 @@ pub(crate) fn mesh_target_set_targets(target_set: MeshTargetSetArg) -> Vec<MeshT
             MeshTargetArg::Cylinder,
             MeshTargetArg::Cone,
             MeshTargetArg::Capsule,
+            MeshTargetArg::Pyramid,
+            MeshTargetArg::Bicone,
+            MeshTargetArg::Dumbbell,
+            MeshTargetArg::Cross,
         ],
     }
 }
@@ -293,6 +337,14 @@ pub(crate) fn mesh_target_for_arg(target: MeshTargetArg, scale: f32) -> Triangle
             .expect("cone target mesh generation should be valid"),
         MeshTargetArg::Capsule => TriangleMeshTarget::capsule(scale, 24)
             .expect("capsule target mesh generation should be valid"),
+        MeshTargetArg::Pyramid => TriangleMeshTarget::pyramid(scale)
+            .expect("pyramid target mesh generation should be valid"),
+        MeshTargetArg::Bicone => TriangleMeshTarget::bicone(scale, 48)
+            .expect("bicone target mesh generation should be valid"),
+        MeshTargetArg::Dumbbell => TriangleMeshTarget::dumbbell(scale, 24)
+            .expect("dumbbell target mesh generation should be valid"),
+        MeshTargetArg::Cross => TriangleMeshTarget::cross(scale, 24)
+            .expect("cross target mesh generation should be valid"),
     }
 }
 
@@ -306,6 +358,10 @@ pub(crate) fn mesh_target_slug(target: MeshTargetArg) -> &'static str {
         MeshTargetArg::Cylinder => "cylinder",
         MeshTargetArg::Cone => "cone",
         MeshTargetArg::Capsule => "capsule",
+        MeshTargetArg::Pyramid => "pyramid",
+        MeshTargetArg::Bicone => "bicone",
+        MeshTargetArg::Dumbbell => "dumbbell",
+        MeshTargetArg::Cross => "cross",
     }
 }
 
@@ -361,6 +417,18 @@ pub(crate) fn mesh_conditionless_local_target_source_for_seed(
         }
         (MeshTargetArg::Capsule, ParticleSeed::LocalSubstrateGrowth3d) => {
             CAPSULE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Pyramid, ParticleSeed::LocalSubstrateGrowth3d) => {
+            PYRAMID_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Bicone, ParticleSeed::LocalSubstrateGrowth3d) => {
+            BICONE_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Dumbbell, ParticleSeed::LocalSubstrateGrowth3d) => {
+            DUMBBELL_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Cross, ParticleSeed::LocalSubstrateGrowth3d) => {
+            CROSS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
         }
         (MeshTargetArg::Torus, ParticleSeed::TorusGrowth3d) => {
             UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE

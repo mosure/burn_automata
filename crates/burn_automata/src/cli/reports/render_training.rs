@@ -22,16 +22,25 @@ pub(crate) struct CliRenderTrainingReport {
 
 #[derive(Serialize)]
 pub(crate) struct CliRenderAdapterSuiteReport {
+    pub(crate) strategy: CliRenderAdapterSuiteStrategy,
+    pub(crate) contract: CliRenderAdapterSuiteContract,
     pub(crate) base_model_input: Option<String>,
     pub(crate) base_model: String,
     pub(crate) base_source: Option<String>,
     pub(crate) shared_base_initialized: bool,
     pub(crate) shared_base_cycles: usize,
     pub(crate) shared_base_training: Vec<CliRenderAdapterSuiteBaseEntry>,
+    pub(crate) shared_base_eval_enabled: bool,
+    pub(crate) shared_base_evaluations: Vec<CliRenderAdapterSuiteBaseEvalEntry>,
     pub(crate) output_dir: String,
+    pub(crate) adapter_bank_manifest: String,
     pub(crate) target_set: MeshTargetSetArg,
     pub(crate) targets: Vec<MeshTargetArg>,
     pub(crate) shared_base_targets: Vec<MeshTargetArg>,
+    pub(crate) adapter_training_targets: Vec<MeshTargetArg>,
+    pub(crate) auto_holdout_stride: usize,
+    pub(crate) auto_holdout_offset: usize,
+    pub(crate) auto_holdout_targets: Vec<MeshTargetArg>,
     pub(crate) holdout_targets: Vec<MeshTargetArg>,
     pub(crate) particle_count: usize,
     pub(crate) rollout_steps: usize,
@@ -45,11 +54,16 @@ pub(crate) struct CliRenderAdapterSuiteReport {
     pub(crate) target_count: usize,
     pub(crate) shared_base_target_count: usize,
     pub(crate) holdout_target_count: usize,
+    pub(crate) shared_base_training_visit_count: usize,
+    pub(crate) adapter_training_target_count: usize,
     pub(crate) adapter_total_parameter_count: usize,
     pub(crate) full_bank_parameter_count: usize,
     pub(crate) shared_plus_adapter_parameter_count: usize,
     pub(crate) shared_plus_adapter_to_full_bank_ratio: f32,
     pub(crate) shared_plus_adapter_savings_ratio: f32,
+    pub(crate) shared_base_summary: CliRenderAdapterSuiteValidationSummary,
+    pub(crate) adapter_summary: CliRenderAdapterSuiteValidationSummary,
+    pub(crate) split_summaries: Vec<CliRenderAdapterSuiteSplitSummary>,
     pub(crate) training_signal_passed: bool,
     pub(crate) missing_train_signal: Vec<CliRenderAdapterSuiteTrainingSignalGap>,
     pub(crate) entries: Vec<CliRenderAdapterSuiteEntry>,
@@ -62,6 +76,16 @@ pub(crate) struct CliRenderAdapterSuiteBaseEntry {
     pub(crate) seed_scale: f32,
     pub(crate) seed_mode: ParticleSeed,
     pub(crate) report: RenderProxyTrainingReport,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliRenderAdapterSuiteBaseEvalEntry {
+    pub(crate) target: MeshTargetArg,
+    pub(crate) split: CliRenderAdapterSuiteSplit,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) strict_gate_summary: CliRenderTrainingGateSummary,
+    pub(crate) growth_validation: CliGrowth3dValidationReport,
 }
 
 #[derive(Serialize)]
@@ -83,6 +107,108 @@ pub(crate) struct CliRenderAdapterSuiteEntry {
 pub(crate) enum CliRenderAdapterSuiteSplit {
     SharedBaseTrain,
     HoldoutAdapterOnly,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CliRenderAdapterSuiteValidationSummary {
+    pub(crate) target_count: usize,
+    pub(crate) strict_pass_count: usize,
+    pub(crate) gate_pass_count: usize,
+    pub(crate) catalog_sanity_pass_count: usize,
+    pub(crate) strict_pass_rate: f32,
+    pub(crate) gate_pass_rate: f32,
+    pub(crate) catalog_sanity_pass_rate: f32,
+    pub(crate) mean_strict_score: f32,
+    pub(crate) max_strict_score: f32,
+    pub(crate) mean_render_loss: f32,
+    pub(crate) max_render_loss: f32,
+    pub(crate) mean_density_psnr_db: f32,
+    pub(crate) min_density_psnr_db: f32,
+    pub(crate) mean_color_psnr_db: f32,
+    pub(crate) mean_depth_psnr_db: f32,
+    pub(crate) mean_active_count_delta: f32,
+    pub(crate) min_active_count_delta: isize,
+    pub(crate) mean_newly_activated_fraction: f32,
+    pub(crate) min_newly_activated_fraction: f32,
+    pub(crate) all_local_conditionless_lineage: bool,
+    pub(crate) all_target_seed_conditionless_lineage: bool,
+    pub(crate) all_object_agnostic_growth_seed_mode: bool,
+    pub(crate) all_target_growth_seed_mode: bool,
+    pub(crate) all_no_seed_coordinate_scaffold: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CliRenderAdapterSuiteSplitSummary {
+    pub(crate) split: CliRenderAdapterSuiteSplit,
+    pub(crate) shared_base: CliRenderAdapterSuiteValidationSummary,
+    pub(crate) adapted: CliRenderAdapterSuiteValidationSummary,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliRenderAdapterBankManifest {
+    pub(crate) schema_version: u32,
+    pub(crate) strategy: CliRenderAdapterSuiteStrategy,
+    pub(crate) contract: CliRenderAdapterSuiteContract,
+    pub(crate) base_model: String,
+    pub(crate) base_source: Option<String>,
+    pub(crate) target_set: MeshTargetSetArg,
+    pub(crate) targets: Vec<MeshTargetArg>,
+    pub(crate) shared_base_targets: Vec<MeshTargetArg>,
+    pub(crate) holdout_targets: Vec<MeshTargetArg>,
+    pub(crate) target_count: usize,
+    pub(crate) shared_base_target_count: usize,
+    pub(crate) holdout_target_count: usize,
+    pub(crate) adapter_target_count: usize,
+    pub(crate) adapter_rank: usize,
+    pub(crate) adapter_alpha: f32,
+    pub(crate) base_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) adapter_to_full_ratio: f32,
+    pub(crate) shared_plus_adapter_to_full_bank_ratio: f32,
+    pub(crate) entries: Vec<CliRenderAdapterBankEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CliRenderAdapterSuiteStrategy {
+    SharedBaseLowRankObjectAdapters,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CliRenderAdapterSuiteContract {
+    pub(crate) many_object_default: bool,
+    pub(crate) explicit_targets_requested: bool,
+    pub(crate) target_count: usize,
+    pub(crate) core_target_count: usize,
+    pub(crate) non_core_target_count: usize,
+    pub(crate) shared_base_target_count: usize,
+    pub(crate) holdout_target_count: usize,
+    pub(crate) adapter_target_count: usize,
+    pub(crate) minimum_many_target_count: usize,
+    pub(crate) minimum_many_non_core_target_count: usize,
+    pub(crate) minimum_many_shared_base_target_count: usize,
+    pub(crate) minimum_many_holdout_target_count: usize,
+    pub(crate) target_count_passed: bool,
+    pub(crate) non_core_target_count_passed: bool,
+    pub(crate) shared_base_target_count_passed: bool,
+    pub(crate) holdout_target_count_passed: bool,
+    pub(crate) adapters_cover_all_targets: bool,
+    pub(crate) contract_passed: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliRenderAdapterBankEntry {
+    pub(crate) target: MeshTargetArg,
+    pub(crate) split: CliRenderAdapterSuiteSplit,
+    pub(crate) adapter_output: String,
+    pub(crate) materialized_model_output: String,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) strict_passed: bool,
+    pub(crate) strict_score: f32,
+    pub(crate) render_total_loss: f32,
+    pub(crate) density_psnr_db: f32,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -132,6 +258,7 @@ impl CliCatalogPromotionSummary {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct CliRenderTrainingGateSummary {
     pub(crate) target: MeshTargetArg,
+    pub(crate) seed_mode: ParticleSeed,
     pub(crate) source: Option<String>,
     pub(crate) strict_passed: bool,
     pub(crate) gate_passed: bool,
@@ -143,6 +270,7 @@ pub(crate) struct CliRenderTrainingGateSummary {
     pub(crate) local_conditionless_lineage: bool,
     pub(crate) target_conditionless_lineage: bool,
     pub(crate) target_seed_conditionless_lineage: bool,
+    pub(crate) object_agnostic_growth_seed_mode: bool,
     pub(crate) target_growth_seed_mode: bool,
     pub(crate) no_seed_coordinate_scaffold: bool,
     pub(crate) neutral_non_opacity_seed_state: bool,
@@ -197,6 +325,7 @@ impl CliRenderTrainingGateSummary {
     pub(crate) fn from_validation(report: &CliGrowth3dValidationReport) -> Self {
         Self {
             target: report.target,
+            seed_mode: report.seed_mode,
             source: report.source.clone(),
             strict_passed: report.strict_passed,
             gate_passed: report.gate_passed,
@@ -210,6 +339,7 @@ impl CliRenderTrainingGateSummary {
             target_seed_conditionless_lineage: report
                 .strict_checks
                 .target_seed_conditionless_lineage,
+            object_agnostic_growth_seed_mode: object_agnostic_growth_seed_mode(report.seed_mode),
             target_growth_seed_mode: report.strict_checks.target_growth_seed_mode,
             no_seed_coordinate_scaffold: report.strict_checks.no_seed_coordinate_scaffold,
             neutral_non_opacity_seed_state: report.strict_checks.neutral_non_opacity_seed_state,

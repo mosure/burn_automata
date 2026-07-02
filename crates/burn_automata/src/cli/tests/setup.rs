@@ -236,8 +236,12 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
         target_set,
         targets,
         holdout_targets,
+        auto_holdout_stride,
+        auto_holdout_offset,
         output_dir,
         training_backend,
+        adapter_bank_output,
+        skip_shared_base_eval,
         adapter_rank,
         adapter_alpha,
         particles,
@@ -249,13 +253,17 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
     assert_eq!(base_model, None);
     assert_eq!(shared_base_output, None);
     assert_eq!(shared_base_cycles, None);
-    assert_eq!(target_set, MeshTargetSetArg::Core);
+    assert_eq!(target_set, MeshTargetSetArg::Many);
     assert!(targets.is_empty());
     assert!(holdout_targets.is_empty());
+    assert_eq!(auto_holdout_stride, 0);
+    assert_eq!(auto_holdout_offset, 3);
     assert_eq!(
         output_dir,
         PathBuf::from("artifacts/render_3d_adapter_suite")
     );
+    assert_eq!(adapter_bank_output, None);
+    assert!(!skip_shared_base_eval);
     assert_eq!(training_backend, RenderTrainingBackendArg::DirectRollout);
     assert_eq!(adapter_rank, 8);
     assert_eq!(adapter_alpha, 8.0);
@@ -288,12 +296,23 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
         "many",
         "--holdout-targets",
         "capsule,teapot",
+        "--auto-holdout-stride",
+        "3",
+        "--auto-holdout-offset",
+        "1",
+        "--adapter-bank-output",
+        "target/adapter_bank.json",
+        "--skip-shared-base-eval",
     ])
     .unwrap();
     let Command::TrainRender3dAdapters {
         target_set,
         targets,
         holdout_targets,
+        auto_holdout_stride,
+        auto_holdout_offset,
+        adapter_bank_output,
+        skip_shared_base_eval,
         ..
     } = args.command
     else {
@@ -305,6 +324,13 @@ fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
         holdout_targets,
         vec![MeshTargetArg::Capsule, MeshTargetArg::Teapot]
     );
+    assert_eq!(auto_holdout_stride, 3);
+    assert_eq!(auto_holdout_offset, 1);
+    assert_eq!(
+        adapter_bank_output,
+        Some(PathBuf::from("target/adapter_bank.json"))
+    );
+    assert!(skip_shared_base_eval);
 }
 
 #[test]
@@ -715,14 +741,20 @@ fn mesh_target_sets_expand_to_many_object_suites() {
             MeshTargetArg::Cylinder,
             MeshTargetArg::Cone,
             MeshTargetArg::Capsule,
+            MeshTargetArg::Pyramid,
+            MeshTargetArg::Bicone,
+            MeshTargetArg::Dumbbell,
+            MeshTargetArg::Cross,
         ]
     );
     let many = mesh_target_set_targets(MeshTargetSetArg::Many);
-    assert_eq!(many.len(), 8);
+    assert_eq!(many.len(), 12);
     assert!(many.contains(&MeshTargetArg::Torus));
     assert!(many.contains(&MeshTargetArg::Teapot));
     assert!(many.contains(&MeshTargetArg::Sphere));
     assert!(many.contains(&MeshTargetArg::Capsule));
+    assert!(many.contains(&MeshTargetArg::Pyramid));
+    assert!(many.contains(&MeshTargetArg::Cross));
 }
 
 #[test]

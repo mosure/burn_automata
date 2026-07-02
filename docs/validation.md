@@ -128,18 +128,31 @@ For shared-weight experiments, `train-render3d-adapters` is the preferred
 multi-object harness. Without `--base-model`, it initializes an object-agnostic
 conditionless-local 3D growth base, alternates full-weight shared-base training
 over the training split for `--shared-base-cycles`, saves that base, then
-freezes it while fitting one compact LoRA adapter per target. `--target-set
-core` covers torus and teapot, `--target-set primitives` covers sphere,
-ellipsoid, cube, cylinder, cone, and capsule, and `--target-set many` combines
-both groups. `--holdout-targets` excludes named targets from shared-base cycles
-but still trains adapters for them, giving a direct adapter-only generalization
-probe. With `--base-model`, shared-base cycles default to zero so the supplied
-base is preserved unless continuation is requested explicitly. The suite report
-records the shared-base training entries separately from each adapter's strict
-growth/render validation, plus the full-bank parameter count versus
-shared-base-plus-adapter-bank count; these artifacts still remain diagnostic
-until the strict gates pass. The suite report also rolls direct training-signal
-health up to `training_signal_passed` and `missing_train_signal`, covering both
+freezes it while fitting one compact LoRA adapter per target. The command
+defaults to `--target-set many`, covering torus, teapot, sphere, ellipsoid,
+cube, cylinder, cone, capsule, pyramid, bicone, dumbbell, and cross.
+`--target-set core` is now the smaller torus/teapot diagnostic set, while
+`--target-set primitives` covers the ten object-agnostic procedural mesh
+classes. `--holdout-targets` excludes
+named targets from shared-base cycles but still trains adapters for them,
+giving a direct adapter-only generalization probe. No-arg many-object suites
+use an effective `--auto-holdout-stride 4 --auto-holdout-offset 3`, holding out
+ellipsoid, capsule, and cross while keeping torus and teapot in shared-base
+training; override `--auto-holdout-stride` and `--auto-holdout-offset` for a
+different split. With
+`--base-model`, shared-base cycles default to zero so the supplied base is
+preserved unless continuation is requested explicitly; without a base,
+`--target-set many` defaults to two shared-base cycles so the shared dynamics
+see every training object more than once. The suite evaluates the frozen shared
+base across every target before adapter fitting, then records shared-base and
+adapted aggregate summaries split by training versus held-out targets. It also
+writes a compact `adapter_bank.json` manifest containing the shared BPK, every
+LoRA adapter path, explicit target/split counts, split metadata, parameter
+efficiency, and validation scores.
+That manifest is the preferred supervision target for future HyperNPA
+condition-to-adapter experiments. These artifacts still remain diagnostic until
+the strict gates pass. The suite report also rolls direct training-signal health
+up to `training_signal_passed` and `missing_train_signal`, covering both
 shared-base cycles and per-target adapters.
 
 Each direct-rollout history entry also reports
@@ -2140,3 +2153,88 @@ surface-motion supervision; it is converting those bounded local output
 gradients into larger accepted recurrent rollout dynamics under line-search,
 SGD clipping, and strict render/nonregression selection. No catalog model was
 promoted.
+
+## 2026-07-02 Mature-Material Continuation Retention
+
+Compact full-weight diagnostics showed a selection bug rather than a missing
+objective: safe local-front progress could improve strict score, render loss,
+activation count, and temporal schedule error, but was still rolled back
+because the mature visible-material guard required temporal geometry to already
+be fully progressive. That guard remains in checkpoint promotion, but training
+continuation now has a narrower path for non-promoted progress when all of
+these generic signals improve together:
+
+- active count/newly activated fraction;
+- max render loss or minimum density PSNR;
+- strict score;
+- temporal activation schedule error.
+
+The continuation path still requires bounded dormant drift, bounded inactive
+material visibility, local-front activation, and temporal non-regression. It
+does not make a checkpoint selectable and does not relax catalog promotion.
+
+Focused regression:
+`render_selection_training_progress_retains_mature_material_activation_breakthrough`
+accepts the measured safe-continuation pattern while still rejecting the same
+candidate if temporal schedule error does not improve. Existing mature
+material-only continuation tests continue to reject static target-surface
+approach without progressive temporal geometry.
+
+Rerun compact diagnostics:
+
+| probe | retained rounds | strict score | render total | density PSNR | active growth | strict gate |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| `target/goal_full_weight_torus_diag_after_retention.json` | `2/2` | `178.669` | `0.490` | `3.243` | `8 -> 28` | failed |
+| `target/goal_full_weight_teapot_diag_after_retention.json` | `2/2` | `189.917` | `0.590` | `2.371` | `8 -> 21` | failed |
+
+These are still diagnostic runs, not promoted artifacts. The strict blockers
+remain coverage, surface-normal support, temporal geometry, and render density;
+the change only lets safe rollout-level improvements compound across rounds
+instead of being reverted before the next objective step.
+
+## 2026-07-02 Progress-Candidate Final Fallback
+
+Strict-score line search was selecting useful non-promoted progress candidates,
+but repeated inner steps could degrade them before the round ended. The direct
+training loop now restores the best bounded progress candidate at the end of a
+round when no strict checkpoint was found. The outer training loop also keeps
+the best non-promoted continuation candidate as the final diagnostic artifact
+when no strict checkpoint exists at all. This does not mark the candidate as a
+selected checkpoint, does not alter catalog promotion gates, and still validates
+the exact model written to disk.
+
+Compact two-round full-weight local 3D probes:
+
+| probe | render total | density PSNR | strict score | active growth | newly activated | extent bbox | normal bins | strict gate |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| previous torus line-search probe | `0.415` | `3.989` | `188.746` | `8 -> 30` | `0.393` | `0.137` | `0.192` | failed |
+| `target/goal_progress_fallback_torus.json` | `0.378` | `4.414` | `147.750` | `8 -> 38` | `0.536` | `0.390` | `0.385` | failed |
+| previous teapot line-search probe | `0.664` | `1.855` | `201.151` | `8 -> 15` | `0.125` | `0.097` | `0.0` | failed |
+| `target/goal_progress_fallback_teapot.json` | `0.495` | `3.143` | `178.655` | `8 -> 34` | `0.464` | `0.551` | `0.385` | failed |
+
+This is aligned progress, not completion. Torus still fails local-front
+coherence, temporal activation/geometry, target coverage, material-visible
+coverage, surface-normal coverage, and render-density gates. Teapot still fails
+newly activated fraction, local-front coherence, temporal activation/geometry,
+surface bounds/tails, target/material coverage, normal coverage, and render.
+No catalog model was promoted.
+
+## 2026-07-02 Many-Object Adapter-Suite Contract
+
+The shared-base plus LoRA path is now validated separately from strict
+morphogenesis quality. `train-render3d-adapters` writes
+`strategy="shared_base_low_rank_object_adapters"` and a `contract` block into
+both the full suite report and `adapter_bank.json`. The default no-arg `many`
+suite must satisfy:
+
+- at least eight total targets;
+- at least six non-core targets beyond torus/teapot;
+- at least six shared-base split targets;
+- at least two held-out adapter-only targets;
+- exactly one adapter-training target for every suite target.
+
+Focused torus/teapot diagnostics remain supported through `--target-set core`
+or explicit `--targets`, but those runs set `many_object_default=false` and are
+not reported as the many-object scaling path. The unit test
+`default_many_contract_rejects_core_only_regression` fails if the default suite
+silently regresses to torus/teapot-only training.

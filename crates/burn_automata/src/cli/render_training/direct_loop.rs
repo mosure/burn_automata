@@ -38,11 +38,15 @@ pub(crate) fn render_direct_rollout_training_steps(
     } else {
         None
     };
+    let mut best_inner_progress_model = None::<NpaModel>;
+    let mut best_inner_progress_selection = None::<RenderSelectionMetrics>;
     let mut selected_inner_checkpoint = false;
+    let mut followup_line_search_scale = None::<f32>;
     for inner_step in 0..steps {
         let (trace, trajectory) = render_training_trajectory(model, grid, cfg, round)?;
         let gradient = render_position_gradient(&trace, target, render_cfg, cfg)?;
-        let (report, step_scale, mut candidates) = if cfg.direct_line_search {
+        let run_line_search = cfg.direct_line_search && inner_step == 0;
+        let (report, step_scale, mut candidates) = if run_line_search {
             render_direct_rollout_training_step_with_line_search(
                 model,
                 grid,
@@ -56,12 +60,17 @@ pub(crate) fn render_direct_rollout_training_steps(
                 selection_baseline,
             )?
         } else {
+            let step_cfg = if cfg.direct_line_search {
+                direct_line_search_followup_config(cfg, followup_line_search_scale)
+            } else {
+                cfg.clone()
+            };
             let report = if cfg.direct_selection_seed_training {
                 render_direct_rollout_multiseed_training_step(
                     model,
                     grid,
                     target,
-                    cfg,
+                    &step_cfg,
                     round,
                     &trace,
                     &trajectory,
@@ -75,12 +84,19 @@ pub(crate) fn render_direct_rollout_training_steps(
                     &trace,
                     &trajectory,
                     &gradient,
-                    cfg,
-                    render_training_round_seed(cfg, round),
+                    &step_cfg,
+                    render_training_round_seed(&step_cfg, round),
                 )?
             };
-            (report, 1.0, Vec::new())
+            let step_scale = followup_line_search_scale
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .unwrap_or(1.0);
+            (report, step_scale, Vec::new())
         };
+        if run_line_search {
+            followup_line_search_scale =
+                (step_scale.is_finite() && step_scale > 0.0).then_some(step_scale);
+        }
         for candidate in &mut candidates {
             candidate.inner_step = inner_step;
         }
@@ -108,6 +124,18 @@ pub(crate) fn render_direct_rollout_training_steps(
                 .as_ref()
                 .is_some_and(|best| render_selection_training_progress_beats(&selection, best))
             {
+                if best_inner_progress_selection.as_ref().is_none_or(|best| {
+                    render_selection_progress_candidate_preferred(
+                        &selection,
+                        best,
+                        best_inner_selection
+                            .as_ref()
+                            .expect("line-search baseline exists"),
+                    )
+                }) {
+                    best_inner_progress_model = Some(model.clone());
+                    best_inner_progress_selection = Some(selection);
+                }
                 // Keep a bounded non-promotable candidate for subsequent inner
                 // optimization steps. Strict best checkpointing remains
                 // unchanged and is restored below once a strict checkpoint
@@ -120,6 +148,19 @@ pub(crate) fn render_direct_rollout_training_steps(
     let mut report = combine_direct_rollout_training_reports(&reports);
     if cfg.direct_line_search && selected_inner_checkpoint {
         *model = best_inner_model;
+        let final_trace = render_training_trace_for_seed(
+            model,
+            grid,
+            cfg,
+            render_training_round_seed(cfg, round),
+        )?;
+        report.final_loss =
+            mesh_multiview_render_loss_from_trace(&final_trace, target, render_cfg)?.total_loss;
+        report.best_loss = report.best_loss.min(report.final_loss);
+    } else if cfg.direct_line_search
+        && let Some(progress_model) = best_inner_progress_model
+    {
+        *model = progress_model;
         let final_trace = render_training_trace_for_seed(
             model,
             grid,

@@ -416,13 +416,22 @@ as the final Hyper-NPA target:
   suites. The suite can initialize and train an object-agnostic shared local 3D
   growth base across the target list before freezing it for per-object adapter
   fitting. It now supports built-in target sets (`core`, `primitives`, `many`)
-  and held-out adapter-only targets, so reports can separate shared-dynamics
-  training quality from LoRA specialization/generalization quality. The suite
-  output is the desired bridge artifact for HyperNPA: a shared BPK plus many
-  compact `.adapter.json` object adapters, with materialized BPKs treated as
-  validation/viewer compatibility outputs. A conditional HyperNPA should learn
-  to predict this adapter bank distribution first, before attempting full
-  per-object weight generation.
+  where `many` is a 12-object bank spanning torus, teapot, sphere, ellipsoid,
+  cube, cylinder, cone, capsule, pyramid, bicone, dumbbell, and cross. It also
+  supports manual or automatic held-out adapter-only targets, so reports can
+  separate shared-dynamics training quality from LoRA specialization and
+  adapter-only generalization quality. The suite evaluates the frozen shared
+  base across all targets before fitting adapters, records train/holdout
+  aggregate summaries, and emits an `adapter_bank.json` manifest. That manifest
+  is the desired bridge artifact for HyperNPA: a shared BPK plus many compact
+  `.adapter.json` object adapters, with materialized BPKs treated only as
+  validation/viewer compatibility outputs. The manifest and full suite report
+  carry `strategy="shared_base_low_rank_object_adapters"` and a many-object
+  coverage contract, so a default suite is rejected as a scaling run if it
+  silently collapses back to torus/teapot-only training or misses adapter
+  artifacts for any target. A conditional HyperNPA should first learn to predict
+  this adapter bank distribution, then move to chunk-local adapters and finally
+  to full end-to-end parameter generation.
 - Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
   `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
   seed modes are legacy diagnostics for existing BPK lineage and should not be

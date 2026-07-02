@@ -2,6 +2,27 @@ use crate::cli::prelude::*;
 
 use super::super::resolve_direct_selection_seed_training;
 
+mod bank;
+mod contract;
+mod evaluation;
+mod signal;
+mod splits;
+mod summary;
+
+use bank::adapter_suite_bank_entries;
+use contract::adapter_suite_contract;
+use evaluation::adapter_suite_shared_base_evaluations;
+use signal::{adapter_suite_missing_signal_labels, adapter_suite_missing_train_signal};
+use splits::{
+    adapter_suite_auto_holdout_targets, adapter_suite_holdout_targets, adapter_suite_split,
+    default_adapter_suite_shared_base_cycles, effective_adapter_suite_auto_holdout_stride,
+    resolve_adapter_suite_targets, suite_report_holdout_target_count,
+    suite_report_shared_base_target_count, validate_holdout_targets,
+};
+use summary::{
+    adapter_suite_adapter_summary, adapter_suite_shared_base_summary, adapter_suite_split_summaries,
+};
+
 pub(crate) fn run_train_render_3d_adapters(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -13,8 +34,12 @@ pub(crate) fn run_train_render_3d_adapters(
         target_set,
         targets,
         holdout_targets,
+        auto_holdout_stride,
+        auto_holdout_offset,
         output_dir,
         report_output,
+        adapter_bank_output,
+        skip_shared_base_eval,
         rounds,
         supervised_steps_per_round,
         particles,
@@ -66,8 +91,20 @@ pub(crate) fn run_train_render_3d_adapters(
         ))
         .into());
     }
+    let explicit_targets_requested = !targets.is_empty();
+    let manual_holdout_targets = holdout_targets;
     let targets = resolve_adapter_suite_targets(targets, target_set)?;
-    let holdout_targets = unique_targets(holdout_targets);
+    let auto_holdout_stride = effective_adapter_suite_auto_holdout_stride(
+        auto_holdout_stride,
+        explicit_targets_requested,
+        target_set,
+        &manual_holdout_targets,
+        targets.len(),
+    );
+    let auto_holdout_targets =
+        adapter_suite_auto_holdout_targets(&targets, auto_holdout_stride, auto_holdout_offset)?;
+    let holdout_targets =
+        adapter_suite_holdout_targets(manual_holdout_targets, auto_holdout_targets.clone());
     validate_holdout_targets(&targets, &holdout_targets)?;
     let shared_base_targets = targets
         .iter()
@@ -83,7 +120,9 @@ pub(crate) fn run_train_render_3d_adapters(
         ))
         .into());
     }
-    let shared_base_cycles = shared_base_cycles.unwrap_or(usize::from(base_model.is_none()));
+    let shared_base_cycles = shared_base_cycles.unwrap_or_else(|| {
+        default_adapter_suite_shared_base_cycles(base_model.is_some(), target_set, targets.len())
+    });
     if shared_base_cycles > 0 && shared_base_targets.is_empty() {
         return Err(std::io::Error::other(
             "adapter suite shared-base training requires at least one non-holdout target",
@@ -107,6 +146,37 @@ pub(crate) fn run_train_render_3d_adapters(
     if let Some(parent) = report_output.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let adapter_bank_output =
+        adapter_bank_output.unwrap_or_else(|| output_dir.join("adapter_bank.json"));
+    if let Some(parent) = adapter_bank_output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    println!(
+        "adapter suite target_set={:?} target_count={} shared_base_target_count={} holdout_target_count={} shared_base_cycles={} adapter_target_count={} targets={:?} shared_base_targets={:?} holdout_targets={:?} adapter_rank={} adapter_bank={}",
+        target_set,
+        targets.len(),
+        shared_base_targets.len(),
+        holdout_targets.len(),
+        shared_base_cycles,
+        targets.len(),
+        targets
+            .iter()
+            .copied()
+            .map(mesh_target_slug)
+            .collect::<Vec<_>>(),
+        shared_base_targets
+            .iter()
+            .copied()
+            .map(mesh_target_slug)
+            .collect::<Vec<_>>(),
+        holdout_targets
+            .iter()
+            .copied()
+            .map(mesh_target_slug)
+            .collect::<Vec<_>>(),
+        adapter_rank,
+        adapter_bank_output.display()
+    );
 
     let base_model_input = base_model.as_ref().map(|path| path.display().to_string());
     let (mut shared_model, hashgrid, loaded_base_source, shared_base_initialized) =
@@ -234,6 +304,33 @@ pub(crate) fn run_train_render_3d_adapters(
         BpkModelManifest::from_model(&shared_model, hashgrid.clone(), base_source.clone());
     crate::import::save_manifest(&shared_base_output, &base_manifest)?;
     let base_parameter_count = crate::import::parameter_count(&base_manifest);
+    let shared_base_evaluations = if skip_shared_base_eval {
+        Vec::new()
+    } else {
+        adapter_suite_shared_base_evaluations(
+            &shared_base_output,
+            &base_manifest,
+            &targets,
+            &holdout_targets,
+            seed_scale,
+            seed_mode,
+            particles,
+            rollout_steps,
+            selection_seed,
+            &training_selection_seeds,
+            image_size,
+            target_samples,
+            sigma,
+            min_sigma,
+            max_sigma,
+            gaussian_decode_mode,
+            world_scale,
+            render_opacity_logit_bias,
+            density_weight,
+            color_weight,
+            depth_weight,
+        )?
+    };
 
     let mut entries = Vec::with_capacity(targets.len());
     for (target_index, target) in targets.iter().copied().enumerate() {
@@ -418,17 +515,67 @@ pub(crate) fn run_train_render_3d_adapters(
     let shared_plus_adapter_savings_ratio = 1.0 - shared_plus_adapter_to_full_bank_ratio;
     let missing_train_signal = adapter_suite_missing_train_signal(&shared_base_training, &entries);
     let training_signal_passed = missing_train_signal.is_empty();
+    let shared_base_summary = adapter_suite_shared_base_summary(&shared_base_evaluations);
+    let adapter_summary = adapter_suite_adapter_summary(&entries);
+    let split_summaries = adapter_suite_split_summaries(&shared_base_evaluations, &entries);
+    let adapter_training_targets = entries.iter().map(|entry| entry.target).collect::<Vec<_>>();
+    let strategy = CliRenderAdapterSuiteStrategy::SharedBaseLowRankObjectAdapters;
+    let contract = adapter_suite_contract(
+        target_set,
+        explicit_targets_requested,
+        &targets,
+        &shared_base_targets,
+        &holdout_targets,
+        &adapter_training_targets,
+    );
+    let shared_base_training_visit_count = shared_base_training.len();
+    let adapter_bank_manifest = CliRenderAdapterBankManifest {
+        schema_version: 1,
+        strategy,
+        contract: contract.clone(),
+        base_model: shared_base_output.display().to_string(),
+        base_source: base_source.clone(),
+        target_set,
+        targets: targets.clone(),
+        shared_base_targets: shared_base_targets.clone(),
+        holdout_targets: holdout_targets.clone(),
+        target_count,
+        shared_base_target_count: shared_base_targets.len(),
+        holdout_target_count: holdout_targets.len(),
+        adapter_target_count: target_count,
+        adapter_rank,
+        adapter_alpha,
+        base_parameter_count,
+        materialized_parameter_count,
+        adapter_parameter_count,
+        adapter_to_full_ratio,
+        shared_plus_adapter_to_full_bank_ratio,
+        entries: adapter_suite_bank_entries(&entries),
+    };
+    std::fs::write(
+        &adapter_bank_output,
+        serde_json::to_string_pretty(&adapter_bank_manifest)?,
+    )?;
     let suite_report = CliRenderAdapterSuiteReport {
+        strategy,
+        contract,
         base_model_input,
         base_model: shared_base_output.display().to_string(),
         base_source,
         shared_base_initialized,
         shared_base_cycles,
         shared_base_training,
+        shared_base_eval_enabled: !skip_shared_base_eval,
+        shared_base_evaluations,
         output_dir: output_dir.display().to_string(),
+        adapter_bank_manifest: adapter_bank_output.display().to_string(),
         target_set,
         targets,
-        shared_base_targets,
+        shared_base_targets: shared_base_targets.clone(),
+        adapter_training_targets,
+        auto_holdout_stride,
+        auto_holdout_offset,
+        auto_holdout_targets,
         holdout_targets,
         particle_count: particles,
         rollout_steps,
@@ -442,11 +589,16 @@ pub(crate) fn run_train_render_3d_adapters(
         target_count,
         shared_base_target_count: suite_report_shared_base_target_count(&entries),
         holdout_target_count: suite_report_holdout_target_count(&entries),
+        shared_base_training_visit_count,
+        adapter_training_target_count: entries.len(),
         adapter_total_parameter_count,
         full_bank_parameter_count,
         shared_plus_adapter_parameter_count,
         shared_plus_adapter_to_full_bank_ratio,
         shared_plus_adapter_savings_ratio,
+        shared_base_summary,
+        adapter_summary,
+        split_summaries,
         training_signal_passed,
         missing_train_signal,
         entries,
@@ -462,10 +614,11 @@ pub(crate) fn run_train_render_3d_adapters(
     let missing_signal_labels =
         adapter_suite_missing_signal_labels(&suite_report.missing_train_signal);
     println!(
-        "wrote {} with {} adapters adapter/full={:.4} failed_targets={:?} missing_train_signal={:?}",
+        "wrote {} with {} adapters adapter/full={:.4} contract_passed={} failed_targets={:?} missing_train_signal={:?}",
         report_output.display(),
         suite_report.entries.len(),
         suite_report.shared_plus_adapter_to_full_bank_ratio,
+        suite_report.contract.contract_passed,
         failed_targets,
         missing_signal_labels
     );
@@ -478,127 +631,4 @@ pub(crate) fn run_train_render_3d_adapters(
     }
 
     Ok(())
-}
-
-fn unique_targets(targets: Vec<MeshTargetArg>) -> Vec<MeshTargetArg> {
-    let mut unique = Vec::with_capacity(targets.len());
-    for target in targets {
-        if !unique.contains(&target) {
-            unique.push(target);
-        }
-    }
-    unique
-}
-
-fn resolve_adapter_suite_targets(
-    targets: Vec<MeshTargetArg>,
-    target_set: MeshTargetSetArg,
-) -> Result<Vec<MeshTargetArg>, Box<dyn std::error::Error>> {
-    let mut resolved = Vec::new();
-    if targets.is_empty() || target_set != MeshTargetSetArg::Core {
-        resolved.extend(mesh_target_set_targets(target_set));
-    }
-    resolved.extend(targets);
-    let resolved = unique_targets(resolved);
-    if resolved.is_empty() {
-        return Err(std::io::Error::other("adapter suite requires at least one target").into());
-    }
-    Ok(resolved)
-}
-
-fn validate_holdout_targets(
-    targets: &[MeshTargetArg],
-    holdout_targets: &[MeshTargetArg],
-) -> Result<(), Box<dyn std::error::Error>> {
-    for holdout_target in holdout_targets {
-        if !targets.contains(holdout_target) {
-            return Err(std::io::Error::other(format!(
-                "holdout target {} is not part of the adapter suite targets",
-                mesh_target_slug(*holdout_target)
-            ))
-            .into());
-        }
-    }
-    Ok(())
-}
-
-fn adapter_suite_split(
-    target: MeshTargetArg,
-    holdout_targets: &[MeshTargetArg],
-) -> CliRenderAdapterSuiteSplit {
-    if holdout_targets.contains(&target) {
-        CliRenderAdapterSuiteSplit::HoldoutAdapterOnly
-    } else {
-        CliRenderAdapterSuiteSplit::SharedBaseTrain
-    }
-}
-
-fn suite_report_shared_base_target_count(entries: &[CliRenderAdapterSuiteEntry]) -> usize {
-    entries
-        .iter()
-        .filter(|entry| entry.split == CliRenderAdapterSuiteSplit::SharedBaseTrain)
-        .count()
-}
-
-fn suite_report_holdout_target_count(entries: &[CliRenderAdapterSuiteEntry]) -> usize {
-    entries
-        .iter()
-        .filter(|entry| entry.split == CliRenderAdapterSuiteSplit::HoldoutAdapterOnly)
-        .count()
-}
-
-fn adapter_suite_missing_train_signal(
-    shared_base_training: &[CliRenderAdapterSuiteBaseEntry],
-    entries: &[CliRenderAdapterSuiteEntry],
-) -> Vec<CliRenderAdapterSuiteTrainingSignalGap> {
-    let mut missing = Vec::new();
-    for entry in shared_base_training {
-        let rounds = render_proxy_missing_signal_rounds(&entry.report);
-        if !rounds.is_empty() {
-            missing.push(CliRenderAdapterSuiteTrainingSignalGap {
-                phase: CliRenderAdapterSuiteTrainingPhase::SharedBase,
-                cycle: Some(entry.cycle),
-                target: entry.target,
-                rounds,
-            });
-        }
-    }
-    for entry in entries {
-        let rounds = render_proxy_missing_signal_rounds(&entry.report);
-        if !rounds.is_empty() {
-            missing.push(CliRenderAdapterSuiteTrainingSignalGap {
-                phase: CliRenderAdapterSuiteTrainingPhase::Adapter,
-                cycle: None,
-                target: entry.target,
-                rounds,
-            });
-        }
-    }
-    missing
-}
-
-fn adapter_suite_missing_signal_labels(
-    missing: &[CliRenderAdapterSuiteTrainingSignalGap],
-) -> Vec<String> {
-    missing
-        .iter()
-        .map(|entry| {
-            let phase = match entry.phase {
-                CliRenderAdapterSuiteTrainingPhase::SharedBase => "shared-base",
-                CliRenderAdapterSuiteTrainingPhase::Adapter => "adapter",
-            };
-            match entry.cycle {
-                Some(cycle) => format!(
-                    "{phase}:cycle={cycle}:target={}:rounds={:?}",
-                    mesh_target_slug(entry.target),
-                    entry.rounds
-                ),
-                None => format!(
-                    "{phase}:target={}:rounds={:?}",
-                    mesh_target_slug(entry.target),
-                    entry.rounds
-                ),
-            }
-        })
-        .collect()
 }

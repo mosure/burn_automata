@@ -258,7 +258,12 @@ pub(crate) fn render_selection_training_progress_beats(
         && surface_ok
         && material_tail_ok
         && inactive_material_ok
-        && render_selection_mature_material_temporal_dynamics_ok(selection, previous)
+        && render_selection_mature_material_training_dynamics_ok(
+            selection,
+            previous,
+            activation_improved,
+            render_improved,
+        )
         && render_selection_dormant_drift_not_regressed(selection, previous)
         && local_front_ok
 }
@@ -588,6 +593,28 @@ fn render_selection_mature_material_temporal_dynamics_ok(
     !mature_material
         || (selection.all_temporal_geometry_progressive
             && render_selection_temporal_activation_not_regressed(selection, previous))
+}
+
+fn render_selection_mature_material_training_dynamics_ok(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+    activation_improved: bool,
+    render_improved: bool,
+) -> bool {
+    if render_selection_mature_material_temporal_dynamics_ok(selection, previous) {
+        return true;
+    }
+    let strict_score_improvement = previous.score - selection.score;
+    let temporal_error_improved = selection.max_temporal_activation_schedule_error.is_finite()
+        && previous.max_temporal_activation_schedule_error.is_finite()
+        && selection.max_temporal_activation_schedule_error + 0.005
+            <= previous.max_temporal_activation_schedule_error;
+
+    activation_improved
+        && render_improved
+        && strict_score_improvement >= 0.25
+        && temporal_error_improved
+        && render_selection_temporal_activation_not_regressed(selection, previous)
 }
 
 pub(crate) fn render_selection_temporal_activation_not_regressed(

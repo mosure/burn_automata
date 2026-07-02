@@ -12,7 +12,11 @@ pub(crate) fn growth_3d_catalog_sanity_report(
         | MeshTargetArg::Cube
         | MeshTargetArg::Cylinder
         | MeshTargetArg::Cone
-        | MeshTargetArg::Capsule => (0.90, 0.95, 16.0, 14.8),
+        | MeshTargetArg::Capsule
+        | MeshTargetArg::Pyramid
+        | MeshTargetArg::Bicone
+        | MeshTargetArg::Dumbbell
+        | MeshTargetArg::Cross => (0.90, 0.95, 16.0, 14.8),
     };
     let passed = render_loss.total_loss <= max_total_loss
         && render_loss.density_psnr_db >= min_density_psnr_db

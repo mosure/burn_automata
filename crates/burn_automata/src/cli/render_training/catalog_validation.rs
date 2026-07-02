@@ -340,6 +340,16 @@ pub(crate) fn target_growth_seed(target: MeshTargetArg, seed_mode: ParticleSeed)
     )
 }
 
+pub(crate) fn object_agnostic_growth_seed_mode(seed_mode: ParticleSeed) -> bool {
+    matches!(
+        seed_mode,
+        ParticleSeed::Growth3d
+            | ParticleSeed::SubstrateGrowth3d
+            | ParticleSeed::LocalGrowth3d
+            | ParticleSeed::LocalSubstrateGrowth3d
+    )
+}
+
 pub(crate) fn target_strict_conditionless_local_growth_seed(
     target: MeshTargetArg,
     seed_mode: ParticleSeed,
