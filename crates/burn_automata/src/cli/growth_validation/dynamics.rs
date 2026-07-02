@@ -780,6 +780,26 @@ pub(crate) fn apply_dynamic_growth_3d_strict_checks(
     apply_surface_profile_strict_check(checks, active_profile, material_visible_profile);
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_dynamic_growth_3d_strict_score(
+    score: &mut Growth3dStrictScoreReport,
+    temporal: &Growth3dTemporalReport,
+    rollout_steps: usize,
+    motion: &Growth3dMotionReport,
+    mean_final_displacement: f32,
+    seed_scale: f32,
+    material_liveness: Growth3dMaterialLivenessReport,
+    material_visible_surface_tail: Growth3dSurfaceTailReport,
+    active_profile: &SurfaceCoverageProfileReport,
+    material_visible_profile: &SurfaceCoverageProfileReport,
+) {
+    apply_temporal_activation_strict_score(score, temporal, rollout_steps);
+    apply_morphogenesis_dynamics_strict_score(score, motion, mean_final_displacement, seed_scale);
+    apply_material_liveness_strict_score(score, material_liveness);
+    apply_material_visible_surface_tail_strict_score(score, material_visible_surface_tail);
+    apply_surface_profile_strict_score(score, active_profile, material_visible_profile);
+}
+
 pub(crate) fn surface_profile_passes_strict_coverage(
     profile: &SurfaceCoverageProfileReport,
 ) -> bool {

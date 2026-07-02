@@ -67,6 +67,111 @@ fn dynamic_growth_3d_strict_checks_apply_all_runtime_blockers() {
 }
 
 #[test]
+fn dynamic_growth_3d_strict_score_applies_all_runtime_penalties() {
+    let checks = passing_growth_3d_strict_checks();
+    let initial_surface = Growth3dSurfaceStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+    };
+    let final_surface = Growth3dSurfaceStats {
+        mean_distance: 0.5,
+        max_distance: 0.2,
+    };
+    let initial_coverage = TargetCoverageStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+        covered_fraction: 0.0,
+    };
+    let final_coverage = TargetCoverageStats {
+        mean_distance: 0.5,
+        max_distance: 0.3,
+        covered_fraction: 0.75,
+    };
+    let mut score = growth_3d_strict_score_report(
+        &checks,
+        initial_surface,
+        final_surface,
+        passing_growth_3d_surface_tail_report(),
+        initial_coverage,
+        final_coverage,
+        final_coverage,
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
+        GaussianVolumeStats::default(),
+    );
+    let initial_score = score.score;
+    let temporal = Growth3dTemporalReport {
+        samples: Vec::new(),
+        first_growth_step: None,
+        half_activation_step: None,
+        full_activation_step: None,
+        activation_span_steps: 0,
+        progressive_activation: false,
+        surface_mean_ratio: 1.0,
+        target_coverage_mean_ratio: 1.0,
+        target_coverage_fraction_delta: 0.0,
+        geometry_progressive: false,
+    };
+    let stalled_motion = growth_3d_motion_report(&[0.0, 0.0, 0.0, 0.0]);
+    let material_liveness = Growth3dMaterialLivenessReport {
+        material_visible_count: 8,
+        inactive_material_visible_count: 2,
+        inactive_material_visible_fraction: 0.25,
+        inactive_material_logit_threshold: 0.0,
+        max_inactive_material_opacity: 1.5,
+        passed: false,
+    };
+    let material_visible_tail = Growth3dSurfaceTailReport {
+        p99_distance: GROWTH_3D_SURFACE_MAX_DISTANCE + 0.2,
+        over_threshold_fraction: 0.10,
+        opacity_weighted_over_threshold_fraction: 0.08,
+        ..passing_growth_3d_surface_tail_report()
+    };
+    let sparse_active = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.25,
+        mean_bin_covered_fraction: 0.20,
+        empty_bins: 48,
+        ..passing_surface_coverage_profile_report()
+    };
+    let sparse_material = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.30,
+        mean_bin_covered_fraction: 0.25,
+        empty_bins: 45,
+        ..passing_surface_coverage_profile_report()
+    };
+
+    apply_dynamic_growth_3d_strict_score(
+        &mut score,
+        &temporal,
+        8,
+        &stalled_motion,
+        0.0,
+        0.72,
+        material_liveness,
+        material_visible_tail,
+        &sparse_active,
+        &sparse_material,
+    );
+
+    assert!(score.score > initial_score);
+    assert!(score.temporal_activation_schedule_penalty > 0.0);
+    assert!(score.motion_peak_penalty > 0.0);
+    assert!(score.motion_active_step_penalty > 0.0);
+    assert!(score.mean_final_displacement_penalty > 0.0);
+    assert!(score.material_visible_inactive_fraction_penalty > 0.0);
+    assert!(score.material_visible_max_inactive_opacity_penalty > 0.0);
+    assert!(score.material_visible_surface_tail_p99_penalty > 0.0);
+    assert!(score.material_visible_surface_tail_fraction_penalty > 0.0);
+    assert!(score.surface_bin_penalty > 0.0);
+    assert!(score.surface_coverage_mean_penalty > 0.0);
+    assert!(score.material_visible_surface_bin_penalty > 0.0);
+    assert!(score.material_visible_surface_mean_penalty > 0.0);
+}
+
+#[test]
 fn growth_3d_strict_checks_reject_sparse_surface_profile_coverage() {
     let mut checks = passing_growth_3d_strict_checks();
     let sparse_active = SurfaceCoverageProfileReport {

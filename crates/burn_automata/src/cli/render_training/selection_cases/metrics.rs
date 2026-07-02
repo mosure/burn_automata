@@ -288,20 +288,15 @@ pub(crate) fn render_selection_case_metrics(
         &render_loss,
         final_gaussian_volume,
     );
-    apply_temporal_activation_strict_score(&mut strict_score, &temporal, cfg.rollout_steps);
-    apply_morphogenesis_dynamics_strict_score(
+    apply_dynamic_growth_3d_strict_score(
         &mut strict_score,
+        &temporal,
+        cfg.rollout_steps,
         &motion,
         mean_final_displacement,
         cfg.seed_scale,
-    );
-    apply_material_liveness_strict_score(&mut strict_score, material_liveness);
-    apply_material_visible_surface_tail_strict_score(
-        &mut strict_score,
+        material_liveness,
         material_visible_surface_tail,
-    );
-    apply_surface_profile_strict_score(
-        &mut strict_score,
         &surface_coverage_profile,
         &material_visible_surface_coverage_profile,
     );

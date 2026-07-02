@@ -576,6 +576,37 @@ fn render_selection_candidate_can_retain_bounded_material_precursor() {
 }
 
 #[test]
+fn render_selection_candidate_rejects_mature_material_opacity_without_surface_progress() {
+    let mut best = render_selection_metrics_with_liveness(77.0, 0.9188, 0.398, 0.0);
+    best.min_final_active_count = 32;
+    best.material_active_mean_opacity = -3.60;
+    best.material_visible_count = 16;
+    best.material_visible_target_mean_distance = 0.72;
+    best.material_visible_target_coverage_fraction = 0.0;
+    best.material_visible_surface_covered_bin_fraction = 0.0;
+    best.material_visible_surface_normal_covered_bin_fraction = 0.0;
+
+    let mut opacity_only = best.clone();
+    opacity_only.score = best.score + 0.01;
+    opacity_only.material_active_mean_opacity = -3.40;
+    opacity_only.render_loss = 0.91881;
+    opacity_only.density_psnr_db = 0.39799;
+
+    assert!(
+        !render_selection_candidate_metrics_beats(&opacity_only, &best),
+        "mature visible-material candidates should not be selected by core opacity alone"
+    );
+
+    let mut surface_approach = opacity_only;
+    surface_approach.material_visible_target_mean_distance =
+        best.material_visible_target_mean_distance - 0.006;
+    assert!(
+        render_selection_candidate_metrics_beats(&surface_approach, &best),
+        "mature visible-material precursors remain selectable when they also move toward the target surface"
+    );
+}
+
+#[test]
 fn render_selection_rejects_bursty_activation_breakthrough_timing_regression() {
     let mut best = render_selection_metrics_with_liveness(81.15844, 0.925548, 0.3570, 1.5105798);
     best.max_temporal_activation_schedule_error = 0.18607144;

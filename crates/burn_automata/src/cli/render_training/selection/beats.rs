@@ -346,6 +346,7 @@ pub(crate) fn render_selection_material_precursor_beats(
     selection: &RenderSelectionMetrics,
     best: &RenderSelectionMetrics,
 ) -> bool {
+    const MATURE_VISIBLE_MATERIAL_COUNT: usize = 8;
     const MATERIAL_MEAN_IMPROVEMENT: f32 = 0.05;
     let visible_count_improved = selection.material_visible_count > best.material_visible_count;
     let active_mean_improved = selection.material_active_mean_opacity.is_finite()
@@ -353,6 +354,11 @@ pub(crate) fn render_selection_material_precursor_beats(
         && selection.material_active_mean_opacity
             > best.material_active_mean_opacity + MATERIAL_MEAN_IMPROVEMENT;
     if !visible_count_improved && !active_mean_improved {
+        return false;
+    }
+    if best.material_visible_count >= MATURE_VISIBLE_MATERIAL_COUNT
+        && !material_surface_support_progressed(selection, best)
+    {
         return false;
     }
     if selection.min_final_active_count < best.min_final_active_count {
@@ -375,6 +381,47 @@ pub(crate) fn render_selection_material_precursor_beats(
         && render_selection_dormant_drift_not_regressed(selection, best)
         && selection.active_surface_max.is_finite()
         && selection.active_surface_max <= GROWTH_3D_SURFACE_MAX_DISTANCE + 0.05
+}
+
+fn material_surface_support_progressed(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+) -> bool {
+    const MATERIAL_TARGET_DISTANCE_PROGRESS: f32 = 5.0e-3;
+    const MATERIAL_TARGET_COVERAGE_PROGRESS: f32 = 5.0e-3;
+    const MATERIAL_SURFACE_BIN_PROGRESS: f32 = 5.0e-3;
+    const STRICT_MATERIAL_MEAN_PROGRESS: f32 = 0.005;
+    const STRICT_MATERIAL_MARGIN_PROGRESS: f32 = 0.005;
+
+    (previous.material_visible_target_mean_distance.is_finite()
+        && selection.material_visible_target_mean_distance.is_finite()
+        && selection.material_visible_target_mean_distance + MATERIAL_TARGET_DISTANCE_PROGRESS
+            <= previous.material_visible_target_mean_distance)
+        || finite_progress(
+            selection.material_visible_target_coverage_fraction,
+            previous.material_visible_target_coverage_fraction,
+            MATERIAL_TARGET_COVERAGE_PROGRESS,
+        )
+        || finite_progress(
+            selection.material_visible_surface_covered_bin_fraction,
+            previous.material_visible_surface_covered_bin_fraction,
+            MATERIAL_SURFACE_BIN_PROGRESS,
+        )
+        || finite_progress(
+            selection.material_visible_surface_normal_covered_bin_fraction,
+            previous.material_visible_surface_normal_covered_bin_fraction,
+            MATERIAL_SURFACE_BIN_PROGRESS,
+        )
+        || strict_surface_materialization_progress(
+            selection,
+            previous,
+            STRICT_MATERIAL_MEAN_PROGRESS,
+            STRICT_MATERIAL_MARGIN_PROGRESS,
+        ) > 0.0
+}
+
+fn finite_progress(selection: f32, previous: f32, min_progress: f32) -> bool {
+    selection.is_finite() && previous.is_finite() && selection >= previous + min_progress
 }
 
 fn strict_surface_materialization_progress(

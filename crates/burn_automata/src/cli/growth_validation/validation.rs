@@ -346,20 +346,15 @@ pub(crate) fn growth_3d_validation_report_single(
         &render_loss,
         final_gaussian_volume,
     );
-    apply_temporal_activation_strict_score(&mut strict_score, &temporal, rollout_steps);
-    apply_morphogenesis_dynamics_strict_score(
+    apply_dynamic_growth_3d_strict_score(
         &mut strict_score,
+        &temporal,
+        rollout_steps,
         &motion,
         mean_final_displacement,
         cfg.seed_scale,
-    );
-    apply_material_liveness_strict_score(&mut strict_score, final_material_liveness);
-    apply_material_visible_surface_tail_strict_score(
-        &mut strict_score,
+        final_material_liveness,
         final_material_visible_surface_tail,
-    );
-    apply_surface_profile_strict_score(
-        &mut strict_score,
         &final_active_surface_coverage_profile,
         &final_material_visible_surface_coverage_profile,
     );
