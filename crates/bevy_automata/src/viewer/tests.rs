@@ -140,8 +140,10 @@ fn catalog_registers_teapot_as_blocked_growth_artifact() {
     assert_eq!(teapot_entries[0].key, ModelCatalogKey::TeapotMorphogen3d);
     assert_eq!(teapot_entries[0].particle_count, 1024);
     assert!(
-        teapot_entries[0].kind.contains("validation blocked"),
-        "teapot should stay hidden until robust held-out seed validation passes"
+        teapot_entries[0]
+            .kind
+            .contains("hidden scaffolded regression"),
+        "teapot should stay hidden until robust held-out seed validation passes with a no-scaffold artifact"
     );
     assert_eq!(
         catalog_seed_mode(teapot_entries[0]),
@@ -189,12 +191,22 @@ fn catalog_3d_default_uses_sorted_gpu_neighbor_mode() {
 }
 
 #[test]
-fn catalog_3d_bpk_entries_use_local_growth_seeded_models() {
+fn hidden_3d_bpk_entries_are_blocked_scaffolded_regression_artifacts() {
     for key in [
         ModelCatalogKey::UvTorusMorphogen3d,
         ModelCatalogKey::TeapotMorphogen3d,
     ] {
         let entry = catalog_entry(key);
+        assert!(
+            !VISIBLE_MODEL_CATALOG_KEYS.contains(&key),
+            "{} must stay hidden until it is replaced by a strict-passing no-scaffold artifact",
+            entry.title
+        );
+        assert!(
+            entry.kind.contains("hidden scaffolded regression"),
+            "{} should disclose why it is registered but not selectable",
+            entry.title
+        );
         let path = resolved_catalog_model_path(entry)
             .unwrap_or_else(|| panic!("missing catalog model {}", entry.title));
         let manifest = burn_automata::import::load_manifest(&path)
@@ -228,10 +240,15 @@ fn catalog_3d_bpk_entries_use_local_growth_seeded_models() {
                 && !source.contains("render-proxy-rust"),
             "{path} must use latest local render-refinement lineage without target-assigned shortcuts, source={source}"
         );
+        let seed_mode = catalog_seed_mode(entry);
         assert!(matches!(
-            catalog_seed_mode(entry),
+            seed_mode,
             ParticleSeed::TorusGrowth3d | ParticleSeed::TeapotGrowth3d
         ));
+        assert!(
+            burn_automata::rollout::growth_3d_seed_writes_coordinate_scaffold(seed_mode),
+            "{path} is intentionally tracked as a hidden regression artifact; strict catalog promotion must replace it with a no-scaffold seed mode"
+        );
     }
 }
 

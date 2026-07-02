@@ -467,8 +467,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ModelCatalogEntry {
         key: ModelCatalogKey::UvTorusMorphogen3d,
         title: "uv torus",
-        kind: "validation blocked 3d",
-        detail: "hidden: latest local-front torus fails tube support/depth gates",
+        kind: "hidden scaffolded regression",
+        detail: "strict promotion blocked: scaffolded seed plus tube support/depth gaps",
         preset: AutomataPreset::Growing3dGs,
         source: ModelCatalogSource::Bpk {
             primary: "assets/models/uv_torus_growth_3d.bpk",
@@ -481,8 +481,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ModelCatalogEntry {
         key: ModelCatalogKey::TeapotMorphogen3d,
         title: "teapot",
-        kind: "validation blocked 3d",
-        detail: "hidden: seed-varied strict gate exposes held-out fragility",
+        kind: "hidden scaffolded regression",
+        detail: "strict promotion blocked: scaffolded seed plus held-out fragility",
         preset: AutomataPreset::Growing3dGs,
         source: ModelCatalogSource::Bpk {
             primary: "assets/models/teapot_growth_3d.bpk",
