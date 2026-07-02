@@ -229,6 +229,18 @@ pub(crate) fn add_material_visibility_output_objective(
         GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
         max_opacity_update,
     );
+    let material_normal_updates = material_surface_normal_opacity_updates_weighted(
+        config,
+        target,
+        positions,
+        states,
+        Some(&material_candidate_weights),
+        opacity_gain,
+        coverage_samples,
+        seed_scale,
+        GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
+        max_opacity_update,
+    );
     let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
     let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
 
@@ -264,6 +276,8 @@ pub(crate) fn add_material_visibility_output_objective(
                     * material_coverage_updates.get(row).copied().unwrap_or(0.0);
                 material_delta += material_surface_weight
                     * material_strata_updates.get(row).copied().unwrap_or(0.0);
+                material_delta += material_surface_weight
+                    * material_normal_updates.get(row).copied().unwrap_or(0.0);
             }
         }
         if material_liveness_gain > 0.0

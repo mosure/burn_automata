@@ -104,6 +104,18 @@ pub(crate) fn render_direct_rollout_training_step(
         cfg.material_max_opacity_update,
         &mut state_adjoint,
     );
+    add_material_surface_normal_state_adjoint(
+        &model.config,
+        target,
+        &trace.positions,
+        &trace.states,
+        cfg.opacity_gain,
+        cfg.coverage_samples,
+        cfg.seed_scale,
+        GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
+        cfg.material_max_opacity_update,
+        &mut state_adjoint,
+    );
     add_material_liveness_state_adjoint(
         &model.config,
         &trace.states,
