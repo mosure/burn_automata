@@ -227,6 +227,40 @@ fn train_render3d_defaults_to_shared_base_adapter_updates() {
 }
 
 #[test]
+fn train_render3d_adapter_suite_defaults_to_shared_base_sweep() {
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d-adapters",
+        "--base-model",
+        "artifacts/shared_base.bpk",
+    ])
+    .unwrap();
+    let Command::TrainRender3dAdapters {
+        base_model,
+        targets,
+        output_dir,
+        training_backend,
+        adapter_rank,
+        adapter_alpha,
+        particles,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-render3d-adapters command");
+    };
+    assert_eq!(base_model, PathBuf::from("artifacts/shared_base.bpk"));
+    assert_eq!(targets, vec![MeshTargetArg::Torus, MeshTargetArg::Teapot]);
+    assert_eq!(
+        output_dir,
+        PathBuf::from("artifacts/render_3d_adapter_suite")
+    );
+    assert_eq!(training_backend, RenderTrainingBackendArg::DirectRollout);
+    assert_eq!(adapter_rank, 8);
+    assert_eq!(adapter_alpha, 8.0);
+    assert_eq!(particles, 512);
+}
+
+#[test]
 fn train_render3d_exposes_robust_geometry_objective_gains() {
     let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
     let Command::TrainRender3d {

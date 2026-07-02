@@ -1,8 +1,8 @@
 use burn_automata::{
-    AutomataPreset, BpkModelManifest, EquivarianceMode, MorphogenSeedEnvelope, NpaConfig, NpaModel,
-    NpaWeights, ParticleSeed, RenderLossConfig, RolloutBatchConfig, RolloutConfig,
-    RolloutSupervisionConfig, SgdConfig, SupervisedBatch, SupervisedTarget, TrainingRunConfig,
-    feature_supervised_batch,
+    AutomataPreset, BpkModelManifest, EquivarianceMode, MorphogenSeedEnvelope, NpaConfig,
+    NpaLowRankAdapter, NpaModel, NpaWeights, ParticleSeed, RenderLossConfig, RolloutBatchConfig,
+    RolloutConfig, RolloutSupervisionConfig, SgdConfig, SupervisedBatch, SupervisedTarget,
+    TrainingRunConfig, feature_supervised_batch,
     kernels::build_hashgrid,
     mesh_multiview_render_loss_from_trace,
     rollout::{

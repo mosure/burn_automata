@@ -181,6 +181,13 @@ pub(crate) fn mesh_target_for_arg(target: MeshTargetArg, scale: f32) -> Triangle
     }
 }
 
+pub(crate) fn mesh_target_slug(target: MeshTargetArg) -> &'static str {
+    match target {
+        MeshTargetArg::Torus => "torus",
+        MeshTargetArg::Teapot => "teapot",
+    }
+}
+
 pub(crate) fn mesh_target_render_training_seed_scale(target: MeshTargetArg) -> f32 {
     mesh_target_training_profile(target).render_training_scale
 }

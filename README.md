@@ -141,8 +141,12 @@ target-agnostic local growth seed defaults; with `--base-model`, it treats the
 provided local-growth BPK as a frozen shared base and trains a LoRA-style
 low-rank object adapter (`--adapter-rank`, `--adapter-alpha`,
 `--adapter-seed`). Reports serialize the adapter parameter count and base/full
-parameter counts; the exported `.bpk` is still a materialized model until the
-compact adapter manifest format lands. Use `--weight-update-mode full` only for
+parameter counts; the exported `.bpk` is a materialized compatibility model.
+For many-object shared-base sweeps, use `train-render3d-adapters --base-model
+<shared.bpk> --targets torus,teapot`. That command freezes the shared base,
+trains one compact `.adapter.json` LoRA artifact per target, writes
+materialized validation/viewer BPKs beside the adapters, and reports
+adapter-to-full parameter efficiency. Use `--weight-update-mode full` only for
 legacy full-model ablations. The backend
 backpropagates the deterministic CPU multi-view splat loss analytically to
 final particle positions, opacity, and color, and applies those adjoints through

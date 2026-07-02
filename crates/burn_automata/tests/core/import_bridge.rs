@@ -40,6 +40,35 @@ fn bpk_manifest_roundtrips_and_rejects_corruption() {
     let err = burn_automata::import::decode_bpk_manifest(&bytes).unwrap_err();
     assert!(err.to_string().contains("checksum"));
 }
+
+#[test]
+fn adapter_manifest_roundtrips_and_materializes_base_model() {
+    let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);
+    let model = NpaModel::seeded(config.clone(), 1234);
+    let base_manifest = BpkModelManifest::from_model(&model, grid, Some("shared-base".to_string()));
+    let adapter = NpaLowRankAdapter::seeded(&config, 2, 2.0, 55);
+    let manifest = burn_automata::import::BpkAdapterManifest::from_adapter(
+        &base_manifest,
+        Some("base.bpk".to_string()),
+        adapter.clone(),
+        Some("adapter-test".to_string()),
+    )
+    .unwrap();
+    let path = temp_path("adapter_manifest.adapter.json");
+
+    burn_automata::import::save_adapter_manifest(&path, &manifest).unwrap();
+    let loaded = burn_automata::import::load_adapter_manifest(&path).unwrap();
+    fs::remove_file(&path).ok();
+
+    loaded.validate(&base_manifest).unwrap();
+    assert_eq!(loaded.model_kind, "npa-lora-adapter");
+    assert_eq!(loaded.adapter_parameter_count(), adapter.parameter_count());
+    let materialized = loaded.materialize(&base_manifest).unwrap();
+    let direct = adapter.apply_to_model(&model).unwrap();
+    assert_eq!(materialized.weights.w1, direct.weights.w1);
+    assert_eq!(materialized.weights.b2, direct.weights.b2);
+}
+
 #[test]
 fn pytorch_npa_checkpoint_imports_to_bpk() {
     let input = temp_path("fake_npa.pth");

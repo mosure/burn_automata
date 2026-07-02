@@ -503,6 +503,103 @@ pub(crate) enum Command {
         #[arg(long)]
         fail_on_validation: bool,
     },
+    #[command(
+        name = "train-render3d-adapters",
+        alias = "train-render-3d-adapters",
+        alias = "train-render3d-lora-suite"
+    )]
+    TrainRender3dAdapters {
+        #[arg(long)]
+        base_model: PathBuf,
+        #[arg(long, value_delimiter = ',', default_value = "torus,teapot")]
+        targets: Vec<MeshTargetArg>,
+        #[arg(long, default_value = "artifacts/render_3d_adapter_suite")]
+        output_dir: PathBuf,
+        #[arg(long, default_value = "artifacts/render_3d_adapter_suite_report.json")]
+        report_output: PathBuf,
+        #[arg(long, default_value_t = 4)]
+        rounds: usize,
+        #[arg(long, default_value_t = 32)]
+        supervised_steps_per_round: usize,
+        #[arg(long, default_value_t = 512)]
+        particles: usize,
+        #[arg(long, default_value_t = 32)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 64)]
+        gradient_particles: usize,
+        #[arg(long, default_value = "analytic")]
+        gradient_mode: RenderGradientModeArg,
+        #[arg(long, default_value_t = 1.0e-3)]
+        finite_diff_eps: f32,
+        #[arg(long, default_value_t = 0.35)]
+        motion_gain: f32,
+        #[arg(long, default_value_t = 0.05)]
+        perception_position_gain: f32,
+        #[arg(long, default_value_t = 1.0)]
+        max_update_norm: f32,
+        #[arg(long, default_value_t = true)]
+        trajectory_supervision: bool,
+        #[arg(long, default_value = "direct-rollout")]
+        training_backend: RenderTrainingBackendArg,
+        #[arg(long, default_value_t = 8)]
+        adapter_rank: usize,
+        #[arg(long, default_value_t = 8.0)]
+        adapter_alpha: f32,
+        #[arg(long, default_value_t = 0x00ad_a973)]
+        adapter_seed: u64,
+        #[arg(long, default_value_t = 5.0e-4)]
+        learning_rate: f32,
+        #[arg(long, default_value_t = 1.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP)]
+        direct_output_gradient_rms_cap: f32,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        direct_line_search: bool,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "0.0625,0.125,0.25,0.5,1,2,4,8,16,32"
+        )]
+        direct_line_search_scales: Vec<f32>,
+        #[arg(long)]
+        direct_material_output_only: bool,
+        #[arg(long)]
+        direct_selection_seed_training: bool,
+        #[arg(long)]
+        no_direct_selection_seed_training: bool,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long)]
+        seed_mode: Option<SeedModeArg>,
+        #[arg(long, default_value_t = 0x0051_a73d)]
+        selection_seed: u64,
+        #[arg(long = "extra-selection-seed", value_delimiter = ',')]
+        extra_selection_seeds: Vec<u64>,
+        #[arg(long, default_value_t = 64)]
+        image_size: usize,
+        #[arg(long, default_value_t = 0)]
+        target_samples: usize,
+        #[arg(long, default_value_t = 2.5)]
+        sigma: f32,
+        #[arg(long, default_value_t = 0.75)]
+        min_sigma: f32,
+        #[arg(long, default_value_t = 5.0)]
+        max_sigma: f32,
+        #[arg(long, default_value = "fixed-sh0")]
+        gaussian_decode_mode: RenderGaussianDecodeModeArg,
+        #[arg(long)]
+        world_scale: Option<f32>,
+        #[arg(long, default_value_t = 0.0)]
+        render_opacity_logit_bias: f32,
+        #[arg(long, default_value_t = 1.0)]
+        density_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        color_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        depth_weight: f32,
+        #[arg(long)]
+        fail_on_validation: bool,
+    },
     Import {
         #[arg(long)]
         input: PathBuf,

@@ -53,6 +53,8 @@ pub(crate) struct RenderProxyTrainingReport {
     pub(crate) final_render_loss: MultiViewRenderLossReport,
     pub(crate) selected_round: Option<usize>,
     pub(crate) history: Vec<RenderProxyTrainingHistoryEntry>,
+    #[serde(skip_serializing)]
+    pub(crate) trained_adapter: Option<NpaLowRankAdapter>,
 }
 
 #[derive(Clone, Debug, Serialize)]

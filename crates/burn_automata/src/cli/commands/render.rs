@@ -1,7 +1,9 @@
 use crate::cli::prelude::*;
 
+mod adapter_suite;
 mod train;
 
+pub(crate) use adapter_suite::run_train_render_3d_adapters;
 pub(crate) use train::run_train_render_3d;
 
 pub(crate) fn run_render_loss_3d(command: Command) -> Result<(), Box<dyn std::error::Error>> {

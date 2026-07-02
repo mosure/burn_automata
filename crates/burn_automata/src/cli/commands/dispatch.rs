@@ -17,6 +17,9 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::ValidateGrowth3d { .. } => render::run_validate_growth_3d(command),
         command @ Command::RetimeGrowth3d { .. } => render::run_retime_growth_3d(command),
         command @ Command::TrainRender3d { .. } => render::run_train_render_3d(command),
+        command @ Command::TrainRender3dAdapters { .. } => {
+            render::run_train_render_3d_adapters(command)
+        }
         command @ Command::Import { .. } => basic::run_import(command),
         command @ Command::Bench { .. } => bench_handlers::run_bench(command),
         command @ Command::BenchSpatial { .. } => bench_handlers::run_bench_spatial(command),

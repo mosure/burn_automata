@@ -20,6 +20,37 @@ pub(crate) struct CliRenderTrainingReport {
     pub(crate) catalog_promotion_validations: Vec<CliGrowth3dValidationReport>,
 }
 
+#[derive(Serialize)]
+pub(crate) struct CliRenderAdapterSuiteReport {
+    pub(crate) base_model: String,
+    pub(crate) base_source: Option<String>,
+    pub(crate) output_dir: String,
+    pub(crate) targets: Vec<MeshTargetArg>,
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) sgd: SgdConfig,
+    pub(crate) adapter_rank: usize,
+    pub(crate) adapter_alpha: f32,
+    pub(crate) base_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) adapter_to_full_ratio: f32,
+    pub(crate) entries: Vec<CliRenderAdapterSuiteEntry>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliRenderAdapterSuiteEntry {
+    pub(crate) target: MeshTargetArg,
+    pub(crate) adapter_output: String,
+    pub(crate) materialized_model_output: String,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) report: RenderProxyTrainingReport,
+    pub(crate) final_render_loss: MultiViewRenderLossReport,
+    pub(crate) strict_gate_summary: CliRenderTrainingGateSummary,
+    pub(crate) growth_validation: CliGrowth3dValidationReport,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct CliCatalogPromotionSummary {
     pub(crate) requested: bool,

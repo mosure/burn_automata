@@ -411,8 +411,11 @@ as the final Hyper-NPA target:
 - The core library now exposes a first adapter primitive:
   `NpaLowRankAdapter` can be materialized onto a shared `NpaModel`, full MLP
   gradients can be projected into adapter gradients, and supervised adapter
-  training can update only the adapter. Render-rollout training should reuse
-  this path next rather than adding per-object full-weight training loops.
+  training can update only the adapter. Render-rollout training now uses this
+  path for both single-target training and `train-render3d-adapters` shared-base
+  suites. The suite output is the desired bridge artifact for HyperNPA: a
+  frozen shared BPK plus many compact `.adapter.json` object adapters, with
+  materialized BPKs treated as validation/viewer compatibility outputs.
 - Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
   `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
   seed modes are legacy diagnostics for existing BPK lineage and should not be

@@ -493,6 +493,7 @@ pub(crate) fn run_render_proxy_training(
         final_render_loss,
         selected_round,
         history,
+        trained_adapter: adapter_state.as_ref().map(|state| state.adapter.clone()),
     })
 }
 

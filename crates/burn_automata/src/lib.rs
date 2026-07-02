@@ -25,7 +25,8 @@ pub use burn_automata_kernels::GaussianDecodeMode;
 pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
 pub use error::{AutomataError, AutomataResult};
 pub use import::{
-    BpkModelManifest, ExportedCheckpoint, ImportReport, import_exported_checkpoint, import_model,
+    BpkAdapterManifest, BpkModelManifest, ExportedCheckpoint, ImportReport,
+    import_exported_checkpoint, import_model, load_adapter_manifest, save_adapter_manifest,
 };
 pub use mesh_objective::{GaussianVolumeStats, MeshRolloutObjectiveConfig};
 pub use model::{NpaLowRankAdapter, NpaModel, NpaWeights, StepOutput};
