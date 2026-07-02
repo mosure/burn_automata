@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn growth_3d_strict_checks_reject_missing_torus_angular_coverage() {
+fn growth_3d_strict_checks_report_torus_angular_diagnostics_without_generic_rejection() {
     let activation = Growth3dActivationReport {
         active_seed_count: 4,
         inactive_seed_count: 124,
@@ -88,8 +88,8 @@ fn growth_3d_strict_checks_reject_missing_torus_angular_coverage() {
         true,
     );
     assert!(!checks.torus_angular_coverage);
-    assert!(!checks.passed);
-    assert!(checks.failure_reasons.contains(&"torus_angular_coverage"));
+    assert!(checks.passed);
+    assert!(!checks.failure_reasons.contains(&"torus_angular_coverage"));
 
     let full_tube_support = TorusAngularCoverageReport {
         covered_joint_bins: 288,
@@ -133,7 +133,7 @@ fn growth_3d_strict_checks_reject_missing_torus_angular_coverage() {
 }
 
 #[test]
-fn growth_3d_strict_score_tracks_torus_angular_coverage() {
+fn growth_3d_strict_score_reports_torus_angular_coverage_without_score_pressure() {
     let checks = passing_growth_3d_strict_checks();
     let initial_surface = Growth3dSurfaceStats {
         mean_distance: 0.2,
@@ -206,7 +206,7 @@ fn growth_3d_strict_score_tracks_torus_angular_coverage() {
     assert!(angular.torus_angular_joint_coverage_penalty > 0.0);
     assert!(angular.torus_angular_tube_coverage_penalty > 0.0);
     assert!(angular.torus_angular_tube_gap_penalty > 0.0);
-    assert!(angular.score > baseline.score);
+    assert_eq!(angular.score, baseline.score);
 }
 
 #[test]

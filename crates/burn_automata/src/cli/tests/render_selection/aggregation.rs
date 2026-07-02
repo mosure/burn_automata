@@ -129,10 +129,10 @@ fn render_selection_metrics_average_base_and_selection_seed_with_morphology_pena
         "worst selection seed should expose strict failure reasons"
     );
     assert!(
-        selection
+        !selection
             .worst_failure_reasons
             .contains(&"torus_angular_coverage"),
-        "torus render-proxy selection must preserve angular-support blockers"
+        "target-specific torus diagnostics must not drive generic render-proxy selection"
     );
     assert!(
         (selection.density_psnr_db

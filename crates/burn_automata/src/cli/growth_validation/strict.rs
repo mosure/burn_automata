@@ -139,7 +139,6 @@ pub(crate) fn growth_3d_strict_checks_report(
             "material_visible_surface_normal_coverage",
             material_visible_surface_normal_coverage,
         ),
-        ("torus_angular_coverage", torus_angular_coverage),
         ("gaussian_scale_budget", gaussian_scale_budget),
         ("render_loss_passed", render_loss_passed),
     ];
@@ -254,7 +253,6 @@ pub(crate) fn growth_3d_strict_score_report(
         checks.material_visible_surface_coverage_profile,
         checks.surface_normal_coverage,
         checks.material_visible_surface_normal_coverage,
-        checks.torus_angular_coverage,
         checks.gaussian_scale_budget,
         checks.material_visible_surface_tail_bounded,
         checks.render_loss_passed,
@@ -340,9 +338,6 @@ pub(crate) fn growth_3d_strict_score_report(
         + surface_normal_mean_penalty
         + material_visible_surface_normal_bin_penalty
         + material_visible_surface_normal_mean_penalty
-        + torus_angular_joint_coverage_penalty
-        + torus_angular_tube_coverage_penalty
-        + torus_angular_tube_gap_penalty
         + gaussian_scale_budget_penalty
         + gaussian_oversize_penalty
         + render_density_penalty
