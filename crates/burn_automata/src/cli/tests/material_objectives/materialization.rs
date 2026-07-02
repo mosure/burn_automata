@@ -3,6 +3,11 @@ use super::*;
 #[test]
 fn temporal_materialization_output_objective_grows_only_local_front_candidates() {
     let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
     let output_dims = config.update_dims();
     let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
     let material_output = config.spatial_dims + material_channel;
@@ -10,6 +15,8 @@ fn temporal_materialization_output_objective_grows_only_local_front_candidates()
         [0.0_f32, 0.0, 0.0, 0.0],
         [0.08_f32, 0.0, 0.0, 0.0],
         [0.10_f32, 0.0, 0.0, 0.0],
+        [0.0_f32, 0.0, 0.90, 0.0],
+        [0.08_f32, 0.0, 0.90, 0.0],
         [0.75_f32, 0.0, 0.0, 0.0],
     ];
     let mut states = vec![0.0; positions.len() * config.state_dims];
@@ -19,12 +26,14 @@ fn temporal_materialization_output_objective_grows_only_local_front_candidates()
     }
     states[GROWTH_3D_LIVENESS_CHANNEL] = 0.0;
     states[material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
+    states[3 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = 0.0;
     let raw_updates = vec![0.0_f32; positions.len() * output_dims];
-    let candidate_weights = vec![0.0_f32, 1.0, 0.0, 1.0];
+    let candidate_weights = vec![0.0_f32, 1.0, 0.0, 0.0, 1.0, 1.0];
     let mut output_gradients = vec![0.0_f32; raw_updates.len()];
 
     add_temporal_materialization_output_objective_with_candidate_weights(
         &config,
+        &target,
         &positions,
         &states,
         &raw_updates,
@@ -32,6 +41,7 @@ fn temporal_materialization_output_objective_grows_only_local_front_candidates()
         1.0,
         0.20,
         &candidate_weights,
+        1.0,
         0.25,
         &mut output_gradients,
     );
@@ -51,6 +61,16 @@ fn temporal_materialization_output_objective_grows_only_local_front_candidates()
     );
     assert_eq!(
         output_gradients[3 * output_dims + material_output],
+        0.0,
+        "off-surface active row without candidate weight should not be materialized"
+    );
+    assert_eq!(
+        output_gradients[4 * output_dims + material_output],
+        0.0,
+        "off-surface local-front candidate should not be materialized by rollout timing"
+    );
+    assert_eq!(
+        output_gradients[5 * output_dims + material_output],
         0.0,
         "far dormant row should not receive global materialization pressure"
     );
@@ -118,11 +138,12 @@ fn active_surface_materialization_promotes_active_surface_rows_only() {
     assert_eq!(
         output_gradients[4 * output_dims + material_output],
         0.0,
-        "active row outside the bounded surface frontier should not receive material pressure"
+        "active row outside the soft surface band should not receive material pressure"
     );
-    assert!(
-        output_gradients[output_dims + material_output] < 0.0,
-        "active row inside the bounded surface frontier should materialize before coverage takes over"
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "active row outside the soft surface band should move before becoming render-visible"
     );
     assert!(
         output_gradients[2 * output_dims + material_output] < 0.0,
@@ -185,8 +206,8 @@ fn active_surface_materialization_prioritizes_rows_before_strict_coverage() {
     );
 
     assert!(
-        output_gradients[material_output].abs() > 5.0,
-        "active rows before strict coverage should receive strong render-material pressure"
+        output_gradients[material_output] < 0.0,
+        "active rows inside the soft surface band should receive render-material pressure"
     );
     assert_eq!(
         output_gradients[output_dims + material_output],

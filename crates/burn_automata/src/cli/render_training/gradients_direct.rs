@@ -634,11 +634,14 @@ pub(crate) fn render_direct_rollout_training_step(
             vec![0.0; particle_count * output_dims];
         add_material_coverage_materialization_output_objective(
             &model.config,
+            target,
+            &snapshot.positions,
             &snapshot.states,
             &updates,
             snapshot.step_fraction,
             cfg.opacity_gain * DIRECT_GROWTH_MATERIAL_COVERAGE_MATERIALIZATION_GAIN_FRACTION,
             &material_coverage_candidate_weights,
+            cfg.seed_scale,
             cfg.material_max_opacity_update,
             &mut material_coverage_materialization_output_gradients,
         );
@@ -659,6 +662,7 @@ pub(crate) fn render_direct_rollout_training_step(
         let mut temporal_materialization_output_gradients = vec![0.0; particle_count * output_dims];
         add_temporal_materialization_output_objective_with_candidate_weights(
             &model.config,
+            target,
             &snapshot.positions,
             &snapshot.states,
             &updates,
@@ -666,6 +670,7 @@ pub(crate) fn render_direct_rollout_training_step(
             cfg.opacity_gain * DIRECT_GROWTH_TEMPORAL_MATERIALIZATION_GAIN_FRACTION,
             cfg.liveness_front_radius,
             &liveness_candidate_weights,
+            cfg.seed_scale,
             cfg.material_max_opacity_update,
             &mut temporal_materialization_output_gradients,
         );

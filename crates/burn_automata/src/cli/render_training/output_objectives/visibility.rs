@@ -525,21 +525,24 @@ pub(crate) fn add_material_visibility_output_objective(
         let projection = target.project(position3(*position));
         let surface_weight =
             soft_material_assignment_weight(projection.distance, strict_threshold, soft_threshold);
-        let activation_surface_weight = if liveness <= -1.0 {
+        let material_surface_weight = surface_weight;
+        let liveness_surface_weight = if liveness <= -1.0 {
             surface_weight.max(0.5 * candidate_weight)
         } else {
             surface_weight
         };
         let mut material_delta = 0.0_f32;
         if opacity_gain > 0.0 && opacity_gain.is_finite() && material_candidate {
-            if activation_surface_weight > 0.0 {
+            if material_surface_weight > 0.0 {
                 material_delta += opacity_gain
-                    * activation_surface_weight
+                    * material_surface_weight
                     * candidate_weight
                     * (GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET - material_opacity);
+                material_delta += material_surface_weight
+                    * material_coverage_updates.get(row).copied().unwrap_or(0.0);
+                material_delta += material_surface_weight
+                    * material_strata_updates.get(row).copied().unwrap_or(0.0);
             }
-            material_delta += material_coverage_updates.get(row).copied().unwrap_or(0.0);
-            material_delta += material_strata_updates.get(row).copied().unwrap_or(0.0);
         }
         if material_liveness_gain > 0.0
             && material_liveness_gain.is_finite()
@@ -569,9 +572,9 @@ pub(crate) fn add_material_visibility_output_objective(
             && predicted_liveness[row] <= -1.0
             && front_weight > 0.0
         {
-            if activation_surface_weight > 0.0 {
+            if liveness_surface_weight > 0.0 {
                 let score =
-                    (front_weight * activation_surface_weight * candidate_weight).clamp(0.0, 1.0);
+                    (front_weight * liveness_surface_weight * candidate_weight).clamp(0.0, 1.0);
                 if score > 0.0 {
                     liveness_candidates.push((row, score, liveness));
                 }

@@ -10,6 +10,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_temporal_materialization_output_objective_with_candidate_weights(
     config: &NpaConfig,
+    target: &TriangleMeshTarget,
     positions: &[[f32; 4]],
     states: &[f32],
     raw_updates: &[f32],
@@ -17,6 +18,7 @@ pub(crate) fn add_temporal_materialization_output_objective_with_candidate_weigh
     material_gain: f32,
     front_radius: f32,
     candidate_weights: &[f32],
+    seed_scale: f32,
     max_material_update: f32,
     output_gradients: &mut [f32],
 ) {
@@ -80,6 +82,10 @@ pub(crate) fn add_temporal_materialization_output_objective_with_candidate_weigh
     };
     let mut candidates = (0..positions.len())
         .filter_map(|row| {
+            let surface_weight = surface_band_material_weight(target, positions[row], seed_scale);
+            if surface_weight <= 0.0 {
+                return None;
+            }
             let state_base = row * config.state_dims;
             let output_base = row * output_dims;
             let material = states[state_base + material_channel];
@@ -92,7 +98,7 @@ pub(crate) fn add_temporal_materialization_output_objective_with_candidate_weigh
             if front_weight <= 0.0 || candidate_weight <= 0.0 {
                 return None;
             }
-            let score = (front_weight * candidate_weight).clamp(0.0, 1.0);
+            let score = (front_weight * candidate_weight * surface_weight).clamp(0.0, 1.0);
             (score > 0.0 && score.is_finite()).then_some((row, score, material))
         })
         .collect::<Vec<_>>();
@@ -123,11 +129,14 @@ pub(crate) fn add_temporal_materialization_output_objective_with_candidate_weigh
 
 pub(crate) fn add_material_coverage_materialization_output_objective(
     config: &NpaConfig,
+    target: &TriangleMeshTarget,
+    positions: &[[f32; 4]],
     states: &[f32],
     raw_updates: &[f32],
     step_fraction: f32,
     material_gain: f32,
     candidate_weights: &[f32],
+    seed_scale: f32,
     max_material_update: f32,
     output_gradients: &mut [f32],
 ) {
@@ -144,6 +153,7 @@ pub(crate) fn add_material_coverage_materialization_output_objective(
         || output_dims == 0
         || material_gain <= 0.0
         || !material_gain.is_finite()
+        || positions.len() < candidate_weights.len()
         || states.len() < candidate_weights.len().saturating_mul(config.state_dims)
         || raw_updates.len() < candidate_weights.len().saturating_mul(output_dims)
         || output_gradients.len() < candidate_weights.len().saturating_mul(output_dims)
@@ -165,6 +175,10 @@ pub(crate) fn add_material_coverage_materialization_output_objective(
     for row in 0..candidate_weights.len() {
         let candidate_weight = candidate_weights[row].clamp(0.0, 1.0);
         if candidate_weight <= 1.0e-3 || !candidate_weight.is_finite() {
+            continue;
+        }
+        let surface_weight = surface_band_material_weight(target, positions[row], seed_scale);
+        if surface_weight <= 0.0 {
             continue;
         }
         let state_base = row * config.state_dims;
@@ -189,6 +203,7 @@ pub(crate) fn add_material_coverage_materialization_output_objective(
         }
         output_gradients[output_base + material_output] += material_gain
             * candidate_weight
+            * surface_weight
             * activity_weight
             * (raw_updates[output_base + material_output] - target_update);
     }
@@ -265,9 +280,7 @@ pub(crate) fn add_active_surface_materialization_output_objective(
             continue;
         }
 
-        let projection = target.project(position3(*position));
-        let surface_weight =
-            material_visible_surface_materialization_weight(projection.distance, seed_scale);
+        let surface_weight = surface_band_material_weight(target, *position, seed_scale);
         if surface_weight <= 0.0 {
             continue;
         }
@@ -288,6 +301,17 @@ pub(crate) fn add_active_surface_materialization_output_objective(
         let raw = raw_updates[output_base + material_output];
         output_gradients[output_base + material_output] += material_gain * (raw - target_update);
     }
+}
+
+fn surface_band_material_weight(
+    target: &TriangleMeshTarget,
+    position: [f32; 4],
+    seed_scale: f32,
+) -> f32 {
+    let projection = target.project(position3(position));
+    let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
+    let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
+    soft_material_assignment_weight(projection.distance, strict_threshold, soft_threshold)
 }
 
 #[allow(dead_code)]

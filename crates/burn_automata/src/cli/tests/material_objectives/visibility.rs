@@ -180,7 +180,7 @@ fn material_visibility_output_objective_couples_local_front_to_mesh_motion() {
 }
 
 #[test]
-fn material_visibility_output_objective_preactivates_offsurface_local_front_rows() {
+fn material_visibility_output_objective_does_not_materialize_offsurface_local_front_rows() {
     let config = NpaConfig::growing_3dgs();
     let target = TriangleMeshTarget::new(
         vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
@@ -226,13 +226,15 @@ fn material_visibility_output_objective_preactivates_offsurface_local_front_rows
         &mut output_gradients,
     );
 
-    assert!(
-        output_gradients[output_dims + material_output] < 0.0,
-        "off-surface local-front row should receive material preactivation while it is being moved"
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "off-surface local-front row should not become render-visible before reaching the surface band"
     );
-    assert!(
-        output_gradients[output_dims + liveness_output] < 0.0,
-        "off-surface local-front material preactivation should also provide bounded liveness pressure"
+    assert_eq!(
+        output_gradients[output_dims + liveness_output],
+        0.0,
+        "off-surface local-front row should rely on geometry/liveness objectives rather than material preactivation"
     );
     assert_eq!(
         output_gradients[2 * output_dims + material_output],

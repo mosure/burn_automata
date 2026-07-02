@@ -303,25 +303,39 @@ fn material_coverage_candidates_train_liveness_and_material_updates() {
 #[test]
 fn material_coverage_materialization_output_objective_promotes_candidate_rows_only() {
     let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
     let output_dims = config.update_dims();
     let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
     let material_output = config.spatial_dims + material_channel;
     let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
-    let rows = 3;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.01, 0.0],
+        [0.08_f32, 0.0, 0.01, 0.0],
+        [0.0_f32, 0.0, 0.90, 0.0],
+        [0.04_f32, 0.0, 0.01, 0.0],
+    ];
+    let rows = positions.len();
     let mut states = vec![GROWTH_3D_INACTIVE_OPACITY_LOGIT; rows * config.state_dims];
-    states[2 * config.state_dims + material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
+    states[3 * config.state_dims + material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
     let mut raw_updates = vec![0.0_f32; rows * output_dims];
     raw_updates[liveness_output] = 1.2;
-    let candidate_weights = vec![1.0_f32, 0.0, 1.0];
+    let candidate_weights = vec![1.0_f32, 0.0, 1.0, 1.0];
     let mut gradients = vec![0.0_f32; rows * output_dims];
 
     add_material_coverage_materialization_output_objective(
         &config,
+        &target,
+        &positions,
         &states,
         &raw_updates,
         0.75,
         1.0,
         &candidate_weights,
+        1.0,
         0.25,
         &mut gradients,
     );
@@ -341,6 +355,11 @@ fn material_coverage_materialization_output_objective_promotes_candidate_rows_on
     );
     assert_eq!(
         gradients[2 * output_dims + material_output],
+        0.0,
+        "off-surface candidate should not become render-visible before entering the surface band"
+    );
+    assert_eq!(
+        gradients[3 * output_dims + material_output],
         0.0,
         "already visible candidate should not receive more material pressure"
     );
