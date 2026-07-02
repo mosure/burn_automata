@@ -6,6 +6,7 @@ use super::*;
 pub(crate) fn growth_3d_strict_checks_report(
     position_features: bool,
     local_conditionless_lineage: bool,
+    target_conditionless_lineage: bool,
     seed_coordinate_scaffold: bool,
     non_opacity_seed_abs_max: f32,
     final_opacity: Growth3dOpacityStats,
@@ -95,6 +96,7 @@ pub(crate) fn growth_3d_strict_checks_report(
     let checks = [
         ("no_position_features", no_position_features),
         ("local_conditionless_lineage", local_conditionless_lineage),
+        ("target_conditionless_lineage", target_conditionless_lineage),
         ("no_seed_coordinate_scaffold", no_seed_coordinate_scaffold),
         (
             "neutral_non_opacity_seed_state",
@@ -152,6 +154,7 @@ pub(crate) fn growth_3d_strict_checks_report(
         passed,
         no_position_features,
         local_conditionless_lineage,
+        target_conditionless_lineage,
         no_seed_coordinate_scaffold,
         neutral_non_opacity_seed_state,
         sparse_active_seed,
@@ -224,6 +227,7 @@ pub(crate) fn growth_3d_strict_score_report(
     let hard_failures = [
         checks.no_position_features,
         checks.local_conditionless_lineage,
+        checks.target_conditionless_lineage,
         checks.no_seed_coordinate_scaffold,
         checks.neutral_non_opacity_seed_state,
         checks.sparse_active_seed,

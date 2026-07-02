@@ -66,6 +66,7 @@ fn growth_3d_strict_checks_require_sustained_motion() {
     let checks = growth_3d_strict_checks_report(
         false,
         true,
+        true,
         false,
         0.0,
         passing_growth_3d_opacity_stats(),
@@ -98,6 +99,7 @@ fn growth_3d_strict_checks_require_sustained_motion() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         false,
         0.0,
@@ -147,6 +149,7 @@ fn growth_3d_strict_checks_require_sustained_motion() {
     let checks = growth_3d_strict_checks_report(
         false,
         true,
+        true,
         false,
         0.0,
         high_opacity,
@@ -178,6 +181,7 @@ fn growth_3d_strict_checks_require_sustained_motion() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         false,
         0.0,
@@ -217,6 +221,7 @@ fn growth_3d_strict_checks_require_sustained_motion() {
     };
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         false,
         0.0,
@@ -365,6 +370,7 @@ fn growth_3d_strict_checks_reject_surface_max_escape() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         false,
         0.0,

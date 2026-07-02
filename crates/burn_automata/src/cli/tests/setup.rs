@@ -335,6 +335,18 @@ fn render_training_source_does_not_preserve_mismatched_target_lineage() {
     );
     assert!(mismatched_source.contains("Teapot"));
     assert!(mismatched_source.contains(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE));
+
+    let mismatched_seed_source = render_training_source(
+        MeshTargetArg::Teapot,
+        Some(TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE),
+        ParticleSeed::TorusLocalSubstrateGrowth3d,
+    );
+    assert!(
+        mismatched_seed_source.starts_with("render-proxy-rust:"),
+        "target-local lineage must not be preserved when the seed family belongs to another target"
+    );
+    assert!(mismatched_seed_source.contains("Teapot"));
+    assert!(mismatched_seed_source.contains("TorusLocalSubstrateGrowth3d"));
 }
 
 #[test]
@@ -628,7 +640,16 @@ fn render_training_base_defaults_to_conditionless_local_growth() {
     )
     .unwrap_err()
     .to_string();
-    assert!(err.contains("target local growth seed"));
+    assert!(err.contains("strict conditionless-local growth seed"));
+
+    let scaffold_err =
+        render_training_base_model(MeshTargetArg::Torus, &target, ParticleSeed::TorusGrowth3d)
+            .unwrap_err()
+            .to_string();
+    assert!(
+        scaffold_err.contains("strict conditionless-local growth seed"),
+        "default render training must not silently fall back to scaffolded compact seeds"
+    );
 }
 
 #[test]
@@ -816,15 +837,41 @@ fn local_3d_continuation_accepts_only_conditionless_local_lineage() {
     );
     crate::import::save_manifest(&local_path, &local_manifest).unwrap();
 
-    let (_loaded, _grid, source) =
-        load_conditionless_local_base_model(&local_path, TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE)
-            .unwrap();
+    let (_loaded, _grid, source) = load_conditionless_local_base_model(
+        &local_path,
+        MeshTargetArg::Torus,
+        UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+    )
+    .unwrap();
+    let target_mismatch_err = load_conditionless_local_base_model(
+        &local_path,
+        MeshTargetArg::Teapot,
+        TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+    )
+    .unwrap_err()
+    .to_string();
     std::fs::remove_file(&local_path).ok();
     assert!(source.contains("continued-from="));
     assert!(source.contains("conditionless-local"));
     assert!(!source.contains("position-field"));
     assert!(!source.contains("seed-frame"));
     assert!(!source.contains("render-proxy-rust"));
+    assert!(
+        target_mismatch_err.contains("target-mismatched lineage"),
+        "continuation must not relabel a torus local base as a teapot local base"
+    );
+
+    let requested_source_mismatch = load_conditionless_local_base_model(
+        &local_path,
+        MeshTargetArg::Torus,
+        TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        requested_source_mismatch.contains("target source does not match target"),
+        "continuation must not accept an output source for another mesh target"
+    );
 
     let shortcut_path = bin_temp_path("local_3d_continuation_shortcut.bpk");
     let shortcut_manifest = BpkModelManifest::from_model(
@@ -837,6 +884,7 @@ fn local_3d_continuation_accepts_only_conditionless_local_lineage() {
     crate::import::save_manifest(&shortcut_path, &shortcut_manifest).unwrap();
     let shortcut_err = load_conditionless_local_base_model(
         &shortcut_path,
+        MeshTargetArg::Torus,
         UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE,
     )
     .unwrap_err();
@@ -857,6 +905,7 @@ fn local_3d_continuation_accepts_only_conditionless_local_lineage() {
     crate::import::save_manifest(&position_path, &position_manifest).unwrap();
     let position_err = load_conditionless_local_base_model(
         &position_path,
+        MeshTargetArg::Teapot,
         TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE,
     )
     .unwrap_err();

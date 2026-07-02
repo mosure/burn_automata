@@ -239,6 +239,7 @@ pub(crate) fn render_selection_case_metrics(
     let mut strict_checks = growth_3d_strict_checks_report(
         model.config.position_features,
         true,
+        true,
         growth_3d_seed_has_coordinate_scaffold(cfg.seed_mode),
         non_opacity_seed_abs_max,
         final_opacity,

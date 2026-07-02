@@ -48,6 +48,7 @@ pub(crate) fn growth_3d_validation_report_single(
     let source = manifest.source.clone();
     let source_text = source.as_deref().unwrap_or_default();
     let local_conditionless_lineage = local_conditionless_lineage(source_text);
+    let target_conditionless_lineage = target_conditionless_lineage(target_arg, source_text);
     let position_features = manifest.config.position_features;
     let seed_coordinate_scaffold = growth_3d_seed_has_coordinate_scaffold(cfg.seed_mode);
     let grid = manifest.hashgrid.clone();
@@ -296,6 +297,7 @@ pub(crate) fn growth_3d_validation_report_single(
     let mut strict_checks = growth_3d_strict_checks_report(
         position_features,
         local_conditionless_lineage,
+        target_conditionless_lineage,
         seed_coordinate_scaffold,
         non_opacity_seed_abs_max,
         final_opacity,
@@ -361,6 +363,7 @@ pub(crate) fn growth_3d_validation_report_single(
     );
     let catalog_gate_passed = !position_features
         && local_conditionless_lineage
+        && target_conditionless_lineage
         && !seed_coordinate_scaffold
         && non_opacity_seed_abs_max <= 1.0e-6
         && final_opacity.finite
@@ -397,6 +400,7 @@ pub(crate) fn growth_3d_validation_report_single(
         source,
         position_features,
         local_conditionless_lineage,
+        target_conditionless_lineage,
         seed_coordinate_scaffold,
         particle_count: cfg.particle_count,
         steps: cfg.steps,

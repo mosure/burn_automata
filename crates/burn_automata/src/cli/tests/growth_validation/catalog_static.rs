@@ -81,6 +81,54 @@ fn growth_3d_validation_rejects_static_local_artifact() {
 }
 
 #[test]
+fn growth_3d_validation_rejects_mismatched_target_lineage() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let model = NpaModel {
+        config: config.clone(),
+        weights: NpaWeights::zeros(&config),
+    };
+    let path = bin_temp_path("mismatched_target_lineage_growth3d.bpk");
+    let manifest = BpkModelManifest::from_model(
+        &model,
+        grid,
+        Some(format!(
+            "ablation-rust:{UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE}"
+        )),
+    );
+    crate::import::save_manifest(&path, &manifest).unwrap();
+
+    let report = growth_3d_validation_report(
+        &path,
+        MeshTargetArg::Teapot,
+        growth_validation_test_config(ParticleSeed::TeapotLocalSubstrateGrowth3d),
+    )
+    .unwrap();
+    std::fs::remove_file(&path).ok();
+
+    assert!(report.local_conditionless_lineage);
+    assert!(!report.target_conditionless_lineage);
+    assert!(!report.strict_checks.target_conditionless_lineage);
+    assert!(!report.strict_passed);
+    assert!(
+        report
+            .strict_checks
+            .failure_reasons
+            .contains(&"target_conditionless_lineage"),
+        "target-mismatched local artifacts should fail strict validation explicitly"
+    );
+    assert!(!report.robustness.all_target_conditionless_lineage);
+    assert!(
+        report
+            .robustness
+            .seeds
+            .iter()
+            .all(|seed| !seed.target_conditionless_lineage)
+    );
+    assert!(!growth_3d_fail_on_validation_passed(&report));
+}
+
+#[test]
 fn growth_3d_catalog_sanity_thresholds_match_active_catalog_floor() {
     for (target, max_total_loss, min_density, min_color, min_depth) in [
         (MeshTargetArg::Torus, 0.90, 0.95, 16.0, 14.8),
@@ -151,6 +199,7 @@ fn growth_3d_strict_checks_accept_one_eighth_active_seed_boundary() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         false,
         0.0,
@@ -228,6 +277,7 @@ fn growth_3d_strict_checks_reject_seed_coordinate_scaffold() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         0.0,
@@ -320,6 +370,7 @@ fn growth_3d_strict_checks_reject_tiny_active_extent() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         false,
         0.0,

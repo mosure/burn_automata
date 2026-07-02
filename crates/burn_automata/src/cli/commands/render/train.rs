@@ -95,9 +95,9 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
     } else {
         let default_seed_mode = render_training_default_seed_mode(target);
         let seed_mode = requested_seed_mode.unwrap_or(default_seed_mode);
-        if !target_local_growth_seed(target, seed_mode) {
+        if !target_strict_conditionless_local_growth_seed(target, seed_mode) {
             return Err(std::io::Error::other(format!(
-                "train-render3d without --base-model defaults to conditionless-local growth and requires a target local growth seed; got seed_mode={seed_mode:?}"
+                "train-render3d without --base-model defaults to conditionless-local growth and requires the target strict conditionless-local growth seed; got seed_mode={seed_mode:?}"
             ))
             .into());
         }

@@ -9,9 +9,9 @@ pub(crate) fn render_training_base_model(
     target_mesh: &TriangleMeshTarget,
     seed_mode: ParticleSeed,
 ) -> Result<(NpaModel, String), Box<dyn std::error::Error>> {
-    if !target_local_growth_seed(target, seed_mode) {
+    if !target_strict_conditionless_local_growth_seed(target, seed_mode) {
         return Err(std::io::Error::other(format!(
-            "default render training base requires a target local growth seed; got seed_mode={seed_mode:?}"
+            "default render training base requires the target strict conditionless-local growth seed; got seed_mode={seed_mode:?}"
         ))
         .into());
     }
@@ -211,17 +211,7 @@ pub(crate) fn render_training_source(
     base_source: Option<&str>,
     seed_mode: ParticleSeed,
 ) -> String {
-    let local_growth_seed = matches!(
-        seed_mode,
-        ParticleSeed::TorusGrowth3d
-            | ParticleSeed::TeapotGrowth3d
-            | ParticleSeed::TorusSubstrateGrowth3d
-            | ParticleSeed::TeapotSubstrateGrowth3d
-            | ParticleSeed::TorusLocalGrowth3d
-            | ParticleSeed::TeapotLocalGrowth3d
-            | ParticleSeed::TorusLocalSubstrateGrowth3d
-            | ParticleSeed::TeapotLocalSubstrateGrowth3d
-    );
+    let local_growth_seed = target_growth_seed(target, seed_mode);
     if let Some(source) = base_source {
         if source.starts_with("render-refined-rust:")
             && local_growth_seed
@@ -296,7 +286,7 @@ pub(crate) fn finalize_render_training_manifest_promotion(
     Ok(())
 }
 
-pub(crate) fn target_local_growth_seed(target: MeshTargetArg, seed_mode: ParticleSeed) -> bool {
+pub(crate) fn target_growth_seed(target: MeshTargetArg, seed_mode: ParticleSeed) -> bool {
     matches!(
         (target, seed_mode),
         (MeshTargetArg::Torus, ParticleSeed::TorusGrowth3d)
@@ -314,6 +304,15 @@ pub(crate) fn target_local_growth_seed(target: MeshTargetArg, seed_mode: Particl
                 ParticleSeed::TeapotLocalSubstrateGrowth3d
             )
     )
+}
+
+pub(crate) fn target_strict_conditionless_local_growth_seed(
+    target: MeshTargetArg,
+    seed_mode: ParticleSeed,
+) -> bool {
+    seed_mode == conditionless_local_seed_mode(target)
+        && target_growth_seed(target, seed_mode)
+        && !growth_3d_seed_has_coordinate_scaffold(seed_mode)
 }
 
 pub(crate) fn validate_diagnostic_3d_output_not_catalog(
@@ -339,7 +338,7 @@ pub(crate) fn validate_catalog_bound_render_training_output(
     if !is_catalog_model_output_path(model_output) {
         return Ok(());
     }
-    if !target_local_growth_seed(target, seed_mode) {
+    if !target_growth_seed(target, seed_mode) {
         return Err(std::io::Error::other(format!(
             "catalog-bound 3D render training output {} requires the target local growth seed; got seed_mode={seed_mode:?}",
             model_output.display()
@@ -384,8 +383,15 @@ pub(crate) fn target_conditionless_lineage(target: MeshTargetArg, source: &str) 
 
 pub(crate) fn load_conditionless_local_base_model(
     path: &Path,
+    target: MeshTargetArg,
     target_source: &str,
 ) -> Result<(NpaModel, crate::kernels::HashGridConfig, String), Box<dyn std::error::Error>> {
+    if !target_source.contains(mesh_target_lineage_marker(target)) {
+        return Err(std::io::Error::other(format!(
+            "local 3D continuation target source does not match target {target:?}: target_source={target_source:?}"
+        ))
+        .into());
+    }
     let manifest = crate::import::load_manifest(path)?;
     if manifest.config.spatial_dims != 3 || manifest.config.state_dims <= 3 {
         return Err(std::io::Error::other(format!(
@@ -405,6 +411,13 @@ pub(crate) fn load_conditionless_local_base_model(
     if !local_conditionless_lineage(source_text) {
         return Err(std::io::Error::other(format!(
             "local 3D continuation rejects shortcut lineage for {}: source={source_text:?}",
+            path.display()
+        ))
+        .into());
+    }
+    if !target_conditionless_lineage(target, source_text) {
+        return Err(std::io::Error::other(format!(
+            "local 3D continuation rejects target-mismatched lineage for {}: target={target:?} source={source_text:?}",
             path.display()
         ))
         .into());

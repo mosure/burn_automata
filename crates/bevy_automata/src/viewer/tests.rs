@@ -61,7 +61,10 @@ fn catalog_selection_preserves_visualization_settings() {
     assert_eq!(settings.particle_count, 1024);
     assert_eq!(settings.steps_per_frame, 3);
     assert_eq!(settings.seed, CATALOG_3D_GROWTH_SEED);
-    assert_eq!(settings.seed_mode, ParticleSeed::TorusGrowth3d);
+    assert_eq!(
+        settings.seed_mode,
+        ParticleSeed::TorusLocalSubstrateGrowth3d
+    );
     assert!((settings.reference_seed_scale - 0.54).abs() < f32::EPSILON);
     assert!((settings.render_scale - 1.5).abs() < f32::EPSILON);
     assert!((settings.render_opacity - 0.375).abs() < f32::EPSILON);
@@ -77,7 +80,10 @@ fn catalog_selection_preserves_visualization_settings() {
     assert_eq!(settings.particle_count, 1024);
     assert_eq!(settings.steps_per_frame, 2);
     assert_eq!(settings.seed, CATALOG_3D_GROWTH_SEED);
-    assert_eq!(settings.seed_mode, ParticleSeed::TeapotGrowth3d);
+    assert_eq!(
+        settings.seed_mode,
+        ParticleSeed::TeapotLocalSubstrateGrowth3d
+    );
     assert!((settings.reference_seed_scale - 0.72).abs() < f32::EPSILON);
     assert!((settings.render_scale - 1.5).abs() < f32::EPSILON);
     assert!((settings.render_opacity - 0.375).abs() < f32::EPSILON);
@@ -106,7 +112,7 @@ fn catalog_keeps_only_latest_torus_regression_artifact() {
     assert_eq!(torus_entries[0].key, ModelCatalogKey::UvTorusMorphogen3d);
     assert_eq!(
         catalog_seed_mode(torus_entries[0]),
-        ParticleSeed::TorusGrowth3d
+        ParticleSeed::TorusLocalSubstrateGrowth3d
     );
     assert!(matches!(
         torus_entries[0].source,
@@ -140,14 +146,12 @@ fn catalog_registers_teapot_as_blocked_growth_artifact() {
     assert_eq!(teapot_entries[0].key, ModelCatalogKey::TeapotMorphogen3d);
     assert_eq!(teapot_entries[0].particle_count, 1024);
     assert!(
-        teapot_entries[0]
-            .kind
-            .contains("hidden scaffolded regression"),
-        "teapot should stay hidden until robust held-out seed validation passes with a no-scaffold artifact"
+        teapot_entries[0].kind.contains("hidden local regression"),
+        "teapot should stay hidden until robust held-out seed validation passes"
     );
     assert_eq!(
         catalog_seed_mode(teapot_entries[0]),
-        ParticleSeed::TeapotGrowth3d
+        ParticleSeed::TeapotLocalSubstrateGrowth3d
     );
     assert!(matches!(
         teapot_entries[0].source,
@@ -191,7 +195,7 @@ fn catalog_3d_default_uses_sorted_gpu_neighbor_mode() {
 }
 
 #[test]
-fn hidden_3d_bpk_entries_are_blocked_scaffolded_regression_artifacts() {
+fn hidden_3d_bpk_entries_are_blocked_local_regression_artifacts() {
     for key in [
         ModelCatalogKey::UvTorusMorphogen3d,
         ModelCatalogKey::TeapotMorphogen3d,
@@ -203,7 +207,7 @@ fn hidden_3d_bpk_entries_are_blocked_scaffolded_regression_artifacts() {
             entry.title
         );
         assert!(
-            entry.kind.contains("hidden scaffolded regression"),
+            entry.kind.contains("hidden local regression"),
             "{} should disclose why it is registered but not selectable",
             entry.title
         );
@@ -243,11 +247,11 @@ fn hidden_3d_bpk_entries_are_blocked_scaffolded_regression_artifacts() {
         let seed_mode = catalog_seed_mode(entry);
         assert!(matches!(
             seed_mode,
-            ParticleSeed::TorusGrowth3d | ParticleSeed::TeapotGrowth3d
+            ParticleSeed::TorusLocalSubstrateGrowth3d | ParticleSeed::TeapotLocalSubstrateGrowth3d
         ));
         assert!(
-            burn_automata::rollout::growth_3d_seed_writes_coordinate_scaffold(seed_mode),
-            "{path} is intentionally tracked as a hidden regression artifact; strict catalog promotion must replace it with a no-scaffold seed mode"
+            !burn_automata::rollout::growth_3d_seed_writes_coordinate_scaffold(seed_mode),
+            "{path} should run with the same no-scaffold seed family required for strict catalog promotion"
         );
     }
 }

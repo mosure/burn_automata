@@ -2,6 +2,10 @@
 
 use super::*;
 
+const SEED_FRAME_RESIDUAL_MOTION_GAIN: f32 = 0.3;
+const SEED_FRAME_RESIDUAL_DECAY: f32 = 0.025;
+const SEED_FRAME_OPACITY_GROWTH_DELTA: f32 = 0.08;
+
 #[allow(dead_code)]
 pub(crate) fn local_growth_student_model(
     config: NpaConfig,
@@ -411,9 +415,25 @@ pub(crate) fn add_growth_3d_material_opacity_update_bias(
 pub(crate) fn torus_growth_model(
     config: NpaConfig,
 ) -> Result<NpaModel, Box<dyn std::error::Error>> {
+    residual_state_growth_model(
+        config,
+        "uv torus growth",
+        UV_TORUS_MOTION_GAIN,
+        UV_TORUS_RESIDUAL_DECAY,
+        UV_TORUS_OPACITY_GROWTH_DELTA,
+    )
+}
+
+fn residual_state_growth_model(
+    config: NpaConfig,
+    family: &str,
+    motion_gain: f32,
+    residual_decay: f32,
+    opacity_growth_delta: f32,
+) -> Result<NpaModel, Box<dyn std::error::Error>> {
     if config.spatial_dims != 3 || config.state_dims <= 3 || config.hidden_dims < 6 {
         return Err(std::io::Error::other(format!(
-            "uv torus growth requires 3D config, state_dims > 3, and hidden_dims >= 6; got spatial_dims={}, state_dims={}, hidden_dims={}",
+            "{family} requires 3D config, state_dims > 3, and hidden_dims >= 6; got spatial_dims={}, state_dims={}, hidden_dims={}",
             config.spatial_dims, config.state_dims, config.hidden_dims
         ))
         .into());
@@ -427,14 +447,14 @@ pub(crate) fn torus_growth_model(
         weights.w1[pos_hidden * input_dims + axis] = 1.0;
         weights.w1[neg_hidden * input_dims + axis] = -1.0;
 
-        weights.w2[axis * config.hidden_dims + pos_hidden] = UV_TORUS_MOTION_GAIN;
-        weights.w2[axis * config.hidden_dims + neg_hidden] = -UV_TORUS_MOTION_GAIN;
+        weights.w2[axis * config.hidden_dims + pos_hidden] = motion_gain;
+        weights.w2[axis * config.hidden_dims + neg_hidden] = -motion_gain;
 
         let residual_out = config.spatial_dims + axis;
-        weights.w2[residual_out * config.hidden_dims + pos_hidden] = -UV_TORUS_RESIDUAL_DECAY;
-        weights.w2[residual_out * config.hidden_dims + neg_hidden] = UV_TORUS_RESIDUAL_DECAY;
+        weights.w2[residual_out * config.hidden_dims + pos_hidden] = -residual_decay;
+        weights.w2[residual_out * config.hidden_dims + neg_hidden] = residual_decay;
     }
-    weights.b2[config.spatial_dims + 3] = UV_TORUS_OPACITY_GROWTH_DELTA;
+    weights.b2[config.spatial_dims + 3] = opacity_growth_delta;
 
     Ok(NpaModel { config, weights })
 }
@@ -454,5 +474,11 @@ pub(crate) fn seed_frame_morphogen_model(
         )
         .into());
     }
-    torus_growth_model(config)
+    residual_state_growth_model(
+        config,
+        "seed-frame residual growth",
+        SEED_FRAME_RESIDUAL_MOTION_GAIN,
+        SEED_FRAME_RESIDUAL_DECAY,
+        SEED_FRAME_OPACITY_GROWTH_DELTA,
+    )
 }

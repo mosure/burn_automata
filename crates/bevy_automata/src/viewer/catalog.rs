@@ -467,8 +467,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ModelCatalogEntry {
         key: ModelCatalogKey::UvTorusMorphogen3d,
         title: "uv torus",
-        kind: "hidden scaffolded regression",
-        detail: "strict promotion blocked: scaffolded seed plus tube support/depth gaps",
+        kind: "hidden local regression",
+        detail: "strict promotion blocked: local growth still fails held-out geometry gates",
         preset: AutomataPreset::Growing3dGs,
         source: ModelCatalogSource::Bpk {
             primary: "assets/models/uv_torus_growth_3d.bpk",
@@ -481,8 +481,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
     ModelCatalogEntry {
         key: ModelCatalogKey::TeapotMorphogen3d,
         title: "teapot",
-        kind: "hidden scaffolded regression",
-        detail: "strict promotion blocked: scaffolded seed plus held-out fragility",
+        kind: "hidden local regression",
+        detail: "strict promotion blocked: local growth still fails held-out geometry gates",
         preset: AutomataPreset::Growing3dGs,
         source: ModelCatalogSource::Bpk {
             primary: "assets/models/teapot_growth_3d.bpk",
@@ -626,8 +626,8 @@ fn resolve_catalog_path(path: &'static str) -> Option<String> {
 
 pub(super) fn catalog_seed_mode(entry: &ModelCatalogEntry) -> ParticleSeed {
     match entry.key {
-        ModelCatalogKey::UvTorusMorphogen3d => ParticleSeed::TorusGrowth3d,
-        ModelCatalogKey::TeapotMorphogen3d => ParticleSeed::TeapotGrowth3d,
+        ModelCatalogKey::UvTorusMorphogen3d => ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ModelCatalogKey::TeapotMorphogen3d => ParticleSeed::TeapotLocalSubstrateGrowth3d,
         _ => ParticleSeed::UniformCircle,
     }
 }

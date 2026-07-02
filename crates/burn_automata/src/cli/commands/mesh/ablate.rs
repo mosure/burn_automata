@@ -53,7 +53,7 @@ pub(crate) fn run_ablate_local_3d(command: Command) -> Result<(), Box<dyn std::e
         .unwrap_or_else(|| conditionless_local_seed_mode(target));
     let target_source = mesh_conditionless_local_target_source_for_seed(target, seed_mode);
     let (mut model, hashgrid, output_source) = if let Some(path) = base_model.as_ref() {
-        load_conditionless_local_base_model(path, target_source)?
+        load_conditionless_local_base_model(path, target, target_source)?
     } else {
         let config = NpaConfig::growing_3dgs();
         let hashgrid = crate::kernels::HashGridConfig::growing_3dgs();
