@@ -2042,3 +2042,42 @@ increase core render density and modestly improve activation/extent, while
 material-visible support remains concentrated near the seed core and never
 crosses the target surface coverage/profile/normal gates. No 3D artifact is
 promoted from this pass.
+
+## 2026-07-02 Material Surface-Motion Diagnostics
+
+The direct rollout diagnostics now mirror the material visible-surface motion
+term that the trainer already applies. Reports serialize
+`material_surface_motion_rms` and
+`material_surface_motion_nonzero_fraction`, and the combined-gradient
+diagnostic includes that term before channel capping. This closes an
+instrumentation gap: future torus/teapot probes can distinguish absent
+material-surface pressure from pressure that is present but not yet converted
+into accepted rollout motion.
+
+The direct trainer also applies a generic post-composition spatial-motion RMS
+floor before channel capping. This is not target-specific: it only boosts
+existing nonzero spatial output gradients, uses the configured direct gradient
+RMS budget, and remains bounded by the normal per-channel cap. The goal is to
+keep local mesh/surface/coverage motion pressure from being underrepresented
+relative to liveness/material channels.
+
+Focused tests:
+`direct_rollout_objective_diagnostics_reports_channel_pressure` now checks
+material-surface motion diagnostics and post-cap spatial motion budget, and the
+material-surface candidate tests continue to verify bounded-frontier locality.
+
+Compact two-round probes show the new diagnostics are active, but strict
+morphogenesis is still not solved:
+
+| probe | strict score | active growth | mean / peak motion | target coverage | material-visible target coverage | material surface motion RMS / nonzero | decision |
+| --- | ---: | --- | --- | ---: | ---: | --- | --- |
+| `target/goal_probe_torus_motion_balance.json` | `109.288` | `8 -> 43` | `0.0288 / 0.00444` | `0.0781` | `0.0195` | `0.0316 / 0.399` | reject |
+| `target/goal_probe_teapot_motion_balance.json` | `88.796` | `8 -> 48` | `0.0270 / 0.00411` | `0.2129` | `0.0` | `0.0320 / 0.410` | reject |
+
+The post-cap spatial motion RMS rose from roughly `0.041..0.044` to
+`0.050..0.051`, but the selected compact rollouts and strict scores were
+unchanged over two rounds. This indicates the next blocker is not missing
+surface-motion supervision; it is converting those bounded local output
+gradients into larger accepted recurrent rollout dynamics under line-search,
+SGD clipping, and strict render/nonregression selection. No catalog model was
+promoted.

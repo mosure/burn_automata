@@ -155,6 +155,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
     let mut temporal_extent_motion = OutputGradientAccumulator::default();
     let mut extent_motion_memory = OutputGradientAccumulator::default();
     let mut material_coverage_motion = OutputGradientAccumulator::default();
+    let mut material_surface_motion = OutputGradientAccumulator::default();
     let mut residual_velocity = OutputGradientAccumulator::default();
     let mut motion_memory = OutputGradientAccumulator::default();
     let mut material_coverage_motion_memory = OutputGradientAccumulator::default();
@@ -723,6 +724,58 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             );
         }
 
+        let mut material_surface_motion_output_gradients = vec![0.0; particle_count * output_dims];
+        add_material_visible_surface_approach_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.surface_gain,
+            cfg.surface_escape_gain,
+            cfg.max_update_norm,
+            cfg.seed_scale,
+            cfg.liveness_front_radius,
+            Some(&liveness_candidate_weights),
+            cfg.trajectory_mesh_gain * direct_trajectory_geometry_weight(snapshot.step_fraction),
+            &mut material_surface_motion_output_gradients,
+        );
+        add_material_visible_surface_coverage_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.coverage_gain,
+            cfg.coverage_samples,
+            cfg.max_update_norm,
+            cfg.coverage_mode,
+            cfg.coverage_softness,
+            cfg.coverage_repulsion_gain,
+            cfg.coverage_gap_gain,
+            cfg.coverage_repulsion_radius,
+            cfg.coverage_normal_weight,
+            cfg.seed_scale,
+            cfg.liveness_front_radius,
+            Some(&liveness_candidate_weights),
+            cfg.trajectory_mesh_gain * direct_trajectory_geometry_weight(snapshot.step_fraction),
+            &mut material_surface_motion_output_gradients,
+        );
+        boost_sparse_output_channel_rms(
+            &mut material_surface_motion_output_gradients,
+            output_dims,
+            0..model.config.spatial_dims,
+            cfg.direct_output_gradient_rms_cap * 0.5,
+            16.0,
+        );
+        accumulate_output_channels(
+            &mut material_surface_motion,
+            &material_surface_motion_output_gradients,
+            particle_count,
+            output_dims,
+            0..model.config.spatial_dims,
+        );
+
         let mut material_output_gradients = vec![0.0; particle_count * output_dims];
         add_material_visibility_output_objective(
             &model.config,
@@ -767,6 +820,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         add_output_gradients(&mut combined, &temporal_extent_motion_output_gradients);
         add_output_gradients(&mut combined, &extent_motion_memory_output_gradients);
         add_output_gradients(&mut combined, &material_coverage_motion_output_gradients);
+        add_output_gradients(&mut combined, &material_surface_motion_output_gradients);
         add_output_gradients(&mut combined, &residual_velocity_output_gradients);
         add_output_gradients(&mut combined, &motion_memory_output_gradients);
         add_output_gradients(
@@ -783,6 +837,13 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &active_surface_materialization_output_gradients,
         );
         add_output_gradients(&mut combined, &material_output_gradients);
+        boost_sparse_output_channel_rms(
+            &mut combined,
+            output_dims,
+            0..model.config.spatial_dims,
+            cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_SPATIAL_MOTION_RMS_TARGET_FRACTION,
+            8.0,
+        );
         accumulate_output_channels(
             &mut combined_pre_cap,
             &combined,
@@ -890,6 +951,8 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         extent_motion_memory_nonzero_fraction: extent_motion_memory.nonzero_fraction(),
         material_coverage_motion_rms: material_coverage_motion.rms(),
         material_coverage_motion_nonzero_fraction: material_coverage_motion.nonzero_fraction(),
+        material_surface_motion_rms: material_surface_motion.rms(),
+        material_surface_motion_nonzero_fraction: material_surface_motion.nonzero_fraction(),
         residual_velocity_rms: residual_velocity.rms(),
         residual_velocity_nonzero_fraction: residual_velocity.nonzero_fraction(),
         motion_memory_rms: motion_memory.rms(),

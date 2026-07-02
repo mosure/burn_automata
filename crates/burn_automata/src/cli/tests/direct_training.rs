@@ -232,6 +232,11 @@ fn direct_rollout_objective_diagnostics_reports_channel_pressure() {
     );
     assert!(diagnostics.material_coverage_motion_nonzero_fraction > 0.0);
     assert!(
+        diagnostics.material_surface_motion_rms > 0.0,
+        "material visible-surface objective should produce active/front surface motion pressure"
+    );
+    assert!(diagnostics.material_surface_motion_nonzero_fraction > 0.0);
+    assert!(
         diagnostics.residual_velocity_rms > 0.0,
         "mesh residual objective should supervise velocity state outputs directly"
     );
@@ -267,6 +272,10 @@ fn direct_rollout_objective_diagnostics_reports_channel_pressure() {
     assert!(diagnostics.combined_pre_cap_rms >= diagnostics.combined_post_cap_rms);
     assert!(diagnostics.mesh_motion_post_cap_rms > 0.0);
     assert!(diagnostics.mesh_motion_post_cap_nonzero_fraction > 0.0);
+    assert!(
+        diagnostics.mesh_motion_post_cap_rms >= cfg.direct_output_gradient_rms_cap * 0.5,
+        "combined direct gradients should preserve spatial motion pressure instead of letting liveness/material channels dominate"
+    );
     assert!(diagnostics.residual_velocity_post_cap_rms > 0.0);
     assert!(diagnostics.residual_velocity_post_cap_nonzero_fraction > 0.0);
     assert!(diagnostics.motion_memory_post_cap_rms > 0.0);

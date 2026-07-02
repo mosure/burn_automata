@@ -848,6 +848,8 @@ pub(crate) struct DirectRolloutObjectiveDiagnostics {
     pub(crate) extent_motion_memory_nonzero_fraction: f32,
     pub(crate) material_coverage_motion_rms: f32,
     pub(crate) material_coverage_motion_nonzero_fraction: f32,
+    pub(crate) material_surface_motion_rms: f32,
+    pub(crate) material_surface_motion_nonzero_fraction: f32,
     pub(crate) residual_velocity_rms: f32,
     pub(crate) residual_velocity_nonzero_fraction: f32,
     pub(crate) motion_memory_rms: f32,

@@ -1034,6 +1034,13 @@ pub(crate) fn render_direct_rollout_training_step(
             );
         }
         add_output_gradients(&mut step_output_gradients, &material_output_gradients);
+        boost_sparse_output_channel_rms(
+            &mut step_output_gradients,
+            output_dims,
+            0..model.config.spatial_dims,
+            cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_SPATIAL_MOTION_RMS_TARGET_FRACTION,
+            8.0,
+        );
         cap_output_gradient_channel_rms_with_liveness_cap(
             &model.config,
             &mut step_output_gradients,
