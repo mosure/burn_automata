@@ -4,7 +4,11 @@ mod accumulator;
 mod config;
 mod direct;
 mod direct_accumulators;
+mod direct_channels;
 mod direct_combined;
+mod direct_liveness;
+mod direct_material;
+mod direct_motion;
 mod liveness_progress;
 mod terminal;
 
