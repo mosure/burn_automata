@@ -129,6 +129,52 @@ fn growth_3d_validation_rejects_mismatched_target_lineage() {
 }
 
 #[test]
+fn growth_3d_validation_rejects_mismatched_target_seed_mode() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let model = NpaModel {
+        config: config.clone(),
+        weights: NpaWeights::zeros(&config),
+    };
+    let path = bin_temp_path("mismatched_target_seed_mode_growth3d.bpk");
+    let manifest = BpkModelManifest::from_model(
+        &model,
+        grid,
+        Some(format!(
+            "ablation-rust:{TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE}"
+        )),
+    );
+    crate::import::save_manifest(&path, &manifest).unwrap();
+
+    let mut cfg = growth_validation_test_config(ParticleSeed::TorusLocalSubstrateGrowth3d);
+    cfg.extra_seeds = vec![43];
+    let report = growth_3d_validation_report(&path, MeshTargetArg::Teapot, cfg).unwrap();
+    std::fs::remove_file(&path).ok();
+
+    assert!(report.local_conditionless_lineage);
+    assert!(report.target_conditionless_lineage);
+    assert!(!report.target_growth_seed_mode);
+    assert!(!report.strict_checks.target_growth_seed_mode);
+    assert!(!report.strict_passed);
+    assert!(
+        report
+            .strict_checks
+            .failure_reasons
+            .contains(&"target_growth_seed_mode"),
+        "target validation must fail when a teapot artifact is evaluated with a torus seed family"
+    );
+    assert!(!report.robustness.all_target_growth_seed_mode);
+    assert!(
+        report
+            .robustness
+            .seeds
+            .iter()
+            .all(|seed| !seed.target_growth_seed_mode)
+    );
+    assert!(!growth_3d_fail_on_validation_passed(&report));
+}
+
+#[test]
 fn growth_3d_catalog_sanity_thresholds_match_active_catalog_floor() {
     for (target, max_total_loss, min_density, min_color, min_depth) in [
         (MeshTargetArg::Torus, 0.90, 0.95, 16.0, 14.8),
@@ -199,6 +245,7 @@ fn growth_3d_strict_checks_accept_one_eighth_active_seed_boundary() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         false,
@@ -277,6 +324,7 @@ fn growth_3d_strict_checks_reject_seed_coordinate_scaffold() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         true,
@@ -370,6 +418,7 @@ fn growth_3d_strict_checks_reject_tiny_active_extent() {
 
     let checks = growth_3d_strict_checks_report(
         false,
+        true,
         true,
         true,
         false,
