@@ -12,4 +12,5 @@ mod mesh_reports;
 mod mesh_rollout;
 mod proxy_and_coverage;
 mod render_selection;
+mod render_training_outputs;
 mod setup;

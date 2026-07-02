@@ -260,6 +260,42 @@ pub(crate) fn catalog_bound_candidate_path(target: MeshTargetArg, process_id: u3
     ))
 }
 
+pub(crate) fn save_render_training_manifest_for_validation(
+    model_output: &Path,
+    manifest: &BpkModelManifest,
+    target: MeshTargetArg,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if is_catalog_model_output_path(model_output) {
+        let candidate_path = catalog_bound_candidate_path(target, std::process::id());
+        if let Some(parent) = candidate_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::import::save_manifest(&candidate_path, manifest)?;
+        Ok(Some(candidate_path))
+    } else {
+        crate::import::save_manifest(model_output, manifest)?;
+        Ok(None)
+    }
+}
+
+pub(crate) fn finalize_render_training_manifest_promotion(
+    model_output: &Path,
+    manifest: &BpkModelManifest,
+    candidate_path: Option<&Path>,
+    promotion_error: Option<Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(candidate_path) = candidate_path {
+        if promotion_error.is_none() {
+            crate::import::save_manifest(model_output, manifest)?;
+        }
+        std::fs::remove_file(candidate_path).ok();
+    }
+    if let Some(error) = promotion_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(crate) fn target_local_growth_seed(target: MeshTargetArg, seed_mode: ParticleSeed) -> bool {
     matches!(
         (target, seed_mode),

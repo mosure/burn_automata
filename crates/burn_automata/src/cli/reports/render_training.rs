@@ -16,7 +16,31 @@ pub(crate) struct CliRenderTrainingReport {
     pub(crate) final_render_loss: MultiViewRenderLossReport,
     pub(crate) strict_gate_summary: CliRenderTrainingGateSummary,
     pub(crate) growth_validation: CliGrowth3dValidationReport,
+    pub(crate) catalog_promotion: CliCatalogPromotionSummary,
     pub(crate) catalog_promotion_validations: Vec<CliGrowth3dValidationReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CliCatalogPromotionSummary {
+    pub(crate) requested: bool,
+    pub(crate) validation_count: usize,
+    pub(crate) validation_passed: bool,
+    pub(crate) rejection_reason: Option<String>,
+}
+
+impl CliCatalogPromotionSummary {
+    pub(crate) fn from_validation_result(
+        requested: bool,
+        validation_count: usize,
+        rejection_reason: Option<String>,
+    ) -> Self {
+        Self {
+            requested,
+            validation_count,
+            validation_passed: requested && rejection_reason.is_none(),
+            rejection_reason,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -50,13 +74,29 @@ pub(crate) struct CliRenderTrainingGateSummary {
     pub(crate) temporal_activation_progressive: bool,
     pub(crate) temporal_geometry_progressive: bool,
     pub(crate) target_coverage_mean_improvement: f32,
+    pub(crate) target_coverage_mean_ratio: f32,
+    pub(crate) target_coverage_max_distance: f32,
     pub(crate) target_coverage_fraction_delta: f32,
     pub(crate) target_coverage_fraction: f32,
+    pub(crate) material_visible_target_mean_distance: f32,
+    pub(crate) material_visible_target_max_distance: f32,
     pub(crate) material_visible_target_coverage_fraction: f32,
+    pub(crate) surface_mean_ratio: f32,
+    pub(crate) surface_max_distance: f32,
+    pub(crate) surface_tail_p99_distance: f32,
+    pub(crate) surface_tail_over_threshold_fraction: f32,
+    pub(crate) material_visible_surface_tail_p99_distance: f32,
+    pub(crate) material_visible_surface_tail_over_threshold_fraction: f32,
     pub(crate) surface_covered_bin_fraction: f32,
+    pub(crate) surface_mean_bin_covered_fraction: f32,
     pub(crate) material_visible_surface_covered_bin_fraction: f32,
+    pub(crate) material_visible_surface_mean_bin_covered_fraction: f32,
     pub(crate) surface_normal_covered_bin_fraction: f32,
+    pub(crate) surface_normal_mean_bin_covered_fraction: f32,
     pub(crate) material_visible_surface_normal_covered_bin_fraction: f32,
+    pub(crate) material_visible_surface_normal_mean_bin_covered_fraction: f32,
+    pub(crate) gaussian_scale_budget_loss: f32,
+    pub(crate) gaussian_oversize_fraction: f32,
     pub(crate) render_loss_passed: bool,
     pub(crate) render_total_loss: f32,
     pub(crate) render_density_psnr_db: f32,
@@ -98,24 +138,58 @@ impl CliRenderTrainingGateSummary {
             temporal_geometry_progressive: report.temporal.geometry_progressive,
             target_coverage_mean_improvement: report.initial_target_coverage.mean_distance
                 - report.final_target_coverage.mean_distance,
+            target_coverage_mean_ratio: report.strict_score.target_coverage_mean_ratio,
+            target_coverage_max_distance: report.final_target_coverage.max_distance,
             target_coverage_fraction_delta: report.final_target_coverage.covered_fraction
                 - report.initial_target_coverage.covered_fraction,
             target_coverage_fraction: report.final_target_coverage.covered_fraction,
+            material_visible_target_mean_distance: report
+                .final_material_visible_target_coverage
+                .mean_distance,
+            material_visible_target_max_distance: report
+                .final_material_visible_target_coverage
+                .max_distance,
             material_visible_target_coverage_fraction: report
                 .final_material_visible_target_coverage
                 .covered_fraction,
+            surface_mean_ratio: report.strict_score.surface_mean_ratio,
+            surface_max_distance: report.final_active_surface.max_distance,
+            surface_tail_p99_distance: report.final_active_surface_tail.p99_distance,
+            surface_tail_over_threshold_fraction: report
+                .final_active_surface_tail
+                .over_threshold_fraction,
+            material_visible_surface_tail_p99_distance: report
+                .final_material_visible_surface_tail
+                .p99_distance,
+            material_visible_surface_tail_over_threshold_fraction: report
+                .final_material_visible_surface_tail
+                .over_threshold_fraction,
             surface_covered_bin_fraction: report
                 .final_active_surface_coverage_profile
                 .covered_bin_fraction,
+            surface_mean_bin_covered_fraction: report
+                .final_active_surface_coverage_profile
+                .mean_bin_covered_fraction,
             material_visible_surface_covered_bin_fraction: report
                 .final_material_visible_surface_coverage_profile
                 .covered_bin_fraction,
+            material_visible_surface_mean_bin_covered_fraction: report
+                .final_material_visible_surface_coverage_profile
+                .mean_bin_covered_fraction,
             surface_normal_covered_bin_fraction: report
                 .final_active_surface_normal_coverage
                 .covered_target_bin_fraction,
+            surface_normal_mean_bin_covered_fraction: report
+                .final_active_surface_normal_coverage
+                .mean_bin_covered_fraction,
             material_visible_surface_normal_covered_bin_fraction: report
                 .final_material_visible_surface_normal_coverage
                 .covered_target_bin_fraction,
+            material_visible_surface_normal_mean_bin_covered_fraction: report
+                .final_material_visible_surface_normal_coverage
+                .mean_bin_covered_fraction,
+            gaussian_scale_budget_loss: report.final_gaussian_volume.scale_budget_loss,
+            gaussian_oversize_fraction: report.final_gaussian_volume.oversize_fraction,
             render_loss_passed: report.render_loss.passed,
             render_total_loss: report.render_loss.total_loss,
             render_density_psnr_db: report.render_loss.density_psnr_db,

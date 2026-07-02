@@ -266,9 +266,20 @@ round instead of only the render-only `before_loss`/`after_loss` pair. Each
 history row also records `selection_worst_seed` and
 `selection_worst_failure_reasons`, which are the held-out seed and strict-check
 blockers that currently dominate promotion selection.
+Catalog-bound `train-render3d` runs stage a temporary validation candidate
+instead of writing directly to `assets/models`. The JSON report is written even
+when promotion validation fails, and it includes `catalog_promotion` with
+`requested`, `validation_count`, `validation_passed`, and `rejection_reason`,
+plus the full `catalog_promotion_validations` list. This keeps failed torus or
+teapot promotion attempts auditable while preserving the no-overwrite guard for
+strict-failing candidates.
 It also records `selection_min_final_active_count`,
 `selection_min_newly_activated_fraction`,
 `selection_min_front_local_newly_activated_fraction`,
+and a flat `strict_gate_summary` with the same coverage, surface-tail,
+surface-normal, gaussian scale-budget, render, and temporal-growth metrics used
+by strict validation. This makes failed torus/teapot promotion reports directly
+sortable by the active blockers instead of requiring a nested report parser.
 `selection_max_front_liveness_margin`,
 `selection_min_front_liveness_candidate_count`,
 `selection_max_extent_front_liveness_margin`,
