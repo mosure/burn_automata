@@ -1,4 +1,6 @@
-use super::*;
+use burn_automata_kernels::HashGridConfig;
+
+use super::{helpers::*, types::*};
 use crate::{AutomataPreset, NpaConfig, ParticleSeed, rollout::seed_particles_scaled};
 
 #[test]
