@@ -4,9 +4,10 @@ use burn_automata::{AutomataPreset, ParticleSeed, RolloutConfig};
 
 use super::{AutomataRuntime, AutomataSettings, apply_preset, reset_training_stats};
 
-pub(super) const DEFAULT_LIZARD_MODEL: &str = "/tmp/burn_automata_lizard.bpk";
-const DEFAULT_POLKA_MODEL: &str = "/tmp/burn_automata_polka.bpk";
-const FALLBACK_POLKA_MODEL: &str = "/tmp/polka_dotted.bpk";
+pub(super) const DEFAULT_LIZARD_MODEL: &str = "models/catalog/growing/lizard.bpk";
+const LEGACY_LIZARD_MODEL: &str = "/tmp/burn_automata_lizard.bpk";
+const DEFAULT_POLKA_MODEL: &str = "models/catalog/texture/polka_dotted_0121.bpk";
+const LEGACY_POLKA_MODEL: &str = "/tmp/burn_automata_polka.bpk";
 pub(super) const BACKWARD_PROBE_PARTICLES: usize = 1024;
 pub(super) const TRAINING_PROBE_PARTICLES: usize = 256;
 pub(super) const TRAINING_INTERVAL_FRAMES: usize = 60;
@@ -117,7 +118,7 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
             primary: DEFAULT_LIZARD_MODEL,
-            fallback: Some("/tmp/lizard.bpk"),
+            fallback: Some(LEGACY_LIZARD_MODEL),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -130,8 +131,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/butterfly.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/butterfly.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/butterfly.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -144,8 +145,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/rose.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/rose.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/rose.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -158,8 +159,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/turtle.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/turtle.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/turtle.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -172,8 +173,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/mushroom.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/mushroom.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/mushroom.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -186,8 +187,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/tropical_fish.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/tropical_fish.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/tropical_fish.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -200,8 +201,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/sun_with_face.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/sun_with_face.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/sun_with_face.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -214,8 +215,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/ghost.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/ghost.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/ghost.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -228,8 +229,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/frog_face.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/frog_face.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/frog_face.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -242,8 +243,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg growing web model",
         preset: AutomataPreset::Growing2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/growing/red_apple.bpk",
-            fallback: None,
+            primary: "models/catalog/growing/red_apple.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/growing/red_apple.bpk"),
         },
         particle_count: 4096,
         seed_scale: 0.2,
@@ -257,7 +258,7 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
             primary: DEFAULT_POLKA_MODEL,
-            fallback: Some(FALLBACK_POLKA_MODEL),
+            fallback: Some(LEGACY_POLKA_MODEL),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -270,8 +271,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/bubbly_0101.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/bubbly_0101.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/bubbly_0101.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -284,8 +285,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/clouds.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/clouds.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/clouds.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -298,8 +299,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/galaxy.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/galaxy.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/galaxy.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -312,8 +313,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/hearts.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/hearts.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/hearts.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -326,8 +327,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/rings.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/rings.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/rings.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -340,8 +341,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/stars.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/stars.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/stars.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -354,8 +355,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/grid_0040.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/grid_0040.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/grid_0040.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -368,8 +369,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/banded_0037.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/banded_0037.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/banded_0037.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -382,8 +383,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/tree.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/tree.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/tree.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -396,8 +397,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/snow.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/snow.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/snow.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -410,8 +411,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/digit_0.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/digit_0.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/digit_0.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -424,8 +425,8 @@ pub(super) const MODEL_CATALOG: &[ModelCatalogEntry] = &[
         detail: "SelfOrg texture web model",
         preset: AutomataPreset::Texture2d,
         source: ModelCatalogSource::Bpk {
-            primary: "/tmp/burn_automata_catalog/texture/letter_a.bpk",
-            fallback: None,
+            primary: "models/catalog/texture/letter_a.bpk",
+            fallback: Some("/tmp/burn_automata_catalog/texture/letter_a.bpk"),
         },
         particle_count: 4096,
         seed_scale: 1.0,
@@ -537,6 +538,19 @@ pub(super) fn catalog_entry_matches_settings(
     }
 }
 
+pub(super) fn catalog_entry_is_available(entry: &ModelCatalogEntry) -> bool {
+    matches!(entry.source, ModelCatalogSource::Preset)
+        || resolved_catalog_model_path(entry).is_some()
+}
+
+pub(super) fn missing_catalog_model_status(entry: &ModelCatalogEntry) -> String {
+    format!(
+        "missing {} model file {}; import catalog BPKs before selection",
+        entry.title,
+        catalog_primary_model_path(entry).unwrap_or("unknown")
+    )
+}
+
 pub(super) fn select_catalog_entry(
     key: ModelCatalogKey,
     settings: &mut AutomataSettings,
@@ -548,10 +562,7 @@ pub(super) fn select_catalog_entry(
         ModelCatalogSource::Bpk { .. } => match resolved_catalog_model_path(entry) {
             Some(path) => Some(path),
             None => {
-                runtime.status = format!(
-                    "missing model file {}",
-                    catalog_primary_model_path(entry).unwrap_or("unknown")
-                );
+                runtime.status = missing_catalog_model_status(entry);
                 return;
             }
         },

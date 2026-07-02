@@ -6,7 +6,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "lizard",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_lizard.bpk",
+    "output": "models/catalog/growing/lizard.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -18,7 +18,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "butterfly",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/butterfly.bpk",
+    "output": "models/catalog/growing/butterfly.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -30,7 +30,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "rose",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/rose.bpk",
+    "output": "models/catalog/growing/rose.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -42,7 +42,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "turtle",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/turtle.bpk",
+    "output": "models/catalog/growing/turtle.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -54,7 +54,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "mushroom",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/mushroom.bpk",
+    "output": "models/catalog/growing/mushroom.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -66,7 +66,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "tropical_fish",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/tropical_fish.bpk",
+    "output": "models/catalog/growing/tropical_fish.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -78,7 +78,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "sun_with_face",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/sun_with_face.bpk",
+    "output": "models/catalog/growing/sun_with_face.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -90,7 +90,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "ghost",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/ghost.bpk",
+    "output": "models/catalog/growing/ghost.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -102,7 +102,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "frog_face",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/frog_face.bpk",
+    "output": "models/catalog/growing/frog_face.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -114,7 +114,7 @@
     "source_json": "growing_demo/models.json",
     "model_key": "red_apple",
     "preset": "growing-2d",
-    "output": "/tmp/burn_automata_catalog/growing/red_apple.bpk",
+    "output": "models/catalog/growing/red_apple.bpk",
     "particles": 4096,
     "seed_scale": 0.2,
     "update_prob": 0.5
@@ -126,7 +126,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "polka-dotted_0121",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_polka.bpk",
+    "output": "models/catalog/texture/polka_dotted_0121.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -138,7 +138,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "bubbly_0101",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/bubbly_0101.bpk",
+    "output": "models/catalog/texture/bubbly_0101.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -150,7 +150,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "clouds",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/clouds.bpk",
+    "output": "models/catalog/texture/clouds.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -162,7 +162,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "galaxy",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/galaxy.bpk",
+    "output": "models/catalog/texture/galaxy.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -174,7 +174,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "hearts",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/hearts.bpk",
+    "output": "models/catalog/texture/hearts.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -186,7 +186,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "rings",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/rings.bpk",
+    "output": "models/catalog/texture/rings.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -198,7 +198,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "stars",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/stars.bpk",
+    "output": "models/catalog/texture/stars.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -210,7 +210,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "grid_0040",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/grid_0040.bpk",
+    "output": "models/catalog/texture/grid_0040.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -222,7 +222,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "banded_0037",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/banded_0037.bpk",
+    "output": "models/catalog/texture/banded_0037.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -234,7 +234,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "tree",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/tree.bpk",
+    "output": "models/catalog/texture/tree.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -246,7 +246,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "snow",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/snow.bpk",
+    "output": "models/catalog/texture/snow.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -258,7 +258,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "0",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/digit_0.bpk",
+    "output": "models/catalog/texture/digit_0.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5
@@ -270,7 +270,7 @@
     "source_json": "texture_demo/models.json",
     "model_key": "A",
     "preset": "texture-2d",
-    "output": "/tmp/burn_automata_catalog/texture/letter_a.bpk",
+    "output": "models/catalog/texture/letter_a.bpk",
     "particles": 4096,
     "seed_scale": 1.0,
     "update_prob": 0.5

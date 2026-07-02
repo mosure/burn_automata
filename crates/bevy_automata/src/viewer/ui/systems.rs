@@ -320,9 +320,15 @@ pub(in crate::viewer) fn update_catalog_card_styles(
     )>,
 ) {
     for (card, hovered, mut background, mut border) in &mut cards {
-        let selected = catalog_entry_matches_settings(catalog_entry(card.0), &settings);
+        let entry = catalog_entry(card.0);
+        let selected = catalog_entry_matches_settings(entry, &settings);
+        let available = catalog_entry_is_available(entry);
         background.0 = if selected {
             Color::srgb(0.105, 0.15, 0.15)
+        } else if !available && hovered.0 {
+            Color::srgb(0.13, 0.075, 0.072)
+        } else if !available {
+            Color::srgb(0.075, 0.066, 0.064)
         } else if hovered.0 {
             Color::srgb(0.095, 0.112, 0.122)
         } else {
@@ -330,6 +336,10 @@ pub(in crate::viewer) fn update_catalog_card_styles(
         };
         *border = BorderColor::from(if selected {
             Color::srgb(0.34, 0.70, 0.66)
+        } else if !available && hovered.0 {
+            Color::srgb(0.58, 0.24, 0.22)
+        } else if !available {
+            Color::srgb(0.34, 0.20, 0.18)
         } else if hovered.0 {
             Color::srgb(0.32, 0.39, 0.42)
         } else {

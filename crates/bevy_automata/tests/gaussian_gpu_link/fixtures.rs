@@ -2,7 +2,8 @@ use super::prelude::*;
 
 use std::sync::Mutex;
 
-pub(crate) const LIZARD_MODEL_PATH: &str = "/tmp/burn_automata_lizard.bpk";
+pub(crate) const LIZARD_MODEL_PATH: &str = "models/catalog/growing/lizard.bpk";
+pub(crate) const POLKA_MODEL_PATH: &str = "models/catalog/texture/polka_dotted_0121.bpk";
 pub(crate) const TORUS_GROWTH_MODEL_PATH: &str = "assets/models/uv_torus_growth_3d.bpk";
 pub(crate) const SH_C0: f32 = 0.282_094_8;
 static BEVY_TEST_LOCK: Mutex<()> = Mutex::new(());

@@ -137,9 +137,9 @@ fn viewer_model_and_particle_config_transitions_are_stable()
             2,
         ));
     }
-    if Path::new("/tmp/burn_automata_polka.bpk").exists() {
+    if Path::new(POLKA_MODEL_PATH).exists() {
         transitions.push((
-            Some("/tmp/burn_automata_polka.bpk"),
+            Some(POLKA_MODEL_PATH),
             AutomataPreset::Texture2d,
             512,
             1.0,

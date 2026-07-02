@@ -11,7 +11,7 @@ homepage.workspace = true
 readme = "../../README.md"
 
 [features]
-default = ["viewer", "splatting"]
+default = ["viewer", "splatting", "gpu_wgpu"]
 viewer = []
 splatting = ["dep:bevy_gaussian_splatting"]
 gpu_wgpu = ["burn_automata/gpu_wgpu"]

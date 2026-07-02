@@ -37,5 +37,5 @@ Headless validation covers the storage-buffer bridge, direct viewer bridge, comp
 ```bash
 cargo test -p burn_automata --test gpu_wgpu --no-default-features --features "cli gpu_wgpu" -- --nocapture
 cargo test -p bevy_automata --no-default-features --features "splatting gpu_wgpu" --test gaussian_gpu_link -- --nocapture
-REQUIRE_BPK=1 LIZARD_BPK=models/lizard.bpk POLKA_BPK=models/polka_dotted.bpk scripts/validate_gpu_e2e.sh
+REQUIRE_BPK=1 scripts/validate_gpu_e2e.sh
 ```

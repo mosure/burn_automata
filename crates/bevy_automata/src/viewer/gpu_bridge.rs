@@ -8,6 +8,7 @@ pub(super) fn automata_render_reinit_key(
     neighbor_mode: WgpuNeighborMode,
 ) -> AutomataRenderReinitKey {
     AutomataRenderReinitKey {
+        settings_revision: settings.revision,
         particle_count: settings.particle_count,
         seed: settings.seed,
         seed_scale_bits: settings.seed_scale.to_bits(),
@@ -73,6 +74,7 @@ pub(super) struct AutomataRenderParamKey {
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct AutomataRenderReinitKey {
+    settings_revision: u64,
     particle_count: usize,
     seed: u64,
     seed_scale_bits: u32,

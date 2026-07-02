@@ -92,7 +92,7 @@ cargo run -p burn_automata --bin burn_automata -- train \
   --model-output artifacts/trained_student.bpk
 ```
 
-For imported-model parity or distillation experiments, replace `--target-seed 99` with `--target-model models/lizard.bpk`. The JSON report records initial/final/best loss and sampled convergence history; `--model-output` writes the trained student as a checksumed `.bpk`.
+For imported-model parity or distillation experiments, replace `--target-seed 99` with `--target-model models/catalog/growing/lizard.bpk`. The JSON report records initial/final/best loss and sampled convergence history; `--model-output` writes the trained student as a checksumed `.bpk`.
 Use `--zero-update` only for deliberate stationary/hold artifacts; it is
 mutually exclusive with teacher-seed and teacher-model targets.
 Use `--batch-source features` only for low-level MLP regression checks; it is no
@@ -294,18 +294,19 @@ Run the viewer:
 
 ```bash
 cargo run --release -p bevy_automata
-cargo run --release -p bevy_automata --features gpu_wgpu
+cargo run --release -p bevy_automata --no-default-features --features "viewer splatting"
 ```
 
-The default viewer command uses a CPU rollout-to-planar-gaussian fallback so it
-renders without the direct WGPU bridge. The `gpu_wgpu` command runs the resident
-render-world WGPU automata state and writes directly into
-`bevy_gaussian_splatting` buffers. The viewer has a `train` toggle and `train
-lr` slider. Live training freezes the current model as a local rollout teacher,
-samples a bounded probe batch from the current rollout, applies clipped
-supervised SGD on the CPU-side model, reports convergence in the BSN status
-panel, and pushes updated weights into the resident render-world WGPU automata
-state without a host readback path for gaussian rendering.
+The default viewer command runs the resident render-world WGPU automata state
+and writes directly into `bevy_gaussian_splatting` buffers. The
+`--no-default-features` command keeps the CPU rollout-to-planar-gaussian
+fallback for environments where the direct WGPU bridge is being isolated. The
+viewer has a `train` toggle and `train lr` slider. Live training freezes the
+current model as a local rollout teacher, samples a bounded probe batch from
+the current rollout, applies clipped supervised SGD on the CPU-side model,
+reports convergence in the BSN status panel, and pushes updated weights into
+the resident render-world WGPU automata state without a host readback path for
+gaussian rendering.
 
 Run profiled target benchmarks:
 
@@ -326,7 +327,7 @@ Run the focused checks:
 scripts/ci_check.sh
 scripts/check_inference_features.sh
 scripts/validate_3d_catalog.py
-REQUIRE_BPK=1 LIZARD_BPK=models/lizard.bpk POLKA_BPK=models/polka_dotted.bpk scripts/validate_gpu_e2e.sh
+REQUIRE_BPK=1 scripts/validate_gpu_e2e.sh
 CATALOG_PARITY=1 SELFORG_WEB_ROOT=/tmp/selforg_npa_web scripts/validate_gpu_e2e.sh
 ```
 
@@ -337,7 +338,7 @@ The upstream project at <https://selforg-npa.github.io/> publishes PyTorch check
 ```bash
 cargo run -p burn_automata --bin burn_automata -- import \
   --input data/pretrained/lizard.pth \
-  --output models/lizard.bpk
+  --output models/catalog/growing/lizard.bpk
 ```
 
 The importer reads the checkpoint storages, infers NPA dimensions from the first two MLP layers, records source metadata, and writes a checksumed `.bpk` container. JSON interchange files from `scripts/export_npa_checkpoint.py` are still supported for debugging or unsupported checkpoint variants.
@@ -352,10 +353,10 @@ python3 scripts/import_selforg_catalog.py --web-root /tmp/selforg_npa_web
 Validate numerical parity for an imported checkpoint:
 
 ```bash
-python3 scripts/validate_import_parity.py --model models/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2
-python3 scripts/validate_import_parity.py --model models/polka_dotted.bpk --particles 64 --preset texture-2d --seed-scale 1.0
-python3 scripts/validate_import_parity.py --model models/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
-python3 scripts/validate_import_parity.py --model models/polka_dotted.bpk --particles 64 --preset texture-2d --seed-scale 1.0 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
+python3 scripts/validate_import_parity.py --model models/catalog/growing/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2
+python3 scripts/validate_import_parity.py --model models/catalog/texture/polka_dotted_0121.bpk --particles 64 --preset texture-2d --seed-scale 1.0
+python3 scripts/validate_import_parity.py --model models/catalog/growing/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
+python3 scripts/validate_import_parity.py --model models/catalog/texture/polka_dotted_0121.bpk --particles 64 --preset texture-2d --seed-scale 1.0 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
 python3 scripts/validate_catalog_parity.py --web-root /tmp/selforg_npa_web --gpu --build-binary --require-all
 ```
 

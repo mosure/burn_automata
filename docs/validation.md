@@ -1181,10 +1181,10 @@ loss gates.
 After importing upstream checkpoints, run:
 
 ```bash
-python3 scripts/validate_import_parity.py --model /tmp/burn_automata_lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2
-python3 scripts/validate_import_parity.py --model /tmp/burn_automata_polka.bpk --particles 64 --preset texture-2d --seed-scale 1.0
-python3 scripts/validate_import_parity.py --model /tmp/burn_automata_lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
-python3 scripts/validate_import_parity.py --model /tmp/burn_automata_polka.bpk --particles 64 --preset texture-2d --seed-scale 1.0 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
+python3 scripts/validate_import_parity.py --model models/catalog/growing/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2
+python3 scripts/validate_import_parity.py --model models/catalog/texture/polka_dotted_0121.bpk --particles 64 --preset texture-2d --seed-scale 1.0
+python3 scripts/validate_import_parity.py --model models/catalog/growing/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
+python3 scripts/validate_import_parity.py --model models/catalog/texture/polka_dotted_0121.bpk --particles 64 --preset texture-2d --seed-scale 1.0 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
 ```
 
 The script runs deterministic Rust inference for zero or more steps, then compares the rollout with a dependency-free Python implementation of the same SPH, moment correction, MLP, and Euler update formulas. It reports max position/state errors, position PSNR, hidden-state PSNR, tail-RGB PSNR, and a deterministic 2D Gaussian-image PSNR. `scripts/validate_gpu_e2e.sh` combines the WGPU tests, Bevy planar gaussian linkage harness, and imported-model WGPU PSNR checks when the BPK files are available.
@@ -1206,8 +1206,8 @@ Latest local WGPU imported-model parity over 4 steps at 64 particles:
 | set | entries | max position error | max state error | min hidden PSNR | min rendered Gaussian PSNR |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | curated web/BPK catalog | `23` | `1.9e-5` | `1.1e-4` | `101.5 dB` | `107.2 dB` |
-| `/tmp/burn_automata_lizard.bpk` | `1` | `2.3e-7` | `2.5e-6` | `132.7 dB` | `142.9 dB` |
-| `/tmp/burn_automata_polka.bpk` | `1` | `4.6e-6` | `6.1e-5` | `105.8 dB` | `111.4 dB` |
+| `models/catalog/growing/lizard.bpk` | `1` | `2.3e-7` | `2.5e-6` | `132.7 dB` | `142.9 dB` |
+| `models/catalog/texture/polka_dotted_0121.bpk` | `1` | `4.6e-6` | `6.1e-5` | `105.8 dB` | `111.4 dB` |
 
 ## 2026-07-01 Direct 3D Front Objectives
 

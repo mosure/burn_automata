@@ -84,8 +84,9 @@ use catalog::SORTED_ENTRY_MIN_CAPACITY;
 use catalog::{
     AUTOMATA_UI_PANEL_WIDTH, BACKWARD_PROBE_PARTICLES, CATALOG_DOUBLE_CLICK_SECONDS,
     DEFAULT_LIZARD_MODEL, LIVE_TRAINING_TARGET, ModelCatalogKey, TRAINING_INTERVAL_FRAMES,
-    TRAINING_PROBE_PARTICLES, catalog_entry, catalog_entry_matches_settings, catalog_preview_image,
-    catalog_thumbnail_image, select_catalog_entry,
+    TRAINING_PROBE_PARTICLES, catalog_entry, catalog_entry_is_available,
+    catalog_entry_matches_settings, catalog_preview_image, catalog_thumbnail_image,
+    select_catalog_entry,
 };
 #[cfg(test)]
 use catalog::{
