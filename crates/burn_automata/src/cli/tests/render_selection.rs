@@ -52,7 +52,11 @@ fn temporal_activation_allowed_fraction_matches_progressive_growth_gate() {
         temporal_activation_allowed_fraction(1.0) < 1.0,
         "the temporal schedule should not treat all-particle activation as a valid final shortcut"
     );
-    assert_eq!(temporal_activation_allowed_fraction(1.0), 0.95);
+    assert!(
+        (0.60..0.70).contains(&temporal_activation_target_fraction(1.0)),
+        "final activation should ask for enough active particles to pass strict growth without pushing the whole cloud live"
+    );
+    assert_eq!(temporal_activation_allowed_fraction(1.0), 0.75);
 }
 
 #[test]
@@ -100,7 +104,7 @@ fn temporal_activation_schedule_error_penalizes_burst_growth() {
         geometry_progressive: false,
     };
     let abrupt = report([0.03, 0.03, 0.53, 1.0]);
-    let staged = report([0.03, 0.08, 0.25, 0.95]);
+    let staged = report([0.03, 0.08, 0.25, 0.65]);
 
     assert!(
         temporal_activation_schedule_error(&abrupt, 4)
