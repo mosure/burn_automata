@@ -14,5 +14,7 @@ mod coverage_modes;
 pub(crate) use coverage_modes::*;
 mod relocation;
 pub(crate) use relocation::*;
+mod weighted_relocation;
+pub(crate) use weighted_relocation::*;
 mod utilities;
 pub(crate) use utilities::*;

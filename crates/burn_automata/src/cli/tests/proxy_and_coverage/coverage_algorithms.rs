@@ -371,6 +371,65 @@ fn surface_gap_relocation_can_use_low_assignment_donors() {
     );
     assert!(updates.iter().flatten().all(|value| value.is_finite()));
 }
+
+#[test]
+fn weighted_surface_gap_relocation_prefers_confident_material_front_rows() {
+    let target = TriangleMeshTarget::new(
+        vec![
+            [-1.0, -0.1, 0.0],
+            [-1.0, 0.1, 0.0],
+            [-1.0, 0.0, 0.2],
+            [1.0, -0.1, 0.0],
+            [1.0, 0.1, 0.0],
+            [1.0, 0.0, 0.2],
+        ],
+        vec![[0, 1, 2], [3, 4, 5]],
+    )
+    .unwrap();
+    let positions = vec![[-1.00, -0.03, 0.05, 0.0], [-0.96, 0.03, 0.05, 0.0]];
+    let high_first = render_proxy_weighted_target_coverage_updates(
+        &target,
+        &positions,
+        &[1.0, 0.05],
+        1.0,
+        512,
+        10.0,
+        CoverageUpdateModeArg::HardNearest,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    let high_second = render_proxy_weighted_target_coverage_updates(
+        &target,
+        &positions,
+        &[0.05, 1.0],
+        1.0,
+        512,
+        10.0,
+        CoverageUpdateModeArg::HardNearest,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+
+    assert!(
+        high_first[0][0] > high_first[1][0] + 0.1,
+        "higher-confidence row should be the primary donor for uncovered target gaps: {high_first:?}"
+    );
+    assert!(
+        high_second[1][0] > high_second[0][0] + 0.1,
+        "flipping confidence should flip the preferred gap donor: {high_second:?}"
+    );
+    assert!(high_first.iter().flatten().all(|value| value.is_finite()));
+    assert!(high_second.iter().flatten().all(|value| value.is_finite()));
+}
+
 #[test]
 fn sliced_ot_coverage_balances_separated_surface_modes() {
     let config = NpaConfig::growing_3dgs();

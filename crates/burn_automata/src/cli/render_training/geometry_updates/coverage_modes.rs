@@ -212,10 +212,11 @@ pub(crate) fn render_proxy_weighted_target_coverage_updates(
             &mut updates,
         );
     }
-    add_surface_gap_relocation_to_updates(
+    add_weighted_surface_gap_relocation_to_updates(
         target,
         positions,
         &candidate_rows,
+        row_weights,
         coverage_gain,
         coverage_gap_gain,
         coverage_samples,
