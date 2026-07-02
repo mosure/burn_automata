@@ -135,6 +135,26 @@ pub(crate) enum SeedModeArg {
         alias = "dense-torus"
     )]
     UvTorusDense3d,
+    #[value(name = "growth-3d", alias = "growth", alias = "random-ball-growth-3d")]
+    Growth3d,
+    #[value(
+        name = "substrate-growth-3d",
+        alias = "substrate-growth",
+        alias = "growth-substrate"
+    )]
+    SubstrateGrowth3d,
+    #[value(
+        name = "local-growth-3d",
+        alias = "local-growth",
+        alias = "growth-local"
+    )]
+    LocalGrowth3d,
+    #[value(
+        name = "local-substrate-growth-3d",
+        alias = "local-substrate",
+        alias = "growth-local-substrate"
+    )]
+    LocalSubstrateGrowth3d,
     #[value(
         name = "torus-field-dense-3d",
         alias = "torus-field",
@@ -244,6 +264,10 @@ impl From<SeedModeArg> for ParticleSeed {
             SeedModeArg::UniformCircle => Self::UniformCircle,
             SeedModeArg::UvTorus3d => Self::UvTorus3d,
             SeedModeArg::UvTorusDense3d => Self::UvTorusDense3d,
+            SeedModeArg::Growth3d => Self::Growth3d,
+            SeedModeArg::SubstrateGrowth3d => Self::SubstrateGrowth3d,
+            SeedModeArg::LocalGrowth3d => Self::LocalGrowth3d,
+            SeedModeArg::LocalSubstrateGrowth3d => Self::LocalSubstrateGrowth3d,
             SeedModeArg::TorusFieldDense3d => Self::TorusFieldDense3d,
             SeedModeArg::TeapotFieldDense3d => Self::TeapotFieldDense3d,
             SeedModeArg::TorusGrowth3d => Self::TorusGrowth3d,

@@ -394,6 +394,18 @@ If a new crate is too early, start with modules under `burn_automata::hyper` and
 The current 3D mesh implementation should be treated as explicit baselines, not
 as the final Hyper-NPA target:
 
+- Preferred direction: train a shared 3D NPA basis across many mesh targets and
+  specialize each target with a small LoRA-style adapter or other compact
+  parameter subset. The shared weights should encode common local
+  communication, activation, materialization, and splat-scale dynamics; the
+  adapter should encode object-specific geometry/material bias. A future
+  HyperNPA generator should predict that adapter from a condition rather than
+  emitting a full independent weight set for every object.
+- Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
+  `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
+  seed modes are legacy diagnostics for existing BPK lineage and should not be
+  used as the mechanism for new object identity.
+
 - `uv_torus_growth_3d.bpk`: the current torus regression artifact. It uses
   `position_features=false` and `ParticleSeed::TorusGrowth3d`, so it starts from
   a compact neutral sparse-core seed rather than target residual/color state.

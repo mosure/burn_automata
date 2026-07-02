@@ -9,6 +9,15 @@ a shared neural rule, and form a target object through rollout dynamics rather
 than particle-index assignment, precolored particles, residual-state targets, or
 absolute world-position fields.
 
+The preferred long-term architecture is a shared 3D NPA dynamics basis plus
+small object adapters. Torus, teapot, and future mesh targets should train and
+validate one shared communication/morphogenesis rule, then specialize with a
+LoRA-style low-rank adapter or similarly small parameter subset. A HyperNPA
+conditioner can later predict that adapter from an image, mesh, scene latent, or
+other condition. New target support should add mesh/loss metadata and adapter
+training cases, not new object-named particle seeds or full independent weight
+sets.
+
 ## Alignment Contract
 
 The local 3D path must keep these properties:
@@ -18,6 +27,10 @@ The local 3D path must keep these properties:
 - Shared update rule with local density/state perception and directional
   gradients.
 - Multi-step rollout supervision, not one-step projection only.
+- Object identity must live in the target/condition/adapters, not in
+  `ParticleSeed`; promotion-facing seeds must be target-agnostic.
+- Shared base weights should be trained and evaluated across multiple mesh
+  targets before per-object adapters are promoted.
 - Validation from a saved `.bpk` loaded back from disk.
 - Geometry, color, opacity, and finite-state checks across particle counts,
   seed scales, and rollout horizons.
@@ -45,6 +58,10 @@ per-particle targets.
 
 This pass adds explicit compact neutral growth seeds:
 
+- `ParticleSeed::Growth3d`
+- `ParticleSeed::SubstrateGrowth3d`
+- `ParticleSeed::LocalGrowth3d`
+- `ParticleSeed::LocalSubstrateGrowth3d`
 - `ParticleSeed::TorusGrowth3d`
 - `ParticleSeed::TeapotGrowth3d`
 - `ParticleSeed::TorusLocalGrowth3d`
@@ -52,8 +69,10 @@ This pass adds explicit compact neutral growth seeds:
 - `ParticleSeed::TorusLocalSubstrateGrowth3d`
 - `ParticleSeed::TeapotLocalSubstrateGrowth3d`
 
-These seeds match the 2D growing setup more closely than the legacy 3D
-morphogen seeds: particles are sampled from a compact random ball, no target
+The generic seeds are the promotion-facing path. The torus/teapot-named growth
+seeds remain only as legacy aliases for existing artifacts and historical
+regression reports. These seeds match the 2D growing setup more closely than
+the legacy 3D morphogen seeds: particles are sampled from a compact random ball, no target
 residual, normal, signed-distance, color, particle index, or target sample is
 written into state, and activation starts from a sparse opacity/alive core. The
 non-`Local` variants still write a normalized seed-frame coordinate scaffold
@@ -96,6 +115,10 @@ The old target-bearing `*_morphogen_3d.bpk` files and standalone field
 render-proxy BPKs are retired from `assets/models`. New diagnostic runs should
 write into `target/` or `artifacts/` unless they pass the promotion checks
 below.
+
+New promotion candidates should use `ParticleSeed::LocalSubstrateGrowth3d` by
+default. Object-specific seed names should not be used for new catalog-bound
+training; they are compatibility names for the current hidden regression BPKs.
 
 The app-scale promotion/regression harness is:
 

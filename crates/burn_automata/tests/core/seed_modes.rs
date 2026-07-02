@@ -171,7 +171,11 @@ fn growth_3d_seeds_are_compact_neutral_and_not_target_assigned() {
     let particles = 512;
     let state_dims = 16;
     let scale = 0.72;
-    for seed_mode in [ParticleSeed::TorusGrowth3d, ParticleSeed::TeapotGrowth3d] {
+    for seed_mode in [
+        ParticleSeed::Growth3d,
+        ParticleSeed::TorusGrowth3d,
+        ParticleSeed::TeapotGrowth3d,
+    ] {
         let (positions, states) =
             seed_particles_scaled(1, particles, state_dims, 3, 73, seed_mode, scale);
         let mut max_radius = 0.0_f32;
@@ -239,6 +243,42 @@ fn growth_3d_seeds_are_compact_neutral_and_not_target_assigned() {
         assert!(
             inactive_count > active_count * 4,
             "{seed_mode:?} should start from a sparse active core, active={active_count} inactive={inactive_count}"
+        );
+    }
+}
+
+#[test]
+fn generic_3d_growth_seeds_match_legacy_alias_topology() {
+    let particles = 256;
+    let state_dims = 16;
+    let scale = 0.72;
+    for (generic, legacy) in [
+        (ParticleSeed::Growth3d, ParticleSeed::TorusGrowth3d),
+        (
+            ParticleSeed::SubstrateGrowth3d,
+            ParticleSeed::TorusSubstrateGrowth3d,
+        ),
+        (
+            ParticleSeed::LocalGrowth3d,
+            ParticleSeed::TorusLocalGrowth3d,
+        ),
+        (
+            ParticleSeed::LocalSubstrateGrowth3d,
+            ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ),
+    ] {
+        let (generic_positions, generic_states) =
+            seed_particles_scaled(1, particles, state_dims, 3, 0x3d5eed, generic, scale);
+        let (legacy_positions, legacy_states) =
+            seed_particles_scaled(1, particles, state_dims, 3, 0x3d5eed, legacy, scale);
+
+        assert_eq!(
+            generic_positions, legacy_positions,
+            "{generic:?} should keep the same topology as its legacy alias"
+        );
+        assert_eq!(
+            generic_states, legacy_states,
+            "{generic:?} should only rename the seed family, not change initialized state"
         );
     }
 }

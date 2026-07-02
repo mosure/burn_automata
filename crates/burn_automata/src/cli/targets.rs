@@ -127,7 +127,7 @@ pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetT
             field_scale: UV_TORUS_FIELD_SCALE,
             render_training_scale: UV_TORUS_RENDER_TRAINING_SCALE,
             field_seed_mode: ParticleSeed::TorusFieldDense3d,
-            conditionless_local_seed_mode: ParticleSeed::TorusLocalSubstrateGrowth3d,
+            conditionless_local_seed_mode: ParticleSeed::LocalSubstrateGrowth3d,
             field_motion_gain: UV_TORUS_FIELD_MOTION_GAIN,
             field_color_gain: UV_TORUS_FIELD_COLOR_GAIN,
             local_motion_gain: LOCAL_TORUS_MOTION_GAIN,
@@ -144,7 +144,7 @@ pub(crate) fn mesh_target_training_profile(target: MeshTargetArg) -> MeshTargetT
             field_scale: DEFAULT_3D_MESH_FIELD_SCALE,
             render_training_scale: TEAPOT_RENDER_TRAINING_SCALE,
             field_seed_mode: ParticleSeed::TeapotFieldDense3d,
-            conditionless_local_seed_mode: ParticleSeed::TeapotLocalSubstrateGrowth3d,
+            conditionless_local_seed_mode: ParticleSeed::LocalSubstrateGrowth3d,
             field_motion_gain: TEAPOT_FIELD_MOTION_GAIN,
             field_color_gain: TEAPOT_FIELD_COLOR_GAIN,
             local_motion_gain: LOCAL_TEAPOT_MOTION_GAIN,
@@ -198,6 +198,24 @@ pub(crate) fn mesh_conditionless_local_target_source_for_seed(
     seed_mode: ParticleSeed,
 ) -> &'static str {
     match (target, seed_mode) {
+        (MeshTargetArg::Torus, ParticleSeed::Growth3d) => {
+            UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE
+        }
+        (MeshTargetArg::Teapot, ParticleSeed::Growth3d) => {
+            TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE
+        }
+        (MeshTargetArg::Torus, ParticleSeed::LocalGrowth3d) => {
+            UV_TORUS_CONDITIONLESS_COMPACT_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Teapot, ParticleSeed::LocalGrowth3d) => {
+            TEAPOT_CONDITIONLESS_COMPACT_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Torus, ParticleSeed::LocalSubstrateGrowth3d) => {
+            UV_TORUS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
+        (MeshTargetArg::Teapot, ParticleSeed::LocalSubstrateGrowth3d) => {
+            TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+        }
         (MeshTargetArg::Torus, ParticleSeed::TorusGrowth3d) => {
             UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE
         }

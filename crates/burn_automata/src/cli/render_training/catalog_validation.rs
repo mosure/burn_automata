@@ -287,6 +287,16 @@ pub(crate) fn finalize_render_training_manifest_promotion(
 }
 
 pub(crate) fn target_growth_seed(target: MeshTargetArg, seed_mode: ParticleSeed) -> bool {
+    if matches!(
+        seed_mode,
+        ParticleSeed::Growth3d
+            | ParticleSeed::SubstrateGrowth3d
+            | ParticleSeed::LocalGrowth3d
+            | ParticleSeed::LocalSubstrateGrowth3d
+    ) {
+        return true;
+    }
+
     matches!(
         (target, seed_mode),
         (MeshTargetArg::Torus, ParticleSeed::TorusGrowth3d)

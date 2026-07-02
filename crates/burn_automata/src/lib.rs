@@ -28,7 +28,7 @@ pub use import::{
     BpkModelManifest, ExportedCheckpoint, ImportReport, import_exported_checkpoint, import_model,
 };
 pub use mesh_objective::{GaussianVolumeStats, MeshRolloutObjectiveConfig};
-pub use model::{NpaModel, NpaWeights, StepOutput};
+pub use model::{NpaLowRankAdapter, NpaModel, NpaWeights, StepOutput};
 pub use pipeline::{
     AutomataPipeline, FeatureBatchConfig, RolloutBatchConfig, RolloutSupervisionConfig,
     SupervisedTarget, feature_supervised_batch, rollout_supervised_batch,

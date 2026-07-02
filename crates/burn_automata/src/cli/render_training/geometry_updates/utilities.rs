@@ -232,6 +232,10 @@ pub(crate) fn reference_seed_scale_for_seed_mode(
     match seed_mode {
         ParticleSeed::UvTorus3d
         | ParticleSeed::UvTorusDense3d
+        | ParticleSeed::Growth3d
+        | ParticleSeed::SubstrateGrowth3d
+        | ParticleSeed::LocalGrowth3d
+        | ParticleSeed::LocalSubstrateGrowth3d
         | ParticleSeed::TorusFieldDense3d
         | ParticleSeed::TeapotFieldDense3d
         | ParticleSeed::TorusGrowth3d

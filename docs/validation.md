@@ -1318,16 +1318,19 @@ still fails to create progressive activation and visible material coverage on
 the target surface.
 
 The default no-base `train-render3d` seed mode now matches the strict
-conditionless-local intent. It defaults to `TorusLocalSubstrateGrowth3d` /
-`TeapotLocalSubstrateGrowth3d`, which keep the connected dormant substrate but
-leave state channels `0..2` neutral instead of writing normalized seed-frame
-coordinates. Base-model continuation still uses field seeds for
+conditionless-local intent. It defaults to the target-agnostic
+`LocalSubstrateGrowth3d`, which keeps the connected dormant substrate but
+leaves state channels `0..2` neutral instead of writing normalized seed-frame
+coordinates. The old `TorusLocalSubstrateGrowth3d` /
+`TeapotLocalSubstrateGrowth3d` names remain legacy compatibility aliases for
+historical diagnostics, not the preferred catalog-promotion path. Base-model
+continuation still uses field seeds for
 position-feature models. This is covered by
 `render_training_defaults_match_model_family`,
 `render_training_base_defaults_to_conditionless_local_growth`,
 `local_growth_seed_modes_do_not_write_coordinate_scaffold`, and
 `growth_3d_local_substrate_seed_keeps_topology_without_coordinate_state`. A
-64-particle validation smoke with `--seed-mode torus-local-substrate-growth-3d`
+64-particle validation smoke with `--seed-mode local-substrate-growth-3d`
 reports `seed_coordinate_scaffold=false`,
 `strict_checks.no_seed_coordinate_scaffold=true`, and
 `non_opacity_seed_abs_max=0.0`; it still fails strict growth/render checks

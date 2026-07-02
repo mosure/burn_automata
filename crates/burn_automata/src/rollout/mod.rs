@@ -92,6 +92,10 @@ pub enum ParticleSeed {
     Uniform,
     #[default]
     UniformCircle,
+    Growth3d,
+    SubstrateGrowth3d,
+    LocalGrowth3d,
+    LocalSubstrateGrowth3d,
     UvTorus3d,
     UvTorusDense3d,
     TorusFieldDense3d,
@@ -241,7 +245,11 @@ pub fn seed_particles_scaled(
                     position[2] = r * z;
                 }
             }
-            ParticleSeed::TorusGrowth3d
+            ParticleSeed::Growth3d
+            | ParticleSeed::SubstrateGrowth3d
+            | ParticleSeed::LocalGrowth3d
+            | ParticleSeed::LocalSubstrateGrowth3d
+            | ParticleSeed::TorusGrowth3d
             | ParticleSeed::TeapotGrowth3d
             | ParticleSeed::TorusSubstrateGrowth3d
             | ParticleSeed::TeapotSubstrateGrowth3d
@@ -252,7 +260,9 @@ pub fn seed_particles_scaled(
                 if spatial_dims == 3 {
                     let local_idx = idx % particle_count.max(1);
                     let seed_position = match seed_mode {
-                        ParticleSeed::TorusSubstrateGrowth3d
+                        ParticleSeed::SubstrateGrowth3d
+                        | ParticleSeed::LocalSubstrateGrowth3d
+                        | ParticleSeed::TorusSubstrateGrowth3d
                         | ParticleSeed::TeapotSubstrateGrowth3d
                         | ParticleSeed::TorusLocalSubstrateGrowth3d
                         | ParticleSeed::TeapotLocalSubstrateGrowth3d => {
@@ -286,7 +296,9 @@ pub fn seed_particles_scaled(
                             GROWTH_3D_ACTIVE_OPACITY_LOGIT
                         } else if matches!(
                             seed_mode,
-                            ParticleSeed::TorusSubstrateGrowth3d
+                            ParticleSeed::SubstrateGrowth3d
+                                | ParticleSeed::LocalSubstrateGrowth3d
+                                | ParticleSeed::TorusSubstrateGrowth3d
                                 | ParticleSeed::TeapotSubstrateGrowth3d
                                 | ParticleSeed::TorusLocalSubstrateGrowth3d
                                 | ParticleSeed::TeapotLocalSubstrateGrowth3d
@@ -468,7 +480,9 @@ pub fn seed_particles_scaled(
 pub fn growth_3d_seed_writes_coordinate_scaffold(seed_mode: ParticleSeed) -> bool {
     matches!(
         seed_mode,
-        ParticleSeed::TorusGrowth3d
+        ParticleSeed::Growth3d
+            | ParticleSeed::SubstrateGrowth3d
+            | ParticleSeed::TorusGrowth3d
             | ParticleSeed::TeapotGrowth3d
             | ParticleSeed::TorusSubstrateGrowth3d
             | ParticleSeed::TeapotSubstrateGrowth3d

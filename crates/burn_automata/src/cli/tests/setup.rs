@@ -56,6 +56,34 @@ fn mesh_training_sources_separate_rollout_local_from_projection_baseline() {
     assert_eq!(
         mesh_conditionless_local_target_source_for_seed(
             MeshTargetArg::Torus,
+            ParticleSeed::Growth3d,
+        ),
+        UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE
+    );
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Teapot,
+            ParticleSeed::Growth3d,
+        ),
+        TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE
+    );
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Torus,
+            ParticleSeed::LocalSubstrateGrowth3d,
+        ),
+        UV_TORUS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+    );
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Teapot,
+            ParticleSeed::LocalSubstrateGrowth3d,
+        ),
+        TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+    );
+    assert_eq!(
+        mesh_conditionless_local_target_source_for_seed(
+            MeshTargetArg::Torus,
             ParticleSeed::TorusGrowth3d,
         ),
         UV_TORUS_CONDITIONLESS_COMPACT_TARGET_SOURCE
@@ -325,6 +353,16 @@ fn render_training_source_does_not_preserve_mismatched_target_lineage() {
     ));
     assert!(target_seed_conditionless_lineage(
         MeshTargetArg::Teapot,
+        ParticleSeed::LocalSubstrateGrowth3d,
+        TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+    ));
+    assert!(target_seed_conditionless_lineage(
+        MeshTargetArg::Torus,
+        ParticleSeed::LocalSubstrateGrowth3d,
+        UV_TORUS_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
+    ));
+    assert!(target_seed_conditionless_lineage(
+        MeshTargetArg::Teapot,
         ParticleSeed::TeapotLocalSubstrateGrowth3d,
         TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE
     ));
@@ -375,21 +413,21 @@ fn render_training_source_does_not_preserve_mismatched_target_lineage() {
 fn render_training_defaults_match_model_family() {
     assert_eq!(
         render_training_default_seed_mode(MeshTargetArg::Torus),
-        ParticleSeed::TorusLocalSubstrateGrowth3d
+        ParticleSeed::LocalSubstrateGrowth3d
     );
     assert_eq!(
         render_training_default_seed_mode(MeshTargetArg::Teapot),
-        ParticleSeed::TeapotLocalSubstrateGrowth3d
+        ParticleSeed::LocalSubstrateGrowth3d
     );
 
     let local_model = NpaModel::seeded(NpaConfig::growing_3dgs(), 7);
     assert_eq!(
         default_render_training_seed_mode(MeshTargetArg::Torus, &local_model),
-        ParticleSeed::TorusLocalSubstrateGrowth3d
+        ParticleSeed::LocalSubstrateGrowth3d
     );
     assert_eq!(
         default_render_training_seed_mode(MeshTargetArg::Teapot, &local_model),
-        ParticleSeed::TeapotLocalSubstrateGrowth3d
+        ParticleSeed::LocalSubstrateGrowth3d
     );
 
     let field_model = NpaModel::seeded(NpaConfig::torus_field_3dgs(), 7);
@@ -412,7 +450,7 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
     assert_eq!(torus.field_seed_mode, ParticleSeed::TorusFieldDense3d);
     assert_eq!(
         torus.conditionless_local_seed_mode,
-        ParticleSeed::TorusLocalSubstrateGrowth3d
+        ParticleSeed::LocalSubstrateGrowth3d
     );
     assert_eq!(torus.field_motion_gain, UV_TORUS_FIELD_MOTION_GAIN);
     assert_eq!(torus.field_color_gain, UV_TORUS_FIELD_COLOR_GAIN);
@@ -447,7 +485,7 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
     assert_eq!(teapot.field_seed_mode, ParticleSeed::TeapotFieldDense3d);
     assert_eq!(
         teapot.conditionless_local_seed_mode,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d
+        ParticleSeed::LocalSubstrateGrowth3d
     );
     assert_eq!(teapot.field_motion_gain, TEAPOT_FIELD_MOTION_GAIN);
     assert_eq!(teapot.field_color_gain, TEAPOT_FIELD_COLOR_GAIN);
@@ -478,6 +516,10 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
         teapot.field_seed_mode, torus.field_seed_mode,
         "generic profile lookup must not reuse torus seed modes for teapot"
     );
+    assert_eq!(
+        teapot.conditionless_local_seed_mode, torus.conditionless_local_seed_mode,
+        "strict local training should share object-agnostic seed modes across mesh targets"
+    );
     assert_ne!(
         teapot.conditionless_local_target_source, torus.conditionless_local_target_source,
         "target profile sources must identify the actual mesh target"
@@ -491,6 +533,10 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
 #[test]
 fn mesh_seed_modes_use_neutral_3d_reference_scale() {
     for seed_mode in [
+        ParticleSeed::Growth3d,
+        ParticleSeed::SubstrateGrowth3d,
+        ParticleSeed::LocalGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         ParticleSeed::TorusFieldDense3d,
         ParticleSeed::TeapotFieldDense3d,
         ParticleSeed::TorusGrowth3d,
@@ -591,7 +637,7 @@ fn catalog_promotion_validation_configs_match_app_scale() {
         7,
         &[99],
         0.54,
-        ParticleSeed::TorusLocalSubstrateGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         render,
     );
 
@@ -604,7 +650,7 @@ fn catalog_promotion_validation_configs_match_app_scale() {
         assert_eq!(cfg.particle_count, CATALOG_3D_VALIDATION_PARTICLES);
         assert_eq!(cfg.seed, CATALOG_3D_APP_EVAL_SEED);
         assert_eq!(cfg.extra_seeds, vec![42, 99, 7]);
-        assert_eq!(cfg.seed_mode, ParticleSeed::TorusLocalSubstrateGrowth3d);
+        assert_eq!(cfg.seed_mode, ParticleSeed::LocalSubstrateGrowth3d);
         assert!(
             !growth_3d_seed_has_coordinate_scaffold(cfg.seed_mode),
             "catalog promotion validation must run the same no-scaffold seed family required by the strict gate"
@@ -656,7 +702,7 @@ fn catalog_bound_render_training_rejects_mismatched_target_lineage() {
     let mismatch = validate_catalog_bound_render_training_output(
         catalog_path,
         MeshTargetArg::Teapot,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         Some(UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE),
     )
     .unwrap_err()
@@ -666,7 +712,7 @@ fn catalog_bound_render_training_rejects_mismatched_target_lineage() {
     validate_catalog_bound_render_training_output(
         catalog_path,
         MeshTargetArg::Teapot,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         Some(TEAPOT_CONDITIONLESS_LOCAL_NOSCAFFOLD_TARGET_SOURCE),
     )
     .unwrap();
@@ -713,7 +759,11 @@ fn render_training_base_defaults_to_conditionless_local_growth() {
 #[test]
 fn sparse_growth_seed_modes_do_not_preload_target_state() {
     let config = NpaConfig::growing_3dgs();
-    for seed_mode in [ParticleSeed::TorusGrowth3d, ParticleSeed::TeapotGrowth3d] {
+    for seed_mode in [
+        ParticleSeed::Growth3d,
+        ParticleSeed::TorusGrowth3d,
+        ParticleSeed::TeapotGrowth3d,
+    ] {
         let (_positions, states) = seed_particles_scaled(
             1,
             512,
@@ -751,6 +801,8 @@ fn sparse_growth_seed_modes_do_not_preload_target_state() {
 fn local_growth_seed_modes_do_not_write_coordinate_scaffold() {
     let config = NpaConfig::growing_3dgs();
     let seed_modes = [
+        ParticleSeed::LocalGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         ParticleSeed::TorusLocalGrowth3d,
         ParticleSeed::TeapotLocalGrowth3d,
         ParticleSeed::TorusLocalSubstrateGrowth3d,
@@ -802,7 +854,7 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     validate_catalog_bound_render_training_output(
         Path::new("assets/models/teapot_growth_3d.bpk"),
         MeshTargetArg::Teapot,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         Some(&local_source),
     )
     .unwrap();
@@ -819,7 +871,7 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     let source_seed_mismatch_error = validate_catalog_bound_render_training_output(
         Path::new("assets/models/render_trained_3d.bpk"),
         MeshTargetArg::Teapot,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         Some(TEAPOT_CONDITIONLESS_COMPACT_TARGET_SOURCE),
     )
     .unwrap_err();
@@ -847,7 +899,7 @@ fn catalog_bound_render_training_requires_local_growth_lineage() {
     let shortcut_lineage_error = validate_catalog_bound_render_training_output(
         Path::new("assets/models/render_trained_3d.bpk"),
         MeshTargetArg::Teapot,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d,
+        ParticleSeed::LocalSubstrateGrowth3d,
         Some(TEAPOT_POSITION_FIELD_TARGET_SOURCE),
     )
     .unwrap_err();
