@@ -30,6 +30,39 @@ fn render_selection_candidate_requires_morphology_and_bounded_render_regression(
 }
 
 #[test]
+fn render_selection_candidate_rejects_render_only_metric_improvement() {
+    let best = render_selection_metrics_with_liveness(100.0, 0.925, 0.35, 0.0);
+
+    let mut render_only = best.clone();
+    render_only.score = 98.0;
+    render_only.render_loss = 0.910;
+    render_only.density_psnr_db = 0.40;
+    assert!(
+        render_selection_candidate_beats(
+            render_only.score,
+            best.score,
+            render_only.morphology_non_regressed,
+            render_only.render_loss,
+            best.render_loss,
+            render_only.density_psnr_db,
+            best.density_psnr_db,
+        ),
+        "scalar selection still sees this as a strict score/render improvement"
+    );
+    assert!(
+        !render_selection_candidate_metrics_beats(&render_only, &best),
+        "metric-aware checkpoint selection should not promote render-only 3D candidates"
+    );
+
+    let mut surface_progress = render_only;
+    surface_progress.surface_covered_bin_fraction = best.surface_covered_bin_fraction + 0.006;
+    assert!(
+        render_selection_candidate_metrics_beats(&surface_progress, &best),
+        "strict score/render progress remains selectable once it also improves morphology"
+    );
+}
+
+#[test]
 fn render_selection_candidate_can_retain_bounded_liveness_precursor_progress() {
     let best = render_selection_metrics_with_liveness(107.10512, 0.925306, 0.3583453, 5.686245);
     let improved =

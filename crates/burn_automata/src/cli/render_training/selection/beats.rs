@@ -1,10 +1,12 @@
 use super::*;
 
+mod checkpoint;
 mod color;
 mod geometry;
 mod liveness;
 mod strict_morphology;
 
+use checkpoint::render_selection_checkpoint_morphogenesis_progressed;
 use color::render_selection_color_training_progress_beats;
 use geometry::{
     render_selection_geometry_growth_precursor_beats,
@@ -59,7 +61,8 @@ pub(crate) fn render_selection_candidate_metrics_beats(
             best.render_loss,
             selection.density_psnr_db,
             best.density_psnr_db,
-        ))
+        )
+        && render_selection_checkpoint_morphogenesis_progressed(selection, best))
         || render_selection_liveness_precursor_beats(selection, best)
         || render_selection_activation_breakthrough_beats(selection, best)
         || render_selection_material_precursor_beats(selection, best)
