@@ -419,6 +419,22 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
     assert_eq!(torus.local_motion_gain, LOCAL_TORUS_MOTION_GAIN);
     assert_eq!(torus.local_color_gain, LOCAL_TORUS_COLOR_GAIN);
     assert_eq!(
+        torus.position_field_target_source,
+        UV_TORUS_POSITION_FIELD_TARGET_SOURCE
+    );
+    assert_eq!(
+        torus.rollout_field_target_source,
+        UV_TORUS_ROLLOUT_FIELD_TARGET_SOURCE
+    );
+    assert_eq!(
+        torus.morphogen_baseline_target_source,
+        UV_TORUS_MORPHOGEN_BASELINE_TARGET_SOURCE
+    );
+    assert_eq!(
+        torus.morphogen_rollout_target_source,
+        UV_TORUS_MORPHOGEN_ROLLOUT_TARGET_SOURCE
+    );
+    assert_eq!(
         torus.conditionless_local_target_source,
         UV_TORUS_CONDITIONLESS_LOCAL_TARGET_SOURCE
     );
@@ -438,6 +454,22 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
     assert_eq!(teapot.local_motion_gain, LOCAL_TEAPOT_MOTION_GAIN);
     assert_eq!(teapot.local_color_gain, LOCAL_TEAPOT_COLOR_GAIN);
     assert_eq!(
+        teapot.position_field_target_source,
+        TEAPOT_POSITION_FIELD_TARGET_SOURCE
+    );
+    assert_eq!(
+        teapot.rollout_field_target_source,
+        TEAPOT_ROLLOUT_FIELD_TARGET_SOURCE
+    );
+    assert_eq!(
+        teapot.morphogen_baseline_target_source,
+        TEAPOT_MORPHOGEN_BASELINE_TARGET_SOURCE
+    );
+    assert_eq!(
+        teapot.morphogen_rollout_target_source,
+        TEAPOT_MORPHOGEN_ROLLOUT_TARGET_SOURCE
+    );
+    assert_eq!(
         teapot.conditionless_local_target_source,
         TEAPOT_CONDITIONLESS_LOCAL_TARGET_SOURCE
     );
@@ -449,6 +481,10 @@ fn mesh_target_training_profiles_are_explicit_per_target() {
     assert_ne!(
         teapot.conditionless_local_target_source, torus.conditionless_local_target_source,
         "target profile sources must identify the actual mesh target"
+    );
+    assert_ne!(
+        teapot.morphogen_rollout_target_source, torus.morphogen_rollout_target_source,
+        "target profile rollout sources must identify the actual mesh target"
     );
 }
 

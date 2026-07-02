@@ -61,10 +61,7 @@ fn catalog_selection_preserves_visualization_settings() {
     assert_eq!(settings.particle_count, 1024);
     assert_eq!(settings.steps_per_frame, 3);
     assert_eq!(settings.seed, CATALOG_3D_GROWTH_SEED);
-    assert_eq!(
-        settings.seed_mode,
-        ParticleSeed::TorusLocalSubstrateGrowth3d
-    );
+    assert_eq!(settings.seed_mode, ParticleSeed::TorusGrowth3d);
     assert!((settings.reference_seed_scale - 0.54).abs() < f32::EPSILON);
     assert!((settings.render_scale - 1.5).abs() < f32::EPSILON);
     assert!((settings.render_opacity - 0.375).abs() < f32::EPSILON);
@@ -80,10 +77,7 @@ fn catalog_selection_preserves_visualization_settings() {
     assert_eq!(settings.particle_count, 1024);
     assert_eq!(settings.steps_per_frame, 2);
     assert_eq!(settings.seed, CATALOG_3D_GROWTH_SEED);
-    assert_eq!(
-        settings.seed_mode,
-        ParticleSeed::TeapotLocalSubstrateGrowth3d
-    );
+    assert_eq!(settings.seed_mode, ParticleSeed::TeapotGrowth3d);
     assert!((settings.reference_seed_scale - 0.72).abs() < f32::EPSILON);
     assert!((settings.render_scale - 1.5).abs() < f32::EPSILON);
     assert!((settings.render_opacity - 0.375).abs() < f32::EPSILON);
@@ -112,7 +106,7 @@ fn catalog_keeps_only_latest_torus_regression_artifact() {
     assert_eq!(torus_entries[0].key, ModelCatalogKey::UvTorusMorphogen3d);
     assert_eq!(
         catalog_seed_mode(torus_entries[0]),
-        ParticleSeed::TorusLocalSubstrateGrowth3d
+        ParticleSeed::TorusGrowth3d
     );
     assert!(matches!(
         torus_entries[0].source,
@@ -147,11 +141,11 @@ fn catalog_registers_teapot_as_blocked_growth_artifact() {
     assert_eq!(teapot_entries[0].particle_count, 1024);
     assert!(
         teapot_entries[0].kind.contains("hidden local regression"),
-        "teapot should stay hidden until robust held-out seed validation passes"
+        "teapot should stay hidden until strict no-scaffold lineage and robust held-out seed validation pass"
     );
     assert_eq!(
         catalog_seed_mode(teapot_entries[0]),
-        ParticleSeed::TeapotLocalSubstrateGrowth3d
+        ParticleSeed::TeapotGrowth3d
     );
     assert!(matches!(
         teapot_entries[0].source,
@@ -247,11 +241,11 @@ fn hidden_3d_bpk_entries_are_blocked_local_regression_artifacts() {
         let seed_mode = catalog_seed_mode(entry);
         assert!(matches!(
             seed_mode,
-            ParticleSeed::TorusLocalSubstrateGrowth3d | ParticleSeed::TeapotLocalSubstrateGrowth3d
+            ParticleSeed::TorusGrowth3d | ParticleSeed::TeapotGrowth3d
         ));
         assert!(
-            !burn_automata::rollout::growth_3d_seed_writes_coordinate_scaffold(seed_mode),
-            "{path} should run with the same no-scaffold seed family required for strict catalog promotion"
+            burn_automata::rollout::growth_3d_seed_writes_coordinate_scaffold(seed_mode),
+            "{path} should run with its source-matching random-ball diagnostic seed; strict catalog promotion must replace it with a no-scaffold source/seed lineage"
         );
     }
 }

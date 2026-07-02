@@ -33,7 +33,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                     grad_clip_norm: 1.0,
                     ..SgdConfig::default()
                 },
-                TEAPOT_POSITION_FIELD_TARGET_SOURCE,
+                target_profile.position_field_target_source,
                 None,
             )
         }
@@ -118,7 +118,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                     grad_clip_norm: 1.0,
                     ..SgdConfig::default()
                 },
-                TEAPOT_ROLLOUT_FIELD_TARGET_SOURCE,
+                target_profile.rollout_field_target_source,
                 Some(rollout_report),
             )
         }
@@ -204,7 +204,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                     grad_clip_norm: 0.08,
                     ..SgdConfig::default()
                 },
-                TEAPOT_MORPHOGEN_ROLLOUT_TARGET_SOURCE,
+                target_profile.morphogen_rollout_target_source,
                 Some(rollout_report),
             )
         }
@@ -219,7 +219,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
                     grad_clip_norm: 1.0,
                     ..SgdConfig::default()
                 },
-                TEAPOT_MORPHOGEN_BASELINE_TARGET_SOURCE,
+                target_profile.morphogen_baseline_target_source,
                 None,
             )
         }
