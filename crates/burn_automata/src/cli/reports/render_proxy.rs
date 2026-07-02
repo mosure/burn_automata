@@ -242,6 +242,8 @@ pub(crate) struct DirectRolloutObjectiveDiagnostics {
     pub(crate) temporal_materialization_nonzero_fraction: f32,
     pub(crate) active_surface_materialization_rms: f32,
     pub(crate) active_surface_materialization_nonzero_fraction: f32,
+    pub(crate) strict_surface_materialization_rms: f32,
+    pub(crate) strict_surface_materialization_nonzero_fraction: f32,
     pub(crate) material_visibility_rms: f32,
     pub(crate) material_visibility_nonzero_fraction: f32,
     pub(crate) surface_color_rms: f32,

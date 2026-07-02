@@ -709,6 +709,30 @@ pub(crate) fn render_direct_rollout_training_step(
                 16.0,
             );
         }
+        let mut strict_surface_materialization_output_gradients =
+            vec![0.0; particle_count * output_dims];
+        add_strict_surface_materialization_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.opacity_gain * DIRECT_GROWTH_STRICT_SURFACE_MATERIALIZATION_GAIN_FRACTION,
+            cfg.seed_scale,
+            cfg.material_max_opacity_update,
+            &mut strict_surface_materialization_output_gradients,
+        );
+        if let Some(material_channel) = growth_3d_material_opacity_channel(model.config.state_dims)
+        {
+            boost_sparse_output_channel_rms(
+                &mut strict_surface_materialization_output_gradients,
+                output_dims,
+                [model.config.spatial_dims + material_channel],
+                cfg.direct_output_gradient_rms_cap
+                    * DIRECT_GROWTH_MATERIAL_OUTPUT_RMS_CAP_MULTIPLIER,
+                16.0,
+            );
+        }
         let mut material_surface_motion_output_gradients = vec![0.0; particle_count * output_dims];
         add_material_visible_surface_approach_output_objective(
             &model.config,
@@ -799,6 +823,10 @@ pub(crate) fn render_direct_rollout_training_step(
         add_output_gradients(
             &mut step_output_gradients,
             &active_surface_materialization_output_gradients,
+        );
+        add_output_gradients(
+            &mut step_output_gradients,
+            &strict_surface_materialization_output_gradients,
         );
         let mut material_output_gradients = vec![0.0; particle_count * output_dims];
         add_material_visibility_output_objective(

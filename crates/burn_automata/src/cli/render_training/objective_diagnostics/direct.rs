@@ -44,6 +44,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
     let mut material_coverage_materialization = OutputGradientAccumulator::default();
     let mut temporal_materialization = OutputGradientAccumulator::default();
     let mut active_surface_materialization = OutputGradientAccumulator::default();
+    let mut strict_surface_materialization = OutputGradientAccumulator::default();
     let mut material_visibility = OutputGradientAccumulator::default();
     let mut surface_color = OutputGradientAccumulator::default();
     let mut combined_pre_cap = OutputGradientAccumulator::default();
@@ -613,6 +614,29 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             );
         }
 
+        let mut strict_surface_materialization_output_gradients =
+            vec![0.0; particle_count * output_dims];
+        add_strict_surface_materialization_output_objective(
+            &model.config,
+            target,
+            &snapshot.positions,
+            &snapshot.states,
+            &updates,
+            cfg.opacity_gain * DIRECT_GROWTH_STRICT_SURFACE_MATERIALIZATION_GAIN_FRACTION,
+            cfg.seed_scale,
+            cfg.material_max_opacity_update,
+            &mut strict_surface_materialization_output_gradients,
+        );
+        if let Some(material_output) = material_output {
+            accumulate_output_channels(
+                &mut strict_surface_materialization,
+                &strict_surface_materialization_output_gradients,
+                particle_count,
+                output_dims,
+                [material_output],
+            );
+        }
+
         let mut material_surface_motion_output_gradients = vec![0.0; particle_count * output_dims];
         add_material_visible_surface_approach_output_objective(
             &model.config,
@@ -758,6 +782,10 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut combined,
             &active_surface_materialization_output_gradients,
         );
+        add_output_gradients(
+            &mut combined,
+            &strict_surface_materialization_output_gradients,
+        );
         add_output_gradients(&mut combined, &material_output_gradients);
         add_output_gradients(&mut combined, &surface_color_output_gradients);
         boost_sparse_output_channel_rms(
@@ -774,12 +802,13 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             output_dims,
             0..output_dims,
         );
-        cap_output_gradient_channel_rms_with_liveness_cap(
+        cap_output_gradient_channel_rms_with_state_caps(
             &model.config,
             &mut combined,
             output_dims,
             cfg.direct_output_gradient_rms_cap,
             liveness_update_cap,
+            cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_MATERIAL_OUTPUT_RMS_CAP_MULTIPLIER,
         );
         accumulate_output_channels(
             &mut combined_post_cap,
@@ -899,6 +928,9 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         temporal_materialization_nonzero_fraction: temporal_materialization.nonzero_fraction(),
         active_surface_materialization_rms: active_surface_materialization.rms(),
         active_surface_materialization_nonzero_fraction: active_surface_materialization
+            .nonzero_fraction(),
+        strict_surface_materialization_rms: strict_surface_materialization.rms(),
+        strict_surface_materialization_nonzero_fraction: strict_surface_materialization
             .nonzero_fraction(),
         material_visibility_rms: material_visibility.rms(),
         material_visibility_nonzero_fraction: material_visibility.nonzero_fraction(),

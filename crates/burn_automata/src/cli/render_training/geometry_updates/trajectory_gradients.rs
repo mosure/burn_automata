@@ -586,6 +586,7 @@ pub(crate) fn cap_output_gradient_channel_rms(
     cap_output_gradient_channel_rms_impl(output_gradients, output_dims, rms_cap, &[])
 }
 
+#[cfg(test)]
 pub(crate) fn cap_output_gradient_channel_rms_with_liveness_cap(
     config: &NpaConfig,
     output_gradients: &mut [f32],
