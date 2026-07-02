@@ -120,6 +120,20 @@ New promotion candidates should use `ParticleSeed::LocalSubstrateGrowth3d` by
 default. Object-specific seed names should not be used for new catalog-bound
 training; they are compatibility names for the current hidden regression BPKs.
 
+The shared-base adapter path now has core training support:
+
+- `NpaLowRankAdapter` materializes a LoRA-style low-rank delta on top of shared
+  `NpaWeights`.
+- `project_low_rank_adapter_gradients` maps full MLP gradients from existing
+  rollout/render losses into adapter-factor gradients.
+- `supervised_adapter_train_step` updates only adapter parameters while leaving
+  the shared base model unchanged.
+
+The next promotion-facing training experiments should use the same
+rollout/render objectives on a shared base model and train per-target adapters
+for torus, teapot, and future meshes before considering full-weight
+specialization.
+
 The app-scale promotion/regression harness is:
 
 ```bash

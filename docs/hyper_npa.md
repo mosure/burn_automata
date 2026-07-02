@@ -401,6 +401,11 @@ as the final Hyper-NPA target:
   adapter should encode object-specific geometry/material bias. A future
   HyperNPA generator should predict that adapter from a condition rather than
   emitting a full independent weight set for every object.
+- The core library now exposes a first adapter primitive:
+  `NpaLowRankAdapter` can be materialized onto a shared `NpaModel`, full MLP
+  gradients can be projected into adapter gradients, and supervised adapter
+  training can update only the adapter. Render-rollout training should reuse
+  this path next rather than adding per-object full-weight training loops.
 - Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
   `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
   seed modes are legacy diagnostics for existing BPK lineage and should not be

@@ -98,6 +98,21 @@ impl NpaLowRankAdapter {
         }
     }
 
+    pub fn seeded(config: &NpaConfig, rank: usize, alpha: f32, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut adapter = Self::zeros(config, rank, alpha);
+        for value in adapter
+            .w1_down
+            .iter_mut()
+            .chain(adapter.w1_up.iter_mut())
+            .chain(adapter.w2_down.iter_mut())
+            .chain(adapter.w2_up.iter_mut())
+        {
+            *value = rng.random_range(-0.01..0.01);
+        }
+        adapter
+    }
+
     pub fn parameter_count(&self) -> usize {
         self.w1_down.len()
             + self.w1_up.len()
