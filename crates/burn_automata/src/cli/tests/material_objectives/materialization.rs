@@ -272,6 +272,66 @@ fn active_surface_materialization_prioritizes_rows_before_strict_coverage() {
 }
 
 #[test]
+fn active_surface_materialization_uses_tight_opacity_frontier() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_scale = 1.0;
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    let opacity_frontier = material_opacity_frontier_coverage_threshold(seed_scale);
+    let inside_frontier_distance = (soft + opacity_frontier) * 0.5;
+    let target = TriangleMeshTarget::new(
+        vec![
+            [inside_frontier_distance, -0.1, 0.0],
+            [inside_frontier_distance, 0.1, 0.0],
+            [inside_frontier_distance, 0.0, 0.2],
+        ],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [
+            inside_frontier_distance - opacity_frontier * 1.1,
+            0.0,
+            0.0,
+            0.0,
+        ],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_active_surface_materialization_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        seed_scale,
+        f32::INFINITY,
+        0.0,
+        None,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[material_output] < 0.0,
+        "active rows just outside the soft material band should receive bounded precursor material pressure"
+    );
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "rows outside the tighter opacity frontier should not receive material pressure"
+    );
+}
+
+#[test]
 fn active_surface_materialization_respects_local_front_candidate_weights() {
     let config = NpaConfig::growing_3dgs();
     let target = TriangleMeshTarget::new(

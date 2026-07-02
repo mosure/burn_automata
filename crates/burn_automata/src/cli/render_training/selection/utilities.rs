@@ -14,6 +14,11 @@ pub(crate) fn material_training_frontier_coverage_threshold(seed_scale: f32) -> 
     soft.max(seed_scale.max(soft) * 1.25).max(soft)
 }
 
+pub(crate) fn material_opacity_frontier_coverage_threshold(seed_scale: f32) -> f32 {
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    (soft * 1.5).max(soft)
+}
+
 pub(crate) fn direct_trajectory_geometry_weight(step_fraction: f32) -> f32 {
     let schedule = step_fraction.clamp(0.0, 1.0);
     0.5 + 0.5 * schedule

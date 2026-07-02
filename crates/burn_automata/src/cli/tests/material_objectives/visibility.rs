@@ -51,6 +51,62 @@ fn material_visibility_output_objective_promotes_approaching_active_rows() {
 }
 
 #[test]
+fn material_visibility_output_objective_uses_tight_opacity_frontier() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let seed_scale = 1.0;
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    let opacity_frontier = material_opacity_frontier_coverage_threshold(seed_scale);
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, (soft + opacity_frontier) * 0.5, 0.0],
+        [0.0_f32, 0.0, opacity_frontier * 1.1, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    states[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    states[config.state_dims + material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_material_visibility_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        0.0,
+        0.0,
+        64,
+        seed_scale,
+        0.05,
+        ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
+        0.0,
+        None,
+        1.0,
+        0.1,
+        1.0,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[material_output] < 0.0,
+        "active rows just outside the soft material band should get bounded precursor material pressure"
+    );
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "active rows outside the tighter opacity frontier should remain material-inactive"
+    );
+}
+
+#[test]
 fn material_visibility_output_objective_promotes_local_front_rows() {
     let config = NpaConfig::growing_3dgs();
     let target = TriangleMeshTarget::new(

@@ -243,6 +243,7 @@ pub(crate) fn add_material_visibility_output_objective(
     );
     let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
     let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
+    let opacity_frontier_threshold = material_opacity_frontier_coverage_threshold(seed_scale);
 
     for (row, position) in positions.iter().enumerate() {
         let state_base = row * config.state_dims;
@@ -261,8 +262,12 @@ pub(crate) fn add_material_visibility_output_objective(
         let output_base = row * output_dims;
         let predicted_material = material_opacity + raw_updates[output_base + material_output];
         let projection = target.project(position3(*position));
-        let surface_weight =
-            soft_material_assignment_weight(projection.distance, strict_threshold, soft_threshold);
+        let surface_weight = frontier_material_assignment_weight(
+            projection.distance,
+            strict_threshold,
+            soft_threshold,
+            opacity_frontier_threshold,
+        );
         let material_surface_weight = surface_weight;
         let liveness_surface_weight = if liveness <= -1.0 {
             surface_weight.max(0.5 * candidate_weight)

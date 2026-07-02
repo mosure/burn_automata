@@ -75,7 +75,8 @@ pub(crate) fn add_temporal_materialization_output_objective_with_candidate_weigh
     };
     let mut candidates = (0..positions.len())
         .filter_map(|row| {
-            let surface_weight = surface_band_material_weight(target, positions[row], seed_scale);
+            let surface_weight =
+                surface_precursor_material_weight(target, positions[row], seed_scale);
             if surface_weight <= 0.0 {
                 return None;
             }
@@ -174,7 +175,7 @@ pub(crate) fn add_material_coverage_materialization_output_objective(
         if candidate_weight <= 1.0e-3 || !candidate_weight.is_finite() {
             continue;
         }
-        let surface_weight = surface_band_material_weight(target, positions[row], seed_scale);
+        let surface_weight = surface_precursor_material_weight(target, positions[row], seed_scale);
         if surface_weight <= 0.0 {
             continue;
         }
@@ -281,7 +282,7 @@ pub(crate) fn add_active_surface_materialization_output_objective(
             continue;
         }
 
-        let surface_weight = surface_band_material_weight(target, *position, seed_scale);
+        let surface_weight = surface_precursor_material_weight(target, *position, seed_scale);
         if surface_weight <= 0.0 {
             continue;
         }
@@ -307,7 +308,7 @@ pub(crate) fn add_active_surface_materialization_output_objective(
     }
 }
 
-fn surface_band_material_weight(
+fn surface_precursor_material_weight(
     target: &TriangleMeshTarget,
     position: [f32; 4],
     seed_scale: f32,
@@ -315,7 +316,13 @@ fn surface_band_material_weight(
     let projection = target.project(position3(position));
     let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
     let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
-    soft_material_assignment_weight(projection.distance, strict_threshold, soft_threshold)
+    let frontier_threshold = material_opacity_frontier_coverage_threshold(seed_scale);
+    frontier_material_assignment_weight(
+        projection.distance,
+        strict_threshold,
+        soft_threshold,
+        frontier_threshold,
+    )
 }
 
 pub(crate) fn material_precursor_ceiling() -> f32 {
