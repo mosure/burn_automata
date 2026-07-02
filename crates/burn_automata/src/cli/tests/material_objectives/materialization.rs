@@ -85,6 +85,7 @@ fn active_surface_materialization_promotes_active_surface_rows_only() {
         [0.0_f32, 0.0, 0.90, 0.0],
         [0.04_f32, 0.0, 0.01, 0.0],
         [0.80_f32, 0.0, 0.01, 0.0],
+        [0.0_f32, 0.0, 1.40, 0.0],
     ];
     let mut states = vec![0.0; positions.len() * config.state_dims];
     for state in states.chunks_exact_mut(config.state_dims) {
@@ -115,9 +116,13 @@ fn active_surface_materialization_promotes_active_surface_rows_only() {
         "active near-surface row should train material output upward"
     );
     assert_eq!(
-        output_gradients[output_dims + material_output],
+        output_gradients[4 * output_dims + material_output],
         0.0,
-        "active row outside the soft surface band should not receive material pressure"
+        "active row outside the bounded surface frontier should not receive material pressure"
+    );
+    assert!(
+        output_gradients[output_dims + material_output] < 0.0,
+        "active row inside the bounded surface frontier should materialize before coverage takes over"
     );
     assert!(
         output_gradients[2 * output_dims + material_output] < 0.0,

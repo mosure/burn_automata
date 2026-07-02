@@ -276,7 +276,7 @@ pub(crate) fn add_surface_material_opacity_state_adjoint(
     positions: &[[f32; 4]],
     states: &[f32],
     material_opacity_gain: f32,
-    surface_threshold: f32,
+    seed_scale: f32,
     target_opacity_logit: f32,
     max_adjoint: f32,
     state_adjoint: &mut [f32],
@@ -287,8 +287,8 @@ pub(crate) fn add_surface_material_opacity_state_adjoint(
         || state_adjoint.len() < states.len()
         || material_opacity_gain <= 0.0
         || !material_opacity_gain.is_finite()
-        || surface_threshold <= 0.0
-        || !surface_threshold.is_finite()
+        || seed_scale <= 0.0
+        || !seed_scale.is_finite()
         || !target_opacity_logit.is_finite()
     {
         return;
@@ -301,7 +301,9 @@ pub(crate) fn add_surface_material_opacity_state_adjoint(
     } else {
         f32::INFINITY
     };
-    let threshold = surface_threshold.max(1.0e-6);
+    let strict_threshold = target_coverage_threshold(seed_scale).max(1.0e-6);
+    let soft_threshold = material_training_soft_coverage_threshold(seed_scale);
+    let frontier_threshold = material_training_frontier_coverage_threshold(seed_scale);
 
     for (row, position) in positions.iter().enumerate() {
         let state_base = row * config.state_dims;
@@ -310,12 +312,14 @@ pub(crate) fn add_surface_material_opacity_state_adjoint(
             continue;
         }
         let projection = target.project(position3(*position));
-        if !projection.distance.is_finite() || projection.distance > threshold {
-            continue;
-        }
         let opacity_index = state_base + opacity_channel;
         let current_opacity = states[opacity_index];
-        let surface_weight = (1.0 - projection.distance / threshold).clamp(0.0, 1.0);
+        let surface_weight = frontier_material_assignment_weight(
+            projection.distance,
+            strict_threshold,
+            soft_threshold,
+            frontier_threshold,
+        );
         if surface_weight <= 0.0 {
             continue;
         }

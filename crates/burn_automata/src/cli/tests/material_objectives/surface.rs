@@ -64,11 +64,24 @@ fn surface_material_opacity_adjoint_targets_visible_surface_particles() {
         sample.position[2],
         0.0,
     ];
+    let frontier_surface = [
+        sample.position[0] + sample.normal[0] * 0.5,
+        sample.position[1] + sample.normal[1] * 0.5,
+        sample.position[2] + sample.normal[2] * 0.5,
+        0.0,
+    ];
+    let outside_frontier = [
+        sample.position[0] + sample.normal[0] * 1.6,
+        sample.position[1] + sample.normal[1] * 1.6,
+        sample.position[2] + sample.normal[2] * 1.6,
+        0.0,
+    ];
     let positions = vec![
         near_surface,
-        [2.0_f32, 0.0, 0.0, 0.0],
+        outside_frontier,
         near_surface,
         near_surface,
+        frontier_surface,
     ];
     let mut states = vec![0.0; positions.len() * config.state_dims];
     let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
@@ -78,6 +91,7 @@ fn surface_material_opacity_adjoint_targets_visible_surface_particles() {
     states[2 * config.state_dims + material_channel] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
     states[3 * config.state_dims + material_channel] =
         GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET + 2.0;
+    states[4 * config.state_dims + material_channel] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
     let mut adjoint = vec![0.0; states.len()];
 
     add_surface_material_opacity_state_adjoint(
@@ -86,7 +100,7 @@ fn surface_material_opacity_adjoint_targets_visible_surface_particles() {
         &positions,
         &states,
         0.5,
-        0.2,
+        0.54,
         GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
         0.1,
         &mut adjoint,
@@ -113,6 +127,10 @@ fn surface_material_opacity_adjoint_targets_visible_surface_particles() {
     assert!(
         adjoint[3 * config.state_dims + material_channel] > 0.0,
         "oversaturated visible particles should receive damping pressure"
+    );
+    assert!(
+        adjoint[4 * config.state_dims + material_channel] < 0.0,
+        "active low-opacity particles inside the bounded surface frontier should be promoted"
     );
     assert!(
         adjoint.iter().all(|value| value.abs() <= 0.1 + 1.0e-6),

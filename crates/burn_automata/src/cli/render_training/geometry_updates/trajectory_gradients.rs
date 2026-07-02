@@ -247,7 +247,7 @@ pub(crate) fn trajectory_render_adjoints(
                 &snapshot_trace.positions,
                 &snapshot_trace.states,
                 cfg.opacity_gain,
-                target_coverage_threshold(cfg.seed_scale),
+                cfg.seed_scale,
                 GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET,
                 cfg.material_max_opacity_update,
                 &mut material_state,
