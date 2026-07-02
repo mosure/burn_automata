@@ -210,6 +210,41 @@ fn growth_3d_strict_checks_reject_transparent_normal_support() {
 }
 
 #[test]
+fn growth_3d_strict_score_counts_shape_render_failures_as_hard_gates() {
+    let mut checks = passing_growth_3d_strict_checks();
+    checks.passed = false;
+    checks.target_coverage_fraction = false;
+    checks.material_visible_target_coverage_fraction = false;
+    checks.surface_normal_coverage = false;
+    checks.material_visible_surface_normal_coverage = false;
+    checks.render_loss_passed = false;
+    checks.failure_reasons = vec![
+        "target_coverage_fraction",
+        "material_visible_target_coverage_fraction",
+        "surface_normal_coverage",
+        "material_visible_surface_normal_coverage",
+        "render_loss_passed",
+    ];
+
+    let score = strict_score_for_gate_checks(&checks);
+
+    assert!(
+        score.hard_failure_penalty >= 50.0,
+        "strict score should treat every failed shape/render promotion gate as hard; score={}",
+        score.hard_failure_penalty
+    );
+    assert_eq!(score.target_coverage_fraction_penalty, 0.0);
+    assert_eq!(score.material_visible_target_coverage_penalty, 0.0);
+    assert_eq!(score.surface_normal_bin_penalty, 0.0);
+    assert_eq!(score.material_visible_surface_normal_bin_penalty, 0.0);
+    assert_eq!(score.render_density_penalty, 0.0);
+    assert!(
+        score.score >= score.hard_failure_penalty,
+        "hard gate failures must dominate even when continuous distances sit exactly on threshold"
+    );
+}
+
+#[test]
 fn growth_3d_strict_score_tracks_distance_to_gate() {
     let checks = passing_growth_3d_strict_checks();
     let perfect_render = synthetic_render_loss(0.0, 10.0, 12.0, 14.0);
@@ -331,4 +366,40 @@ fn growth_3d_strict_score_tracks_distance_to_gate() {
     );
     assert!(surface_max_only.surface_max_penalty > 0.0);
     assert_eq!(surface_max_only.score, surface_max_only.surface_max_penalty);
+}
+
+fn strict_score_for_gate_checks(checks: &Growth3dStrictChecksReport) -> Growth3dStrictScoreReport {
+    growth_3d_strict_score_report(
+        checks,
+        Growth3dSurfaceStats {
+            mean_distance: 0.2,
+            max_distance: 0.2,
+        },
+        Growth3dSurfaceStats {
+            mean_distance: 0.16,
+            max_distance: 0.3,
+        },
+        passing_growth_3d_surface_tail_report(),
+        TargetCoverageStats {
+            mean_distance: 1.0,
+            max_distance: 1.0,
+            covered_fraction: 0.1,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.8,
+            max_distance: 0.7,
+            covered_fraction: 0.60,
+        },
+        TargetCoverageStats {
+            mean_distance: 0.8,
+            max_distance: 0.7,
+            covered_fraction: 0.60,
+        },
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
+        GaussianVolumeStats::default(),
+    )
 }

@@ -242,11 +242,21 @@ pub(crate) fn growth_3d_strict_score_report(
         checks.material_visible_particles_live,
         checks.color_state_emerged,
         checks.permutation_consistent,
+        checks.surface_mean_improved,
+        checks.surface_max_bounded,
+        checks.surface_tail_bounded,
+        checks.target_coverage_mean_improved,
+        checks.target_coverage_max_bounded,
+        checks.target_coverage_fraction,
+        checks.material_visible_target_coverage_fraction,
         checks.surface_coverage_profile,
         checks.material_visible_surface_coverage_profile,
+        checks.surface_normal_coverage,
+        checks.material_visible_surface_normal_coverage,
         checks.torus_angular_coverage,
         checks.gaussian_scale_budget,
         checks.material_visible_surface_tail_bounded,
+        checks.render_loss_passed,
     ]
     .into_iter()
     .filter(|passed| !passed)
