@@ -346,6 +346,20 @@ fn render_training_validation_extra_seeds_dedupe_selection_set() {
 }
 
 #[test]
+fn render_training_default_extra_selection_seeds_include_catalog_heldouts() {
+    assert_eq!(
+        render_training_default_extra_selection_seeds(CATALOG_3D_APP_EVAL_SEED, &[]),
+        vec![42, 99],
+        "default train-render3d should optimize the app held-out seeds that catalog promotion validates"
+    );
+    assert_eq!(
+        render_training_default_extra_selection_seeds(42, &[99, 7, 42, CATALOG_3D_APP_EVAL_SEED]),
+        vec![99, 7, CATALOG_3D_APP_EVAL_SEED],
+        "selection seed should stay singular while user extras are deduped after held-outs"
+    );
+}
+
+#[test]
 fn catalog_promotion_validation_extra_seeds_include_app_heldouts() {
     assert_eq!(
         catalog_promotion_validation_extra_seeds(CATALOG_3D_APP_EVAL_SEED, &[]),

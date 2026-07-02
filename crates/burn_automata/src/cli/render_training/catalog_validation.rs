@@ -76,6 +76,27 @@ pub(crate) fn render_training_validation_extra_seeds(
     seeds
 }
 
+pub(crate) fn render_training_default_extra_selection_seeds(
+    selection_seed: u64,
+    user_extra_selection_seeds: &[u64],
+) -> Vec<u64> {
+    let mut seeds =
+        Vec::with_capacity(CATALOG_3D_HELD_OUT_SEEDS.len() + user_extra_selection_seeds.len());
+    for heldout_seed in CATALOG_3D_HELD_OUT_SEEDS {
+        push_extra_training_selection_seed(&mut seeds, selection_seed, heldout_seed);
+    }
+    for &extra_seed in user_extra_selection_seeds {
+        push_extra_training_selection_seed(&mut seeds, selection_seed, extra_seed);
+    }
+    seeds
+}
+
+fn push_extra_training_selection_seed(seeds: &mut Vec<u64>, selection_seed: u64, seed: u64) {
+    if seed != selection_seed && !seeds.contains(&seed) {
+        seeds.push(seed);
+    }
+}
+
 pub(crate) fn catalog_promotion_validation_extra_seeds(
     selection_seed: u64,
     extra_selection_seeds: &[u64],

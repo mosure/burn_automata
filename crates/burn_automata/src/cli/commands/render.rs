@@ -391,6 +391,8 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         color_weight,
         depth_weight,
     };
+    let training_selection_seeds =
+        render_training_default_extra_selection_seeds(selection_seed, &extra_selection_seeds);
     let sgd = SgdConfig {
         learning_rate,
         grad_clip_norm,
@@ -447,7 +449,7 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
             direct_selection_seed_training,
             seed: 0x005a_173d,
             selection_seed: Some(selection_seed),
-            selection_seeds: extra_selection_seeds.clone(),
+            selection_seeds: training_selection_seeds.clone(),
             seed_scale,
             seed_mode,
             render,
@@ -470,7 +472,7 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         )),
     );
     let validation_extra_seeds =
-        render_training_validation_extra_seeds(selection_seed, &extra_selection_seeds);
+        render_training_validation_extra_seeds(selection_seed, &training_selection_seeds);
     let mut catalog_promotion_validations = Vec::new();
     if catalog_bound_output {
         let candidate_path = catalog_bound_candidate_path(target, std::process::id());
@@ -481,7 +483,7 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         let promotion_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             for validation_cfg in catalog_promotion_validation_configs(
                 selection_seed,
-                &extra_selection_seeds,
+                &training_selection_seeds,
                 seed_scale,
                 seed_mode,
                 render,
