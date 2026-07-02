@@ -274,6 +274,9 @@ pub(crate) fn render_selection_progress_candidate_preferred(
     no_op: &RenderSelectionMetrics,
 ) -> bool {
     const STRICT_SURFACE_MATERIAL_PROGRESS_TIEBREAK: f32 = 0.005;
+    const STRICT_SURFACE_MATERIAL_SCORE_SLACK: f32 = 0.25;
+    const PROGRESS_SCORE_REGRESSION_SLACK: f32 = 2.0;
+    const MATERIAL_VISIBLE_COVERAGE_TIEBREAK: f32 = 0.01;
 
     let candidate_strict_progress = strict_surface_materialization_progress(
         candidate,
@@ -288,6 +291,9 @@ pub(crate) fn render_selection_progress_candidate_preferred(
         PRECURSOR_STRICT_SURFACE_MATERIAL_MARGIN_PROGRESS,
     );
     if candidate_strict_progress >= best_strict_progress + STRICT_SURFACE_MATERIAL_PROGRESS_TIEBREAK
+        && candidate.score.is_finite()
+        && best_progress.score.is_finite()
+        && candidate.score <= best_progress.score + STRICT_SURFACE_MATERIAL_SCORE_SLACK
         && render_selection_inactive_material_not_regressed(candidate, no_op)
         && render_selection_dormant_drift_not_regressed(candidate, no_op)
         && render_selection_render_within_strict_surface_materialization_slack(
@@ -301,6 +307,23 @@ pub(crate) fn render_selection_progress_candidate_preferred(
         return true;
     }
     if best_strict_progress >= candidate_strict_progress + STRICT_SURFACE_MATERIAL_PROGRESS_TIEBREAK
+    {
+        return false;
+    }
+
+    let material_visible_coverage_progress = candidate.material_visible_target_coverage_fraction
+        >= best_progress.material_visible_target_coverage_fraction
+            + MATERIAL_VISIBLE_COVERAGE_TIEBREAK
+        || candidate.material_visible_surface_covered_bin_fraction
+            >= best_progress.material_visible_surface_covered_bin_fraction
+                + MATERIAL_VISIBLE_COVERAGE_TIEBREAK
+        || candidate.material_visible_surface_normal_covered_bin_fraction
+            >= best_progress.material_visible_surface_normal_covered_bin_fraction
+                + MATERIAL_VISIBLE_COVERAGE_TIEBREAK;
+    if candidate.score.is_finite()
+        && best_progress.score.is_finite()
+        && candidate.score > best_progress.score + PROGRESS_SCORE_REGRESSION_SLACK
+        && !material_visible_coverage_progress
     {
         return false;
     }

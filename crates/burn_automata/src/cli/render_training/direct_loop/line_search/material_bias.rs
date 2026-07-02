@@ -1,9 +1,12 @@
 use super::*;
 
-const DIRECT_LINE_SEARCH_KIND_MATERIAL_BIAS: &str = "material-opacity-bias";
+pub(super) const DIRECT_LINE_SEARCH_KIND_MATERIAL_BIAS: &str = "material-opacity-bias";
+pub(super) const DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS: &str =
+    "sgd-scale-material-opacity-bias";
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate_material_opacity_bias_line_search_candidate(
+    candidate_kind: &'static str,
     base_model: &NpaModel,
     grid: &crate::kernels::HashGridConfig,
     target: &TriangleMeshTarget,
@@ -11,6 +14,7 @@ pub(super) fn evaluate_material_opacity_bias_line_search_candidate(
     gradient: &RenderProxyGradientRows,
     render_cfg: RenderLossConfig,
     selection_baseline: &[RenderSelectionBaselineCase],
+    source_scale: f32,
     material_opacity_bias: f32,
 ) -> Result<Option<DirectLineSearchCandidate>, Box<dyn std::error::Error>> {
     if !material_opacity_bias.is_finite() || material_opacity_bias <= 0.0 {
@@ -30,8 +34,8 @@ pub(super) fn evaluate_material_opacity_bias_line_search_candidate(
     )?;
     let report = render_direct_rollout_noop_report(selection.render_loss, gradient);
     let candidate_report = direct_line_search_candidate_report(
-        DIRECT_LINE_SEARCH_KIND_MATERIAL_BIAS,
-        0.0,
+        candidate_kind,
+        source_scale,
         material_opacity_bias,
         &selection,
         &report,

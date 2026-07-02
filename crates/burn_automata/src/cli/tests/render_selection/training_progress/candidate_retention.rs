@@ -69,6 +69,43 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
 }
 
 #[test]
+fn render_selection_progress_rejects_strict_material_tiebreak_with_score_regression() {
+    let mut no_op = render_selection_metrics_with_liveness(99.49, 0.6847, 1.94, 0.0);
+    no_op.strict_surface_active_count = 24;
+    no_op.strict_surface_materialized_fraction = 0.2;
+    no_op.strict_surface_material_mean_opacity = -3.20;
+    no_op.strict_surface_material_visible_margin = 2.20;
+    no_op.material_visible_target_coverage_fraction = 0.0;
+
+    let mut better_score = no_op.clone();
+    better_score.score = 191.60;
+    set_render_selection_metrics_render(
+        &mut better_score,
+        no_op.render_loss - 0.02,
+        no_op.density_psnr_db + 0.15,
+    );
+    better_score.strict_surface_materialized_fraction = 0.2;
+    better_score.strict_surface_material_mean_opacity = -3.19;
+    better_score.strict_surface_material_visible_margin = 2.19;
+
+    let mut material_only = better_score.clone();
+    material_only.score = 202.0;
+    set_render_selection_metrics_render(
+        &mut material_only,
+        better_score.render_loss - 0.01,
+        better_score.density_psnr_db + 0.10,
+    );
+    material_only.strict_surface_materialized_fraction = 0.25;
+    material_only.strict_surface_material_mean_opacity = -3.05;
+    material_only.strict_surface_material_visible_margin = 2.05;
+
+    assert!(
+        !render_selection_progress_candidate_preferred(&material_only, &better_score, &no_op),
+        "strict-band materialization is a tie-breaker and must not override a large strict-score regression"
+    );
+}
+
+#[test]
 fn render_selection_training_progress_rejects_precursor_coverage_collapse() {
     let mut previous = render_selection_metrics_with_liveness(91.34, 0.75218, 1.39, 0.79);
     previous.material_active_mean_opacity = 1.64;

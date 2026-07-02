@@ -2,10 +2,17 @@ use super::*;
 
 mod material_bias;
 
-use material_bias::evaluate_material_opacity_bias_line_search_candidate;
 pub(crate) use material_bias::material_opacity_bias_line_search_candidates;
+use material_bias::{
+    DIRECT_LINE_SEARCH_KIND_MATERIAL_BIAS, DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS,
+    evaluate_material_opacity_bias_line_search_candidate,
+};
 
 pub(crate) const DIRECT_LINE_SEARCH_KIND_SGD: &str = "sgd-scale";
+
+fn relative_f32_eq(lhs: f32, rhs: f32) -> bool {
+    ((lhs - rhs).abs() / lhs.abs().max(rhs.abs()).max(1.0e-6)) < 1.0e-5
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DirectLineSearchCandidateKey {
@@ -148,6 +155,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
     for material_opacity_bias in material_opacity_bias_line_search_candidates(&no_op_selection, cfg)
     {
         let Some(candidate) = evaluate_material_opacity_bias_line_search_candidate(
+            DIRECT_LINE_SEARCH_KIND_MATERIAL_BIAS,
             &base_model,
             grid,
             target,
@@ -155,6 +163,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             gradient,
             render_cfg,
             selection_baseline,
+            0.0,
             material_opacity_bias,
         )?
         else {
@@ -173,6 +182,61 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             &mut candidate_reports,
             &no_op_selection,
         );
+    }
+
+    let mut material_refinement_sources = Vec::new();
+    if let Some(key) = best_key
+        && key.kind == DIRECT_LINE_SEARCH_KIND_SGD
+        && key.scale > 0.0
+    {
+        material_refinement_sources.push((best_model.clone(), best_selection.clone(), key.scale));
+    }
+    if let (Some(progress_model), Some(key)) = (&best_progress_model, best_progress_key)
+        && key.kind == DIRECT_LINE_SEARCH_KIND_SGD
+        && key.scale > 0.0
+        && !material_refinement_sources
+            .iter()
+            .any(|(_, _, scale)| relative_f32_eq(*scale, key.scale))
+    {
+        material_refinement_sources.push((
+            progress_model.clone(),
+            best_progress_selection.clone(),
+            key.scale,
+        ));
+    }
+    for (source_model, source_selection, source_scale) in material_refinement_sources {
+        for material_opacity_bias in
+            material_opacity_bias_line_search_candidates(&source_selection, cfg)
+        {
+            let Some(candidate) = evaluate_material_opacity_bias_line_search_candidate(
+                DIRECT_LINE_SEARCH_KIND_SGD_MATERIAL_BIAS,
+                &source_model,
+                grid,
+                target,
+                cfg,
+                gradient,
+                render_cfg,
+                selection_baseline,
+                source_scale,
+                material_opacity_bias,
+            )?
+            else {
+                continue;
+            };
+            update_direct_line_search_state(
+                candidate,
+                &mut best_model,
+                &mut best_report,
+                &mut best_selection,
+                &mut best_key,
+                &mut best_progress_model,
+                &mut best_progress_report,
+                &mut best_progress_selection,
+                &mut best_progress_key,
+                &mut candidate_reports,
+                &no_op_selection,
+            );
+        }
     }
 
     if best_key.is_some()
