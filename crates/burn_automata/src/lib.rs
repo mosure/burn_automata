@@ -5,11 +5,14 @@
 //! reference kernels behind the same interfaces.
 
 pub mod burn_bridge;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod config;
 pub mod error;
 #[cfg(feature = "gpu_wgpu")]
 pub mod gpu;
 pub mod import;
+pub mod mesh_objective;
 pub mod model;
 pub mod pipeline;
 pub mod render_loss;
@@ -18,12 +21,15 @@ pub mod target_geometry;
 pub mod training;
 
 pub use burn_automata_kernels as kernels;
+pub use burn_automata_kernels::GaussianDecodeMode;
 pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
 pub use error::{AutomataError, AutomataResult};
 pub use import::{
-    BpkModelManifest, ExportedCheckpoint, ImportReport, import_exported_checkpoint, import_model,
+    BpkAdapterManifest, BpkModelManifest, ExportedCheckpoint, ImportReport,
+    import_exported_checkpoint, import_model, load_adapter_manifest, save_adapter_manifest,
 };
-pub use model::{NpaModel, NpaWeights, StepOutput};
+pub use mesh_objective::{GaussianVolumeStats, MeshRolloutObjectiveConfig};
+pub use model::{NpaLowRankAdapter, NpaModel, NpaWeights, StepOutput};
 pub use pipeline::{
     AutomataPipeline, FeatureBatchConfig, RolloutBatchConfig, RolloutSupervisionConfig,
     SupervisedTarget, feature_supervised_batch, rollout_supervised_batch,
@@ -43,9 +49,11 @@ pub use target_geometry::{
     OvoxelTarget, TargetProjection, TargetSurfaceSample, TriangleMeshTarget,
 };
 pub use training::{
-    SgdConfig, SupervisedBatch, SupervisedGradients, SupervisedStepReport, TrainingHistoryEntry,
-    TrainingRunConfig, TrainingRunReport, apply_sgd_gradients, mlp_backward_from_output_gradients,
-    run_supervised_training, supervised_backward, supervised_loss, supervised_train_step,
+    LowRankAdapterGradients, SgdConfig, SupervisedBatch, SupervisedGradients, SupervisedStepReport,
+    TrainingHistoryEntry, TrainingRunConfig, TrainingRunReport, apply_sgd_adapter_gradients,
+    apply_sgd_gradients, mlp_backward_from_output_gradients, project_low_rank_adapter_gradients,
+    run_supervised_adapter_training, run_supervised_training, supervised_adapter_loss,
+    supervised_adapter_train_step, supervised_backward, supervised_loss, supervised_train_step,
 };
 
 pub fn version() -> &'static str {

@@ -12,7 +12,7 @@ pub mod splat;
 pub mod tile;
 
 pub use config::{Boundary, HashGridConfig, HashGridMode, KernelError, KernelResult};
-pub use gaussian::{Gaussian3d, GaussianDecodeConfig, decode_gaussians_3d};
+pub use gaussian::{Gaussian3d, GaussianDecodeConfig, GaussianDecodeMode, decode_gaussians_3d};
 pub use hashgrid::{HashGridSnapshot, build_hashgrid};
 pub use reference::{
     PerceptionAdjointOutput, PerceptionOptions, PerceptionOutput, euler_step, perceive,
@@ -375,7 +375,9 @@ mod tests {
 
         let state_dims = 20;
         let mut states = vec![0.0; state_dims];
-        states[state_dims - 16] = 1.0;
+        states[state_dims - 3] = 0.4;
+        states[state_dims - 2] = -0.2;
+        states[state_dims - 1] = 0.1;
         let gaussians = decode_gaussians_3d(
             &[[0.0, 0.0, 0.0, 0.0]],
             &states,
@@ -383,8 +385,57 @@ mod tests {
             GaussianDecodeConfig::default(),
         );
         assert_eq!(gaussians.len(), 1);
-        assert_eq!(gaussians[0].spherical_harmonic.len(), 4);
+        assert_eq!(gaussians[0].spherical_harmonic.len(), 1);
+        assert_eq!(gaussians[0].spherical_harmonic[0], [0.9, 0.3, 0.6]);
         assert!(gaussians[0].scale_opacity[3] > 0.0);
+    }
+
+    #[test]
+    fn gaussian_decode_modes_cover_fixed_learned_and_oriented_scale() {
+        let positions = [[0.1, -0.2, 0.3, 0.0]];
+
+        let mut learned = vec![0.0; 8];
+        learned[3] = 2.0;
+        learned[4] = 1.5;
+        learned[5] = 0.25;
+        learned[6] = -0.25;
+        learned[7] = 0.0;
+        let learned_gaussian = decode_gaussians_3d(
+            &positions,
+            &learned,
+            8,
+            GaussianDecodeConfig {
+                mode: GaussianDecodeMode::GaussianSh0LearnedScale,
+                sigma: 0.01,
+                opacity_scale: 1.0,
+                ..GaussianDecodeConfig::default()
+            },
+        );
+        assert_eq!(learned_gaussian[0].spherical_harmonic.len(), 1);
+        assert_eq!(learned_gaussian[0].spherical_harmonic[0], [0.75, 0.25, 0.5]);
+        assert!(learned_gaussian[0].scale_opacity[0] > 0.01);
+        assert!(learned_gaussian[0].scale_opacity[3] > 0.5);
+        assert_eq!(learned_gaussian[0].rotation, [1.0, 0.0, 0.0, 0.0]);
+
+        let mut oriented = vec![0.0; 20];
+        oriented[4] = 1.0;
+        oriented[12] = 1.0;
+        oriented[16] = 0.5;
+        oriented[17] = -0.5;
+        oriented[18] = 0.0;
+        let oriented_gaussian = decode_gaussians_3d(
+            &positions,
+            &oriented,
+            20,
+            GaussianDecodeConfig {
+                mode: GaussianDecodeMode::GaussianSh0Oriented,
+                sh_degree: 1,
+                ..GaussianDecodeConfig::default()
+            },
+        );
+        assert_eq!(oriented_gaussian[0].spherical_harmonic.len(), 4);
+        assert!((oriented_gaussian[0].rotation[0] - 1.0).abs() <= 1.0e-6);
+        assert!(oriented_gaussian[0].scale_opacity[0].is_finite());
     }
 
     #[test]

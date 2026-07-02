@@ -72,6 +72,152 @@ impl NpaWeights {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NpaLowRankAdapter {
+    pub rank: usize,
+    pub alpha: f32,
+    pub w1_down: Vec<f32>,
+    pub w1_up: Vec<f32>,
+    pub w2_down: Vec<f32>,
+    pub w2_up: Vec<f32>,
+    pub b1_delta: Vec<f32>,
+    pub b2_delta: Vec<f32>,
+}
+
+impl NpaLowRankAdapter {
+    pub fn zeros(config: &NpaConfig, rank: usize, alpha: f32) -> Self {
+        let rank = rank.max(1);
+        Self {
+            rank,
+            alpha,
+            w1_down: vec![0.0; rank * config.perception_dims()],
+            w1_up: vec![0.0; config.hidden_dims * rank],
+            w2_down: vec![0.0; rank * config.hidden_dims],
+            w2_up: vec![0.0; config.update_dims() * rank],
+            b1_delta: vec![0.0; config.hidden_dims],
+            b2_delta: vec![0.0; config.update_dims()],
+        }
+    }
+
+    pub fn seeded(config: &NpaConfig, rank: usize, alpha: f32, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut adapter = Self::zeros(config, rank, alpha);
+        for value in adapter
+            .w1_down
+            .iter_mut()
+            .chain(adapter.w1_up.iter_mut())
+            .chain(adapter.w2_down.iter_mut())
+            .chain(adapter.w2_up.iter_mut())
+        {
+            *value = rng.random_range(-0.01..0.01);
+        }
+        adapter
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.w1_down.len()
+            + self.w1_up.len()
+            + self.w2_down.len()
+            + self.w2_up.len()
+            + self.b1_delta.len()
+            + self.b2_delta.len()
+    }
+
+    pub fn validate(&self, config: &NpaConfig) -> AutomataResult<()> {
+        if self.rank == 0 {
+            return Err(AutomataError::InvalidModel(
+                "low-rank adapter rank must be > 0".to_string(),
+            ));
+        }
+        let input_dims = config.perception_dims();
+        let update_dims = config.update_dims();
+        let expected = [
+            ("w1_down", self.rank * input_dims, self.w1_down.len()),
+            ("w1_up", config.hidden_dims * self.rank, self.w1_up.len()),
+            (
+                "w2_down",
+                self.rank * config.hidden_dims,
+                self.w2_down.len(),
+            ),
+            ("w2_up", update_dims * self.rank, self.w2_up.len()),
+            ("b1_delta", config.hidden_dims, self.b1_delta.len()),
+            ("b2_delta", update_dims, self.b2_delta.len()),
+        ];
+        for (name, expected_len, actual_len) in expected {
+            if actual_len != expected_len {
+                return Err(AutomataError::InvalidModel(format!(
+                    "{name} len {actual_len} != {expected_len}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn apply_to_weights(
+        &self,
+        config: &NpaConfig,
+        base: &NpaWeights,
+    ) -> AutomataResult<NpaWeights> {
+        base.validate(config)?;
+        self.validate(config)?;
+
+        let mut adapted = base.clone();
+        let scale = self.alpha / self.rank as f32;
+        add_low_rank_delta(
+            &mut adapted.w1,
+            config.hidden_dims,
+            config.perception_dims(),
+            self.rank,
+            &self.w1_up,
+            &self.w1_down,
+            scale,
+        );
+        add_low_rank_delta(
+            &mut adapted.w2,
+            config.update_dims(),
+            config.hidden_dims,
+            self.rank,
+            &self.w2_up,
+            &self.w2_down,
+            scale,
+        );
+        for (value, delta) in adapted.b1.iter_mut().zip(&self.b1_delta) {
+            *value += delta;
+        }
+        for (value, delta) in adapted.b2.iter_mut().zip(&self.b2_delta) {
+            *value += delta;
+        }
+        Ok(adapted)
+    }
+
+    pub fn apply_to_model(&self, base: &NpaModel) -> AutomataResult<NpaModel> {
+        Ok(NpaModel {
+            config: base.config.clone(),
+            weights: self.apply_to_weights(&base.config, &base.weights)?,
+        })
+    }
+}
+
+fn add_low_rank_delta(
+    matrix: &mut [f32],
+    rows: usize,
+    cols: usize,
+    rank: usize,
+    up: &[f32],
+    down: &[f32],
+    scale: f32,
+) {
+    for row in 0..rows {
+        for col in 0..cols {
+            let mut delta = 0.0_f32;
+            for r in 0..rank {
+                delta += up[row * rank + r] * down[r * cols + col];
+            }
+            matrix[row * cols + col] += scale * delta;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NpaModel {
     pub config: NpaConfig,
     pub weights: NpaWeights,
@@ -291,4 +437,61 @@ fn repeated_rows(values: &[f32], rows: usize) -> Vec<f32> {
         out.extend_from_slice(values);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AutomataPreset;
+
+    #[test]
+    fn low_rank_adapter_parameter_count_is_smaller_than_full_weights() {
+        let config = NpaConfig::for_preset(AutomataPreset::Growing3dGs).0;
+        let adapter = NpaLowRankAdapter::zeros(&config, 2, 2.0);
+        let full = NpaWeights::zeros(&config);
+        let full_count = full.w1.len() + full.b1.len() + full.w2.len() + full.b2.len();
+
+        adapter.validate(&config).unwrap();
+        assert!(adapter.parameter_count() < full_count);
+    }
+
+    #[test]
+    fn low_rank_adapter_materializes_expected_weight_delta() {
+        let mut config = NpaConfig::for_preset(AutomataPreset::Growing3dGs).0;
+        config.hidden_dims = 2;
+        config.state_dims = 4;
+        config.position_features = false;
+        let input_dims = config.perception_dims();
+        let update_dims = config.update_dims();
+        let base = NpaWeights::zeros(&config);
+        let mut adapter = NpaLowRankAdapter::zeros(&config, 1, 2.0);
+
+        adapter.w1_up = vec![3.0, -5.0];
+        adapter.w1_down = vec![0.0; input_dims];
+        adapter.w1_down[0] = 7.0;
+        adapter.w2_up = vec![0.0; update_dims];
+        adapter.w2_up[0] = 11.0;
+        adapter.w2_down = vec![0.0; config.hidden_dims];
+        adapter.w2_down[1] = 13.0;
+        adapter.b1_delta = vec![0.25, -0.5];
+        adapter.b2_delta = vec![0.75; update_dims];
+
+        let adapted = adapter.apply_to_weights(&config, &base).unwrap();
+
+        assert_eq!(adapted.w1[0], 42.0);
+        assert_eq!(adapted.w1[input_dims], -70.0);
+        assert_eq!(adapted.w2[1], 286.0);
+        assert_eq!(adapted.b1, vec![0.25, -0.5]);
+        assert_eq!(adapted.b2, vec![0.75; update_dims]);
+    }
+
+    #[test]
+    fn low_rank_adapter_rejects_mismatched_dimensions() {
+        let config = NpaConfig::for_preset(AutomataPreset::Growing3dGs).0;
+        let mut adapter = NpaLowRankAdapter::zeros(&config, 2, 1.0);
+        adapter.w1_down.pop();
+
+        let err = adapter.validate(&config).unwrap_err().to_string();
+        assert!(err.contains("w1_down len"));
+    }
 }

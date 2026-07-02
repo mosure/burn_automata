@@ -1,0 +1,471 @@
+use super::*;
+
+#[test]
+fn dynamic_growth_3d_strict_checks_apply_all_runtime_blockers() {
+    let mut checks = passing_growth_3d_strict_checks();
+    let dormant_drift = Growth3dDormantDriftReport {
+        drifting_rows: 3,
+        drifting_fraction: 0.25,
+        max_dormant_displacement: 0.4,
+        passed: false,
+        ..passing_growth_3d_dormant_drift_report()
+    };
+    let material_liveness = Growth3dMaterialLivenessReport {
+        material_visible_count: 8,
+        inactive_material_visible_count: 2,
+        inactive_material_visible_fraction: 0.25,
+        inactive_material_logit_threshold: 0.0,
+        max_inactive_material_opacity: 1.5,
+        passed: false,
+    };
+    let material_visible_tail = Growth3dSurfaceTailReport {
+        p99_distance: GROWTH_3D_SURFACE_MAX_DISTANCE + 0.2,
+        over_threshold_fraction: 0.10,
+        opacity_weighted_over_threshold_fraction: 0.08,
+        ..passing_growth_3d_surface_tail_report()
+    };
+    let sparse_active = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.25,
+        mean_bin_covered_fraction: 0.20,
+        empty_bins: 48,
+        ..passing_surface_coverage_profile_report()
+    };
+    let sparse_material = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.30,
+        mean_bin_covered_fraction: 0.25,
+        empty_bins: 45,
+        ..passing_surface_coverage_profile_report()
+    };
+
+    apply_dynamic_growth_3d_strict_checks(
+        &mut checks,
+        dormant_drift,
+        material_liveness,
+        material_visible_tail,
+        &sparse_active,
+        &sparse_material,
+    );
+
+    assert!(!checks.passed);
+    assert!(!checks.dormant_drift_bounded);
+    assert!(!checks.material_visible_particles_live);
+    assert!(!checks.material_visible_surface_tail_bounded);
+    assert!(!checks.surface_coverage_profile);
+    assert!(!checks.material_visible_surface_coverage_profile);
+    for reason in [
+        "dormant_drift_bounded",
+        "material_visible_particles_live",
+        "material_visible_surface_tail_bounded",
+        "surface_coverage_profile",
+        "material_visible_surface_coverage_profile",
+    ] {
+        assert!(
+            checks.failure_reasons.contains(&reason),
+            "dynamic strict gate should report {reason}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_growth_3d_strict_score_applies_all_runtime_penalties() {
+    let checks = passing_growth_3d_strict_checks();
+    let initial_surface = Growth3dSurfaceStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+    };
+    let final_surface = Growth3dSurfaceStats {
+        mean_distance: 0.5,
+        max_distance: 0.2,
+    };
+    let initial_coverage = TargetCoverageStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+        covered_fraction: 0.0,
+    };
+    let final_coverage = TargetCoverageStats {
+        mean_distance: 0.5,
+        max_distance: 0.3,
+        covered_fraction: 0.75,
+    };
+    let mut score = growth_3d_strict_score_report(
+        &checks,
+        initial_surface,
+        final_surface,
+        passing_growth_3d_surface_tail_report(),
+        initial_coverage,
+        final_coverage,
+        final_coverage,
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
+        GaussianVolumeStats::default(),
+        None,
+    );
+    let initial_score = score.score;
+    let temporal = Growth3dTemporalReport {
+        samples: Vec::new(),
+        first_growth_step: None,
+        half_activation_step: None,
+        full_activation_step: None,
+        activation_span_steps: 0,
+        progressive_activation: false,
+        surface_mean_ratio: 1.0,
+        target_coverage_mean_ratio: 1.0,
+        target_coverage_fraction_delta: 0.0,
+        geometry_progressive: false,
+    };
+    let stalled_motion = growth_3d_motion_report(&[0.0, 0.0, 0.0, 0.0]);
+    let material_liveness = Growth3dMaterialLivenessReport {
+        material_visible_count: 8,
+        inactive_material_visible_count: 2,
+        inactive_material_visible_fraction: 0.25,
+        inactive_material_logit_threshold: 0.0,
+        max_inactive_material_opacity: 1.5,
+        passed: false,
+    };
+    let material_visible_tail = Growth3dSurfaceTailReport {
+        p99_distance: GROWTH_3D_SURFACE_MAX_DISTANCE + 0.2,
+        over_threshold_fraction: 0.10,
+        opacity_weighted_over_threshold_fraction: 0.08,
+        ..passing_growth_3d_surface_tail_report()
+    };
+    let sparse_active = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.25,
+        mean_bin_covered_fraction: 0.20,
+        empty_bins: 48,
+        ..passing_surface_coverage_profile_report()
+    };
+    let sparse_material = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.30,
+        mean_bin_covered_fraction: 0.25,
+        empty_bins: 45,
+        ..passing_surface_coverage_profile_report()
+    };
+
+    apply_dynamic_growth_3d_strict_score(
+        &mut score,
+        &temporal,
+        8,
+        &stalled_motion,
+        0.0,
+        0.72,
+        material_liveness,
+        material_visible_tail,
+        &sparse_active,
+        &sparse_material,
+    );
+
+    assert!(score.score > initial_score);
+    assert!(score.temporal_activation_schedule_penalty > 0.0);
+    assert!(score.motion_peak_penalty > 0.0);
+    assert!(score.motion_active_step_penalty > 0.0);
+    assert!(score.mean_final_displacement_penalty > 0.0);
+    assert!(score.material_visible_inactive_fraction_penalty > 0.0);
+    assert!(score.material_visible_max_inactive_opacity_penalty > 0.0);
+    assert!(score.material_visible_surface_tail_p99_penalty > 0.0);
+    assert!(score.material_visible_surface_tail_fraction_penalty > 0.0);
+    assert!(score.surface_bin_penalty > 0.0);
+    assert!(score.surface_coverage_mean_penalty > 0.0);
+    assert!(score.material_visible_surface_bin_penalty > 0.0);
+    assert!(score.material_visible_surface_mean_penalty > 0.0);
+}
+
+#[test]
+fn growth_3d_strict_checks_reject_sparse_surface_profile_coverage() {
+    let mut checks = passing_growth_3d_strict_checks();
+    let sparse_active = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.25,
+        mean_bin_covered_fraction: 0.20,
+        empty_bins: 48,
+        ..passing_surface_coverage_profile_report()
+    };
+    let sparse_material = SurfaceCoverageProfileReport {
+        covered_bin_fraction: 0.30,
+        mean_bin_covered_fraction: 0.25,
+        empty_bins: 45,
+        ..passing_surface_coverage_profile_report()
+    };
+
+    apply_surface_profile_strict_check(&mut checks, &sparse_active, &sparse_material);
+
+    assert!(!checks.surface_coverage_profile);
+    assert!(!checks.material_visible_surface_coverage_profile);
+    assert!(checks.failure_reasons.contains(&"surface_coverage_profile"));
+    assert!(
+        checks
+            .failure_reasons
+            .contains(&"material_visible_surface_coverage_profile")
+    );
+
+    let initial_surface = Growth3dSurfaceStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+    };
+    let final_surface = Growth3dSurfaceStats {
+        mean_distance: 0.5,
+        max_distance: 0.2,
+    };
+    let initial_coverage = TargetCoverageStats {
+        mean_distance: 1.0,
+        max_distance: 1.0,
+        covered_fraction: 0.0,
+    };
+    let final_coverage = TargetCoverageStats {
+        mean_distance: 0.5,
+        max_distance: 0.3,
+        covered_fraction: 0.75,
+    };
+    let mut score = growth_3d_strict_score_report(
+        &checks,
+        initial_surface,
+        final_surface,
+        passing_growth_3d_surface_tail_report(),
+        initial_coverage,
+        final_coverage,
+        final_coverage,
+        &passing_surface_normal_coverage_report(),
+        &passing_surface_normal_coverage_report(),
+        passing_growth_3d_extent_report(),
+        0.72,
+        &synthetic_render_loss(0.0, 10.0, 12.0, 14.0),
+        GaussianVolumeStats::default(),
+        None,
+    );
+    apply_surface_profile_strict_score(&mut score, &sparse_active, &sparse_material);
+
+    assert!(score.hard_failure_penalty >= 20.0);
+    assert!(score.surface_bin_penalty > 0.0);
+    assert!(score.surface_coverage_mean_penalty > 0.0);
+    assert!(score.material_visible_surface_bin_penalty > 0.0);
+    assert!(score.material_visible_surface_mean_penalty > 0.0);
+}
+
+#[test]
+fn render_selection_score_penalizes_material_visible_normal_regression() {
+    let baseline = vec![RenderSelectionBaselineCase {
+        seed: 7,
+        active_surface_max: 0.12,
+        target_coverage_fraction: 0.82,
+        material_visible_target_mean_distance: 0.05,
+        material_visible_target_max_distance: 0.12,
+        material_visible_target_coverage_fraction: 0.82,
+        material_visible_inactive_fraction: 0.0,
+        material_visible_max_inactive_opacity: f32::NEG_INFINITY,
+        surface_covered_bin_fraction: 0.90,
+        surface_mean_bin_covered_fraction: 0.80,
+        material_visible_surface_covered_bin_fraction: 0.90,
+        material_visible_surface_mean_bin_covered_fraction: 0.80,
+        surface_normal_covered_bin_fraction: 0.80,
+        surface_normal_mean_bin_covered_fraction: 0.70,
+        material_visible_surface_normal_covered_bin_fraction: 0.80,
+        material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
+        material_visible_surface_tail_p99_distance: 0.20,
+        material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
+        active_extent_bbox_ratio: 0.35,
+        active_extent_min_axis_ratio: 0.15,
+        final_active_count: 64,
+        newly_activated_fraction: 0.75,
+        front_local_newly_activated_fraction: 0.70,
+        front_liveness: LocalFrontLivenessProgress::default(),
+        extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_activation_schedule_error: 0.0,
+        temporal_activation_progressive: true,
+        temporal_geometry_progressive: true,
+    }];
+    let case = RenderSelectionCaseMetrics {
+        render_loss: synthetic_render_loss(1.0, 20.0, 20.0, 20.0),
+        active_surface: Growth3dSurfaceStats {
+            mean_distance: 0.05,
+            max_distance: 0.12,
+        },
+        target_coverage: TargetCoverageStats {
+            mean_distance: 0.05,
+            max_distance: 0.12,
+            covered_fraction: 0.82,
+        },
+        material_visible_target_coverage: TargetCoverageStats {
+            mean_distance: 0.05,
+            max_distance: 0.12,
+            covered_fraction: 0.82,
+        },
+        strict_surface_materialization: passing_strict_surface_materialization_report(),
+        material_opacity: passing_growth_3d_opacity_stats(),
+        material_liveness: passing_material_liveness_report(),
+        final_color_state: emerged_growth_3d_color_state_report(),
+        surface_coverage_profile: passing_surface_coverage_profile_report(),
+        material_visible_surface_coverage_profile: passing_surface_coverage_profile_report(),
+        surface_normal_coverage: passing_surface_normal_coverage_report(),
+        material_visible_surface_normal_coverage: SurfaceNormalCoverageReport {
+            covered_target_bin_fraction: 0.35,
+            mean_bin_covered_fraction: 0.25,
+            ..passing_surface_normal_coverage_report()
+        },
+        material_visible_surface_tail: passing_growth_3d_surface_tail_report(),
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
+        extent: passing_growth_3d_extent_report(),
+        final_active_count: 64,
+        newly_activated_fraction: 0.75,
+        front_local_newly_activated_fraction: 0.70,
+        front_liveness: LocalFrontLivenessProgress::default(),
+        extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_activation_schedule_error: 0.0,
+        temporal_activation_progressive: true,
+        temporal_geometry_progressive: true,
+        score: 1.0,
+        failure_reasons: Vec::new(),
+    };
+
+    let scored = render_selection_case_score_with_baseline(7, &case, Some(&baseline));
+
+    assert!(!scored.morphology_non_regressed);
+    assert!(
+        scored.score > case.score + 8.0,
+        "material-visible normal regression should add a meaningful selection penalty"
+    );
+}
+
+#[test]
+fn render_selection_score_penalizes_material_visible_tail_regression() {
+    let baseline = vec![RenderSelectionBaselineCase {
+        seed: 7,
+        active_surface_max: 0.12,
+        target_coverage_fraction: 0.82,
+        material_visible_target_mean_distance: 0.05,
+        material_visible_target_max_distance: 0.12,
+        material_visible_target_coverage_fraction: 0.82,
+        material_visible_inactive_fraction: 0.0,
+        material_visible_max_inactive_opacity: f32::NEG_INFINITY,
+        surface_covered_bin_fraction: 0.90,
+        surface_mean_bin_covered_fraction: 0.80,
+        material_visible_surface_covered_bin_fraction: 0.90,
+        material_visible_surface_mean_bin_covered_fraction: 0.80,
+        surface_normal_covered_bin_fraction: 0.80,
+        surface_normal_mean_bin_covered_fraction: 0.70,
+        material_visible_surface_normal_covered_bin_fraction: 0.80,
+        material_visible_surface_normal_mean_bin_covered_fraction: 0.70,
+        material_visible_surface_tail_p99_distance: 0.20,
+        material_visible_surface_tail_over_threshold_fraction: 0.0,
+        dormant_drift_fraction: 0.0,
+        max_dormant_drift: 0.02,
+        active_extent_bbox_ratio: 0.35,
+        active_extent_min_axis_ratio: 0.15,
+        final_active_count: 64,
+        newly_activated_fraction: 0.75,
+        front_local_newly_activated_fraction: 0.70,
+        front_liveness: LocalFrontLivenessProgress::default(),
+        extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_activation_schedule_error: 0.0,
+        temporal_activation_progressive: true,
+        temporal_geometry_progressive: true,
+    }];
+    let case = RenderSelectionCaseMetrics {
+        render_loss: synthetic_render_loss(1.0, 20.0, 20.0, 20.0),
+        active_surface: Growth3dSurfaceStats {
+            mean_distance: 0.05,
+            max_distance: 0.12,
+        },
+        target_coverage: TargetCoverageStats {
+            mean_distance: 0.05,
+            max_distance: 0.12,
+            covered_fraction: 0.82,
+        },
+        material_visible_target_coverage: TargetCoverageStats {
+            mean_distance: 0.05,
+            max_distance: 0.12,
+            covered_fraction: 0.82,
+        },
+        strict_surface_materialization: passing_strict_surface_materialization_report(),
+        material_opacity: passing_growth_3d_opacity_stats(),
+        material_liveness: passing_material_liveness_report(),
+        final_color_state: emerged_growth_3d_color_state_report(),
+        surface_coverage_profile: passing_surface_coverage_profile_report(),
+        material_visible_surface_coverage_profile: passing_surface_coverage_profile_report(),
+        surface_normal_coverage: passing_surface_normal_coverage_report(),
+        material_visible_surface_normal_coverage: passing_surface_normal_coverage_report(),
+        material_visible_surface_tail: Growth3dSurfaceTailReport {
+            p99_distance: 0.80,
+            over_threshold_fraction: 0.25,
+            opacity_weighted_over_threshold_fraction: 0.20,
+            ..passing_growth_3d_surface_tail_report()
+        },
+        dormant_drift: passing_growth_3d_dormant_drift_report(),
+        extent: passing_growth_3d_extent_report(),
+        final_active_count: 64,
+        newly_activated_fraction: 0.75,
+        front_local_newly_activated_fraction: 0.70,
+        front_liveness: LocalFrontLivenessProgress::default(),
+        extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_extent_front_liveness: LocalFrontLivenessProgress::default(),
+        temporal_activation_schedule_error: 0.0,
+        temporal_activation_progressive: true,
+        temporal_geometry_progressive: true,
+        score: 1.0,
+        failure_reasons: Vec::new(),
+    };
+
+    let scored = render_selection_case_score_with_baseline(7, &case, Some(&baseline));
+
+    assert!(!scored.morphology_non_regressed);
+    assert!(
+        scored.score > case.score + 8.0,
+        "material-visible tail regression should add a meaningful selection penalty"
+    );
+}
+
+#[test]
+fn growth_3d_robustness_report_aggregates_surface_normal_coverage() {
+    let report = growth_3d_robustness_report(vec![
+        robustness_seed_report_with_surface_normal_coverage(11, true, 0.80, 0.70),
+        robustness_seed_report_with_surface_normal_coverage(19, false, 0.35, 0.25),
+    ]);
+
+    assert!(!report.all_surface_normal_coverage);
+    assert!(!report.all_material_visible_surface_normal_coverage);
+    assert!(!report.all_surface_coverage_profile);
+    assert!(!report.all_material_visible_surface_coverage_profile);
+    assert_eq!(
+        report.min_final_active_surface_normal_covered_bin_fraction,
+        0.35
+    );
+    assert_eq!(
+        report.min_final_active_surface_normal_mean_bin_covered_fraction,
+        0.25
+    );
+    assert_eq!(report.min_final_active_surface_covered_bin_fraction, 0.35);
+    assert_eq!(
+        report.min_final_active_surface_mean_bin_covered_fraction,
+        0.25
+    );
+    assert_eq!(
+        report.min_final_material_visible_surface_covered_bin_fraction,
+        0.35
+    );
+    assert_eq!(
+        report.min_final_material_visible_surface_mean_bin_covered_fraction,
+        0.25
+    );
+    assert_eq!(
+        report.min_final_material_visible_surface_normal_covered_bin_fraction,
+        0.35
+    );
+    assert_eq!(
+        report.min_final_material_visible_surface_normal_mean_bin_covered_fraction,
+        0.25
+    );
+    assert_eq!(report.seeds[1].seed, 19);
+    assert!(!report.seeds[1].surface_coverage_profile);
+    assert!(!report.seeds[1].material_visible_surface_coverage_profile);
+    assert!(!report.seeds[1].surface_normal_coverage);
+    assert!(!report.seeds[1].material_visible_surface_normal_coverage);
+}

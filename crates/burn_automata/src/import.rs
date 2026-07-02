@@ -7,7 +7,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{AutomataError, AutomataResult, EquivarianceMode, NpaConfig, NpaModel, NpaWeights};
+use crate::{
+    AutomataError, AutomataResult, EquivarianceMode, NpaConfig, NpaLowRankAdapter, NpaModel,
+    NpaWeights,
+};
 use burn_automata_kernels::{Boundary, HashGridConfig, HashGridMode};
 
 pub const BPK_MAGIC: [u8; 8] = *b"BAUTBPK1";
@@ -41,6 +44,91 @@ impl BpkModelManifest {
             config: self.config,
             weights: self.weights,
         }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BpkAdapterManifest {
+    pub format_version: u32,
+    pub model_kind: String,
+    pub source: Option<String>,
+    pub base_model: Option<String>,
+    pub base_source: Option<String>,
+    pub config: NpaConfig,
+    pub hashgrid: HashGridConfig,
+    pub adapter: NpaLowRankAdapter,
+}
+
+impl BpkAdapterManifest {
+    pub fn from_adapter(
+        base_manifest: &BpkModelManifest,
+        base_model: Option<String>,
+        adapter: NpaLowRankAdapter,
+        source: Option<String>,
+    ) -> AutomataResult<Self> {
+        adapter.validate(&base_manifest.config)?;
+        Ok(Self {
+            format_version: 1,
+            model_kind: "npa-lora-adapter".to_string(),
+            source,
+            base_model,
+            base_source: base_manifest.source.clone(),
+            config: base_manifest.config.clone(),
+            hashgrid: base_manifest.hashgrid.clone(),
+            adapter,
+        })
+    }
+
+    pub fn validate(&self, base_manifest: &BpkModelManifest) -> AutomataResult<()> {
+        if self.format_version != 1 {
+            return Err(AutomataError::InvalidFormat(format!(
+                "unsupported adapter manifest version {}",
+                self.format_version
+            )));
+        }
+        if self.model_kind != "npa-lora-adapter" {
+            return Err(AutomataError::InvalidFormat(format!(
+                "adapter manifest has unexpected model_kind {:?}",
+                self.model_kind
+            )));
+        }
+        if self.config != base_manifest.config {
+            return Err(AutomataError::InvalidModel(
+                "adapter config does not match base model config".to_string(),
+            ));
+        }
+        if self.hashgrid != base_manifest.hashgrid {
+            return Err(AutomataError::InvalidModel(
+                "adapter hashgrid does not match base model hashgrid".to_string(),
+            ));
+        }
+        self.adapter.validate(&self.config)
+    }
+
+    pub fn materialize(
+        &self,
+        base_manifest: &BpkModelManifest,
+    ) -> AutomataResult<BpkModelManifest> {
+        self.validate(base_manifest)?;
+        let base_model = NpaModel {
+            config: base_manifest.config.clone(),
+            weights: base_manifest.weights.clone(),
+        };
+        let materialized = self.adapter.apply_to_model(&base_model)?;
+        Ok(BpkModelManifest::from_model(
+            &materialized,
+            base_manifest.hashgrid.clone(),
+            self.source.clone().or_else(|| {
+                base_manifest
+                    .source
+                    .as_ref()
+                    .map(|source| format!("materialized-adapter:{source}"))
+            }),
+        ))
+    }
+
+    pub fn adapter_parameter_count(&self) -> usize {
+        self.adapter.parameter_count()
     }
 }
 
@@ -257,6 +345,31 @@ pub fn save_manifest(
         fs::write(path, serde_json::to_string_pretty(manifest)?)?;
         Ok(None)
     }
+}
+
+pub fn load_adapter_manifest(path: impl AsRef<Path>) -> AutomataResult<BpkAdapterManifest> {
+    let bytes = fs::read(path)?;
+    let manifest: BpkAdapterManifest = serde_json::from_slice(&bytes)?;
+    manifest.adapter.validate(&manifest.config)?;
+    Ok(manifest)
+}
+
+pub fn save_adapter_manifest(
+    path: impl AsRef<Path>,
+    manifest: &BpkAdapterManifest,
+) -> AutomataResult<()> {
+    manifest.adapter.validate(&manifest.config)?;
+    let path = path.as_ref();
+    if is_bpk_path(path) {
+        return Err(AutomataError::InvalidArgument(
+            "adapter manifests are JSON artifacts; use .json or .adapter.json".to_string(),
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(manifest)?)?;
+    Ok(())
 }
 
 pub fn parameter_count(manifest: &BpkModelManifest) -> usize {

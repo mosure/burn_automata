@@ -160,6 +160,13 @@ shared base NPA
   + generated rollout schedule
 ```
 
+This is now the preferred direction for 3D object training in this codebase:
+train a shared 3D NPA dynamics basis across mesh/object families, then train a
+small adapter for each object or chunk. Full per-object weight sets are useful
+diagnostics, but they should not be the default promotion path. Object-specific
+`ParticleSeed` variants should likewise stay legacy-only; target identity
+belongs in the target representation, condition tokens, or generated adapter.
+
 The generated parameter package should become an extension of `.bpk`, for example:
 
 ```text
@@ -393,6 +400,42 @@ If a new crate is too early, start with modules under `burn_automata::hyper` and
 
 The current 3D mesh implementation should be treated as explicit baselines, not
 as the final Hyper-NPA target:
+
+- Preferred direction: train a shared 3D NPA basis across many mesh targets and
+  specialize each target with a small LoRA-style adapter or other compact
+  parameter subset. The shared weights should encode common local
+  communication, activation, materialization, and splat-scale dynamics; the
+  adapter should encode object-specific geometry/material bias. A future
+  HyperNPA generator should predict that adapter from a condition rather than
+  emitting a full independent weight set for every object.
+- The core library now exposes a first adapter primitive:
+  `NpaLowRankAdapter` can be materialized onto a shared `NpaModel`, full MLP
+  gradients can be projected into adapter gradients, and supervised adapter
+  training can update only the adapter. Render-rollout training now uses this
+  path for both single-target training and `train-render3d-adapters` shared-base
+  suites. The suite can initialize and train an object-agnostic shared local 3D
+  growth base across the target list before freezing it for per-object adapter
+  fitting. It now supports built-in target sets (`core`, `primitives`, `many`)
+  where `many` is a 12-object bank spanning torus, teapot, sphere, ellipsoid,
+  cube, cylinder, cone, capsule, pyramid, bicone, dumbbell, and cross. It also
+  supports manual or automatic held-out adapter-only targets, so reports can
+  separate shared-dynamics training quality from LoRA specialization and
+  adapter-only generalization quality. The suite evaluates the frozen shared
+  base across all targets before fitting adapters, records train/holdout
+  aggregate summaries, and emits an `adapter_bank.json` manifest. That manifest
+  is the desired bridge artifact for HyperNPA: a shared BPK plus many compact
+  `.adapter.json` object adapters, with materialized BPKs treated only as
+  validation/viewer compatibility outputs. The manifest and full suite report
+  carry `strategy="shared_base_low_rank_object_adapters"` and a many-object
+  coverage contract, so a default suite is rejected as a scaling run if it
+  silently collapses back to torus/teapot-only training or misses adapter
+  artifacts for any target. A conditional HyperNPA should first learn to predict
+  this adapter bank distribution, then move to chunk-local adapters and finally
+  to full end-to-end parameter generation.
+- Promotion-facing 3D seeds should be object-agnostic (`Growth3d`,
+  `LocalGrowth3d`, `SubstrateGrowth3d`, `LocalSubstrateGrowth3d`). Object-named
+  seed modes are legacy diagnostics for existing BPK lineage and should not be
+  used as the mechanism for new object identity.
 
 - `uv_torus_growth_3d.bpk`: the current torus regression artifact. It uses
   `position_features=false` and `ParticleSeed::TorusGrowth3d`, so it starts from

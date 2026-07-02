@@ -1,0 +1,556 @@
+use super::*;
+
+#[test]
+fn temporal_materialization_output_objective_grows_only_local_front_candidates() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [0.08_f32, 0.0, 0.0, 0.0],
+        [0.10_f32, 0.0, 0.0, 0.0],
+        [0.0_f32, 0.0, 0.90, 0.0],
+        [0.08_f32, 0.0, 0.90, 0.0],
+        [0.75_f32, 0.0, 0.0, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    states[GROWTH_3D_LIVENESS_CHANNEL] = 0.0;
+    states[material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
+    states[3 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = 0.0;
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let candidate_weights = vec![0.0_f32, 1.0, 0.0, 0.0, 1.0, 1.0];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_temporal_materialization_output_objective_with_candidate_weights(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        1.0,
+        0.20,
+        &candidate_weights,
+        1.0,
+        0.25,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[output_dims + material_output] < 0.0,
+        "under-active local-front candidate should train material output upward"
+    );
+    assert!(
+        output_gradients[output_dims + material_output].abs() <= 0.25 + 1.0e-6,
+        "temporal materialization should respect the material update cap"
+    );
+    assert_eq!(
+        output_gradients[2 * output_dims + material_output],
+        0.0,
+        "local-front row without candidate weight should not be materialized"
+    );
+    assert_eq!(
+        output_gradients[3 * output_dims + material_output],
+        0.0,
+        "off-surface active row without candidate weight should not be materialized"
+    );
+    assert_eq!(
+        output_gradients[4 * output_dims + material_output],
+        0.0,
+        "off-surface local-front candidate should not be materialized by rollout timing"
+    );
+    assert_eq!(
+        output_gradients[5 * output_dims + material_output],
+        0.0,
+        "far dormant row should not receive global materialization pressure"
+    );
+}
+
+#[test]
+fn temporal_materialization_target_follows_rollout_schedule() {
+    let early = temporal_materialization_target_logit(0.0);
+    let mid = temporal_materialization_target_logit(0.5);
+    let late = temporal_materialization_target_logit(1.0);
+
+    assert_eq!(early, GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.0);
+    assert!(mid > early);
+    assert!(late > mid);
+    assert_eq!(late, GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET);
+}
+
+#[test]
+fn temporal_materialization_keeps_dormant_pending_rows_below_visible_threshold() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [0.08_f32, 0.0, 0.0, 0.0],
+        [0.10_f32, 0.0, 0.0, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    states[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[config.state_dims + material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT + 1.2;
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    let mut raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    raw_updates[2 * output_dims + liveness_output] = 8.0;
+    let candidate_weights = vec![1.0_f32, 1.0, 1.0];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_temporal_materialization_output_objective_with_candidate_weights(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        1.0,
+        0.20,
+        &candidate_weights,
+        1.0,
+        0.25,
+        &mut output_gradients,
+    );
+
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "dormant row already above the precursor ceiling should not be pushed further visible"
+    );
+    assert!(
+        output_gradients[2 * output_dims + material_output] < 0.0,
+        "predicted-active row may continue materializing toward render-visible target"
+    );
+}
+
+#[test]
+fn active_surface_materialization_promotes_active_surface_rows_only() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.01, 0.0],
+        [0.0_f32, 0.0, 0.90, 0.0],
+        [0.04_f32, 0.0, 0.01, 0.0],
+        [0.80_f32, 0.0, 0.01, 0.0],
+        [0.0_f32, 0.0, 1.40, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[3 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    let mut raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    raw_updates[2 * output_dims + liveness_output] = 8.0;
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_active_surface_materialization_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        1.0,
+        0.10,
+        0.0,
+        None,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[material_output] < 0.0,
+        "active near-surface row should train material output upward"
+    );
+    assert_eq!(
+        output_gradients[4 * output_dims + material_output],
+        0.0,
+        "active row outside the soft surface band should not receive material pressure"
+    );
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "active row outside the soft surface band should move before becoming render-visible"
+    );
+    assert!(
+        output_gradients[2 * output_dims + material_output] < 0.0,
+        "predicted-active near-surface row should materialize before visible-only coverage takes over"
+    );
+    assert_eq!(
+        output_gradients[3 * output_dims + material_output],
+        0.0,
+        "dormant non-front row should not receive global material pressure"
+    );
+    assert!(
+        output_gradients[material_output].abs() <= 0.10 + 1.0e-6,
+        "active surface materialization should respect the material update cap"
+    );
+}
+
+#[test]
+fn active_surface_materialization_prioritizes_rows_before_strict_coverage() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_scale = 1.0;
+    let strict = target_coverage_threshold(seed_scale);
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    let frontier = material_training_frontier_coverage_threshold(seed_scale);
+    let band_distance = (strict + soft) * 0.5;
+    let target = TriangleMeshTarget::new(
+        vec![
+            [band_distance, -0.1, 0.0],
+            [band_distance, 0.1, 0.0],
+            [band_distance, 0.0, 0.2],
+        ],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [band_distance - frontier * 1.1, 0.0, 0.0, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_active_surface_materialization_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        seed_scale,
+        f32::INFINITY,
+        0.0,
+        None,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[material_output] < 0.0,
+        "active rows inside the soft surface band should receive render-material pressure"
+    );
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "active rows outside the bounded material frontier should remain excluded"
+    );
+}
+
+#[test]
+fn active_surface_materialization_uses_tight_opacity_frontier() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_scale = 1.0;
+    let soft = material_training_soft_coverage_threshold(seed_scale);
+    let opacity_frontier = material_opacity_frontier_coverage_threshold(seed_scale);
+    let inside_frontier_distance = (soft + opacity_frontier) * 0.5;
+    let target = TriangleMeshTarget::new(
+        vec![
+            [inside_frontier_distance, -0.1, 0.0],
+            [inside_frontier_distance, 0.1, 0.0],
+            [inside_frontier_distance, 0.0, 0.2],
+        ],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [
+            inside_frontier_distance - opacity_frontier * 1.1,
+            0.0,
+            0.0,
+            0.0,
+        ],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_active_surface_materialization_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        seed_scale,
+        f32::INFINITY,
+        0.0,
+        None,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[material_output] < 0.0,
+        "active rows just outside the soft material band should receive bounded precursor material pressure"
+    );
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "rows outside the tighter opacity frontier should not receive material pressure"
+    );
+}
+
+#[test]
+fn active_surface_materialization_respects_local_front_candidate_weights() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.01, 0.0],
+        [0.08_f32, 0.0, 0.01, 0.0],
+        [0.10_f32, 0.0, 0.01, 0.0],
+        [0.80_f32, 0.0, 0.01, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    for row in 1..positions.len() {
+        states[row * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] =
+            GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    }
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let candidate_weights = vec![0.0_f32, 1.0, 0.0, 1.0];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_active_surface_materialization_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        1.0,
+        0.10,
+        0.20,
+        Some(&candidate_weights),
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[output_dims + material_output] < 0.0,
+        "local-front row with candidate weight should receive material pressure"
+    );
+    assert_eq!(
+        output_gradients[2 * output_dims + material_output],
+        0.0,
+        "local-front row with zero candidate weight should not materialize"
+    );
+    assert_eq!(
+        output_gradients[3 * output_dims + material_output],
+        0.0,
+        "far dormant row should remain excluded even with candidate weight"
+    );
+}
+
+#[test]
+fn strict_surface_materialization_promotes_only_active_strict_band_rows() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_scale = 1.0;
+    let strict = target_coverage_threshold(seed_scale);
+    let target = TriangleMeshTarget::new(
+        vec![[-0.4, -0.4, 0.0], [0.4, -0.4, 0.0], [0.0, 0.4, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, strict * 0.5, 0.0],
+        [0.1_f32, 0.0, strict * 1.5, 0.0],
+        [0.0_f32, 0.1, strict * 0.5, 0.0],
+        [0.0_f32, -0.1, strict * 0.5, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = -2.0;
+    }
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[3 * config.state_dims + material_channel] = GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET;
+    let raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_strict_surface_materialization_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        seed_scale,
+        0.25,
+        &mut output_gradients,
+    );
+
+    assert!(
+        output_gradients[material_output] < 0.0,
+        "active row inside strict target coverage should train material output upward"
+    );
+    assert!(
+        output_gradients[material_output].abs() <= 0.25 + 1.0e-6,
+        "strict materialization should respect the material update cap"
+    );
+    assert_eq!(
+        output_gradients[output_dims + material_output],
+        0.0,
+        "active row outside strict coverage should move before strict materialization"
+    );
+    assert_eq!(
+        output_gradients[2 * output_dims + material_output],
+        0.0,
+        "dormant row inside strict coverage should not receive global material pressure"
+    );
+    assert_eq!(
+        output_gradients[3 * output_dims + material_output],
+        0.0,
+        "already-materialized row should not receive extra strict-band pressure"
+    );
+}
+
+#[test]
+fn active_strict_surface_materialization_report_tracks_previsibility_margin() {
+    let config = NpaConfig::growing_3dgs();
+    let seed_scale = 1.0;
+    let strict = target_coverage_threshold(seed_scale);
+    let target = TriangleMeshTarget::new(
+        vec![[-0.4, -0.4, 0.0], [0.4, -0.4, 0.0], [0.0, 0.4, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let positions = vec![
+        [0.0_f32, 0.0, strict * 0.5, 0.0],
+        [0.1_f32, 0.0, strict * 0.5, 0.0],
+        [0.1_f32, 0.0, strict * 1.5, 0.0],
+        [0.0_f32, 0.1, strict * 0.5, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    states[material_channel] = -2.0;
+    states[config.state_dims + material_channel] = -0.5;
+    states[2 * config.state_dims + material_channel] = -3.0;
+    states[3 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[3 * config.state_dims + material_channel] = -2.0;
+
+    let report = active_strict_surface_materialization_report(
+        &positions,
+        &states,
+        config.state_dims,
+        &target,
+        strict,
+    );
+
+    assert_eq!(report.active_strict_count, 2);
+    assert_eq!(report.materialized_count, 1);
+    assert!((report.materialized_fraction - 0.5).abs() <= 1.0e-6);
+    assert!((report.mean_material_opacity - -1.25).abs() <= 1.0e-6);
+    assert!((report.mean_visible_margin - 0.5).abs() <= 1.0e-6);
+    assert!((report.max_visible_margin - 1.0).abs() <= 1.0e-6);
+}
+
+#[test]
+fn material_visible_liveness_output_objective_activates_local_front_material_rows() {
+    let config = NpaConfig::growing_3dgs();
+    let target = TriangleMeshTarget::new(
+        vec![[-0.1, -0.1, 0.0], [0.1, -0.1, 0.0], [0.0, 0.2, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let output_dims = config.update_dims();
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let liveness_output = config.spatial_dims + GROWTH_3D_LIVENESS_CHANNEL;
+    let material_output = config.spatial_dims + material_channel;
+    let positions = vec![
+        [0.0_f32, 0.0, 0.01, 0.0],
+        [0.08_f32, 0.0, 0.01, 0.0],
+        [0.8_f32, 0.0, 0.01, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    states[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    for state in states.chunks_exact_mut(config.state_dims) {
+        state[material_channel] = GROWTH_3D_MATERIAL_INACTIVE_OPACITY_LOGIT;
+    }
+    let mut raw_updates = vec![0.0_f32; positions.len() * output_dims];
+    raw_updates[2 * output_dims + material_output] = 8.5;
+    let mut output_gradients = vec![0.0_f32; raw_updates.len()];
+
+    add_material_visible_liveness_output_objective(
+        &config,
+        &target,
+        &positions,
+        &states,
+        &raw_updates,
+        1.0,
+        material_training_soft_coverage_threshold(1.0),
+        0.1,
+        0.20,
+        1.0,
+        &mut output_gradients,
+    );
+
+    assert_eq!(
+        output_gradients[liveness_output], 0.0,
+        "already-live rows should not receive material-visible liveness pressure"
+    );
+    assert!(
+        output_gradients[output_dims + liveness_output] < 0.0,
+        "near-front surface row should train liveness output upward before material visibility is learned"
+    );
+    assert!(
+        output_gradients[output_dims + liveness_output].abs() <= 0.1 + 1.0e-6,
+        "material-visible liveness output should respect max_liveness_update"
+    );
+    assert_eq!(
+        output_gradients[2 * output_dims + liveness_output],
+        0.0,
+        "far dormant predicted-material row should remain local-front gated"
+    );
+}

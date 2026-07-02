@@ -104,9 +104,20 @@ experiments should write to `target/` or `artifacts/` until they pass the
 strict mesh/render gates. `train-render3d` refuses `assets/models/*` outputs
 unless the run starts from a conditionless-local base model and uses the
 matching local 3D growth seed; catalog-bound candidates are validated from a
-temporary `target/` path and only promoted after strict multi-seed growth
-validation passes. Legacy, ablation, and retiming 3D commands refuse
-catalog-bound output paths entirely:
+temporary `target/` path and only promoted after strict app-scale multi-seed
+growth validation passes at the 1024-particle catalog and viewer horizons.
+Legacy, ablation, and retiming 3D commands refuse
+catalog-bound output paths entirely. The preferred scaling path is the
+many-object shared-base plus LoRA suite:
+
+```bash
+cargo run -p burn_automata --release --bin burn_automata -- train-render3d-adapters \
+  --target-set many \
+  --output-dir artifacts/render_3d_adapter_suite \
+  --report-output artifacts/render_3d_adapter_suite_report.json
+```
+
+Use single-target `train-render3d` commands for focused diagnostics:
 
 ```bash
 cargo run -p burn_automata --release --bin burn_automata -- train-render3d \
@@ -133,10 +144,45 @@ The legacy projection/seed-frame batch is still available as
 `--training-mode rollout-local` remains available for local teacher
 distillation experiments. `--training-mode rollout-position-field` is available
 for rollout-state mesh rows, but those commands are no longer catalog defaults.
-`train-render3d` defaults to `--training-backend direct-rollout`. Without
-`--base-model`, it starts from a conditionless-local compact-growth prior with
-`position_features=false` and target-local growth seed defaults; with
-`--base-model`, it continues the provided local-growth BPK. The backend
+`train-render3d` defaults to `--training-backend direct-rollout` and
+`--weight-update-mode adapter`. Without `--base-model`, it starts from a
+conditionless-local compact-growth prior with `position_features=false` and
+target-agnostic local growth seed defaults; with `--base-model`, it treats the
+provided local-growth BPK as a frozen shared base and trains a LoRA-style
+low-rank object adapter (`--adapter-rank`, `--adapter-alpha`,
+`--adapter-seed`). Reports serialize the adapter parameter count and base/full
+parameter counts; the exported `.bpk` is a materialized compatibility model.
+For many-object shared-base sweeps, use `train-render3d-adapters`. It defaults
+to `--target-set many`, covering torus, teapot, sphere, ellipsoid, cube,
+cylinder, cone, capsule, pyramid, bicone, dumbbell, and cross. `--target-set
+core` is the smaller torus/teapot diagnostic set, and `--target-set primitives`
+expands to the ten object-agnostic procedural mesh classes. Explicit
+`--targets` runs focused subsets.
+`--holdout-targets` removes targets from shared-base cycles while still fitting
+adapter-only held-out objects. By default, no-arg many-object suites use an
+effective `--auto-holdout-stride 4 --auto-holdout-offset 3`, holding out
+ellipsoid, capsule, and cross while keeping torus and teapot in shared-base
+training; override these flags for a different split. Without `--base-model`,
+the suite initializes an object-agnostic conditionless-local 3D growth base,
+alternates full-weight shared-base training for `--shared-base-cycles` cycles
+(`many` defaults to two cycles), saves `shared_base.bpk`, evaluates that frozen
+base on every target, then trains one compact `.adapter.json` LoRA artifact per
+target. With `--base-model`, the suite freezes the supplied base by default;
+pass `--shared-base-cycles` to continue shared-base training before adapter
+fitting. Materialized validation/viewer BPKs are written beside the adapters,
+and the suite report records shared-base generalization, adapted train/holdout
+quality, explicit shared/holdout/adapter target counts, single-adapter
+efficiency, and shared-base-plus-adapter-bank efficiency. The suite also writes
+`adapter_bank.json` by default; this compact manifest includes the same split
+counts and is the intended target format for future HyperNPA models that
+predict object LoRA adapters from conditions. Both the suite report and
+adapter-bank manifest include `strategy="shared_base_low_rank_object_adapters"`
+and a `contract` block. The no-arg many-object contract fails if the run
+collapses back to only torus/teapot, if too few non-core objects participate, or
+if adapters are not produced for every target. Use `train-render3d` for
+single-target diagnostics and `--target-set core` only for the small
+torus/teapot regression suite; use `--weight-update-mode full` only for legacy
+full-model ablations. The backend
 backpropagates the deterministic CPU multi-view splat loss analytically to
 final particle positions, opacity, and color, and applies those adjoints through
 the stored rollout MLP outputs. It also
@@ -144,13 +190,23 @@ propagates RGB/opacity state adjoints through direct, blurred, and
 state-gradient SPH perception channels over stored snapshots, carries position
 adjoints through direct Euler integration, and applies a conservative
 `--perception-position-gain` to fixed-neighborhood SPH position-perception
-adjoints. `--direct-selection-seed-training` is available as an opt-in
-multi-seed update ablation. `--trajectory-render-gain`/`--trajectory-render-samples`
-can inject render adjoints at stored rollout snapshots, and
-`--full-coverage-adjoint` can apply target-coverage pressure to all active
-particles instead of sampled render-gradient rows; both are currently diagnostic
-ablations because short 3D probes regressed strict gates. The older supervised
-row projection remains
+adjoints. Direct-rollout training now averages clipped SGD deltas over the
+selection seed set by default; use `--no-direct-selection-seed-training` only
+for the older single-seed ablation. `--trajectory-render-gain`/`--trajectory-render-samples`
+can inject render adjoints at stored rollout snapshots, while
+`--trajectory-mesh-gain` uses the same snapshot schedule for mesh
+coverage/surface adjoints without enabling intermediate render gradients.
+`--liveness-gain`
+adds a bounded local-front state adjoint on the strict liveness channel
+(`state[3]`), so render/coverage training can teach progressive activation
+instead of only material opacity. This liveness snapshot path uses
+`--trajectory-render-samples` but does not require nonzero
+`--trajectory-render-gain`; far dormant particles receive no global activation
+pressure. The direct backend now applies target-coverage pressure to
+all active particles by default instead of only sampled render-gradient rows.
+Coverage adjoints use `--coverage-gain` directly rather than being scaled by
+the render `--motion-gain`; use `--no-full-coverage-adjoint` only for the older
+sparse-row ablation. The older supervised row projection remains
 available as `--training-backend proxy`.
 `--coverage-mode soft-chamfer` adds an opt-in detached soft target-coverage
 proxy, and `--coverage-repulsion-gain`/`--coverage-repulsion-radius` can add
@@ -172,10 +228,21 @@ array prefix, so under-covered regions participate in continuation probes.
 `--gradient-mode finite-diff` remains available for regression checks. This is
 an honest backend scaffold, not full WGPU/autodiff BPTT through particle
 positions inside perception, changing neighbor membership, and render
-visibility through time. `train-render3d` reports serialize a
+visibility through time. `--surface-escape-gain` weights active particles that
+escape past the strict surface-distance threshold more strongly in the
+terminal, trajectory, and proxy surface projection objectives, so reported
+surface tails have a matching training signal instead of being diagnostics
+only. `train-render3d` reports serialize a
 `growth_validation` section with the same strict gate and seed set used by
 catalog promotion, and `--fail-on-validation` fails on that strict
-runtime-dynamics gate rather than render PSNR alone.
+runtime-dynamics gate rather than render PSNR alone. Candidate selection uses
+that strict score, including active-surface max/tail and render-density
+penalties. It also records target-normal-bin coverage, so missing broad surface
+normal families such as torus tube collapse are strict blockers even when
+pointwise target coverage looks acceptable. Selection only allows bounded
+render/density slack when the strict score improves materially. Rejected rounds
+are rolled back before the next rollout, so subsequent training continues from
+the best strict-scored checkpoint instead of a regressed candidate.
 
 For the stricter no-position experiment, use the explicit ablation command:
 

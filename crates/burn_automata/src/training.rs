@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AutomataResult, NpaModel};
+use crate::{AutomataResult, NpaLowRankAdapter, NpaModel};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SgdConfig {
@@ -78,6 +78,30 @@ pub struct SupervisedGradients {
     pub features: Vec<f32>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LowRankAdapterGradients {
+    pub w1_down: Vec<f32>,
+    pub w1_up: Vec<f32>,
+    pub w2_down: Vec<f32>,
+    pub w2_up: Vec<f32>,
+    pub b1_delta: Vec<f32>,
+    pub b2_delta: Vec<f32>,
+    pub rows: usize,
+}
+
+impl LowRankAdapterGradients {
+    pub fn grad_norm(&self) -> f32 {
+        grad_norm(&[
+            &self.w1_down,
+            &self.w1_up,
+            &self.w2_down,
+            &self.w2_up,
+            &self.b1_delta,
+            &self.b2_delta,
+        ])
+    }
+}
+
 pub fn supervised_train_step(
     model: &mut NpaModel,
     batch: &SupervisedBatch,
@@ -86,6 +110,32 @@ pub fn supervised_train_step(
     validate_sgd_config(cfg)?;
     let (grads, mut report) = supervised_backward(model, batch)?;
     let step = apply_sgd_gradients(model, &grads, cfg)?;
+    report.grad_norm = step.grad_norm;
+    report.grad_scale = step.grad_scale;
+    report.clipped = step.clipped;
+    Ok(report)
+}
+
+pub fn supervised_adapter_loss(
+    base_model: &NpaModel,
+    adapter: &NpaLowRankAdapter,
+    batch: &SupervisedBatch,
+) -> AutomataResult<f32> {
+    let adapted = adapter.apply_to_model(base_model)?;
+    supervised_loss(&adapted, batch)
+}
+
+pub fn supervised_adapter_train_step(
+    base_model: &NpaModel,
+    adapter: &mut NpaLowRankAdapter,
+    batch: &SupervisedBatch,
+    cfg: SgdConfig,
+) -> AutomataResult<SupervisedStepReport> {
+    validate_sgd_config(cfg)?;
+    let adapted = adapter.apply_to_model(base_model)?;
+    let (full_grads, mut report) = supervised_backward(&adapted, batch)?;
+    let adapter_grads = project_low_rank_adapter_gradients(base_model, adapter, &full_grads)?;
+    let step = apply_sgd_adapter_gradients(adapter, &adapter_grads, cfg)?;
     report.grad_norm = step.grad_norm;
     report.grad_scale = step.grad_scale;
     report.clipped = step.clipped;
@@ -124,6 +174,52 @@ pub fn run_supervised_training(
     }
     if best_loss < final_loss {
         *model = best_model;
+        final_loss = best_loss;
+    }
+
+    Ok(TrainingRunReport {
+        steps: cfg.steps,
+        rows,
+        initial_loss,
+        final_loss,
+        best_loss,
+        history,
+    })
+}
+
+pub fn run_supervised_adapter_training(
+    base_model: &NpaModel,
+    adapter: &mut NpaLowRankAdapter,
+    batch: &SupervisedBatch,
+    cfg: TrainingRunConfig,
+) -> AutomataResult<TrainingRunReport> {
+    validate_sgd_config(cfg.sgd)?;
+    let (rows, _) = validate_batch(&adapter.apply_to_model(base_model)?, batch)?;
+    let initial_loss = supervised_adapter_loss(base_model, adapter, batch)?;
+    let mut final_loss = initial_loss;
+    let mut best_loss = initial_loss;
+    let mut best_adapter = adapter.clone();
+    let report_interval = cfg.report_interval.max(1);
+    let mut history = Vec::new();
+
+    for step in 1..=cfg.steps {
+        let step_report = supervised_adapter_train_step(base_model, adapter, batch, cfg.sgd)?;
+        if step == cfg.steps || step.is_multiple_of(report_interval) {
+            final_loss = supervised_adapter_loss(base_model, adapter, batch)?;
+            if final_loss < best_loss {
+                best_loss = final_loss;
+                best_adapter = adapter.clone();
+            }
+            history.push(TrainingHistoryEntry {
+                step,
+                loss: final_loss,
+                grad_norm: step_report.grad_norm,
+                grad_scale: step_report.grad_scale,
+            });
+        }
+    }
+    if best_loss < final_loss {
+        *adapter = best_adapter;
         final_loss = best_loss;
     }
 
@@ -385,6 +481,124 @@ pub fn apply_sgd_gradients(
     })
 }
 
+pub fn project_low_rank_adapter_gradients(
+    base_model: &NpaModel,
+    adapter: &NpaLowRankAdapter,
+    full_grads: &SupervisedGradients,
+) -> AutomataResult<LowRankAdapterGradients> {
+    base_model.validate()?;
+    adapter.validate(&base_model.config)?;
+    validate_gradients(full_grads)?;
+
+    let input_dims = base_model.config.perception_dims();
+    let hidden_dims = base_model.config.hidden_dims;
+    let output_dims = base_model.config.update_dims();
+    let rows = if full_grads.features.is_empty() {
+        0
+    } else {
+        full_grads.features.len() / input_dims
+    };
+    let scale = adapter.alpha / adapter.rank as f32;
+
+    let mut w1_down = vec![0.0; adapter.w1_down.len()];
+    let mut w1_up = vec![0.0; adapter.w1_up.len()];
+    let mut w2_down = vec![0.0; adapter.w2_down.len()];
+    let mut w2_up = vec![0.0; adapter.w2_up.len()];
+
+    project_low_rank_matrix_gradients(
+        &full_grads.w1,
+        hidden_dims,
+        input_dims,
+        adapter.rank,
+        &adapter.w1_up,
+        &adapter.w1_down,
+        scale,
+        &mut w1_up,
+        &mut w1_down,
+    );
+    project_low_rank_matrix_gradients(
+        &full_grads.w2,
+        output_dims,
+        hidden_dims,
+        adapter.rank,
+        &adapter.w2_up,
+        &adapter.w2_down,
+        scale,
+        &mut w2_up,
+        &mut w2_down,
+    );
+
+    let grads = LowRankAdapterGradients {
+        w1_down,
+        w1_up,
+        w2_down,
+        w2_up,
+        b1_delta: full_grads.b1.clone(),
+        b2_delta: full_grads.b2.clone(),
+        rows,
+    };
+    validate_adapter_gradients(adapter, &grads)?;
+    Ok(grads)
+}
+
+pub fn apply_sgd_adapter_gradients(
+    adapter: &mut NpaLowRankAdapter,
+    grads: &LowRankAdapterGradients,
+    cfg: SgdConfig,
+) -> AutomataResult<SupervisedStepReport> {
+    validate_sgd_config(cfg)?;
+    validate_adapter_gradients(adapter, grads)?;
+    let grad_norm = grads.grad_norm();
+    if !grad_norm.is_finite() {
+        return Err(crate::AutomataError::InvalidArgument(
+            "adapter gradient norm is not finite".to_string(),
+        ));
+    }
+    let scale = if cfg.grad_clip_norm > 0.0 && grad_norm > cfg.grad_clip_norm {
+        cfg.grad_clip_norm / grad_norm
+    } else {
+        1.0
+    };
+
+    apply_sgd(&mut adapter.w1_down, &grads.w1_down, cfg, scale);
+    apply_sgd(&mut adapter.w1_up, &grads.w1_up, cfg, scale);
+    apply_sgd(&mut adapter.w2_down, &grads.w2_down, cfg, scale);
+    apply_sgd(&mut adapter.w2_up, &grads.w2_up, cfg, scale);
+    apply_sgd(&mut adapter.b1_delta, &grads.b1_delta, cfg, scale);
+    apply_sgd(&mut adapter.b2_delta, &grads.b2_delta, cfg, scale);
+
+    Ok(SupervisedStepReport {
+        loss: 0.0,
+        rows: grads.rows,
+        grad_norm,
+        grad_scale: scale,
+        clipped: scale < 1.0,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_low_rank_matrix_gradients(
+    matrix_grads: &[f32],
+    rows: usize,
+    cols: usize,
+    rank: usize,
+    up: &[f32],
+    down: &[f32],
+    scale: f32,
+    up_grads: &mut [f32],
+    down_grads: &mut [f32],
+) {
+    for row in 0..rows {
+        for col in 0..cols {
+            let grad = matrix_grads[row * cols + col] * scale;
+            for r in 0..rank {
+                up_grads[row * rank + r] += grad * down[r * cols + col];
+                down_grads[r * cols + col] += grad * up[row * rank + r];
+            }
+        }
+    }
+}
+
 fn grad_norm(groups: &[&[f32]]) -> f32 {
     groups
         .iter()
@@ -453,6 +667,34 @@ fn validate_gradients(grads: &SupervisedGradients) -> AutomataResult<()> {
     ensure_finite("feature gradients", &grads.features)
 }
 
+fn validate_adapter_gradients(
+    adapter: &NpaLowRankAdapter,
+    grads: &LowRankAdapterGradients,
+) -> AutomataResult<()> {
+    let expected = [
+        ("w1_down", adapter.w1_down.len(), grads.w1_down.len()),
+        ("w1_up", adapter.w1_up.len(), grads.w1_up.len()),
+        ("w2_down", adapter.w2_down.len(), grads.w2_down.len()),
+        ("w2_up", adapter.w2_up.len(), grads.w2_up.len()),
+        ("b1_delta", adapter.b1_delta.len(), grads.b1_delta.len()),
+        ("b2_delta", adapter.b2_delta.len(), grads.b2_delta.len()),
+    ];
+    for (name, expected_len, actual_len) in expected {
+        if actual_len != expected_len {
+            return Err(crate::AutomataError::InvalidArgument(format!(
+                "adapter gradient {name} len {actual_len} != {expected_len}"
+            )));
+        }
+    }
+    ensure_finite("adapter gradient w1_down", &grads.w1_down)?;
+    ensure_finite("adapter gradient w1_up", &grads.w1_up)?;
+    ensure_finite("adapter gradient w2_down", &grads.w2_down)?;
+    ensure_finite("adapter gradient w2_up", &grads.w2_up)?;
+    ensure_finite("adapter gradient b1_delta", &grads.b1_delta)?;
+    ensure_finite("adapter gradient b2_delta", &grads.b2_delta)?;
+    Ok(())
+}
+
 fn ensure_finite(name: &str, values: &[f32]) -> AutomataResult<()> {
     if values.iter().all(|value| value.is_finite()) {
         return Ok(());
@@ -466,6 +708,19 @@ fn ensure_finite(name: &str, values: &[f32]) -> AutomataResult<()> {
 mod tests {
     use super::*;
     use crate::{NpaConfig, NpaWeights};
+
+    fn adapter_loss_for_param(
+        base: &NpaModel,
+        adapter: &mut NpaLowRankAdapter,
+        batch: &SupervisedBatch,
+        param_idx: usize,
+        delta: f32,
+    ) -> f32 {
+        adapter.w2_up[param_idx] += delta;
+        let loss = supervised_adapter_loss(base, adapter, batch).unwrap();
+        adapter.w2_up[param_idx] -= delta;
+        loss
+    }
 
     #[test]
     fn supervised_training_restores_best_checkpoint_after_overshoot() {
@@ -504,5 +759,129 @@ mod tests {
         assert_eq!(model.weights.b1, initial.weights.b1);
         assert_eq!(model.weights.w2, initial.weights.w2);
         assert_eq!(model.weights.b2, initial.weights.b2);
+    }
+
+    #[test]
+    fn low_rank_adapter_gradient_projection_matches_finite_difference() {
+        let mut config = NpaConfig::growing_3dgs();
+        config.hidden_dims = 3;
+        config.state_dims = 5;
+        config.position_features = false;
+        let input_dims = config.perception_dims();
+        let output_dims = config.update_dims();
+        let mut base = NpaModel {
+            weights: NpaWeights::seeded(&config, 11),
+            config,
+        };
+        for bias in &mut base.weights.b1 {
+            *bias = 0.25;
+        }
+        let mut adapter = NpaLowRankAdapter::seeded(&base.config, 2, 2.0, 17);
+        let batch = SupervisedBatch {
+            features: vec![0.2; input_dims],
+            target_update: vec![0.05; output_dims],
+        };
+        let adapted = adapter.apply_to_model(&base).unwrap();
+        let (full_grads, _) = supervised_backward(&adapted, &batch).unwrap();
+        let adapter_grads =
+            project_low_rank_adapter_gradients(&base, &adapter, &full_grads).unwrap();
+
+        let param_idx = 0;
+        let eps = 1.0e-3;
+        let plus = adapter_loss_for_param(&base, &mut adapter, &batch, param_idx, eps);
+        let minus = adapter_loss_for_param(&base, &mut adapter, &batch, param_idx, -eps);
+        let numeric = (plus - minus) / (2.0 * eps);
+        let analytic = adapter_grads.w2_up[param_idx];
+
+        assert!(
+            (analytic - numeric).abs() < 2.0e-3,
+            "adapter gradient mismatch analytic={analytic} numeric={numeric}"
+        );
+    }
+
+    #[test]
+    fn supervised_adapter_step_updates_adapter_without_mutating_base() {
+        let config = NpaConfig::growing_3dgs();
+        let base = NpaModel {
+            weights: NpaWeights::zeros(&config),
+            config,
+        };
+        let base_before = base.clone();
+        let mut adapter = NpaLowRankAdapter::zeros(&base.config, 2, 2.0);
+        let mut target_update = vec![0.0; base.config.update_dims()];
+        target_update[0] = 1.0;
+        let batch = SupervisedBatch {
+            features: vec![0.0; base.config.perception_dims()],
+            target_update,
+        };
+        let before = supervised_adapter_loss(&base, &adapter, &batch).unwrap();
+
+        let report = supervised_adapter_train_step(
+            &base,
+            &mut adapter,
+            &batch,
+            SgdConfig {
+                learning_rate: 0.1,
+                weight_decay: 0.0,
+                grad_clip_norm: 0.0,
+            },
+        )
+        .unwrap();
+        let after = supervised_adapter_loss(&base, &adapter, &batch).unwrap();
+
+        assert_eq!(base.weights.w1, base_before.weights.w1);
+        assert_eq!(base.weights.b1, base_before.weights.b1);
+        assert_eq!(base.weights.w2, base_before.weights.w2);
+        assert_eq!(base.weights.b2, base_before.weights.b2);
+        assert!(adapter.b2_delta[0] > 0.0);
+        assert!(after < before, "adapter step should reduce supervised loss");
+        assert_eq!(report.rows, 1);
+        assert!(report.grad_norm > 0.0);
+    }
+
+    #[test]
+    fn supervised_adapter_training_run_tracks_history_without_mutating_base() {
+        let mut config = NpaConfig::growing_3dgs();
+        config.hidden_dims = 4;
+        let base = NpaModel {
+            weights: NpaWeights::zeros(&config),
+            config,
+        };
+        let base_before = base.clone();
+        let mut adapter = NpaLowRankAdapter::zeros(&base.config, 2, 2.0);
+        let mut target_update = vec![0.0; base.config.update_dims()];
+        target_update[1] = -0.75;
+        let batch = SupervisedBatch {
+            features: vec![0.0; base.config.perception_dims()],
+            target_update,
+        };
+        let before = supervised_adapter_loss(&base, &adapter, &batch).unwrap();
+
+        let report = run_supervised_adapter_training(
+            &base,
+            &mut adapter,
+            &batch,
+            TrainingRunConfig {
+                steps: 3,
+                report_interval: 1,
+                sgd: SgdConfig {
+                    learning_rate: 0.1,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+            },
+        )
+        .unwrap();
+        let after = supervised_adapter_loss(&base, &adapter, &batch).unwrap();
+
+        assert_eq!(base.weights.w1, base_before.weights.w1);
+        assert_eq!(base.weights.b1, base_before.weights.b1);
+        assert_eq!(base.weights.w2, base_before.weights.w2);
+        assert_eq!(base.weights.b2, base_before.weights.b2);
+        assert_eq!(report.steps, 3);
+        assert_eq!(report.history.len(), 3);
+        assert!(report.best_loss <= before);
+        assert!(after <= before);
+        assert!(adapter.b2_delta[1] < 0.0);
     }
 }

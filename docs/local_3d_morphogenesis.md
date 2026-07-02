@@ -9,6 +9,32 @@ a shared neural rule, and form a target object through rollout dynamics rather
 than particle-index assignment, precolored particles, residual-state targets, or
 absolute world-position fields.
 
+The preferred long-term architecture is a shared 3D NPA dynamics basis plus
+small object adapters. Torus, teapot, and future mesh targets should train and
+validate one shared communication/morphogenesis rule, then specialize with a
+LoRA-style low-rank adapter or similarly small parameter subset. A HyperNPA
+conditioner can later predict that adapter from an image, mesh, scene latent, or
+other condition. New target support should add mesh/loss metadata and adapter
+training cases, not new object-named particle seeds or full independent weight
+sets.
+
+`train-render3d-adapters --target-set many` is the current scaling harness for
+this direction. It trains one shared conditionless-local base over the selected
+training targets, optionally reserves `--holdout-targets` for adapter-only
+generalization checks, and emits a shared BPK plus compact LoRA adapter JSON
+files. The built-in primitive set (sphere, ellipsoid, cube, cylinder, cone,
+capsule, pyramid, bicone, dumbbell, and cross) exists to stress shared local
+dynamics across more than torus/teapot without introducing object-specific
+particle seeds.
+
+The suite report and `adapter_bank.json` manifest include
+`strategy="shared_base_low_rank_object_adapters"` plus a coverage contract. The
+default no-arg `many` contract must include at least eight targets, at least six
+non-core targets, at least six shared-base split targets, at least two held-out
+adapter-only targets, and one adapter artifact for every target. Small
+torus/teapot runs remain available as `--target-set core` diagnostics, but they
+are no longer allowed to masquerade as the many-object scaling path.
+
 ## Alignment Contract
 
 The local 3D path must keep these properties:
@@ -18,6 +44,10 @@ The local 3D path must keep these properties:
 - Shared update rule with local density/state perception and directional
   gradients.
 - Multi-step rollout supervision, not one-step projection only.
+- Object identity must live in the target/condition/adapters, not in
+  `ParticleSeed`; promotion-facing seeds must be target-agnostic.
+- Shared base weights should be trained and evaluated across multiple mesh
+  targets before per-object adapters are promoted.
 - Validation from a saved `.bpk` loaded back from disk.
 - Geometry, color, opacity, and finite-state checks across particle counts,
   seed scales, and rollout horizons.
@@ -33,8 +63,8 @@ per-particle targets.
 | --- | --- | --- | --- |
 | retired field render-proxy BPKs | no | absolute position features | diagnostic only; removed from `assets/models` |
 | legacy morphogen BPKs | no | target residual/color seed state | diagnostic only; removed from `assets/models` |
-| `uv_torus_growth_3d.bpk` | partly | compact seed-frame coordinate scaffold; no absolute position features | hidden from app catalog because it fails strict compact-growth coverage/render/topology gates |
-| `teapot_growth_3d.bpk` | partly | compact seed-frame coordinate scaffold; no absolute position features | hidden from app catalog after seed-varied validation exposed held-out fragility |
+| `uv_torus_growth_3d.bpk` | partly | compact seed-frame coordinate scaffold; no absolute position features | hidden from app catalog because it fails strict no-scaffold, coverage/render, and timing gates |
+| `teapot_growth_3d.bpk` | partly | compact seed-frame coordinate scaffold; no absolute position features | hidden from app catalog because it fails strict no-scaffold plus seed-varied render/coverage gates |
 | `--training-mode projection-baseline` | local update, biased seed | residual/color seed channels | diagnostic only |
 | `--training-mode rollout-local` | local student | teacher generated from biased seed-frame baseline | plumbing diagnostic |
 | `ablate-local-3d` | yes | none; random ball + local rollout rows | fails current gates |
@@ -45,15 +75,30 @@ per-particle targets.
 
 This pass adds explicit compact neutral growth seeds:
 
+- `ParticleSeed::Growth3d`
+- `ParticleSeed::SubstrateGrowth3d`
+- `ParticleSeed::LocalGrowth3d`
+- `ParticleSeed::LocalSubstrateGrowth3d`
 - `ParticleSeed::TorusGrowth3d`
 - `ParticleSeed::TeapotGrowth3d`
+- `ParticleSeed::TorusLocalGrowth3d`
+- `ParticleSeed::TeapotLocalGrowth3d`
+- `ParticleSeed::TorusLocalSubstrateGrowth3d`
+- `ParticleSeed::TeapotLocalSubstrateGrowth3d`
 
-These seeds match the 2D growing setup more closely than the legacy 3D
-morphogen seeds: particles are sampled from a compact random ball, hidden state
-is zero except for a sparse opacity/alive core, and no target residual, normal,
-signed-distance, color, particle index, or target sample is written into state.
-The older `TorusMorphogenDense3d` and `TeapotMorphogenDense3d` modes remain as
-diagnostic seed-frame baselines only.
+The generic seeds are the promotion-facing path. The torus/teapot-named growth
+seeds remain only as legacy aliases for existing artifacts and historical
+regression reports. These seeds match the 2D growing setup more closely than
+the legacy 3D morphogen seeds: particles are sampled from a compact random ball, no target
+residual, normal, signed-distance, color, particle index, or target sample is
+written into state, and activation starts from a sparse opacity/alive core. The
+non-`Local` variants still write a normalized seed-frame coordinate scaffold
+into state channels `0..2`, so the latest strict validation treats them as
+hidden diagnostics rather than fully local conditionless candidates. The
+`Local` variants keep the same compact/substrate position and liveness topology
+but leave those coordinate channels neutral. The older `TorusMorphogenDense3d`
+and `TeapotMorphogenDense3d` modes remain as diagnostic seed-frame baselines
+only.
 
 The conditionless local ablation now starts from a stable small-weight local
 student with a weak opacity-gradient expansion prior plus a local opacity
@@ -88,6 +133,54 @@ render-proxy BPKs are retired from `assets/models`. New diagnostic runs should
 write into `target/` or `artifacts/` unless they pass the promotion checks
 below.
 
+New promotion candidates should use `ParticleSeed::LocalSubstrateGrowth3d` by
+default. Object-specific seed names should not be used for new catalog-bound
+training; they are compatibility names for the current hidden regression BPKs.
+
+The shared-base adapter path now has core training support:
+
+- `NpaLowRankAdapter` materializes a LoRA-style low-rank delta on top of shared
+  `NpaWeights`.
+- `project_low_rank_adapter_gradients` maps full MLP gradients from existing
+  rollout/render losses into adapter-factor gradients.
+- `supervised_adapter_train_step` and `run_supervised_adapter_training` update
+  only adapter parameters while leaving the shared base model unchanged.
+- `train-render3d` defaults to `--weight-update-mode adapter`; both proxy and
+  direct-rollout backends project their objective gradients into the adapter,
+  including the direct multi-seed update path.
+- Adapter training reports record the rank, alpha, seed, adapter parameter
+  count, shared-base parameter count, materialized parameter count, and the
+  fact that the current BPK export is a materialized compatibility artifact.
+- Adapter manifests are now first-class JSON artifacts.
+  `train-render3d-adapters` initializes an object-agnostic conditionless-local
+  3D growth base when `--base-model` is omitted, runs the full built-in
+  many-object target bank by default, alternates full-weight shared-base
+  training for
+  `--shared-base-cycles` cycles, saves `shared_base.bpk`, evaluates that frozen
+  base on all suite targets, then trains one LoRA adapter per target. With
+  `--base-model`, shared-base cycles default to zero so existing bases stay
+  frozen unless continuation is requested explicitly. `--target-set core` is
+  the smaller torus/teapot diagnostic subset. The no-arg many-object path
+  defaults to two shared-base cycles and an effective
+  `--auto-holdout-stride 4 --auto-holdout-offset 3`, giving held-out
+  adapter-only splits as the object bank grows. The suite saves
+  `<target>.adapter.json`, saves a materialized `<target>_materialized.bpk` only
+  for validation/viewer compatibility, writes aggregate shared-base and adapted
+  train/holdout summaries with explicit target/split counts, and emits
+  `adapter_bank.json` as the compact condition-to-LoRA supervision artifact for
+  HyperNPA experiments.
+
+The next promotion-facing training experiments should use the same
+rollout/render objectives on a shared base model, train per-target adapters for
+many objects, and evaluate both train and held-out adapter-only splits before
+considering full-weight specialization.
+
+Object-specific particle seeds are explicitly not the desired abstraction for
+new models. They remain only to load and validate historical torus/teapot
+artifacts. New 3D targets should add target geometry, render/coverage losses,
+catalog metadata, and adapter training/evaluation cases while reusing generic
+neutral growth seeds and shared base dynamics.
+
 The app-scale promotion/regression harness is:
 
 ```bash
@@ -101,10 +194,11 @@ artifacts hidden until their strict coverage/render blockers are cleared. The ro
 report now requires color-state emergence and particle-order permutation
 consistency across all three seeds before a 3D artifact is considered
 app-catalog safe. It also records minimum active seed count, final active count,
-newly activated fraction, active growth ratio, worst render loss, minimum
-density/color/depth PSNR, minimum target coverage, and seed-perturbation
-stability across the seed sweep so static, precolored, brittle, or single-seed
-artifacts cannot look catalog-safe through primary-seed render metrics alone.
+newly activated fraction, active growth ratio, minimum target-normalized active
+extent, worst render loss, minimum density/color/depth PSNR, minimum target
+coverage, and seed-perturbation stability across the seed sweep so static,
+precolored, collapsed, brittle, or single-seed artifacts cannot look
+catalog-safe through primary-seed render metrics alone.
 
 The active artifact validation reports can be regenerated with:
 
@@ -253,9 +347,10 @@ samples are checked against their nearest final particle, with mean/max coverage
 distance and covered-surface fraction serialized for each rollout case. This
 rejects partial-object collapse even when particle-to-surface distance looks
 reasonable. The strict report also records final active count, newly activated
-inactive particles, newly activated fraction, and active-front radius, so active
-catalog artifacts must demonstrate visibility growth beyond the sparse core
-instead of only moving pre-visible particles.
+inactive particles, newly activated fraction, active-front radius, and
+target-normalized active extent, so active catalog artifacts must demonstrate
+visibility growth beyond the sparse core and fill a meaningful target-scale 3D
+volume instead of only moving pre-visible particles.
 | teapot, opacity gain `0.025` | `0.0076` | failed | `40.8%` | `0.110` | `0.299` | `6.6e-3` | `6.12..6.16` | `2.743` |
 | torus, sparse-core + clamped render-refined active asset | n/a | failed | n/a | `0.181` | `0.852` | `1.8e-2..3.3e-2` | `8.68..18.56` | `0.929` |
 | teapot, older primary-seed render-safe asset | n/a | failed | n/a | not gated here | not gated here | `1.9e-2..3.4e-2` | bounded in catalog sanity | `0.798` |
@@ -568,9 +663,11 @@ collective dynamics rather than through one-step mesh projection labels.
    - Done interim: `--perception-position-gain` damps those sharp SPH position
      derivatives; unit gain regresses morphology, while the default `0.05`
      improves short render probes without passing strict gates.
-   - Done ablation: `--direct-selection-seed-training` averages clipped
-     direct-rollout SGD deltas over the selection seed set. It did not improve
-     the 1024-particle torus/teapot strict probes, so it remains opt-in.
+   - Done/default: direct-rollout training averages clipped SGD deltas over the
+     selection seed set. Earlier probes did not improve the 1024-particle
+     torus/teapot strict scores enough for promotion, but the robust multi-seed
+     path is now the default; use `--no-direct-selection-seed-training` only for
+     single-seed ablations.
    - Done ablation: `--trajectory-render-gain`/`--trajectory-render-samples`
      inject render/coverage adjoints at sampled rollout snapshots. The first
      1024-particle probes regressed strict score (`teapot=1.105`,
@@ -955,15 +1052,16 @@ best teapot and torus diagnostics. Neither artifact was promoted.
 
 Code changes:
 
-- `train-render3d --direct-line-search` now evaluates multiple effective SGD
-  step scales for direct-rollout render training and keeps the no-op candidate
-  unless a candidate improves the existing strict multi-seed selection score
-  without morphology regression.
+- `train-render3d` now defaults to strict direct line search, evaluating
+  multiple effective SGD step scales for direct-rollout render training and
+  keeping the no-op candidate unless a candidate improves the existing strict
+  multi-seed selection score without morphology regression.
 - The selected scale is written to each render training history row as
   `train_step_scale`. A scale of `0` means the line search intentionally kept
   the current model for that round.
-- Line search is opt-in because strict scoring evaluates additional rollouts and
-  render losses for every candidate scale.
+- `--direct-line-search=false` keeps the older single-step update available for
+  ablations, but the robust training path uses the guarded line search by
+  default despite its extra rollout/render evaluations.
 - `train-render3d --direct-material-output-only` masks direct-rollout gradients
   down to the final material-opacity output row. This keeps hidden features,
   motion rows, liveness rows, and color rows fixed during a render-density
@@ -1135,6 +1233,651 @@ topology formation. The next required backend change is not more gain tuning; it
 is a rollout-level optimizer with dense multi-view render/density gradients and
 an explicit learned morphogen-coordinate loss that is generic over mesh targets.
 
+The 2026-07-01 direct-rollout continuation tightened this conclusion rather
+than resolving it. Direct temporal liveness-output supervision and a
+temporal-regression-aware line-search selector can move compact teapot timing
+from a final-sample burst to `1 -> 1 -> 12 -> 32` active particles over
+`0/1/2/4` steps, but six-round probes still plateau at that first selected
+checkpoint and fail strict temporal geometry, coverage, normal, color, and
+render gates. The selector now records
+`selection_max_temporal_activation_schedule_error` and rejects activation
+breakthrough/refinement candidates that worsen the activation schedule unless
+they are already progressive. That makes the direct optimizer safer, but the
+remaining architecture gap is phase-aware recurrent morphogen state and
+rollout-level render/density supervision that can keep improving after the
+first local activation breakthrough.
+
+A historical follow-up changed the temporal target schedule from linear to
+quadratic in rollout fraction so short 3D rollouts no longer required
+non-local first-step activation from a sparse seed. That improved compact
+strict scores without relaxing gates: teapot moved from `69.082` to `67.218`
+with timing `1 -> 1 -> 10 -> 32`, and torus moved from `90.250` to `77.042`
+with timing `1 -> 1 -> 9 -> 32`. The current trainer has since moved back to a
+linear half-rollout-aligned target with stricter burst rejection; the later
+compact reports below are the current evidence. A soft material-training
+radius now provides opacity pressure for active particles approaching the mesh
+surface, while strict material-visible validation still uses the original
+coverage threshold. A separate material update cap now defaults to `0.75`, so
+material opacity no longer shares the much smaller liveness cap. The cap and
+soft radius are
+unit-tested and slightly improve compact render loss, but they still do not
+improve four-step strict scores because target coverage remains too sparse for
+material-visible coverage to become nonzero. Direct rollout now also applies
+the generic mesh coverage/surface-projection target directly to trajectory
+motion outputs and reports `train_motion_output_delta_norm`; a one-round torus
+diagnostic selected a nonzero motion update (`0.00069`) but still left target
+coverage at `0.0625`. This keeps the implementation aligned with local growth,
+but the full blocker remains: generic 3D morphogenesis still needs stronger
+phase-aware geometry/material/color supervision that continues after early
+activation.
+
+The front-objective follow-up makes that blocker more explicit. Mesh motion
+output supervision now includes active particles plus dormant local-front
+particles; far dormant particles remain gated off. Material output supervision
+also treats predicted-active/local-front rows as candidates and reports
+material precursor metrics during selection. A compact torus one-round probe
+increased motion output update norm to roughly `0.00117` and material output
+update norm to roughly `0.00373`, while reducing render loss to `0.91741`.
+However, only one particle crossed the material-visible threshold and target
+coverage remained `0.0625`. A raw no-line-search continuation from that
+checkpoint improved render loss but destroyed timing/local geometry, raising
+strict score above `120`; the line-search rollback is therefore doing the right
+thing. The remaining research step is not simply stronger opacity gain. It is a
+phase-aware rollout objective that can improve surface/material/color coverage
+after activation without collapsing temporal geometry.
+
+The direct mesh-output path now also includes a small generic target-extent
+term, implemented with explicit active/local-front row weights rather than a
+global dormant wakeup. The helper test
+`render_proxy_target_extent_updates_expand_weighted_active_bounds` verifies
+that weighted boundary rows expand toward target bounds while zero-weight far
+dormant rows remain untouched. Compact probes confirm this does not change the
+research conclusion: torus stayed at strict score `77.041` with
+material-visible coverage `0.0`, while teapot improved only slightly
+(`0.91724` render loss, strict score `67.106`) and still had one
+material-visible particle with zero material-visible target coverage. Extent
+pressure is therefore a useful generic support term, not a substitute for a
+rollout-phase objective that grows visible material over the mesh.
+
+The following material pass makes the same active/local-front weighting
+available to material target coverage and surface-strata coverage updates.
+This removes an implementation mismatch where the direct material output
+objective could see local-front rows, but the coverage helpers only assigned
+target samples to already-live rows. Unit tests now verify weighted material
+target coverage, weighted material surface-strata coverage, and local-front
+material-visible liveness output. Compact probes show the weighted coverage
+path is safe but insufficient: torus remains at material-visible target
+coverage `0.0`, teapot render loss improves only to `0.91723`, and both retain
+only one material-visible particle. A direct material-liveness output ablation
+improved render loss further but worsened torus strict score to `77.211`
+without increasing material-visible coverage, so it is documented as an
+ablation hook rather than enabled in the default trainer. The remaining gap is
+still a coupled phase-aware objective that first grows local support, then
+continues geometry/material/color coverage without letting render loss select
+timing regressions.
+
+The retained July 1 follow-up narrows that ablation into the default material
+objective instead of using a separate global liveness term. Dormant local-front
+rows now receive bounded liveness-output pressure only when the material
+objective is already pushing that row visible, the row is close to the target
+surface, and the temporal activation schedule still has capacity. This removes
+the rejected quadratic material phase schedule, which reduced material
+supervision too much and did not improve coverage. Compact probes improved
+render loss (`torus 0.91733`, `teapot 0.91703`) and increased liveness/material
+output deltas, but strict material-visible target coverage remained `0.0`.
+
+Mesh coverage output supervision also now has a weighted local-front helper:
+`render_proxy_weighted_target_coverage_updates` assigns target coverage
+pressure across active and weighted local-front rows while keeping zero-weight
+far dormant rows untouched. The helper is unit-tested and is useful plumbing
+for generic growth, but compact probes show no final active-coverage lift yet
+(`0.0625` torus, `0.013671875` teapot). The next step remains a stronger
+rollout-phase objective that keeps surface coverage improving after activation
+without selecting bursty all-particle activation.
+
+The current short-probe selector is stricter than the earlier material
+ablation notes: activation breakthroughs and post-activation refinement are no
+longer retained unless temporal activation is progressive, and bounded
+temporal-front precursor retention now rejects active-count bursts. The
+training temporal target is linear in rollout fraction so the output objective
+matches the strict half-rollout activation gate. This avoids selecting the old
+all-active shortcut, but compact probes still fail in a more honest way:
+`target/probe_torus_offsurface_material_r2_report.json` remains at timing
+`1 -> 1 -> 1 -> 20`, material-visible target coverage `0.0`, and strict score
+`90.546`; `target/probe_teapot_offsurface_material_r2_report.json` remains at
+timing `1 -> 1 -> 1 -> 4`, material-visible target coverage `0.0`, and strict
+score `102.139`.
+
+The material objective now also preactivates off-surface local-front rows when
+the same row is receiving weighted material pressure, while leaving far dormant
+rows untouched
+(`material_visibility_output_objective_preactivates_offsurface_local_front_rows`).
+That corrected objective-level mismatch did not change the compact probes,
+which means the remaining blocker is the direct rollout optimizer/selection
+finding useful staged geometry/material dynamics, not merely a missing
+candidate row in the material objective. These failures keep torus and teapot
+hidden from the catalog.
+
+The direct trainer now records per-round `direct_objective_diagnostics` so this
+failure can be attributed more precisely. On the refreshed 32-particle,
+4-step compact probes, temporal liveness, local phase, mesh motion, and
+material visibility all produce nonzero output-gradient pressure before MLP
+backprop. The local phase channel is now explicitly wired into the seeded
+conditionless 3D growth student and direct-rollout output objective:
+`target/probe_torus_phase_state_r2_report.json` reports `phase_rms=0.090`,
+`phase_post_cap_rms=0.088`, timing `1 -> 1 -> 1 -> 20`, strict score `90.546`,
+and material-visible target coverage `0.0`;
+`target/probe_teapot_phase_state_r2_report.json` reports `phase_rms=0.090`,
+`phase_post_cap_rms=0.089`, timing `1 -> 1 -> 1 -> 4`, strict score `102.139`,
+and material-visible target coverage `0.0`. The liveness/material channels
+also survive the configured cap (`liveness_post_cap_rms ~= 1.0`,
+`material_post_cap_rms = 0.125`), yet the selected checkpoints still stay
+late-bursty and material-invisible. Raising the liveness cap with
+`--liveness-update-multiplier 160` changes activation counts slightly and
+improves the teapot strict score (`102.139 -> 92.023`), but it regresses render
+loss and leaves material-visible target coverage at `0.0`.
+
+The next phase-material pass made the local student consume the same generic
+phase state in its material opacity head. This gave the seeded model a causal
+route from local growth phase to visible material without adding any
+shape-specific target/index/position scaffold, and
+`local_growth_student_model_uses_phase_for_material_maturation` guards the
+wiring. The short probes show this is still not enough:
+`target/probe_torus_phase_material_r2_report.json` improves render loss from
+`0.924593` to `0.924173` relative to the phase-state probe, but timing stays
+`1 -> 1 -> 1 -> 20`, material-visible count stays `1`, material-visible target
+coverage stays `0.0`, and strict score remains `90.546`.
+`target/probe_teapot_phase_material_r2_report.json` improves render loss from
+`0.924245` to `0.923622`, but timing stays `1 -> 1 -> 1 -> 4`,
+material-visible count stays `1`, material-visible target coverage stays
+`0.0`, and strict score remains `102.138`. Training history now includes
+`train_phase_output_delta_norm` so later probes can report whether phase
+objectives changed the output head, not only whether phase gradients existed.
+
+The CLI no-base render-training default has also been corrected to the strict
+conditionless local substrate seed family. New `train-render3d` runs now default
+to `TorusLocalSubstrateGrowth3d` / `TeapotLocalSubstrateGrowth3d`; these keep
+the connected substrate topology but leave the coordinate scaffold state
+neutral. Position-feature base models still resolve to field seeds. This
+removes the remaining mismatch where the command claimed conditionless-local
+growth but initialized a scaffolded target growth seed. A 64-particle smoke
+validation against the current hidden torus artifact reports
+`seed_coordinate_scaffold=false`, no `no_seed_coordinate_scaffold` failure, and
+`non_opacity_seed_abs_max=0.0`; it still fails strict growth/render checks
+(`2 -> 6`, strict score `130.568`). This is an eligibility fix, not an
+accuracy improvement.
+
+`train-render3d` reports now also serialize `strict_gate_summary`, a compact
+copy of the catalog-blocking evidence from `growth_validation`. The first
+no-scaffold direct-rollout smokes for torus and teapot both keep
+`strict_passed=false` and `gate_passed=false`: torus reaches only `2 -> 5`
+active particles with `0.039` target coverage, `0.0059` material-visible target
+coverage, and strict score `132.647`; teapot reaches only `2 -> 6` active
+particles with `0.0547` target coverage, `0.0` material-visible target coverage,
+and strict score `122.548`. The summary is for sweep ranking and auditability;
+it does not relax the promotion gate.
+
+The direct material objective now uses the same local-front/mesh-motion
+candidate weights as temporal liveness when deciding which dormant front rows
+may receive material and bounded liveness pressure. This keeps material
+preactivation coupled to geometry-forming rows instead of treating every local
+front candidate equally. The unit test
+`material_visibility_output_objective_couples_local_front_to_mesh_motion`
+guards the behavior. Tiny 64-particle no-scaffold smokes remained effectively
+neutral rather than promotion-quality: torus stayed at strict score `132.647`
+and teapot stayed at strict score `122.548`, with unchanged target/material
+coverage. This narrows the next gap to stronger rollout optimization or model
+capacity rather than uncoupled material activation.
+
+The mesh geometry objective also now has a generic local-front expansion term:
+dormant front particles get a bounded outward motion target away from nearby
+active support before they have enough visible coverage to be assigned to the
+mesh surface. This is target-agnostic and tested by
+`local_front_expansion_updates_push_dormant_front_outward`. The objective raises
+direct mesh-motion gradient RMS in tiny no-scaffold smokes (`0.00204 -> 0.00239`
+for torus, `0.00169 -> 0.00205` for teapot), but it does not yet change strict
+runtime outcomes: torus remains at strict score `132.647`, teapot remains at
+`122.548`, and both stay below coverage/material gates. A current
+`validate-growth3d` rerun now also names the collapsed-support failure as
+`active_extent_growth`: torus reaches only `0.0239` target-normalized active
+bbox diagonal and `0.0191` minimum axis extent ratio, while teapot reaches
+`0.0255` bbox diagonal and `0.00936` minimum axis extent.
+
+The guarded render-training selector now serializes the minimum active bbox and
+min-axis extent ratios across selection seeds for every history row and treats
+extent shrinkage as morphology regression. The targeted unit test is
+`render_selection_score_penalizes_active_extent_regression`. A one-round torus
+smoke, `target/selection_extent_smoke_report.json`, records selection
+bbox/min-axis ratios `0.0239`/`0.0157`; it still fails strict validation with
+`active_extent_growth=false`, which is the desired non-promotion behavior for a
+collapsed compact rollout.
+
+The latest bounded active-liveness sustain pass keeps this line honest. The
+student now has a local, target-agnostic active-row sustain controller that is
+covered by
+`local_growth_student_model_sustains_active_liveness_without_global_activation`:
+inactive substrate rows stay dormant, active rows get small support, and
+over-saturated liveness is damped. The compact torus rerun
+`target/probe_torus_active_sustain_r1_report.json` improves seed retention
+(`1 -> 3` final active rows and strict score `143.170 -> 141.637`), but render
+loss regresses to `0.930443` and all geometry/material coverage gates remain
+failed. The matching teapot probe
+`target/probe_teapot_active_sustain_r1_report.json` regresses against the
+earlier phase/material compact run (`strict_score=131.167`, render loss
+`0.971618`, `3` selected final active rows). Inference from both candidates
+reaches `11/128` active rows at 24 steps and `128/128` at 64 steps, while motion
+remains tiny (`mean_dx_last=0.000090/0.000067` at 24 steps for torus/teapot and
+`0.000021/0.000028` at 64 steps). This rules out "just keep liveness alive" as
+the missing mechanism; the next backend step must couple activation to geometry
+and material rollout losses strongly enough to avoid static or flooding
+dynamics.
+
+The next direct-rollout pass made that coupling explicit. Temporal liveness
+activation candidates are now gated by mesh-motion output pressure in the
+direct backend: overactive-row suppression remains, but dormant local-front
+rows are only activated by the temporal objective when the mesh objective is
+also trying to move them. `mesh_motion_post_cap_rms` is now recorded so reports
+can distinguish "motion pressure was capped away" from "motion pressure did not
+become useful rollout dynamics." The torus mesh-gain ablation shows it is not a
+cap issue: `target/probe_torus_motiondiag_meshgain020_r1_report.json` raises
+pre/post-cap mesh RMS to `0.002980`, but selected metrics are unchanged. The
+mesh-coupled probes reduce temporal liveness nonzero fraction from roughly
+`0.42` to `0.078` and slightly increase motion/material output deltas, yet
+still fail strict checks. `target/probe_torus_meshcoupled_r1_report.json`
+stays at strict score `142.215`; `target/probe_teapot_meshcoupled_r1_report.json`
+improves render loss relative to the active-sustain teapot probe
+(`0.971618 -> 0.965044`) but still has strict score `131.711`. Both reach
+`64/64` active particles by 24-step inference while motion remains tiny. This
+rules out pure temporal-liveness pressure as the only source of flooding, and
+pushes the next experiment toward local recurrent state/velocity/material
+controllers that keep mesh-motion improvements alive over rollout time.
+
+This makes the next experiment direction concrete: improve the rollout-level
+optimizer and local state representation so geometry, material visibility, and
+activation timing co-train, instead of continuing to add isolated front-row
+eligibility rules or globally increasing liveness speed.
+
+The latest local-state pass added a velocity-memory path and fixed the
+substrate seed topology. The student now mirrors mesh-motion output pressure
+into reserved velocity state outputs, boosts those sparse velocity channels,
+and reads/damps velocity memory into future motion. The substrate seed now uses
+connected radial dormant rays from the sparse active core out to the domain
+radius. This is closer to 2D growing NCA seeding because the active core has
+local dormant neighbors from the first step instead of a disconnected domain,
+while avoiding per-particle target seats.
+
+The result is measurable but still not a strict 3D morphogenesis solution.
+After fixing the radial substrate to stay connected under the actual kernel
+radius, 64-particle / 64-step validations no longer stall in the first shell.
+The current connected torus probe grows `2 -> 55` active particles with strict
+score `96.051`, render loss `1.619`, density PSNR `-1.926` dB, target coverage
+`0.047`, and material-visible target coverage `0.023`. The matching teapot
+probe grows `2 -> 52`, with strict score `103.014`, render loss `0.957`,
+density PSNR `0.243` dB, target coverage `0.082`, and material-visible target
+coverage `0.016`. At 256 particles, torus grows `7 -> 202` and teapot grows
+`7 -> 192`, but strict scores remain above `100`. Both targets still fail
+strict timing, local-front, coverage, material, and render gates, so no
+artifact is promoted. The new blocker is controlled recurrent geometry/material
+distribution after activation starts propagating.
+
+Low-particle diagnostics now use an explicit minimum 3D active nucleus
+(`GROWTH_3D_MIN_ACTIVE_SEED_COUNT=8`) so 64- and 128-particle runs have a
+real local front instead of a two- or three-particle degenerate seed. This is
+still conditionless and local: active particles occupy the same stratified core
+and dormant particles remain on radial substrate rays, with no target
+coordinates or per-index seats. The strict sparse-seed gate accepts the exact
+one-eighth active boundary, but catalog promotion remains blocked by the full
+morphogenesis/render gates. Current 64-particle, 4-step smokes grow only
+`8 -> 11` active particles: torus reaches density PSNR `1.173` dB and strict
+score `142.319`, while teapot reaches density PSNR `1.022` dB and strict score
+`131.803`. The seed is no longer the limiting degeneracy; the remaining gap is
+longer-horizon local activation, surface/normal/material coverage, and
+render-loss optimization.
+
+The temporal objective was then tightened to prevent a nonlocal wake-up
+shortcut. Previously, direct rollout liveness used the full activation deficit
+to expand the front candidate set, which could train far dormant substrate
+particles to activate together at the final sample. The bounded version only
+promotes a small nearest local shell and suppresses positive liveness drift
+outside that shell. In 16-step validation this removes the `8 -> 64` global
+burst and restores local-front coherence: a one-round 16-step torus probe
+reaches `8 -> 13` active particles with all new activations local-front
+coherent, but still fails strict gates with score `129.987`. The next model
+gap is therefore not seed topology or nonlocal activation leakage; it is making
+local propagation fast enough while also improving mesh/render coverage and
+material visibility.
+
+Follow-up direct-objective ablations refined the local propagation signal
+without changing the promotion status. Mesh-motion activation candidates now
+use normalized relative motion strength, so stronger mesh-supported local-front
+rows are selected before weaker ones. The direct objective also supplies a
+bounded local-front liveness floor when the rollout is under the temporal
+activation schedule; this preserves 2D-NCA-like local propagation pressure
+without giving far dormant substrate a global wake-up path. Focused unit tests
+cover both behaviors.
+
+The next scaling pass removed another artificial training bottleneck: local
+front helpers no longer cap the adaptive shell at eight particles. Generic
+front objectives now use a bounded `ceil(rows / 16)` shell capped at 64 rows,
+and temporal activation now uses `ceil(rows / 4)` with a row-scaled cap of
+`ceil(rows / 8)`, clamped to `16..512`. The direct trainer also feeds this
+expanded temporal shell into the mesh-coupled liveness candidate weights before
+calling the gated temporal objective, so expanded local-shell rows are not
+masked back to zero by the fixed-radius mesh floor. This keeps the objective
+local while allowing 64-particle smokes to train more than eight dormant
+candidates and 1024+ particle app-scale runs to expose a larger local
+wavefront. Unit tests cover the budget math, explicit candidate gating, and
+the expanded-shell candidate floor. A compact 16-step torus probe increased the
+selected active count from roughly `12` to `15`-`16` and improved the
+temporal/front liveness margins, but strict validation still failed at score
+`130.121` with material-visible target coverage `0.0`. The matching teapot
+probe stayed at `8 -> 12` active particles with strict score `119.867`.
+
+The same scaling and expanded-shell candidate change was also checked at 1024
+particles. A one-round torus probe selected a guarded checkpoint with nonzero
+liveness/phase/motion updates and local-front coherent activation, but strict
+validation still failed: `216/1024` final active particles, newly activated
+fraction `0.1888`, target coverage `0.1846`, material-visible target coverage
+`0.0313`, density PSNR `0.612 dB`, and strict score `109.526`. This is a
+throughput and objective-shaping fix, not a solved 3D morphogenesis result.
+The remaining work is still a stronger rollout-level optimizer/representation
+that couples local activation, surface support, material visibility, and
+rendered density.
+
+The direct backend also now keeps a small terminal active-count anchor during
+trajectory-supervised training (`25%` of the configured liveness gain) and
+reports it separately from output-gradient diagnostics. A 512-particle torus
+probe produced `terminal_liveness_state_rms=0.0372` across `31.1%` of terminal
+rows and selected a bounded checkpoint, but strict validation still failed:
+`101/512` final active particles, newly activated fraction `0.1747`, target
+coverage `0.125`, material-visible target coverage `0.0605`, density PSNR
+`0.591 dB`, and strict score `109.321`. This confirms endpoint active-count
+pressure is present, but the dominant gap remains coupled rollout geometry,
+material visibility, and render-density optimization.
+
+The 2026-07-01 direct-objective pass tested whether missing velocity-state
+supervision was the reason compact 3D candidates still look too static. Mesh
+residuals now train the local velocity state outputs for active and local-front
+particles, with the same local gating and RMS caps as other direct-rollout
+signals. This produced measurable velocity pressure in short probes
+(`residual_velocity_rms=0.00516` torus, `0.00681` teapot; post-cap RMS
+`0.01435`/`0.01466`) but did not pass strict gates. The one-round torus probe
+still ended at `101/512` active particles, newly activated fraction `0.1747`,
+target coverage `0.125`, material-visible target coverage `0.0605`, density
+PSNR `0.591 dB`, and strict score `109.321`; teapot ended at `96/512` active,
+newly activated fraction `0.1647`, target coverage `0.4043`, material-visible
+coverage `0.0020`, density PSNR `0.507 dB`, and strict score `89.996`.
+
+The same pass added an output-level active-surface escape suppression term for
+liveness, but the short primary-seed trajectories did not activate it because
+their training snapshots stayed below the strict surface threshold. Multiseed
+direct training is more relevant: a torus one-round run with selection-seed
+training enabled improved render loss to `0.903445`, density PSNR to
+`0.607 dB`, and strict score to `109.315`, but all major strict morphogenesis
+gates still failed. A four-round multiseed torus run showed the current tradeoff
+clearly: later checkpoints increased heldout active count from `97` to `137`
+and reduced temporal activation error from `0.1306` to `0.1219`, but were
+rejected because active-surface max exceeded the strict surface envelope
+(`0.419..0.437`) while coverage stayed too low. The next experiment should
+couple activation eligibility to coverage/material progress across the same
+seed set used for selection, rather than adding more single-seed velocity
+pressure.
+
+The selection report now also tracks material-visible target mean/max distance.
+This is a precursor metric for the hard material-visible coverage gate: visible
+particles can move toward the target surface for several rounds before any of
+them cross the strict coverage threshold. The selector adds a small
+distance-based score term and treats material-visible distance regression as a
+morphology regression, while the strict gate still requires the original
+coverage fraction, surface profile, normal coverage, and render PSNR checks.
+Compact torus/teapot probes serialize the new fields and remain blocked:
+torus reports material-visible target mean/max `0.961`/`1.230` with coverage
+`0.0` and strict score `130.121`; teapot reports `0.383`/`0.711` with coverage
+`0.0` and strict score `119.867`. This makes the optimizer/selector more
+aware of pre-coverage material approach, but it is not promotion evidence.
+
+The next pass adds a material-visible surface approach objective without
+turning the task into assigned-seat fitting. It projects render-visible
+material rows to the target mesh only when they are already live or inside the
+bounded local front, and feeds that signal through proxy targets,
+direct-rollout output gradients, and terminal/trajectory position adjoints.
+Unit tests cover active visible rows, local-front visible rows, far dormant
+suppression, gradient sign, and adjoint sign. Compact one-round probes remain
+strict-failing, but material-visible coverage is no longer zero: torus reaches
+mean/max target distance `0.844`/`1.188`, material-visible coverage `0.043`,
+surface-tail p99 `0.054`, and strict score `99.358`; teapot reaches
+`0.309`/`0.570`, coverage `0.023`, surface-tail p99 `0.234`, and strict score
+`88.881`. This is useful evidence for surface approach, but surface-profile
+coverage, normal coverage, render density, and growth timing still block
+promotion.
+
+Material-visible surface coverage now has the same generic treatment. A shared
+row-weight helper selects only live visible material and visible bounded-front
+material, then reuses the existing surface-strata and normal-bin coverage
+relocation helpers. This path is wired through proxy supervision,
+direct-rollout output gradients, and terminal/trajectory position adjoints.
+Unit tests verify local eligibility, uncovered-bin relocation, gradient sign,
+and adjoint sign. The compact probes still choose the baseline checkpoint
+(`train_step_scale=0.0`), so current evidence is objective coverage rather
+than promoted training improvement. Torus remains at material-visible
+profile/normal coverage `0.0625`/`0.269` and strict score `99.358`; teapot
+remains at `0.1875`/`0.192` and strict score `88.881`.
+
+These changes are directionally correct but not sufficient. The latest
+direct-rollout line-search pass separates strict checkpoint promotion from
+bounded training continuation. Strict promotion remains gated by the full
+validation report, but training can now continue from a non-promotable
+candidate if it improves render/coverage/extent/activation metrics without a
+large temporal, surface-tail, or nonlocal-front regression. The line-search
+continuation path compares every candidate against the no-op baseline for that
+step, which keeps larger projection shortcuts from superseding smaller bounded
+updates. A new `ROBUST_3D_PHASE_GAIN=0.10` floor also strengthens the local
+phase/progression channel without increasing liveness activation pressure.
+
+Compact one-round probes now move through this bounded continuation path, but
+still fail strict validation. Torus selects a scale-16 update, improves render
+loss to `0.82820076`, density PSNR to `1.0458411`, and strict score to
+`99.308075`, but still fails growth timing, target/material-visible coverage,
+surface/normal coverage, torus angular coverage, and render gates. Teapot
+selects the smaller safe scale-16 update instead of the scale-32
+surface-escaping shortcut, improving render loss to `0.85735345`, density PSNR
+to `0.9054107`, surface-bin coverage to `0.359375`, and normal-bin coverage to
+`0.46153846`; strict score remains `98.424095`. No catalog model was promoted.
+
+The latest local-activation pass adds target-coverage liveness candidates. It
+uses existing mesh coverage updates to rank dormant local-front particles for
+activation, then shares the same candidate weights with temporal liveness and
+material-visibility objectives. This makes coverage demand part of the
+morphogenesis controller while remaining mesh-generic and index-free. The
+short probes show nonzero pressure (`target_coverage_liveness_rms=0.00147` for
+torus and `0.00053` for teapot, each touching about `12.9%` of rows), but they
+remain strict-failing: torus ends at `102/512` active, target/material-visible
+coverage `0.123`/`0.0625`, density PSNR `0.608 dB`, and strict score `109.308`;
+teapot ends at `96/512` active, coverage `0.404`/`0.002`, density PSNR
+`0.506 dB`, and strict score `89.991`. This is a useful local signal, not a
+promotion-quality 3D morphogenesis solution.
+
+The follow-up scheduled-extent objective targets the strict active-extent and
+mean-displacement blockers more directly. It pushes only live or bounded
+local-front boundary rows toward the target bounding support according to a
+temporal curriculum, with no per-sample seats and no arbitrary drift for
+particles exactly at the target center. The signal is measurable after tuning
+(`temporal_extent_motion_rms=0.00036` torus, `0.00038` teapot), but compact
+probes are still neutral rather than solved: torus remains at strict score
+`109.315`, target/material-visible coverage `0.123`/`0.061`, and density PSNR
+`0.608 dB`; teapot remains at strict score `89.991`, coverage `0.404`/`0.002`,
+and density PSNR `0.506 dB`. This confirms that support expansion alone is not
+enough; the next useful step needs to couple expansion with coverage/material
+redistribution over rollout time.
+
+The material-coverage liveness pass adds a first version of that coupling at
+the activation/materialization layer. Active visible material rows represent
+current material support, while dormant local-front rows can act as low-weight
+potential visible support before their material opacity crosses the visibility
+threshold. The resulting weighted coverage-update magnitudes feed direct
+liveness, temporal liveness, and material-visibility objectives without
+particle ids, target-specific seats, or far dormant activation. Unit tests
+cover candidate selection, liveness/material gradient signs, and direct
+diagnostics. Compact one-round probes show the signal is active but not enough:
+torus reports `material_coverage_liveness_rms=0.000115` over `17.4%` of rows,
+render loss `0.859797`, density PSNR `0.806 dB`, final active `23/128`, and
+strict score `130.879`; teapot reports `0.000135` over `12.0%` of rows, render
+loss `0.873122`, density PSNR `0.685 dB`, final active `15/128`, and strict
+score `121.074`. Material-visible coverage/profile/normal support remain at
+zero in these tiny probes, so this is objective wiring and diagnostic evidence,
+not a solved 3D morphogenesis model.
+
+The paired material-coverage front-motion pass makes the same potential support
+visible to spatial output training. The objective uses active visible material
+and dormant local-front material-coverage candidates as weighted rows for the
+generic target-coverage helper, then trains the MLP motion output toward those
+updates. It remains index-free and shape-generic; far dormant rows receive no
+coverage motion. Unit tests cover local-front motion eligibility, training
+gradient sign, and direct diagnostics. Compact probes show the new term is
+active (`material_coverage_motion_rms=0.000457` over `22.2%` of torus rows and
+`0.000388` over `19.0%` of teapot rows), but material-visible
+coverage/profile/normal support still remain at zero and strict scores remain
+`130.879`/`121.074`. This confirms the next blocker is not just exposing a
+motion signal; the rollout objective still needs to make the recurrent local
+controller sustain activation, materialization, and surface redistribution over
+time.
+
+The follow-up recurrent-memory pass now mirrors material-coverage front motion
+into the 3D velocity-memory output channels. This gives the local controller a
+stateful path for potential material support instead of treating that motion as
+a one-step spatial-only correction. Unit tests cover the memory sign/path and
+the direct diagnostics field. Compact probes show nonzero memory pressure
+(`material_coverage_motion_memory_rms=0.00256` torus, `0.00218` teapot), but
+the accepted MLP update remains tiny and strict outcomes are unchanged:
+material-visible coverage/profile/normal support stay at zero and strict
+scores remain `130.879`/`121.074`. The gap has therefore moved from missing
+memory wiring to optimizer/rollout strength: the trainer must make recurrent
+motion/material state accumulate across steps without selecting bursty or
+nonlocal shortcuts.
+
+The direct line-search continuation gate now requires actual bounded progress
+instead of accepting any morphology-non-regressed candidate. This prevents wide
+scale searches from continuing through no-op-looking checkpoints that merely
+avoid immediate strict morphology regression. Default teapot still keeps the
+useful scale-32 strict-selected step, while a scale-128 wide-search attempt now
+rolls back when it fails to improve the selection metrics. The inner
+morphology-recovery fallback also now requires strict-score improvement, and
+rolled-back rounds report `train_step_scale=0.0` so the history reflects the
+applied checkpoint rather than an attempted update. This is selection hygiene,
+not a solved objective: torus/teapot still have zero material-visible
+profile/normal support in the compact probes, and no catalog artifact is
+promoted.
+
+This makes the next research step sharper: the code needs a stronger
+recurrent/local mechanism or optimizer path that turns bounded front activation
+into sustained geometric/material distribution while preserving temporal
+growth, not more seed-radius or liveness scalar tuning.
+
+The latest direct-objective pass adds a temporal materialization signal on that
+same local-front path. Under-materialized local candidates now receive scheduled
+material-opacity output pressure alongside temporal liveness, without particle
+ids, target seats, or torus/teapot branches. Unit tests cover the schedule,
+local-front gating, material-update cap, and direct diagnostics. Compact probes
+show the new channel is active in real training
+(`temporal_materialization_rms=0.00780` over `21.3%` of torus rows and
+`0.00770` over `21.6%` of teapot rows), but the material output is already
+post-cap saturated (`material_post_cap_rms=0.0500`) while active/material
+support remains too compact. Torus ends at `17/128` active particles with
+strict score `131.493`; teapot ends at `15/128` with strict score `121.072`;
+both still have zero material-visible coverage/profile/normal support. This
+rules out "missing material-output wiring" as the next bottleneck. The remaining
+gap is stronger recurrent growth/geometry redistribution that can use the
+available liveness/material signals over longer rollouts without bursty or
+nonlocal shortcuts. No catalog artifact is promoted by this pass.
+
+The next wiring gap was scheduled extent motion. Extent-front and
+temporal-extent spatial targets now mirror into velocity-memory outputs through
+`add_extent_motion_memory_output_objective`, matching the recurrent treatment
+already used for mesh and material-coverage motion. This is still generic:
+target bounds and temporal schedule define the pressure, not per-particle
+assignment. Unit tests cover the sign/path, and direct diagnostics now expose
+`extent_motion_memory_rms` / `extent_motion_memory_nonzero_fraction`. Compact
+probes confirm nonzero recurrent extent pressure (`0.00717` over `25.5%` of
+torus rows, `0.00541` over `25.4%` of teapot rows), but strict scores and
+compact support remain effectively unchanged (`131.493` torus, `121.072`
+teapot; zero material-visible support). This narrows the next step again:
+scheduled expansion memory is wired, but the optimizer/rollout still fails to
+accumulate it into broad target coverage at compact scale. No catalog artifact
+is promoted.
+
+The optimizer path now uses direct-rollout-specific sublinear row
+normalization. Ordinary supervised batches still use true row averaging, while
+direct rollout gradients use `rows^-0.75` after the per-channel output
+objectives have already been RMS capped. This keeps scaling sublinear with
+particle count/trajectory length but avoids erasing sparse local-front signals
+before line search. Compact probes confirm the optimization strength changes in
+a controlled way: torus selects a smaller effective scale (`0.625`) and remains
+neutral, while teapot accepts scale `4.0`, increases output delta norms by
+roughly an order of magnitude, improves render loss to `0.872458`, active extent
+bbox ratio to `0.0772`, and strict score to `120.968`. Both still fail strict
+gates and have zero material-visible support, so this is an optimizer-strength
+step, not a promotion-quality 3D morphogen.
+
+The latest material/surface pass adds two generic precursor paths. First,
+active or predicted-active rows in the target surface band receive direct
+material-output pressure before they are render-visible. Second, the
+material-visible surface approach/coverage helpers include a scale-normalized
+candidate floor for active, predicted-active, and local-front rows, so capped
+material updates do not have to cross the visible threshold before geometry
+pressure can act. These paths are still conditionless/local: they use mesh
+projection distance and liveness/front candidate state, not target seats,
+particle ids, or torus/teapot-specific coordinates.
+
+The compact evidence is diagnostic, not promotable. Torus
+`target/candidate_surface_torus_probe_training.json` has nonzero
+`active_surface_materialization_rms=0.02385`, but still ends at `17/128` active
+particles, target coverage `0.0859`, material-visible coverage/profile/normal
+support `0.0`, and strict score `131.493`. Teapot
+`target/candidate_surface_teapot_probe_training.json` has
+`active_surface_materialization_rms=0.02379`, improves only to `16/128` active
+particles, target coverage `0.2109`, material-visible coverage/profile/normal
+support `0.0`, and strict score `120.966`. This rules out missing
+material/surface-candidate wiring as the primary blocker. The remaining
+research target is a stronger recurrent rollout objective/optimizer that turns
+local precursor pressure into sustained growth and broad surface distribution
+without selecting bursty activation or nonlocal shortcuts. No catalog artifact
+is promoted.
+
+The follow-up recurrent activation pass mirrors liveness pressure into the
+growth phase channel. This makes temporal/front activation stateful in the same
+spirit as the existing velocity-memory paths for motion, while preserving the
+same local candidate and burst-suppression gates. The compact probes show the
+signal is active (`liveness_phase_memory_rms=0.0150` torus, `0.0160` teapot;
+phase post-cap RMS around `0.029`), but strict outcomes are unchanged:
+`17/128` active particles and strict score `131.493` for torus, `16/128` active
+particles and strict score `120.966` for teapot, with zero material-visible
+support in both. The next step is therefore not more phase-memory wiring; it is
+stronger multi-round rollout optimization or a better differentiable rollout
+objective that can turn these recurrent pressures into broad accepted
+activation and surface redistribution without violating render and temporal
+gates.
+
+The seeded local-growth controller now has a matching inference-time
+phase-to-liveness bridge. It uses a dedicated hidden unit that fires only on
+local-front liveness contrast and writes a small bounded contribution into the
+liveness output; phase alone is insufficient to wake far dormant substrate
+particles. This preserves the conditionless/local requirement while preventing
+phase memory from being a dead-end state channel.
+
+Compact probes show the bridge is useful but not decisive. Torus
+`target/phase_liveness_bridge_torus_probe_training.json` increases accepted
+line-search scale to `16`, improves render loss to `0.797211`, improves density
+PSNR to `1.263`, and grows `18/128` active particles, but target coverage
+remains `0.0859`, material-visible coverage remains `0.0`, and strict score is
+still `131.306`. Teapot
+`target/phase_liveness_bridge_teapot_probe_training.json` also grows `18/128`
+active particles and improves strict score to `120.732`, but render loss
+regresses to `0.896240` and material-visible coverage remains `0.0`. The
+diagnosis is now sharper: phase/liveness recurrence is wired through the
+model, but strict success still needs an objective/optimizer that spreads
+activated material across the target surface instead of only increasing local
+activation strength. No catalog artifact is promoted.
+
 ## 2026-06-30 Seed-Varied Robustness And Normal-Coverage Update
 
 This pass fixed two training/validation issues that made earlier 3D results too
@@ -1174,3 +1917,33 @@ failure from "no tube support" to "surface/render control after tube support."
 The remaining torus problem is balancing normal coverage, surface projection,
 opacity/material density, and rollout timing under one robust multi-seed
 selection objective.
+
+## 2026-07-01 Material-Coverage Materialization And Active Material Maturation
+
+This pass adds one missing direct-rollout signal and strengthens one generic
+inference-time controller:
+
+- Material-coverage candidate materialization now has its own objective and
+  diagnostics (`material_coverage_materialization_rms`,
+  `material_coverage_materialization_nonzero_fraction`). It uses the existing
+  local material-coverage candidate weights and writes only render-material
+  output, so it remains conditionless/local rather than assigning target seats.
+- The seeded local-growth controller now materializes active rows faster
+  (`LOCAL_GROWTH_ACTIVE_MATERIAL_GAIN=0.50`) while retaining the same dormant
+  row guard and high-material self-damping.
+
+Compact evidence is directionally useful but still non-promotable:
+
+| probe | render total | density PSNR | active growth | material-visible count | material-visible target coverage | strict score |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| `target/active_material_gain_torus_probe_training.json` | `0.6686` | `2.055` | `8 -> 19` | `15` | `0.0` | `131.202` |
+| `target/active_material_gain_teapot_probe_training.json` | `0.8117` | `1.078` | `8 -> 17` | `15` | `0.0` | `120.813` |
+| high-gain torus ablation (`lr=0.002`, liveness/mesh `0.2`, cap `0.12`) | `0.6676` | `2.063` | `8 -> 21` | `15` | `0.0` | `131.159` |
+| high-gain teapot ablation (`lr=0.002`, liveness/mesh `0.2`, cap `0.12`) | `0.8106` | `1.084` | `8 -> 21` | `15` | `0.0` | `120.610` |
+
+The ablations show that the architecture can accept stronger local-growth
+updates, and render density improves, but material-visible support remains
+clustered near the seed core. The remaining work is not another opacity-only
+tweak; it is a stronger rollout objective/optimizer that couples local
+activation, motion, and material maturation far enough to produce target
+surface/profile/normal coverage before strict catalog promotion.
