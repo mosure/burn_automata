@@ -3,6 +3,7 @@ use super::*;
 mod color;
 mod geometry;
 mod liveness;
+mod strict_morphology;
 
 use color::render_selection_color_training_progress_beats;
 use geometry::{
@@ -13,6 +14,7 @@ use liveness::{
     precursor_front_liveness_margin_improved, render_selection_liveness_precursor_beats,
     render_selection_render_within_liveness_precursor_slack,
 };
+use strict_morphology::render_selection_strict_morphology_progress_beats;
 
 const PRECURSOR_STRICT_SURFACE_MATERIAL_MEAN_PROGRESS: f32 = 0.01;
 const PRECURSOR_STRICT_SURFACE_MATERIAL_MARGIN_PROGRESS: f32 = 0.01;
@@ -200,6 +202,8 @@ pub(crate) fn render_selection_training_progress_beats(
     let geometry_progressed =
         render_selection_geometry_training_progress_beats(selection, previous);
     let color_progressed = render_selection_color_training_progress_beats(selection, previous);
+    let strict_morphology_progressed =
+        render_selection_strict_morphology_progress_beats(selection, previous);
     if !((render_improved
         && (coverage_improved
             || material_distance_improved
@@ -207,7 +211,8 @@ pub(crate) fn render_selection_training_progress_beats(
             || activation_improved))
         || precursor_improved
         || geometry_progressed
-        || color_progressed)
+        || color_progressed
+        || strict_morphology_progressed)
     {
         return false;
     }

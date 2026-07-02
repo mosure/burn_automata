@@ -7,4 +7,5 @@ mod objective_config;
 mod sampling;
 mod scoring_regression;
 mod strict_and_robustness;
+mod strict_morphology_progress;
 mod training_progress;
