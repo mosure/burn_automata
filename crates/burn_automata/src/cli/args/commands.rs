@@ -460,8 +460,8 @@ pub(crate) enum Command {
         direct_selection_seed_training: bool,
         #[arg(long)]
         no_direct_selection_seed_training: bool,
-        #[arg(long, default_value_t = 0.72)]
-        seed_scale: f32,
+        #[arg(long)]
+        seed_scale: Option<f32>,
         #[arg(long)]
         seed_mode: Option<SeedModeArg>,
         #[arg(long, default_value_t = 0x0051_a73d)]

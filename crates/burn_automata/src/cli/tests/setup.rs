@@ -338,6 +338,45 @@ fn render_training_defaults_match_model_family() {
 }
 
 #[test]
+fn train_render3d_uses_target_specific_seed_scale_defaults() {
+    assert_eq!(
+        mesh_target_render_training_seed_scale(MeshTargetArg::Torus),
+        UV_TORUS_RENDER_TRAINING_SCALE
+    );
+    assert_eq!(
+        mesh_target_render_training_seed_scale(MeshTargetArg::Teapot),
+        TEAPOT_RENDER_TRAINING_SCALE
+    );
+
+    let args = CliArgs::try_parse_from(["burn_automata", "train-render3d"]).unwrap();
+    let Command::TrainRender3d { seed_scale, .. } = args.command else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(
+        seed_scale, None,
+        "omitted seed scale should be resolved from the target at execution time"
+    );
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-render3d",
+        "--target",
+        "torus",
+        "--seed-scale",
+        "0.9",
+    ])
+    .unwrap();
+    let Command::TrainRender3d { seed_scale, .. } = args.command else {
+        panic!("expected train-render3d command");
+    };
+    assert_eq!(
+        seed_scale,
+        Some(0.9),
+        "explicit seed scale should remain an ablation override"
+    );
+}
+
+#[test]
 fn render_training_validation_extra_seeds_dedupe_selection_set() {
     assert_eq!(
         render_training_validation_extra_seeds(42, &[99, 42, 7, 99]),

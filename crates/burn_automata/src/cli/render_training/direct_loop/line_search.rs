@@ -180,7 +180,8 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
         && best_progress_report.is_some()
         && render_selection_training_progress_beats(&best_progress_selection, &best_selection)
         && (best_progress_selection.score < best_selection.score
-            || best_progress_selection.render_loss < best_selection.render_loss)
+            || best_progress_selection.max_render_loss < best_selection.max_render_loss
+            || best_progress_selection.min_density_psnr_db > best_selection.min_density_psnr_db)
     {
         let progress_model = best_progress_model.take().expect("checked above");
         let progress_report = best_progress_report.take().expect("checked above");

@@ -7,6 +7,8 @@ pub(crate) const UV_TORUS_FIELD_OPACITY_TARGET: f32 = 6.0;
 pub(crate) const UV_TORUS_FIELD_OPACITY_GAIN: f32 = 0.10;
 pub(crate) const GROWTH_3D_VISIBLE_MATERIAL_OPACITY_TARGET: f32 = 6.0;
 pub(crate) const UV_TORUS_FIELD_SCALE: f32 = 0.72;
+pub(crate) const UV_TORUS_RENDER_TRAINING_SCALE: f32 = 0.54;
+pub(crate) const TEAPOT_RENDER_TRAINING_SCALE: f32 = UV_TORUS_FIELD_SCALE;
 pub(crate) const TEAPOT_FIELD_MOTION_GAIN: f32 = 1.0;
 pub(crate) const TEAPOT_FIELD_COLOR_GAIN: f32 = 0.4;
 pub(crate) const LOCAL_TORUS_MOTION_GAIN: f32 = 0.0;
@@ -115,6 +117,13 @@ pub(crate) fn mesh_target_for_arg(target: MeshTargetArg, scale: f32) -> Triangle
     match target {
         MeshTargetArg::Torus => uv_torus_mesh_target(scale),
         MeshTargetArg::Teapot => utah_teapot_mesh_target(scale),
+    }
+}
+
+pub(crate) fn mesh_target_render_training_seed_scale(target: MeshTargetArg) -> f32 {
+    match target {
+        MeshTargetArg::Torus => UV_TORUS_RENDER_TRAINING_SCALE,
+        MeshTargetArg::Teapot => TEAPOT_RENDER_TRAINING_SCALE,
     }
 }
 

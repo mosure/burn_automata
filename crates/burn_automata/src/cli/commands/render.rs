@@ -349,6 +349,7 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         no_direct_selection_seed_training,
     )?;
     let hashgrid = crate::kernels::HashGridConfig::growing_3dgs();
+    let seed_scale = seed_scale.unwrap_or_else(|| mesh_target_render_training_seed_scale(target));
     let requested_seed_mode = seed_mode.map(ParticleSeed::from);
     let target_mesh = mesh_target_for_arg(target, seed_scale);
     let (mut model, base_source, default_seed_mode) = if let Some(path) = base_model.as_ref() {

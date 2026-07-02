@@ -32,7 +32,16 @@ pub(crate) fn render_direct_rollout_multiseed_training_step(
         render_cfg.target_samples = cfg.particles;
     }
 
-    for seed in training_seeds {
+    let seed_selection_scores = direct_rollout_multiseed_selection_scores(
+        &base_model,
+        grid,
+        target,
+        cfg,
+        render_cfg,
+        &training_seeds,
+    )?;
+
+    for seed in training_seeds.iter().copied() {
         let mut candidate = base_model.clone();
         let report = if seed == render_training_round_seed(cfg, round) {
             render_direct_rollout_training_step(
@@ -66,12 +75,12 @@ pub(crate) fn render_direct_rollout_multiseed_training_step(
         });
     }
 
-    let seed_weights = direct_rollout_multiseed_loss_weights(
-        &seed_updates
-            .iter()
-            .map(|update| update.report.initial_loss)
-            .collect::<Vec<_>>(),
-    );
+    let initial_losses = seed_updates
+        .iter()
+        .map(|update| update.report.initial_loss)
+        .collect::<Vec<_>>();
+    let seed_weights =
+        direct_rollout_multiseed_objective_weights(&initial_losses, &seed_selection_scores);
     let mut delta = NpaWeights::zeros(&model.config);
     for (update, weight) in seed_updates.iter().zip(seed_weights.iter()) {
         accumulate_scaled_weight_delta(&mut delta, &base_weights, &update.weights, *weight);
@@ -124,6 +133,28 @@ pub(crate) fn render_direct_rollout_multiseed_training_step(
     })
 }
 
+pub(crate) fn direct_rollout_multiseed_objective_weights(
+    losses: &[f32],
+    scores: &[f32],
+) -> Vec<f32> {
+    let loss_weights = direct_rollout_multiseed_loss_weights(losses);
+    if loss_weights.is_empty() || scores.len() != loss_weights.len() {
+        return loss_weights;
+    }
+    let score_weights = direct_rollout_multiseed_loss_weights(scores);
+    if score_weights.len() != loss_weights.len() {
+        return loss_weights;
+    }
+
+    let mut weights = loss_weights
+        .iter()
+        .zip(score_weights.iter())
+        .map(|(loss_weight, score_weight)| 0.5 * (loss_weight + score_weight))
+        .collect::<Vec<_>>();
+    normalize_multiseed_weights(&mut weights);
+    weights
+}
+
 pub(crate) fn direct_rollout_multiseed_loss_weights(losses: &[f32]) -> Vec<f32> {
     if losses.is_empty() {
         return Vec::new();
@@ -151,16 +182,20 @@ pub(crate) fn direct_rollout_multiseed_loss_weights(losses: &[f32]) -> Vec<f32> 
             }
         })
         .collect::<Vec<_>>();
+    normalize_multiseed_weights(&mut weights);
+    weights
+}
+
+fn normalize_multiseed_weights(weights: &mut [f32]) {
     let total = weights.iter().sum::<f32>();
     if total.is_finite() && total > 0.0 {
-        for weight in &mut weights {
+        for weight in weights {
             *weight /= total;
         }
     } else {
         let uniform = (weights.len().max(1) as f32).recip();
         weights.fill(uniform);
     }
-    weights
 }
 
 pub(crate) fn render_direct_rollout_training_seeds(
@@ -175,6 +210,23 @@ pub(crate) fn render_direct_rollout_training_seeds(
         }
     }
     training_seeds
+}
+
+fn direct_rollout_multiseed_selection_scores(
+    model: &NpaModel,
+    grid: &crate::kernels::HashGridConfig,
+    target: &TriangleMeshTarget,
+    cfg: &RenderProxyTrainingConfig,
+    render_cfg: RenderLossConfig,
+    seeds: &[u64],
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut scores = Vec::with_capacity(seeds.len());
+    for &seed in seeds {
+        let selection_case =
+            render_selection_case_metrics(model, grid, target, cfg, render_cfg, seed)?;
+        scores.push(render_selection_case_score_with_baseline(seed, &selection_case, None).score);
+    }
+    Ok(scores)
 }
 
 pub(crate) fn render_direct_rollout_weighted_loss_for_seeds(

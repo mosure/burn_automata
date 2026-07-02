@@ -9,53 +9,13 @@ fn render_direct_rollout_backend_applies_mlp_gradients() {
     let before = model.weights.w2.clone();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
-        rounds: 1,
-        supervised_steps_per_round: 1,
         particles: 32,
         rollout_steps: 2,
         gradient_particles: 32,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
-        motion_gain: 1.0,
         perception_position_gain: 1.0,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
-        trajectory_mesh_gain: 0.0,
-        trajectory_render_samples: 0,
-        liveness_gain: 0.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-        coverage_gain: 0.0,
         coverage_samples: 0,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
-        coverage_normal_weight: 0.0,
-        extent_gain: 0.0,
-        full_coverage_adjoint: false,
-        surface_gain: 0.0,
-        surface_escape_gain: 0.0,
-        opacity_gain: 0.0,
-        material_liveness_gain: 0.0,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
-        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
         direct_line_search: true,
         direct_line_search_scales: vec![0.5, 1.0, 2.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
-        direct_selection_seed_training: false,
-        seed: 13,
-        selection_seed: None,
-        selection_seeds: Vec::new(),
         seed_scale: 0.72,
         seed_mode: ParticleSeed::UniformCircle,
         render: RenderLossConfig {
@@ -69,6 +29,7 @@ fn render_direct_rollout_backend_applies_mlp_gradients() {
             grad_clip_norm: 1.0,
             weight_decay: 0.0,
         },
+        ..direct_rollout_test_config()
     };
     let (trace, trajectory) = render_training_trajectory(&model, &grid, &cfg, 0).unwrap();
     let gradient = RenderProxyGradientRows {
@@ -107,53 +68,13 @@ fn render_proxy_history_records_direct_line_search_candidates() {
         local_growth_student_model(config, 21, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
-        rounds: 1,
-        supervised_steps_per_round: 1,
         particles: 32,
         rollout_steps: 2,
         gradient_particles: 32,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
-        motion_gain: 1.0,
         perception_position_gain: 1.0,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
-        trajectory_mesh_gain: 0.0,
-        trajectory_render_samples: 0,
-        liveness_gain: 0.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-        coverage_gain: 0.0,
-        coverage_samples: 0,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
-        coverage_normal_weight: 0.0,
-        extent_gain: 0.0,
-        full_coverage_adjoint: false,
-        surface_gain: 0.0,
-        surface_escape_gain: 0.0,
-        opacity_gain: 0.0,
-        material_liveness_gain: 0.0,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
-        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
         direct_line_search: true,
         direct_line_search_scales: vec![0.5, 1.0, 2.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
-        direct_selection_seed_training: false,
         seed: 17,
-        selection_seed: None,
-        selection_seeds: Vec::new(),
         seed_scale: 0.72,
         seed_mode: ParticleSeed::UniformCircle,
         render: RenderLossConfig {
@@ -167,6 +88,7 @@ fn render_proxy_history_records_direct_line_search_candidates() {
             grad_clip_norm: 1.0,
             weight_decay: 0.0,
         },
+        ..direct_rollout_test_config()
     };
 
     let report = run_render_proxy_training(&mut model, &grid, &target, cfg).unwrap();
@@ -252,66 +174,30 @@ fn direct_rollout_objective_diagnostics_reports_channel_pressure() {
     let model = local_growth_student_model(config, 31, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.54);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
-        rounds: 1,
-        supervised_steps_per_round: 1,
         particles: 32,
         rollout_steps: 4,
         gradient_particles: 8,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
         motion_gain: 0.0,
         perception_position_gain: 0.0,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
         trajectory_mesh_gain: ROBUST_3D_TRAJECTORY_MESH_GAIN,
-        trajectory_render_samples: 0,
         liveness_gain: 1.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
         liveness_update_multiplier: 20.0,
         coverage_gain: ROBUST_3D_COVERAGE_GAIN,
         coverage_samples: 32,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
-        coverage_normal_weight: 0.0,
         extent_gain: ROBUST_3D_EXTENT_GAIN,
-        full_coverage_adjoint: false,
         surface_gain: ROBUST_3D_SURFACE_GAIN,
         surface_escape_gain: ROBUST_3D_SURFACE_ESCAPE_GAIN,
         opacity_gain: ROBUST_3D_OPACITY_GAIN,
         material_liveness_gain: ROBUST_3D_MATERIAL_LIVENESS_GAIN,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
         direct_output_gradient_rms_cap: 0.125,
-        direct_line_search: false,
-        direct_line_search_scales: vec![1.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
-        direct_selection_seed_training: false,
         seed: 37,
-        selection_seed: None,
-        selection_seeds: Vec::new(),
-        seed_scale: 0.54,
         seed_mode: ParticleSeed::TorusLocalSubstrateGrowth3d,
-        render: RenderLossConfig {
-            image_size: 8,
-            target_samples: 32,
-            world_scale: 1.08,
-            ..RenderLossConfig::default()
-        },
         sgd: SgdConfig {
             learning_rate: 1.0e-3,
             grad_clip_norm: 1.0,
             weight_decay: 0.0,
         },
+        ..direct_rollout_test_config()
     };
     let (_, trajectory) = render_training_trajectory(&model, &grid, &cfg, 0).unwrap();
     let diagnostics = direct_rollout_objective_diagnostics(&model, &target, &trajectory, &cfg)
@@ -438,66 +324,9 @@ fn direct_rollout_training_honors_supervised_steps_per_round() {
     let before = model.weights.w2.clone();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.54);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
-        rounds: 1,
         supervised_steps_per_round: 3,
-        particles: 16,
-        rollout_steps: 1,
-        gradient_particles: 4,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
-        motion_gain: 1.0,
-        perception_position_gain: 0.05,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
-        trajectory_mesh_gain: 0.0,
-        trajectory_render_samples: 0,
-        liveness_gain: 0.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-        coverage_gain: 0.0,
-        coverage_samples: 16,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
-        coverage_normal_weight: 0.0,
-        extent_gain: 0.0,
-        full_coverage_adjoint: false,
-        surface_gain: 0.0,
-        surface_escape_gain: 0.0,
-        opacity_gain: 0.0,
-        material_liveness_gain: 0.0,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
-        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
-        direct_line_search: false,
-        direct_line_search_scales: vec![1.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
-        direct_selection_seed_training: false,
         seed: 29,
-        selection_seed: None,
-        selection_seeds: Vec::new(),
-        seed_scale: 0.54,
-        seed_mode: ParticleSeed::TorusGrowth3d,
-        render: RenderLossConfig {
-            image_size: 8,
-            target_samples: 32,
-            world_scale: 1.08,
-            ..RenderLossConfig::default()
-        },
-        sgd: SgdConfig {
-            learning_rate: 5.0e-4,
-            grad_clip_norm: 1.0,
-            weight_decay: 0.0,
-        },
+        ..direct_rollout_test_config()
     };
     let baseline = render_selection_baseline(&model, &grid, &target, &cfg, cfg.render).unwrap();
     let (report, step_scale, line_search_candidates) = render_direct_rollout_training_steps(
@@ -534,6 +363,20 @@ fn direct_multiseed_loss_weights_emphasize_worse_rollout_seeds() {
 
     let invalid = direct_rollout_multiseed_loss_weights(&[f32::NAN, f32::INFINITY]);
     assert_eq!(invalid, vec![0.5, 0.5]);
+
+    let dynamics_weights =
+        direct_rollout_multiseed_objective_weights(&[1.0, 1.0, 1.0], &[1.0, 9.0, 1.0]);
+    assert!((dynamics_weights.iter().sum::<f32>() - 1.0).abs() <= 1.0e-6);
+    assert!(
+        dynamics_weights[1] > dynamics_weights[0],
+        "dynamic rollout score should upweight morphogenesis-hard seeds even when terminal render loss ties"
+    );
+
+    let fallback_weights = direct_rollout_multiseed_objective_weights(&[1.0, 3.0], &[1.0]);
+    assert_eq!(
+        fallback_weights,
+        direct_rollout_multiseed_loss_weights(&[1.0, 3.0])
+    );
 }
 #[test]
 fn direct_multiseed_training_reports_actual_weighted_model_loss() {
@@ -544,66 +387,20 @@ fn direct_multiseed_training_reports_actual_weighted_model_loss() {
     let before = model.weights.w2.clone();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.54);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
-        rounds: 1,
-        supervised_steps_per_round: 1,
-        particles: 16,
         rollout_steps: 2,
         gradient_particles: 8,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
-        motion_gain: 1.0,
-        perception_position_gain: 0.05,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
         trajectory_mesh_gain: 0.05,
         trajectory_render_samples: 2,
-        liveness_gain: 0.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
         coverage_gain: 0.1,
         coverage_samples: 32,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
         coverage_normal_weight: 0.1,
-        extent_gain: 0.0,
         full_coverage_adjoint: true,
         surface_gain: 0.1,
-        surface_escape_gain: 0.0,
-        opacity_gain: 0.0,
-        material_liveness_gain: 0.0,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
-        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
-        direct_line_search: false,
-        direct_line_search_scales: vec![1.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
         direct_selection_seed_training: true,
         seed: 31,
         selection_seed: Some(37),
         selection_seeds: vec![43],
-        seed_scale: 0.54,
-        seed_mode: ParticleSeed::TorusGrowth3d,
-        render: RenderLossConfig {
-            image_size: 8,
-            target_samples: 32,
-            world_scale: 1.08,
-            ..RenderLossConfig::default()
-        },
-        sgd: SgdConfig {
-            learning_rate: 5.0e-4,
-            grad_clip_norm: 1.0,
-            weight_decay: 0.0,
-        },
+        ..direct_rollout_test_config()
     };
     let seeds = render_direct_rollout_training_seeds(&cfg, 0);
     let (trace, trajectory) = render_training_trajectory(&model, &grid, &cfg, 0).unwrap();
@@ -617,7 +414,17 @@ fn direct_multiseed_training_reports_actual_weighted_model_loss() {
                 .total_loss
         })
         .collect::<Vec<_>>();
-    let seed_weights = direct_rollout_multiseed_loss_weights(&initial_losses);
+    let selection_scores = seeds
+        .iter()
+        .map(|seed| {
+            let case =
+                render_selection_case_metrics(&model, &grid, &target, &cfg, cfg.render, *seed)
+                    .unwrap();
+            render_selection_case_score_with_baseline(*seed, &case, None).score
+        })
+        .collect::<Vec<_>>();
+    let seed_weights =
+        direct_rollout_multiseed_objective_weights(&initial_losses, &selection_scores);
 
     let report = render_direct_rollout_multiseed_training_step(
         &mut model,
@@ -653,11 +460,11 @@ fn direct_multiseed_training_reports_actual_weighted_model_loss() {
     assert!(report.final_loss.is_finite());
     assert!(
         (report.initial_loss - expected_initial_loss).abs() <= 1.0e-6,
-        "multiseed report should use the loss-weighted robust objective"
+        "multiseed report should use the render-loss and rollout-score weighted robust objective"
     );
     assert!(
         (report.final_loss - actual_final_loss).abs() <= 1.0e-6,
-        "multiseed report should evaluate the loss-weighted model objective that is kept"
+        "multiseed report should evaluate the weighted model objective that is kept"
     );
     assert_eq!(report.history[0].loss, report.final_loss);
     assert_eq!(report.best_loss, report.initial_loss.min(report.final_loss));
@@ -671,66 +478,9 @@ fn render_proxy_history_records_direct_rollout_inner_steps() {
         local_growth_student_model(config, 31, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.54);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
-        rounds: 1,
         supervised_steps_per_round: 3,
-        particles: 16,
-        rollout_steps: 1,
-        gradient_particles: 4,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
-        motion_gain: 1.0,
-        perception_position_gain: 0.05,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
-        trajectory_mesh_gain: 0.0,
-        trajectory_render_samples: 0,
-        liveness_gain: 0.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-        coverage_gain: 0.0,
-        coverage_samples: 16,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
-        coverage_normal_weight: 0.0,
-        extent_gain: 0.0,
-        full_coverage_adjoint: false,
-        surface_gain: 0.0,
-        surface_escape_gain: 0.0,
-        opacity_gain: 0.0,
-        material_liveness_gain: 0.0,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
-        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
-        direct_line_search: false,
-        direct_line_search_scales: vec![1.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
-        direct_selection_seed_training: false,
         seed: 37,
-        selection_seed: None,
-        selection_seeds: Vec::new(),
-        seed_scale: 0.54,
-        seed_mode: ParticleSeed::TorusGrowth3d,
-        render: RenderLossConfig {
-            image_size: 8,
-            target_samples: 32,
-            world_scale: 1.08,
-            ..RenderLossConfig::default()
-        },
-        sgd: SgdConfig {
-            learning_rate: 5.0e-4,
-            grad_clip_norm: 1.0,
-            weight_decay: 0.0,
-        },
+        ..direct_rollout_test_config()
     };
 
     let report = run_render_proxy_training(&mut model, &grid, &target, cfg).unwrap();
@@ -797,66 +547,14 @@ fn render_proxy_training_rolls_back_rejected_round_before_next_round() {
     let initial_model = model.clone();
     let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.54);
     let cfg = RenderProxyTrainingConfig {
-        target: MeshTargetArg::Torus,
         rounds: 2,
-        supervised_steps_per_round: 1,
-        particles: 16,
-        rollout_steps: 1,
-        gradient_particles: 4,
-        gradient_mode: RenderGradientModeArg::Analytic,
-        finite_diff_eps: 1.0e-3,
-        motion_gain: 1.0,
-        perception_position_gain: 0.05,
-        max_update_norm: 0.05,
-        trajectory_supervision: true,
-        trajectory_render_gain: 0.0,
-        trajectory_mesh_gain: 0.0,
-        trajectory_render_samples: 0,
-        liveness_gain: 0.0,
-        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-        coverage_gain: 0.0,
-        coverage_samples: 16,
-        coverage_mode: CoverageUpdateModeArg::HardNearest,
-        coverage_softness: 0.0,
-        coverage_repulsion_gain: 0.0,
-        coverage_gap_gain: 0.0,
-        coverage_repulsion_radius: 0.0,
-        coverage_normal_weight: 0.0,
-        extent_gain: 0.0,
-        full_coverage_adjoint: false,
-        surface_gain: 0.0,
-        surface_escape_gain: 0.0,
-        opacity_gain: 0.0,
-        material_liveness_gain: 0.0,
-        material_tail_gain: 0.0,
-        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-        scale_gain: 0.0,
-        scale_budget_weight: 0.0,
-        max_opacity_update: 0.05,
-        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
-        direct_line_search: false,
-        direct_line_search_scales: vec![1.0],
-        direct_material_output_only: false,
-        training_backend: RenderTrainingBackendArg::DirectRollout,
-        direct_selection_seed_training: false,
         seed: 43,
-        selection_seed: None,
-        selection_seeds: Vec::new(),
-        seed_scale: 0.54,
-        seed_mode: ParticleSeed::TorusGrowth3d,
-        render: RenderLossConfig {
-            image_size: 8,
-            target_samples: 32,
-            world_scale: 1.08,
-            ..RenderLossConfig::default()
-        },
         sgd: SgdConfig {
             learning_rate: 1000.0,
             grad_clip_norm: 100.0,
             weight_decay: 0.0,
         },
+        ..direct_rollout_test_config()
     };
     let expected_round_one_trace = render_training_trace(&initial_model, &grid, &cfg, 1).unwrap();
     let expected_round_one_loss =
