@@ -229,11 +229,17 @@ pub(crate) fn render_selection_training_progress_beats(
                 .max(previous.active_surface_max + SURFACE_MAX_SLACK);
     let material_tail_ok = selection.material_visible_surface_tail_over_threshold_fraction
         <= previous.material_visible_surface_tail_over_threshold_fraction + MATERIAL_TAIL_SLACK;
+    let inactive_material_ok =
+        render_selection_inactive_material_not_regressed(selection, previous);
     let local_front_ok = selection.min_front_local_newly_activated_fraction
         >= MIN_LOCAL_FRONT_FRACTION
         || selection.min_front_local_newly_activated_fraction
             >= previous.min_front_local_newly_activated_fraction - 0.02;
-    (temporal_ok || geometry_temporal_ok) && surface_ok && material_tail_ok && local_front_ok
+    (temporal_ok || geometry_temporal_ok)
+        && surface_ok
+        && material_tail_ok
+        && inactive_material_ok
+        && local_front_ok
 }
 
 pub(crate) fn render_selection_progress_candidate_preferred(
@@ -256,6 +262,7 @@ pub(crate) fn render_selection_progress_candidate_preferred(
         PRECURSOR_STRICT_SURFACE_MATERIAL_MARGIN_PROGRESS,
     );
     if candidate_strict_progress >= best_strict_progress + STRICT_SURFACE_MATERIAL_PROGRESS_TIEBREAK
+        && render_selection_inactive_material_not_regressed(candidate, no_op)
         && render_selection_render_within_strict_surface_materialization_slack(
             candidate.render_loss,
             no_op.render_loss,
@@ -407,6 +414,18 @@ fn strict_surface_materialization_progress(
     fraction_progress
         .max(mean_opacity_progress_value)
         .max(margin_progress_value)
+}
+
+fn render_selection_inactive_material_not_regressed(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+) -> bool {
+    const INACTIVE_MATERIAL_FRACTION_SLACK: f32 = 0.01;
+    selection.material_visible_inactive_fraction.is_finite()
+        && previous.material_visible_inactive_fraction.is_finite()
+        && selection.material_visible_inactive_fraction
+            <= previous.material_visible_inactive_fraction.max(0.0)
+                + INACTIVE_MATERIAL_FRACTION_SLACK
 }
 
 fn render_selection_render_within_strict_surface_materialization_slack(

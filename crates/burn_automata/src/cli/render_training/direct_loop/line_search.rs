@@ -1,5 +1,19 @@
 use super::*;
 
+mod material_bias;
+
+use material_bias::evaluate_material_opacity_bias_line_search_candidate;
+pub(crate) use material_bias::material_opacity_bias_line_search_candidates;
+
+const DIRECT_LINE_SEARCH_KIND_SGD: &str = "sgd-scale";
+
+#[derive(Clone, Copy, Debug)]
+struct DirectLineSearchCandidateKey {
+    kind: &'static str,
+    scale: f32,
+    material_opacity_bias: f32,
+}
+
 struct DirectLineSearchCandidate {
     model: NpaModel,
     report: TrainingRunReport,
@@ -57,11 +71,11 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
     let mut best_model = base_model.clone();
     let mut best_report = render_direct_rollout_noop_report(initial_loss, gradient);
     let mut best_selection = no_op_selection.clone();
-    let mut best_scale = 0.0_f32;
+    let mut best_key = None::<DirectLineSearchCandidateKey>;
     let mut best_progress_model = None::<NpaModel>;
     let mut best_progress_report = None::<TrainingRunReport>;
     let mut best_progress_selection = no_op_selection.clone();
-    let mut best_progress_scale = 0.0_f32;
+    let mut best_progress_key = None::<DirectLineSearchCandidateKey>;
     let mut candidate_reports = Vec::with_capacity(scales.len());
 
     for scale in scales {
@@ -86,11 +100,11 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             &mut best_model,
             &mut best_report,
             &mut best_selection,
-            &mut best_scale,
+            &mut best_key,
             &mut best_progress_model,
             &mut best_progress_report,
             &mut best_progress_selection,
-            &mut best_progress_scale,
+            &mut best_progress_key,
             &mut candidate_reports,
             &no_op_selection,
         );
@@ -121,17 +135,47 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             &mut best_model,
             &mut best_report,
             &mut best_selection,
-            &mut best_scale,
+            &mut best_key,
             &mut best_progress_model,
             &mut best_progress_report,
             &mut best_progress_selection,
-            &mut best_progress_scale,
+            &mut best_progress_key,
             &mut candidate_reports,
             &no_op_selection,
         );
     }
 
-    if best_scale != 0.0
+    for material_opacity_bias in material_opacity_bias_line_search_candidates(&no_op_selection, cfg)
+    {
+        let Some(candidate) = evaluate_material_opacity_bias_line_search_candidate(
+            &base_model,
+            grid,
+            target,
+            cfg,
+            gradient,
+            render_cfg,
+            selection_baseline,
+            material_opacity_bias,
+        )?
+        else {
+            continue;
+        };
+        update_direct_line_search_state(
+            candidate,
+            &mut best_model,
+            &mut best_report,
+            &mut best_selection,
+            &mut best_key,
+            &mut best_progress_model,
+            &mut best_progress_report,
+            &mut best_progress_selection,
+            &mut best_progress_key,
+            &mut candidate_reports,
+            &no_op_selection,
+        );
+    }
+
+    if best_key.is_some()
         && best_progress_model.is_some()
         && best_progress_report.is_some()
         && render_selection_training_progress_beats(&best_progress_selection, &best_selection)
@@ -141,22 +185,40 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
         let progress_model = best_progress_model.take().expect("checked above");
         let progress_report = best_progress_report.take().expect("checked above");
         *model = progress_model;
-        mark_selected_line_search_candidate(&mut candidate_reports, best_progress_scale, false);
-        return Ok((progress_report, best_progress_scale, candidate_reports));
+        if let Some(key) = best_progress_key {
+            mark_selected_line_search_candidate(&mut candidate_reports, key, false);
+        }
+        return Ok((
+            progress_report,
+            best_progress_key.map_or(0.0, |key| key.scale.max(0.0)),
+            candidate_reports,
+        ));
     }
 
-    if best_scale == 0.0
+    if best_key.is_none()
         && let (Some(progress_model), Some(progress_report)) =
             (best_progress_model, best_progress_report)
     {
         *model = progress_model;
-        mark_selected_line_search_candidate(&mut candidate_reports, best_progress_scale, false);
-        return Ok((progress_report, best_progress_scale, candidate_reports));
+        if let Some(key) = best_progress_key {
+            mark_selected_line_search_candidate(&mut candidate_reports, key, false);
+        }
+        return Ok((
+            progress_report,
+            best_progress_key.map_or(0.0, |key| key.scale.max(0.0)),
+            candidate_reports,
+        ));
     }
 
     *model = best_model;
-    mark_selected_line_search_candidate(&mut candidate_reports, best_scale, true);
-    Ok((best_report, best_scale, candidate_reports))
+    if let Some(key) = best_key {
+        mark_selected_line_search_candidate(&mut candidate_reports, key, true);
+    }
+    Ok((
+        best_report,
+        best_key.map_or(0.0, |key| key.scale.max(0.0)),
+        candidate_reports,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -212,7 +274,13 @@ fn evaluate_direct_line_search_candidate(
         render_cfg,
         Some(selection_baseline),
     )?;
-    let candidate_report = direct_line_search_candidate_report(scale, &selection, &report);
+    let candidate_report = direct_line_search_candidate_report(
+        DIRECT_LINE_SEARCH_KIND_SGD,
+        scale,
+        0.0,
+        &selection,
+        &report,
+    );
     Ok(Some(DirectLineSearchCandidate {
         model: candidate,
         report,
@@ -227,17 +295,17 @@ fn update_direct_line_search_state(
     best_model: &mut NpaModel,
     best_report: &mut TrainingRunReport,
     best_selection: &mut RenderSelectionMetrics,
-    best_scale: &mut f32,
+    best_key: &mut Option<DirectLineSearchCandidateKey>,
     best_progress_model: &mut Option<NpaModel>,
     best_progress_report: &mut Option<TrainingRunReport>,
     best_progress_selection: &mut RenderSelectionMetrics,
-    best_progress_scale: &mut f32,
+    best_progress_key: &mut Option<DirectLineSearchCandidateKey>,
     candidate_reports: &mut Vec<DirectLineSearchCandidateReport>,
     no_op_selection: &RenderSelectionMetrics,
 ) {
     let candidate_beats =
         render_selection_candidate_metrics_beats(&candidate.selection, best_selection);
-    let morphology_recovery = *best_scale == 0.0
+    let morphology_recovery = best_key.is_none()
         && render_selection_morphology_recovery_beats(&candidate.selection, best_selection);
     let progress_candidate =
         render_selection_training_progress_beats(&candidate.selection, no_op_selection);
@@ -246,7 +314,7 @@ fn update_direct_line_search_state(
     if candidate_beats || morphology_recovery {
         *best_model = candidate.model;
         *best_report = candidate.report;
-        *best_scale = candidate.candidate_report.scale;
+        *best_key = Some(candidate_report_key(&candidate.candidate_report));
         *best_selection = candidate.selection;
     } else if progress_candidate
         && (best_progress_model.is_none()
@@ -258,21 +326,25 @@ fn update_direct_line_search_state(
     {
         *best_progress_model = Some(candidate.model);
         *best_progress_report = Some(candidate.report);
-        *best_progress_scale = candidate.candidate_report.scale;
+        *best_progress_key = Some(candidate_report_key(&candidate.candidate_report));
         *best_progress_selection = candidate.selection;
     }
     candidate_reports.push(candidate.candidate_report);
 }
 
 fn direct_line_search_candidate_report(
+    candidate_kind: &'static str,
     scale: f32,
+    material_opacity_bias: f32,
     selection: &RenderSelectionMetrics,
     report: &TrainingRunReport,
 ) -> DirectLineSearchCandidateReport {
     let last_history = report.history.last();
     DirectLineSearchCandidateReport {
         inner_step: 0,
+        candidate_kind,
         scale,
+        material_opacity_bias,
         checkpoint_candidate: false,
         progress_candidate: false,
         selected_checkpoint: false,
@@ -345,6 +417,14 @@ fn direct_line_search_candidate_report(
     }
 }
 
+fn candidate_report_key(report: &DirectLineSearchCandidateReport) -> DirectLineSearchCandidateKey {
+    DirectLineSearchCandidateKey {
+        kind: report.candidate_kind,
+        scale: report.scale,
+        material_opacity_bias: report.material_opacity_bias,
+    }
+}
+
 pub(crate) fn adaptive_direct_line_search_refinement_scales(
     reports: &[DirectLineSearchCandidateReport],
     particle_count: usize,
@@ -404,16 +484,17 @@ pub(crate) fn adaptive_direct_line_search_refinement_scales(
 
 fn mark_selected_line_search_candidate(
     reports: &mut [DirectLineSearchCandidateReport],
-    selected_scale: f32,
+    selected: DirectLineSearchCandidateKey,
     checkpoint: bool,
 ) {
-    if selected_scale <= 0.0 || !selected_scale.is_finite() {
+    if !selected.scale.is_finite() || !selected.material_opacity_bias.is_finite() {
         return;
     }
-    if let Some(report) = reports
-        .iter_mut()
-        .find(|report| (report.scale - selected_scale).abs() <= f32::EPSILON)
-    {
+    if let Some(report) = reports.iter_mut().find(|report| {
+        report.candidate_kind == selected.kind
+            && (report.scale - selected.scale).abs() <= f32::EPSILON
+            && (report.material_opacity_bias - selected.material_opacity_bias).abs() <= f32::EPSILON
+    }) {
         if checkpoint {
             report.selected_checkpoint = true;
         } else {

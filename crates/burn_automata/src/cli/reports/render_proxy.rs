@@ -148,7 +148,9 @@ pub(crate) struct RenderProxyTrainingHistoryEntry {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DirectLineSearchCandidateReport {
     pub(crate) inner_step: usize,
+    pub(crate) candidate_kind: &'static str,
     pub(crate) scale: f32,
+    pub(crate) material_opacity_bias: f32,
     pub(crate) checkpoint_candidate: bool,
     pub(crate) progress_candidate: bool,
     pub(crate) selected_checkpoint: bool,

@@ -167,6 +167,13 @@ fn render_selection_training_progress_accepts_strict_surface_material_margin() {
         "strict-band material progress must not hide material tail leaks"
     );
 
+    let mut inactive_material_leaked = continued.clone();
+    inactive_material_leaked.material_visible_inactive_fraction = 0.05;
+    assert!(
+        !render_selection_training_progress_beats(&inactive_material_leaked, &previous),
+        "strict-band material progress must not make dormant particles render-visible"
+    );
+
     let mut coverage_collapsed = continued;
     coverage_collapsed.surface_covered_bin_fraction = previous.surface_covered_bin_fraction - 0.01;
     assert!(
@@ -212,6 +219,17 @@ fn render_selection_progress_prefers_bounded_strict_material_margin_step() {
     assert!(
         !render_selection_progress_candidate_preferred(&degraded, &render_preferred, &no_op),
         "strict-band material progress should not win the tie-breaker outside render slack"
+    );
+
+    let mut inactive_material_leaked = material_preferred;
+    inactive_material_leaked.material_visible_inactive_fraction = 0.05;
+    assert!(
+        !render_selection_progress_candidate_preferred(
+            &inactive_material_leaked,
+            &render_preferred,
+            &no_op,
+        ),
+        "strict-band material progress should not win the tie-breaker by leaking dormant material"
     );
 }
 
