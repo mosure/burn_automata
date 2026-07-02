@@ -3,6 +3,8 @@ use super::*;
 mod accumulator;
 mod config;
 mod direct;
+mod direct_accumulators;
+mod direct_combined;
 mod liveness_progress;
 mod terminal;
 

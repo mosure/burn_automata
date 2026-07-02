@@ -1,4 +1,6 @@
-use super::accumulator::{OutputGradientAccumulator, accumulate_output_channels};
+use super::accumulator::accumulate_output_channels;
+use super::direct_accumulators::DirectObjectiveAccumulators;
+use super::direct_combined::{DirectCombinedGradientInputs, accumulate_combined_direct_gradients};
 use super::terminal::terminal_liveness_state_diagnostics;
 use super::*;
 
@@ -25,48 +27,14 @@ pub(crate) fn direct_rollout_objective_diagnostics(
     let liveness_update_cap =
         liveness_max_update(cfg.max_opacity_update, cfg.liveness_update_multiplier);
 
-    let mut temporal_liveness = OutputGradientAccumulator::default();
-    let mut mesh_motion_liveness = OutputGradientAccumulator::default();
-    let mut surface_escape_liveness = OutputGradientAccumulator::default();
-    let mut target_coverage_liveness = OutputGradientAccumulator::default();
-    let mut material_coverage_liveness = OutputGradientAccumulator::default();
-    let mut extent_front_liveness = OutputGradientAccumulator::default();
-    let mut phase_progress = OutputGradientAccumulator::default();
-    let mut liveness_phase_memory = OutputGradientAccumulator::default();
-    let mut mesh_motion = OutputGradientAccumulator::default();
-    let mut extent_front_motion = OutputGradientAccumulator::default();
-    let mut temporal_extent_motion = OutputGradientAccumulator::default();
-    let mut extent_motion_memory = OutputGradientAccumulator::default();
-    let mut material_coverage_motion = OutputGradientAccumulator::default();
-    let mut material_surface_motion = OutputGradientAccumulator::default();
-    let mut residual_velocity = OutputGradientAccumulator::default();
-    let mut motion_memory = OutputGradientAccumulator::default();
-    let mut material_coverage_motion_memory = OutputGradientAccumulator::default();
-    let mut material_coverage_materialization = OutputGradientAccumulator::default();
-    let mut temporal_materialization = OutputGradientAccumulator::default();
-    let mut active_surface_materialization = OutputGradientAccumulator::default();
-    let mut strict_surface_materialization = OutputGradientAccumulator::default();
-    let mut material_visibility = OutputGradientAccumulator::default();
-    let mut surface_color = OutputGradientAccumulator::default();
-    let mut scale_budget = OutputGradientAccumulator::default();
-    let mut combined_pre_cap = OutputGradientAccumulator::default();
-    let mut combined_post_cap = OutputGradientAccumulator::default();
-    let mut mesh_motion_post_cap = OutputGradientAccumulator::default();
-    let mut residual_velocity_post_cap = OutputGradientAccumulator::default();
-    let mut motion_memory_post_cap = OutputGradientAccumulator::default();
-    let mut liveness_post_cap = OutputGradientAccumulator::default();
-    let mut phase_post_cap = OutputGradientAccumulator::default();
-    let mut material_post_cap = OutputGradientAccumulator::default();
-    let mut scale_post_cap = OutputGradientAccumulator::default();
-    let mut color_post_cap = OutputGradientAccumulator::default();
-    let mut rows = 0usize;
+    let mut accumulators = DirectObjectiveAccumulators::default();
 
     for snapshot in trajectory {
         let particle_count = snapshot.positions.len();
         if particle_count == 0 {
             continue;
         }
-        rows += particle_count;
+        accumulators.add_rows(particle_count);
         let updates = model.forward_update_from_features(&snapshot.features)?;
 
         let mut mesh_output_gradients = vec![0.0; particle_count * output_dims];
@@ -94,7 +62,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut mesh_output_gradients,
         );
         accumulate_output_channels(
-            &mut mesh_motion,
+            &mut accumulators.mesh_motion,
             &mesh_output_gradients,
             particle_count,
             output_dims,
@@ -117,7 +85,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
                 16.0,
             );
             accumulate_output_channels(
-                &mut motion_memory,
+                &mut accumulators.motion_memory,
                 &motion_memory_output_gradients,
                 particle_count,
                 output_dims,
@@ -186,7 +154,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut extent_front_motion_output_gradients,
         );
         accumulate_output_channels(
-            &mut extent_front_motion,
+            &mut accumulators.extent_front_motion,
             &extent_front_motion_output_gradients,
             particle_count,
             output_dims,
@@ -209,7 +177,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut temporal_extent_motion_output_gradients,
         );
         accumulate_output_channels(
-            &mut temporal_extent_motion,
+            &mut accumulators.temporal_extent_motion,
             &temporal_extent_motion_output_gradients,
             particle_count,
             output_dims,
@@ -233,7 +201,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
                 16.0,
             );
             accumulate_output_channels(
-                &mut extent_motion_memory,
+                &mut accumulators.extent_motion_memory,
                 &extent_motion_memory_output_gradients,
                 particle_count,
                 output_dims,
@@ -265,7 +233,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut material_coverage_motion_output_gradients,
         );
         accumulate_output_channels(
-            &mut material_coverage_motion,
+            &mut accumulators.material_coverage_motion,
             &material_coverage_motion_output_gradients,
             particle_count,
             output_dims,
@@ -289,7 +257,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
                 16.0,
             );
             accumulate_output_channels(
-                &mut material_coverage_motion_memory,
+                &mut accumulators.material_coverage_motion_memory,
                 &material_coverage_motion_memory_output_gradients,
                 particle_count,
                 output_dims,
@@ -323,7 +291,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
                 16.0,
             );
             accumulate_output_channels(
-                &mut residual_velocity,
+                &mut accumulators.residual_velocity,
                 &residual_velocity_output_gradients,
                 particle_count,
                 output_dims,
@@ -343,7 +311,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if liveness_output < output_dims {
             accumulate_output_channels(
-                &mut mesh_motion_liveness,
+                &mut accumulators.mesh_motion_liveness,
                 &mesh_liveness_output_gradients,
                 particle_count,
                 output_dims,
@@ -363,7 +331,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if liveness_output < output_dims {
             accumulate_output_channels(
-                &mut target_coverage_liveness,
+                &mut accumulators.target_coverage_liveness,
                 &target_coverage_liveness_output_gradients,
                 particle_count,
                 output_dims,
@@ -384,7 +352,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if liveness_output < output_dims {
             accumulate_output_channels(
-                &mut material_coverage_liveness,
+                &mut accumulators.material_coverage_liveness,
                 &material_coverage_liveness_output_gradients,
                 particle_count,
                 output_dims,
@@ -406,7 +374,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if liveness_output < output_dims {
             accumulate_output_channels(
-                &mut surface_escape_liveness,
+                &mut accumulators.surface_escape_liveness,
                 &surface_escape_liveness_output_gradients,
                 particle_count,
                 output_dims,
@@ -426,7 +394,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if liveness_output < output_dims {
             accumulate_output_channels(
-                &mut extent_front_liveness,
+                &mut accumulators.extent_front_liveness,
                 &extent_front_output_gradients,
                 particle_count,
                 output_dims,
@@ -475,7 +443,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if liveness_output < output_dims {
             accumulate_output_channels(
-                &mut temporal_liveness,
+                &mut accumulators.temporal_liveness,
                 &temporal_output_gradients,
                 particle_count,
                 output_dims,
@@ -513,7 +481,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(phase_output) = phase_output {
             accumulate_output_channels(
-                &mut liveness_phase_memory,
+                &mut accumulators.liveness_phase_memory,
                 &liveness_phase_memory_output_gradients,
                 particle_count,
                 output_dims,
@@ -534,7 +502,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(phase_output) = phase_output {
             accumulate_output_channels(
-                &mut phase_progress,
+                &mut accumulators.phase_progress,
                 &phase_output_gradients,
                 particle_count,
                 output_dims,
@@ -559,7 +527,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(material_output) = material_output {
             accumulate_output_channels(
-                &mut material_coverage_materialization,
+                &mut accumulators.material_coverage_materialization,
                 &material_coverage_materialization_output_gradients,
                 particle_count,
                 output_dims,
@@ -584,7 +552,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(material_output) = material_output {
             accumulate_output_channels(
-                &mut temporal_materialization,
+                &mut accumulators.temporal_materialization,
                 &temporal_materialization_output_gradients,
                 particle_count,
                 output_dims,
@@ -609,7 +577,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(material_output) = material_output {
             accumulate_output_channels(
-                &mut active_surface_materialization,
+                &mut accumulators.active_surface_materialization,
                 &active_surface_materialization_output_gradients,
                 particle_count,
                 output_dims,
@@ -632,7 +600,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(material_output) = material_output {
             accumulate_output_channels(
-                &mut strict_surface_materialization,
+                &mut accumulators.strict_surface_materialization,
                 &strict_surface_materialization_output_gradients,
                 particle_count,
                 output_dims,
@@ -694,7 +662,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             16.0,
         );
         accumulate_output_channels(
-            &mut material_surface_motion,
+            &mut accumulators.material_surface_motion,
             &material_surface_motion_output_gradients,
             particle_count,
             output_dims,
@@ -724,7 +692,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
         );
         if let Some(material_output) = material_output {
             accumulate_output_channels(
-                &mut material_visibility,
+                &mut accumulators.material_visibility,
                 &material_output_gradients,
                 particle_count,
                 output_dims,
@@ -748,7 +716,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut surface_color_output_gradients,
         ) {
             accumulate_output_channels(
-                &mut surface_color,
+                &mut accumulators.surface_color,
                 &surface_color_output_gradients,
                 particle_count,
                 output_dims,
@@ -767,7 +735,7 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             &mut scale_budget_output_gradients,
         ) {
             accumulate_output_channels(
-                &mut scale_budget,
+                &mut accumulators.scale_budget,
                 &scale_budget_output_gradients,
                 particle_count,
                 output_dims,
@@ -775,213 +743,51 @@ pub(crate) fn direct_rollout_objective_diagnostics(
             );
         }
 
-        let mut combined = temporal_output_gradients;
-        add_output_gradients(&mut combined, &mesh_liveness_output_gradients);
-        add_output_gradients(&mut combined, &surface_escape_liveness_output_gradients);
-        add_output_gradients(&mut combined, &target_coverage_liveness_output_gradients);
-        add_output_gradients(&mut combined, &material_coverage_liveness_output_gradients);
-        add_output_gradients(&mut combined, &extent_front_output_gradients);
-        add_output_gradients(&mut combined, &phase_output_gradients);
-        add_output_gradients(&mut combined, &liveness_phase_memory_output_gradients);
-        add_output_gradients(&mut combined, &mesh_output_gradients);
-        add_output_gradients(&mut combined, &extent_front_motion_output_gradients);
-        add_output_gradients(&mut combined, &temporal_extent_motion_output_gradients);
-        add_output_gradients(&mut combined, &extent_motion_memory_output_gradients);
-        add_output_gradients(&mut combined, &material_coverage_motion_output_gradients);
-        add_output_gradients(&mut combined, &material_surface_motion_output_gradients);
-        add_output_gradients(&mut combined, &residual_velocity_output_gradients);
-        add_output_gradients(&mut combined, &motion_memory_output_gradients);
-        add_output_gradients(
-            &mut combined,
+        let combined_additions: [&[f32]; 23] = [
+            &mesh_liveness_output_gradients,
+            &surface_escape_liveness_output_gradients,
+            &target_coverage_liveness_output_gradients,
+            &material_coverage_liveness_output_gradients,
+            &extent_front_output_gradients,
+            &phase_output_gradients,
+            &liveness_phase_memory_output_gradients,
+            &mesh_output_gradients,
+            &extent_front_motion_output_gradients,
+            &temporal_extent_motion_output_gradients,
+            &extent_motion_memory_output_gradients,
+            &material_coverage_motion_output_gradients,
+            &material_surface_motion_output_gradients,
+            &residual_velocity_output_gradients,
+            &motion_memory_output_gradients,
             &material_coverage_motion_memory_output_gradients,
-        );
-        add_output_gradients(
-            &mut combined,
             &material_coverage_materialization_output_gradients,
-        );
-        add_output_gradients(&mut combined, &temporal_materialization_output_gradients);
-        add_output_gradients(
-            &mut combined,
+            &temporal_materialization_output_gradients,
             &active_surface_materialization_output_gradients,
-        );
-        add_output_gradients(
-            &mut combined,
             &strict_surface_materialization_output_gradients,
-        );
-        add_output_gradients(&mut combined, &material_output_gradients);
-        add_output_gradients(&mut combined, &surface_color_output_gradients);
-        add_output_gradients(&mut combined, &scale_budget_output_gradients);
-        boost_sparse_output_channel_rms(
-            &mut combined,
-            output_dims,
-            0..model.config.spatial_dims,
-            cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_SPATIAL_MOTION_RMS_TARGET_FRACTION,
-            8.0,
-        );
-        accumulate_output_channels(
-            &mut combined_pre_cap,
-            &combined,
-            particle_count,
-            output_dims,
-            0..output_dims,
-        );
-        cap_output_gradient_channel_rms_with_state_caps(
-            &model.config,
-            &mut combined,
-            output_dims,
-            cfg.direct_output_gradient_rms_cap,
-            liveness_update_cap,
-            cfg.direct_output_gradient_rms_cap * DIRECT_GROWTH_MATERIAL_OUTPUT_RMS_CAP_MULTIPLIER,
-        );
-        accumulate_output_channels(
-            &mut combined_post_cap,
-            &combined,
-            particle_count,
-            output_dims,
-            0..output_dims,
-        );
-        accumulate_output_channels(
-            &mut mesh_motion_post_cap,
-            &combined,
-            particle_count,
-            output_dims,
-            0..model.config.spatial_dims,
-        );
-        let velocity_outputs = growth_3d_velocity_output_channels(&model.config);
-        if !velocity_outputs.is_empty() {
-            accumulate_output_channels(
-                &mut residual_velocity_post_cap,
-                &combined,
-                particle_count,
+            &material_output_gradients,
+            &surface_color_output_gradients,
+            &scale_budget_output_gradients,
+        ];
+        accumulate_combined_direct_gradients(
+            &mut accumulators,
+            DirectCombinedGradientInputs {
+                config: &model.config,
+                cfg,
                 output_dims,
-                velocity_outputs.clone(),
-            );
-            accumulate_output_channels(
-                &mut motion_memory_post_cap,
-                &combined,
                 particle_count,
-                output_dims,
-                velocity_outputs,
-            );
-        }
-        if liveness_output < output_dims {
-            accumulate_output_channels(
-                &mut liveness_post_cap,
-                &combined,
-                particle_count,
-                output_dims,
-                [liveness_output],
-            );
-        }
-        if let Some(phase_output) = phase_output {
-            accumulate_output_channels(
-                &mut phase_post_cap,
-                &combined,
-                particle_count,
-                output_dims,
-                [phase_output],
-            );
-        }
-        if let Some(material_output) = material_output {
-            accumulate_output_channels(
-                &mut material_post_cap,
-                &combined,
-                particle_count,
-                output_dims,
-                [material_output],
-            );
-        }
-        if let Some(scale_output) = scale_output {
-            accumulate_output_channels(
-                &mut scale_post_cap,
-                &combined,
-                particle_count,
-                output_dims,
-                [scale_output],
-            );
-        }
-        if let Some(color_outputs) = color_outputs {
-            accumulate_output_channels(
-                &mut color_post_cap,
-                &combined,
-                particle_count,
-                output_dims,
+                liveness_update_cap,
+                liveness_output,
+                phase_output,
+                material_output,
+                scale_output,
                 color_outputs,
-            );
-        }
+            },
+            temporal_output_gradients,
+            &combined_additions,
+        );
     }
     let terminal_liveness_state =
         terminal_liveness_state_diagnostics(model, trajectory, cfg, liveness_update_cap);
 
-    Ok(DirectRolloutObjectiveDiagnostics {
-        snapshots: trajectory.len(),
-        rows,
-        temporal_liveness_rms: temporal_liveness.rms(),
-        temporal_liveness_nonzero_fraction: temporal_liveness.nonzero_fraction(),
-        terminal_liveness_state_rms: terminal_liveness_state.rms(),
-        terminal_liveness_state_nonzero_fraction: terminal_liveness_state.nonzero_fraction(),
-        mesh_motion_liveness_rms: mesh_motion_liveness.rms(),
-        mesh_motion_liveness_nonzero_fraction: mesh_motion_liveness.nonzero_fraction(),
-        surface_escape_liveness_rms: surface_escape_liveness.rms(),
-        surface_escape_liveness_nonzero_fraction: surface_escape_liveness.nonzero_fraction(),
-        target_coverage_liveness_rms: target_coverage_liveness.rms(),
-        target_coverage_liveness_nonzero_fraction: target_coverage_liveness.nonzero_fraction(),
-        material_coverage_liveness_rms: material_coverage_liveness.rms(),
-        material_coverage_liveness_nonzero_fraction: material_coverage_liveness.nonzero_fraction(),
-        extent_front_liveness_rms: extent_front_liveness.rms(),
-        extent_front_liveness_nonzero_fraction: extent_front_liveness.nonzero_fraction(),
-        phase_rms: phase_progress.rms(),
-        phase_nonzero_fraction: phase_progress.nonzero_fraction(),
-        liveness_phase_memory_rms: liveness_phase_memory.rms(),
-        liveness_phase_memory_nonzero_fraction: liveness_phase_memory.nonzero_fraction(),
-        mesh_motion_rms: mesh_motion.rms(),
-        mesh_motion_nonzero_fraction: mesh_motion.nonzero_fraction(),
-        extent_front_motion_rms: extent_front_motion.rms(),
-        extent_front_motion_nonzero_fraction: extent_front_motion.nonzero_fraction(),
-        temporal_extent_motion_rms: temporal_extent_motion.rms(),
-        temporal_extent_motion_nonzero_fraction: temporal_extent_motion.nonzero_fraction(),
-        extent_motion_memory_rms: extent_motion_memory.rms(),
-        extent_motion_memory_nonzero_fraction: extent_motion_memory.nonzero_fraction(),
-        material_coverage_motion_rms: material_coverage_motion.rms(),
-        material_coverage_motion_nonzero_fraction: material_coverage_motion.nonzero_fraction(),
-        material_surface_motion_rms: material_surface_motion.rms(),
-        material_surface_motion_nonzero_fraction: material_surface_motion.nonzero_fraction(),
-        residual_velocity_rms: residual_velocity.rms(),
-        residual_velocity_nonzero_fraction: residual_velocity.nonzero_fraction(),
-        motion_memory_rms: motion_memory.rms(),
-        motion_memory_nonzero_fraction: motion_memory.nonzero_fraction(),
-        material_coverage_motion_memory_rms: material_coverage_motion_memory.rms(),
-        material_coverage_motion_memory_nonzero_fraction: material_coverage_motion_memory
-            .nonzero_fraction(),
-        material_coverage_materialization_rms: material_coverage_materialization.rms(),
-        material_coverage_materialization_nonzero_fraction: material_coverage_materialization
-            .nonzero_fraction(),
-        temporal_materialization_rms: temporal_materialization.rms(),
-        temporal_materialization_nonzero_fraction: temporal_materialization.nonzero_fraction(),
-        active_surface_materialization_rms: active_surface_materialization.rms(),
-        active_surface_materialization_nonzero_fraction: active_surface_materialization
-            .nonzero_fraction(),
-        strict_surface_materialization_rms: strict_surface_materialization.rms(),
-        strict_surface_materialization_nonzero_fraction: strict_surface_materialization
-            .nonzero_fraction(),
-        material_visibility_rms: material_visibility.rms(),
-        material_visibility_nonzero_fraction: material_visibility.nonzero_fraction(),
-        surface_color_rms: surface_color.rms(),
-        surface_color_nonzero_fraction: surface_color.nonzero_fraction(),
-        scale_budget_rms: scale_budget.rms(),
-        scale_budget_nonzero_fraction: scale_budget.nonzero_fraction(),
-        combined_pre_cap_rms: combined_pre_cap.rms(),
-        combined_post_cap_rms: combined_post_cap.rms(),
-        mesh_motion_post_cap_rms: mesh_motion_post_cap.rms(),
-        mesh_motion_post_cap_nonzero_fraction: mesh_motion_post_cap.nonzero_fraction(),
-        residual_velocity_post_cap_rms: residual_velocity_post_cap.rms(),
-        residual_velocity_post_cap_nonzero_fraction: residual_velocity_post_cap.nonzero_fraction(),
-        motion_memory_post_cap_rms: motion_memory_post_cap.rms(),
-        motion_memory_post_cap_nonzero_fraction: motion_memory_post_cap.nonzero_fraction(),
-        liveness_post_cap_rms: liveness_post_cap.rms(),
-        phase_post_cap_rms: phase_post_cap.rms(),
-        material_post_cap_rms: material_post_cap.rms(),
-        scale_post_cap_rms: scale_post_cap.rms(),
-        color_post_cap_rms: color_post_cap.rms(),
-    })
+    Ok(accumulators.into_diagnostics(trajectory.len(), terminal_liveness_state))
 }
