@@ -249,6 +249,28 @@ fn growth_3d_strict_checks_require_sustained_motion() {
 }
 
 #[test]
+fn growth_3d_strict_checks_reject_nonlocal_dormant_drift() {
+    let mut checks = passing_growth_3d_strict_checks();
+    let drift = Growth3dDormantDriftReport {
+        sampled_steps: 4,
+        checked_rows: 32,
+        drifting_rows: 3,
+        drifting_fraction: 3.0 / 32.0,
+        mean_dormant_displacement: 0.03,
+        max_dormant_displacement: 0.25,
+        max_allowed_displacement: 0.18,
+        finite: true,
+        passed: false,
+    };
+
+    apply_dormant_drift_strict_check(&mut checks, drift);
+
+    assert!(!checks.dormant_drift_bounded);
+    assert!(!checks.passed);
+    assert!(checks.failure_reasons.contains(&"dormant_drift_bounded"));
+}
+
+#[test]
 fn growth_3d_strict_checks_reject_surface_max_escape() {
     let activation = Growth3dActivationReport {
         active_seed_count: 4,

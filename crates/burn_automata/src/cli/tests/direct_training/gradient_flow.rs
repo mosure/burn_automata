@@ -43,6 +43,91 @@ fn terminal_position_adjoint_combines_render_and_coverage_gradients() {
     assert!((sampled_only[1][2] - 0.4).abs() <= 1.0e-6);
     assert_eq!(sampled_only[2], [0.0; 4]);
 }
+
+#[test]
+fn terminal_render_adjoint_weighting_blocks_far_dormant_shortcut_gradients() {
+    let config = NpaConfig::growing_3dgs();
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0, 0.0],
+        [0.08_f32, 0.0, 0.0, 0.0],
+        [0.80_f32, 0.0, 0.0, 0.0],
+    ];
+    let mut states = vec![0.0; positions.len() * config.state_dims];
+    states[config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    states[2 * config.state_dims + GROWTH_3D_LIVENESS_CHANNEL] = GROWTH_3D_INACTIVE_OPACITY_LOGIT;
+    let trace = crate::RolloutTrace {
+        positions: positions.clone(),
+        states,
+        batch_size: 1,
+        particle_count: positions.len(),
+        state_dims: config.state_dims,
+        steps: 0,
+        mean_dx: Vec::new(),
+    };
+    let gradient = RenderProxyGradientRows {
+        row_indices: vec![0, 1, 2],
+        gradients: vec![[0.5, 0.0, 0.0]; 3],
+        opacity_gradients: vec![1.0; 3],
+        scale_gradients: vec![0.0; 3],
+        color_gradients: vec![[0.25, 0.0, 0.0]; 3],
+    };
+    let coverage = vec![[0.0; 3]; positions.len()];
+    let weights = terminal_render_locality_weights(&config, &trace.positions, &trace.states, 0.15);
+
+    assert_eq!(weights[0], 1.0);
+    assert!(
+        weights[1] > 0.0,
+        "nearest dormant shell should remain trainable as local growth front"
+    );
+    assert_eq!(
+        weights[2], 0.0,
+        "far dormant particles must not receive terminal render shortcuts"
+    );
+
+    let position_adjoint = terminal_render_position_adjoint_weighted(
+        &config,
+        &trace,
+        &gradient,
+        &coverage,
+        2.0,
+        false,
+        3,
+        Some(&weights),
+    );
+    assert!(
+        position_adjoint[0][0] > position_adjoint[1][0] && position_adjoint[1][0] > 0.0,
+        "active rows receive full render motion and front rows receive attenuated local motion"
+    );
+    assert_eq!(
+        position_adjoint[2], [0.0; 4],
+        "far dormant row should not be pulled toward a terminal target seat"
+    );
+
+    let state_adjoint = terminal_render_state_adjoint_weighted(
+        &config,
+        &trace,
+        &gradient,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.15,
+        1.0,
+        0.0,
+        RenderLossConfig::default(),
+        3,
+        Some(&weights),
+    );
+    let material_channel = growth_3d_material_opacity_channel(config.state_dims).unwrap();
+    let tail = config.state_dims - 3;
+    assert!(state_adjoint[material_channel] > 0.0);
+    assert!(state_adjoint[config.state_dims + material_channel] > 0.0);
+    assert_eq!(state_adjoint[2 * config.state_dims + material_channel], 0.0);
+    assert!(state_adjoint[tail] > 0.0);
+    assert!(state_adjoint[config.state_dims + tail] > 0.0);
+    assert_eq!(state_adjoint[2 * config.state_dims + tail], 0.0);
+}
+
 #[test]
 fn output_gradient_channel_rms_cap_balances_dominant_channels() {
     let mut gradients = vec![

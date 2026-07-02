@@ -163,6 +163,7 @@ pub(crate) fn growth_3d_strict_checks_report(
         nonzero_motion,
         sustained_motion,
         local_front_coherent,
+        dormant_drift_bounded: true,
         temporal_activation_progressive,
         temporal_geometry_progressive,
         mean_displacement_growth,

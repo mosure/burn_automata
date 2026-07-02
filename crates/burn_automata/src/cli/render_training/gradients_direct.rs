@@ -46,7 +46,13 @@ pub(crate) fn render_direct_rollout_training_step(
     accumulated_gradients
         .features
         .reserve(trajectory.len() * particle_count * input_dims);
-    let mut state_adjoint = terminal_render_state_adjoint(
+    let terminal_row_weights = terminal_render_locality_weights(
+        &model.config,
+        &trace.positions,
+        &trace.states,
+        cfg.liveness_front_radius,
+    );
+    let mut state_adjoint = terminal_render_state_adjoint_weighted(
         &model.config,
         trace,
         gradient,
@@ -59,6 +65,7 @@ pub(crate) fn render_direct_rollout_training_step(
         liveness_update_cap,
         cfg.render,
         rows,
+        Some(&terminal_row_weights),
     );
     add_surface_material_opacity_state_adjoint(
         &model.config,
@@ -155,7 +162,7 @@ pub(crate) fn render_direct_rollout_training_step(
         cfg.coverage_normal_weight,
         cfg.seed_scale,
     );
-    let mut position_adjoint = terminal_render_position_adjoint(
+    let mut position_adjoint = terminal_render_position_adjoint_weighted(
         &model.config,
         trace,
         gradient,
@@ -163,6 +170,7 @@ pub(crate) fn render_direct_rollout_training_step(
         cfg.motion_gain,
         cfg.full_coverage_adjoint,
         rows,
+        Some(&terminal_row_weights),
     );
     add_surface_position_adjoint(
         &model.config,

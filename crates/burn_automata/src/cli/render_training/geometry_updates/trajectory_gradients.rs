@@ -107,7 +107,13 @@ pub(crate) fn trajectory_render_adjoints(
                 .min(gradient.scale_gradients.len())
                 .min(gradient.color_gradients.len());
             if rows > 0 {
-                state = terminal_render_state_adjoint(
+                let terminal_row_weights = terminal_render_locality_weights(
+                    config,
+                    &snapshot_trace.positions,
+                    &snapshot_trace.states,
+                    cfg.liveness_front_radius,
+                );
+                state = terminal_render_state_adjoint_weighted(
                     config,
                     &snapshot_trace,
                     &gradient,
@@ -120,9 +126,10 @@ pub(crate) fn trajectory_render_adjoints(
                     cfg.material_max_opacity_update,
                     cfg.render,
                     rows,
+                    Some(&terminal_row_weights),
                 );
                 let zero_coverage_updates = vec![[0.0_f32; 3]; snapshot_trace.positions.len()];
-                position = terminal_render_position_adjoint(
+                position = terminal_render_position_adjoint_weighted(
                     config,
                     &snapshot_trace,
                     &gradient,
@@ -130,6 +137,7 @@ pub(crate) fn trajectory_render_adjoints(
                     cfg.motion_gain,
                     false,
                     rows,
+                    Some(&terminal_row_weights),
                 );
                 let render_weight = cfg.trajectory_render_gain * snapshot.step_fraction.powi(2)
                     / render_mesh_sample_count;

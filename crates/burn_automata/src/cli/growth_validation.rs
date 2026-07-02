@@ -19,6 +19,8 @@ mod robustness;
 pub(crate) use robustness::*;
 mod dynamics;
 pub(crate) use dynamics::*;
+mod dormant_drift;
+pub(crate) use dormant_drift::*;
 mod state_metrics;
 pub(crate) use state_metrics::*;
 mod rollout_cases;

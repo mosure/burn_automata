@@ -295,6 +295,7 @@ pub(super) fn passing_growth_3d_strict_checks() -> Growth3dStrictChecksReport {
         nonzero_motion: true,
         sustained_motion: true,
         local_front_coherent: true,
+        dormant_drift_bounded: true,
         temporal_activation_progressive: true,
         temporal_geometry_progressive: true,
         mean_displacement_growth: true,

@@ -278,6 +278,15 @@ pub(crate) fn growth_3d_validation_report_single(
     let front = growth_3d_front_report(
         &model,
         &grid,
+        rollout_cfg.clone(),
+        cfg.seed_mode,
+        &seed_positions,
+        &seed_states,
+        &trace,
+    )?;
+    let dormant_drift = growth_3d_dormant_drift_report(
+        &model,
+        &grid,
         rollout_cfg,
         cfg.seed_mode,
         &seed_positions,
@@ -313,6 +322,7 @@ pub(crate) fn growth_3d_validation_report_single(
         cfg.particle_count,
         render_loss.passed,
     );
+    apply_dormant_drift_strict_check(&mut strict_checks, dormant_drift);
     apply_material_liveness_strict_check(&mut strict_checks, final_material_liveness);
     apply_material_visible_surface_tail_strict_check(
         &mut strict_checks,
@@ -376,6 +386,7 @@ pub(crate) fn growth_3d_validation_report_single(
         && activation.final_active_count > activation.active_seed_count * 4
         && activation.newly_activated_fraction >= 0.50
         && activation.final_active_max_radius > growth_3d_seed_radius(cfg.seed_scale)
+        && dormant_drift.passed
         && motion.peak_mean_dx > 0.01
         && motion.active_step_fraction >= 0.50
         && motion.sustained_step_fraction >= 0.25
@@ -435,6 +446,7 @@ pub(crate) fn growth_3d_validation_report_single(
         motion,
         temporal,
         front,
+        dormant_drift,
         max_motion_per_step: motion.peak_mean_dx,
         render_loss,
         initial_gaussian_volume,

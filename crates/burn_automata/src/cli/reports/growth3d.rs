@@ -61,6 +61,7 @@ pub(crate) struct CliGrowth3dValidationReport {
     pub(crate) motion: Growth3dMotionReport,
     pub(crate) temporal: Growth3dTemporalReport,
     pub(crate) front: Growth3dFrontReport,
+    pub(crate) dormant_drift: Growth3dDormantDriftReport,
     pub(crate) max_motion_per_step: f32,
     pub(crate) render_loss: MultiViewRenderLossReport,
     pub(crate) initial_gaussian_volume: GaussianVolumeStats,
@@ -89,6 +90,7 @@ pub(crate) struct Growth3dStrictChecksReport {
     pub(crate) nonzero_motion: bool,
     pub(crate) sustained_motion: bool,
     pub(crate) local_front_coherent: bool,
+    pub(crate) dormant_drift_bounded: bool,
     pub(crate) temporal_activation_progressive: bool,
     pub(crate) temporal_geometry_progressive: bool,
     pub(crate) mean_displacement_growth: bool,
@@ -481,6 +483,19 @@ pub(crate) struct Growth3dFrontReport {
     pub(crate) mean_nearest_previous_active_distance: f32,
     pub(crate) max_nearest_previous_active_distance: f32,
     pub(crate) max_allowed_distance: f32,
+    pub(crate) finite: bool,
+    pub(crate) passed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct Growth3dDormantDriftReport {
+    pub(crate) sampled_steps: usize,
+    pub(crate) checked_rows: usize,
+    pub(crate) drifting_rows: usize,
+    pub(crate) drifting_fraction: f32,
+    pub(crate) mean_dormant_displacement: f32,
+    pub(crate) max_dormant_displacement: f32,
+    pub(crate) max_allowed_displacement: f32,
     pub(crate) finite: bool,
     pub(crate) passed: bool,
 }
