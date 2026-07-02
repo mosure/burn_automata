@@ -7,6 +7,7 @@ pub(in crate::gpu) fn neighbor_layout_code(mode: WgpuNeighborMode) -> u32 {
         WgpuNeighborMode::TiledFixedCellBuckets { .. } => 1,
         WgpuNeighborMode::SortedCells => 2,
         WgpuNeighborMode::CooperativeSortedCells => 6,
+        WgpuNeighborMode::SubgroupCooperativeSortedCells => 7,
         WgpuNeighborMode::Bvh { .. } => 3,
         WgpuNeighborMode::GpuBvh { .. } => 3,
         WgpuNeighborMode::GpuLbvh { .. } => 4,
@@ -54,6 +55,9 @@ pub(in crate::gpu) fn resolved_neighbor_mode(
         },
         WgpuNeighborMode::SortedCells => WgpuNeighborMode::SortedCells,
         WgpuNeighborMode::CooperativeSortedCells => WgpuNeighborMode::CooperativeSortedCells,
+        WgpuNeighborMode::SubgroupCooperativeSortedCells => {
+            WgpuNeighborMode::SubgroupCooperativeSortedCells
+        }
         WgpuNeighborMode::LinkedList => WgpuNeighborMode::LinkedList,
     }
 }

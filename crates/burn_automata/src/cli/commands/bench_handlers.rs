@@ -106,7 +106,7 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
                 "submit_wait"
             };
             println!(
-                "backend=wgpu particles={particles} steps={steps} repeats={} update_prob={update_prob:.3} geometry={geometry:?} elapsed_ms={:.6} gpu_step_ms={:.6} avg_step_ms={avg_step_ms:.6} min_avg_step_ms={:.6} median_avg_step_ms={:.6} max_avg_step_ms={:.6} step_timing={} step_min_ms={:.6} step_median_ms={:.6} step_p95_ms={:.6} step_p99_ms={:.6} step_max_ms={:.6} step_jitter_ratio={:.6} final_mean_displacement_per_step={:.6} final_mean_density={:.6} initial_nonempty_cells={} initial_max_cell_occupancy={} hashgrid=gpu-local hashgrid_eps={:.6} normalized_seed_scale={} reference_seed_scale={:.6} resident_state=true timing={timing} readback=final gaussian_write={} neighbor_mode={:?} bucket_capacity={} grid_storage_u32={} grid_clear_u32={} grid_overflow_count={} grid_max_overflow_count={} grid_overflowed_steps={}",
+                "backend=wgpu particles={particles} steps={steps} repeats={} update_prob={update_prob:.3} geometry={geometry:?} elapsed_ms={:.6} gpu_step_ms={:.6} avg_step_ms={avg_step_ms:.6} min_avg_step_ms={:.6} median_avg_step_ms={:.6} max_avg_step_ms={:.6} step_timing={} step_min_ms={:.6} step_median_ms={:.6} step_p95_ms={:.6} step_p99_ms={:.6} step_max_ms={:.6} step_jitter_ratio={:.6} final_mean_displacement_per_step={:.6} final_mean_density={:.6} initial_nonempty_cells={} initial_max_cell_occupancy={} hashgrid=gpu-local hashgrid_eps={:.6} normalized_seed_scale={} reference_seed_scale={:.6} resident_state=true timing={timing} readback=final gaussian_write={} subgroup_cooperative_supported={} neighbor_mode={:?} bucket_capacity={} grid_storage_u32={} grid_clear_u32={} grid_overflow_count={} grid_max_overflow_count={} grid_overflowed_steps={}",
                 summary.repeats,
                 start.elapsed().as_secs_f64() * 1000.0,
                 report.gpu_step_ms,
@@ -128,6 +128,7 @@ pub(crate) fn run_bench(command: Command) -> Result<(), Box<dyn std::error::Erro
                 normalize_seed_scale,
                 reference_seed_scale,
                 report.gaussian_write,
+                report.subgroup_cooperative_supported,
                 report.neighbor_mode,
                 report.bucket_capacity,
                 report.grid_storage_len,

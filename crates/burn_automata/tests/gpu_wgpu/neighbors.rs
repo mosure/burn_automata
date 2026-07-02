@@ -23,7 +23,7 @@ fn wgpu_neighbor_modes_match_cpu_oracle_for_2d() -> Result<(), Box<dyn std::erro
         None => return Ok(()),
     };
 
-    for mode in [
+    let mut modes = vec![
         burn_automata::gpu::WgpuNeighborMode::LinkedList,
         burn_automata::gpu::WgpuNeighborMode::FixedCellBuckets {
             capacity: particles,
@@ -34,7 +34,12 @@ fn wgpu_neighbor_modes_match_cpu_oracle_for_2d() -> Result<(), Box<dyn std::erro
         burn_automata::gpu::WgpuNeighborMode::SortedCells,
         burn_automata::gpu::WgpuNeighborMode::CooperativeSortedCells,
         burn_automata::gpu::WgpuNeighborMode::Auto,
-    ] {
+    ];
+    if executor.subgroup_cooperative_supported() {
+        modes.push(burn_automata::gpu::WgpuNeighborMode::SubgroupCooperativeSortedCells);
+    }
+
+    for mode in modes {
         let mut state = executor.create_state_with_neighbor_mode(
             &model, &positions, &states, 1, particles, &grid, 1.0, mode,
         )?;
@@ -346,6 +351,44 @@ fn wgpu_particle_hashgrid_handles_shifted_3d_fixed_buckets()
         max_density <= 2.5e-3,
         "shifted particle hashgrid cooperative sorted max density abs error {max_density} exceeded tolerance"
     );
+
+    if executor.subgroup_cooperative_supported() {
+        let mut subgroup_state = executor.create_state_with_neighbor_mode(
+            &model,
+            &positions,
+            &states,
+            1,
+            particles,
+            &grid,
+            1.0,
+            burn_automata::gpu::WgpuNeighborMode::SubgroupCooperativeSortedCells,
+        )?;
+        executor.step_state(&mut subgroup_state)?;
+        let overflow = executor.read_grid_overflow(&subgroup_state)?;
+        let gpu = executor.read_state(&subgroup_state)?;
+        let max_pos = max_position_abs_error(&cpu.next_positions, &gpu.next_positions);
+        let max_state = max_abs_error(&cpu.next_states, &gpu.next_states);
+        let max_density = max_abs_error(&cpu.perception.density, &gpu.density);
+        eprintln!(
+            "shifted Growing3dGs subgroup cooperative sorted particle hash: overflow={overflow} max_pos={max_pos:.8} max_state={max_state:.8} max_density={max_density:.8}"
+        );
+        assert_eq!(
+            overflow, 0,
+            "subgroup cooperative sorted particle hashgrid should not overflow"
+        );
+        assert!(
+            max_pos <= 2.5e-3,
+            "shifted particle hashgrid subgroup cooperative sorted max position abs error {max_pos} exceeded tolerance"
+        );
+        assert!(
+            max_state <= 2.5e-3,
+            "shifted particle hashgrid subgroup cooperative sorted max state abs error {max_state} exceeded tolerance"
+        );
+        assert!(
+            max_density <= 2.5e-3,
+            "shifted particle hashgrid subgroup cooperative sorted max density abs error {max_density} exceeded tolerance"
+        );
+    }
     Ok(())
 }
 

@@ -17,3 +17,6 @@ mod passes;
 mod readback;
 mod state;
 mod steps;
+mod subgroup;
+
+use subgroup::*;

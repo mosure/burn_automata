@@ -201,6 +201,7 @@ pub(crate) fn neighbor_mode_label(neighbor_mode: WgpuNeighborMode) -> &'static s
         WgpuNeighborMode::TiledFixedCellBuckets { .. } => "tiled-fixed-buckets",
         WgpuNeighborMode::SortedCells => "sorted-cells",
         WgpuNeighborMode::CooperativeSortedCells => "cooperative-sorted-cells",
+        WgpuNeighborMode::SubgroupCooperativeSortedCells => "subgroup-cooperative-sorted-cells",
         WgpuNeighborMode::Bvh { .. } => "bvh",
         WgpuNeighborMode::GpuBvh { .. } => "gpu-bvh",
         WgpuNeighborMode::GpuLbvh { .. } => "gpu-lbvh",

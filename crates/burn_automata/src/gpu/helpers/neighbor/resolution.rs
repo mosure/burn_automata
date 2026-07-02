@@ -25,6 +25,7 @@ pub(in crate::gpu) fn resolve_bucket_capacity(
         WgpuNeighborMode::FixedCellBuckets { capacity } => capacity,
         WgpuNeighborMode::TiledFixedCellBuckets { capacity } => capacity,
         WgpuNeighborMode::CooperativeSortedCells => 0,
+        WgpuNeighborMode::SubgroupCooperativeSortedCells => 0,
         WgpuNeighborMode::Bvh { leaf_size } => {
             validate_bvh_mode(grid, leaf_size, "BVH")?;
             leaf_size

@@ -31,6 +31,12 @@ pub(crate) enum NeighborModeArg {
         alias = "coop"
     )]
     CooperativeSortedCells,
+    #[value(
+        name = "subgroup-cooperative-sorted-cells",
+        alias = "subgroup-cooperative-cells",
+        alias = "subgroup-coop"
+    )]
+    SubgroupCooperativeSortedCells,
     #[value(name = "bvh", alias = "cpu-bvh")]
     Bvh,
     #[value(name = "gpu-bvh", alias = "fixed-gpu-bvh")]

@@ -106,6 +106,14 @@ impl WgpuAutomataExecutor {
         let total = positions.len();
         let (bucket_capacity, resolved_neighbor_mode) =
             resolve_neighbor_mode_for_state(grid, particle_count, positions, neighbor_mode)?;
+        if resolved_neighbor_mode == WgpuNeighborMode::SubgroupCooperativeSortedCells
+            && !self.subgroup_cooperative_supported
+        {
+            return Err(AutomataError::InvalidArgument(
+                "WGPU subgroup cooperative sorted cells requires fixed 32-wide subgroup support; current adapter/device does not expose it"
+                    .to_owned(),
+            ));
+        }
         let bvh_leaf_count = match resolved_neighbor_mode {
             WgpuNeighborMode::GpuBvh { .. }
             | WgpuNeighborMode::GpuLbvh { .. }

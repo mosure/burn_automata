@@ -24,6 +24,7 @@ pub enum WgpuNeighborMode {
     },
     SortedCells,
     CooperativeSortedCells,
+    SubgroupCooperativeSortedCells,
     Bvh {
         leaf_size: usize,
     },
@@ -117,6 +118,7 @@ pub struct WgpuAutomataExecutor {
     pub(super) grid_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) gaussian_source_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) gaussian_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) subgroup_cooperative_supported: bool,
     pub(super) clear_pipeline: wgpu::ComputePipeline,
     pub(super) bin_pipeline: wgpu::ComputePipeline,
     pub(super) scan_counts_pipeline: wgpu::ComputePipeline,
@@ -135,5 +137,7 @@ pub struct WgpuAutomataExecutor {
     pub(super) bvh_update_pipeline: wgpu::ComputePipeline,
     pub(super) cooperative_density_pipeline: wgpu::ComputePipeline,
     pub(super) cooperative_update_pipeline: wgpu::ComputePipeline,
+    pub(super) subgroup_cooperative_density_pipeline: Option<wgpu::ComputePipeline>,
+    pub(super) subgroup_cooperative_update_pipeline: Option<wgpu::ComputePipeline>,
     pub(super) gaussian_pipeline: wgpu::ComputePipeline,
 }

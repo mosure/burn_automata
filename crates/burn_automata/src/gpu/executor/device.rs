@@ -15,8 +15,19 @@ impl WgpuAutomataExecutor {
             .map_err(|err| {
                 AutomataError::InvalidArgument(format!("no WGPU adapter available: {err}"))
             })?;
+        let adapter_features = adapter.features();
+        let adapter_info = adapter.get_info();
+        let required_features =
+            subgroup_cooperative_required_features(adapter_features, &adapter_info);
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("burn_automata_wgpu_device"),
+                required_features,
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(|err| {
                 AutomataError::InvalidArgument(format!("failed to create WGPU device: {err}"))
@@ -25,6 +36,8 @@ impl WgpuAutomataExecutor {
     }
 
     pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> AutomataResult<Self> {
+        let subgroup_cooperative_supported =
+            supports_subgroup_cooperative_sorted_cells(device.features(), &device.adapter_info());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("burn_automata_gpu_step"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("../../gpu_step.wgsl"))),
@@ -247,6 +260,12 @@ impl WgpuAutomataExecutor {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             });
+        let (subgroup_cooperative_density_pipeline, subgroup_cooperative_update_pipeline) =
+            create_subgroup_cooperative_pipelines(
+                &device,
+                &pipeline_layout,
+                subgroup_cooperative_supported,
+            );
         let gaussian_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("burn_automata_write_gaussians"),
             layout: Some(&gaussian_pipeline_layout),
@@ -263,6 +282,7 @@ impl WgpuAutomataExecutor {
             grid_bind_group_layout,
             gaussian_source_bind_group_layout,
             gaussian_bind_group_layout,
+            subgroup_cooperative_supported,
             clear_pipeline,
             bin_pipeline,
             scan_counts_pipeline,
@@ -281,6 +301,8 @@ impl WgpuAutomataExecutor {
             bvh_update_pipeline,
             cooperative_density_pipeline,
             cooperative_update_pipeline,
+            subgroup_cooperative_density_pipeline,
+            subgroup_cooperative_update_pipeline,
             gaussian_pipeline,
         })
     }
@@ -298,5 +320,9 @@ impl WgpuAutomataExecutor {
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|err| AutomataError::InvalidArgument(format!("WGPU poll failed: {err}")))?;
         Ok(())
+    }
+
+    pub fn subgroup_cooperative_supported(&self) -> bool {
+        self.subgroup_cooperative_supported
     }
 }

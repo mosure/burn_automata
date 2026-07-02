@@ -132,6 +132,24 @@ fn adaptive_auto_uses_cooperative_sorted_cells_for_collapsed_3d_cells() {
 }
 
 #[test]
+fn explicit_subgroup_cooperative_sorted_cells_resolves() {
+    let grid = HashGridConfig::growing_2d();
+    let particle_count = 1024;
+    let positions = vec![[0.0, 0.0, 0.0, 0.0]; particle_count];
+
+    let (capacity, mode) = resolve_neighbor_mode_for_state(
+        &grid,
+        particle_count,
+        &positions,
+        WgpuNeighborMode::SubgroupCooperativeSortedCells,
+    )
+    .unwrap();
+
+    assert_eq!(capacity, 0);
+    assert_eq!(mode, WgpuNeighborMode::SubgroupCooperativeSortedCells);
+}
+
+#[test]
 fn adaptive_auto_uses_cooperative_sorted_cells_for_validated_3d_throughput_range() {
     let particle_count = 8192;
     let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);

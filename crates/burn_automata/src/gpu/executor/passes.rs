@@ -40,7 +40,9 @@ impl WgpuAutomataExecutor {
         }
         if matches!(
             state.neighbor_mode,
-            WgpuNeighborMode::SortedCells | WgpuNeighborMode::CooperativeSortedCells
+            WgpuNeighborMode::SortedCells
+                | WgpuNeighborMode::CooperativeSortedCells
+                | WgpuNeighborMode::SubgroupCooperativeSortedCells
         ) {
             let scan_groups = u32_checked(scan_block_count(state.cell_count)?, "scan block count")?;
             {
@@ -93,17 +95,30 @@ impl WgpuAutomataExecutor {
                 state.neighbor_mode,
                 WgpuNeighborMode::CooperativeSortedCells
             );
-            pass.set_pipeline(if tiled {
+            let subgroup_cooperative = matches!(
+                state.neighbor_mode,
+                WgpuNeighborMode::SubgroupCooperativeSortedCells
+            );
+            let pipeline = if tiled {
                 &self.tiled_density_pipeline
             } else if cooperative {
                 &self.cooperative_density_pipeline
+            } else if subgroup_cooperative {
+                self.subgroup_cooperative_density_pipeline
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "WGPU subgroup cooperative density pipeline is unavailable".to_owned(),
+                        )
+                    })?
             } else {
                 &self.density_pipeline
-            });
+            };
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             if tiled {
                 pass.dispatch_workgroups_indirect(&state.indirect_buffer, 0);
-            } else if cooperative {
+            } else if cooperative || subgroup_cooperative {
                 pass.dispatch_workgroups(
                     u32_checked(state.total, "cooperative density groups")?,
                     1,
@@ -136,19 +151,32 @@ impl WgpuAutomataExecutor {
                 state.neighbor_mode,
                 WgpuNeighborMode::CooperativeSortedCells
             );
-            pass.set_pipeline(if bvh {
+            let subgroup_cooperative = matches!(
+                state.neighbor_mode,
+                WgpuNeighborMode::SubgroupCooperativeSortedCells
+            );
+            let pipeline = if bvh {
                 &self.bvh_update_pipeline
             } else if tiled {
                 &self.tiled_update_pipeline
             } else if cooperative {
                 &self.cooperative_update_pipeline
+            } else if subgroup_cooperative {
+                self.subgroup_cooperative_update_pipeline
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "WGPU subgroup cooperative update pipeline is unavailable".to_owned(),
+                        )
+                    })?
             } else {
                 &self.update_pipeline
-            });
+            };
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             if tiled {
                 pass.dispatch_workgroups_indirect(&state.indirect_buffer, 0);
-            } else if cooperative {
+            } else if cooperative || subgroup_cooperative {
                 pass.dispatch_workgroups(
                     u32_checked(state.total, "cooperative update groups")?,
                     1,

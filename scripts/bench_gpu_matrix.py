@@ -195,7 +195,7 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         action="append",
         dest="modes",
-        help="Mode override: auto, linked-list, fixed-buckets:128, tiled-fixed-buckets:128, sorted-cells, cooperative-sorted-cells, bvh:16, gpu-bvh:16, gpu-lbvh:16, gpu-morton-lbvh:16.",
+        help="Mode override: auto, linked-list, fixed-buckets:128, tiled-fixed-buckets:128, sorted-cells, cooperative-sorted-cells, subgroup-cooperative-sorted-cells, bvh:16, gpu-bvh:16, gpu-lbvh:16, gpu-morton-lbvh:16.",
     )
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)

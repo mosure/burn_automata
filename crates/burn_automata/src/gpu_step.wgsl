@@ -15,6 +15,7 @@ const LAYOUT_BVH: u32 = 3u;
 const LAYOUT_SORTED_BVH: u32 = 4u;
 const LAYOUT_MORTON_BVH: u32 = 5u;
 const LAYOUT_COOPERATIVE_SORTED_CELLS: u32 = 6u;
+const LAYOUT_SUBGROUP_COOPERATIVE_SORTED_CELLS: u32 = 7u;
 const BVH_HEADER_U32: u32 = 4u;
 const BVH_NODE_U32: u32 = 9u;
 const BVH_STACK_SIZE: u32 = 64u;
@@ -215,7 +216,8 @@ fn bvh_sort_j() -> u32 {
 fn is_sorted_layout() -> bool {
     return neighbor_layout() == LAYOUT_SORTED_CELLS
         || neighbor_layout() == LAYOUT_SORTED_BVH
-        || neighbor_layout() == LAYOUT_COOPERATIVE_SORTED_CELLS;
+        || neighbor_layout() == LAYOUT_COOPERATIVE_SORTED_CELLS
+        || neighbor_layout() == LAYOUT_SUBGROUP_COOPERATIVE_SORTED_CELLS;
 }
 
 fn is_bvh_layout() -> bool {

@@ -97,6 +97,7 @@ pub(crate) struct GpuBenchReport {
     pub(crate) grid_max_overflow_count: u32,
     pub(crate) grid_overflowed_steps: usize,
     pub(crate) gaussian_write: bool,
+    pub(crate) subgroup_cooperative_supported: bool,
 }
 
 #[cfg(feature = "gpu_wgpu")]
@@ -186,8 +187,10 @@ pub(crate) fn gpu_rollout_bench(
         grid_max_overflow_count: 0,
         grid_overflowed_steps: 0,
         gaussian_write: cfg.gaussian_write,
+        subgroup_cooperative_supported: false,
     };
     let executor = crate::gpu::WgpuAutomataExecutor::new_blocking()?;
+    report.subgroup_cooperative_supported = executor.subgroup_cooperative_supported();
     let mut warmup_state = executor.create_state_with_neighbor_mode_and_update_prob(
         model,
         &positions,
@@ -362,6 +365,9 @@ pub(crate) fn wgpu_neighbor_mode(
         NeighborModeArg::SortedCells => crate::gpu::WgpuNeighborMode::SortedCells,
         NeighborModeArg::CooperativeSortedCells => {
             crate::gpu::WgpuNeighborMode::CooperativeSortedCells
+        }
+        NeighborModeArg::SubgroupCooperativeSortedCells => {
+            crate::gpu::WgpuNeighborMode::SubgroupCooperativeSortedCells
         }
         NeighborModeArg::Bvh => crate::gpu::WgpuNeighborMode::Bvh {
             leaf_size: bucket_capacity.unwrap_or(16),
