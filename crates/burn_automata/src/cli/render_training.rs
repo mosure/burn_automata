@@ -674,19 +674,19 @@ pub(crate) fn run_render_proxy_training(
                 DirectRolloutObjectiveDiagnostics::default()
             };
         let before_training_weights = model.weights.clone();
-        let (train_report, train_step_scale) = match cfg.training_backend {
-            RenderTrainingBackendArg::Proxy => {
-                let batch = render_proxy_supervised_batch(
-                    model,
-                    grid,
-                    target,
-                    &trace,
-                    &trajectory,
-                    &gradient,
-                    &cfg,
-                )?;
-                (
-                    run_supervised_training(
+        let (train_report, train_step_scale, direct_line_search_candidates) =
+            match cfg.training_backend {
+                RenderTrainingBackendArg::Proxy => {
+                    let batch = render_proxy_supervised_batch(
+                        model,
+                        grid,
+                        target,
+                        &trace,
+                        &trajectory,
+                        &gradient,
+                        &cfg,
+                    )?;
+                    let report = run_supervised_training(
                         model,
                         &batch,
                         TrainingRunConfig {
@@ -694,20 +694,19 @@ pub(crate) fn run_render_proxy_training(
                             report_interval: cfg.supervised_steps_per_round,
                             sgd: cfg.sgd,
                         },
-                    )?,
-                    1.0,
-                )
-            }
-            RenderTrainingBackendArg::DirectRollout => render_direct_rollout_training_steps(
-                model,
-                grid,
-                target,
-                &cfg,
-                round,
-                render_cfg,
-                &selection_baseline,
-            )?,
-        };
+                    )?;
+                    (report, 1.0, Vec::new())
+                }
+                RenderTrainingBackendArg::DirectRollout => render_direct_rollout_training_steps(
+                    model,
+                    grid,
+                    target,
+                    &cfg,
+                    round,
+                    render_cfg,
+                    &selection_baseline,
+                )?,
+            };
         let train_liveness_output_delta_norm = output_channel_delta_norm(
             &before_training_weights,
             &model.weights,
@@ -899,6 +898,7 @@ pub(crate) fn run_render_proxy_training(
                 .map(|entry| entry.grad_scale)
                 .collect(),
             train_step_scale: reported_train_step_scale,
+            direct_line_search_candidates,
             train_motion_output_delta_norm,
             train_motion_memory_output_delta_norm,
             train_liveness_output_delta_norm,

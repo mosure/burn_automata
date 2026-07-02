@@ -9,9 +9,13 @@ pub(crate) fn render_direct_rollout_training_steps(
     round: usize,
     render_cfg: RenderLossConfig,
     selection_baseline: &[RenderSelectionBaselineCase],
-) -> Result<(TrainingRunReport, f32), Box<dyn std::error::Error>> {
+) -> Result<
+    (TrainingRunReport, f32, Vec<DirectLineSearchCandidateReport>),
+    Box<dyn std::error::Error>,
+> {
     let steps = cfg.supervised_steps_per_round.max(1);
     let mut reports = Vec::with_capacity(steps);
+    let mut line_search_candidates = Vec::new();
     let mut step_scale_sum = 0.0_f32;
     let mut best_inner_model = model.clone();
     let mut best_inner_selection = if cfg.direct_line_search {
@@ -27,10 +31,10 @@ pub(crate) fn render_direct_rollout_training_steps(
         None
     };
     let mut selected_inner_checkpoint = false;
-    for _ in 0..steps {
+    for inner_step in 0..steps {
         let (trace, trajectory) = render_training_trajectory(model, grid, cfg, round)?;
         let gradient = render_position_gradient(&trace, target, render_cfg, cfg)?;
-        let (report, step_scale) = if cfg.direct_line_search {
+        let (report, step_scale, mut candidates) = if cfg.direct_line_search {
             render_direct_rollout_training_step_with_line_search(
                 model,
                 grid,
@@ -67,8 +71,12 @@ pub(crate) fn render_direct_rollout_training_steps(
                     render_training_round_seed(cfg, round),
                 )?
             };
-            (report, 1.0)
+            (report, 1.0, Vec::new())
         };
+        for candidate in &mut candidates {
+            candidate.inner_step = inner_step;
+        }
+        line_search_candidates.extend(candidates);
         reports.push(report);
         step_scale_sum += step_scale;
         if cfg.direct_line_search {
@@ -114,7 +122,11 @@ pub(crate) fn render_direct_rollout_training_steps(
             mesh_multiview_render_loss_from_trace(&final_trace, target, render_cfg)?.total_loss;
         report.best_loss = report.best_loss.min(report.final_loss);
     }
-    Ok((report, step_scale_sum / steps as f32))
+    Ok((
+        report,
+        step_scale_sum / steps as f32,
+        line_search_candidates,
+    ))
 }
 
 pub(crate) fn combine_direct_rollout_training_reports(
@@ -168,7 +180,10 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
     gradient: &RenderProxyGradientRows,
     render_cfg: RenderLossConfig,
     selection_baseline: &[RenderSelectionBaselineCase],
-) -> Result<(TrainingRunReport, f32), Box<dyn std::error::Error>> {
+) -> Result<
+    (TrainingRunReport, f32, Vec<DirectLineSearchCandidateReport>),
+    Box<dyn std::error::Error>,
+> {
     let scales = sanitized_direct_line_search_scales(cfg);
     if scales.is_empty() {
         let report = if cfg.direct_selection_seed_training {
@@ -187,7 +202,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
                 render_training_round_seed(cfg, round),
             )?
         };
-        return Ok((report, 1.0));
+        return Ok((report, 1.0, Vec::new()));
     }
 
     let base_model = model.clone();
@@ -208,6 +223,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
     let mut best_progress_report = None::<TrainingRunReport>;
     let mut best_progress_selection = no_op_selection.clone();
     let mut best_progress_scale = 0.0_f32;
+    let mut candidate_reports = Vec::with_capacity(scales.len());
 
     for scale in scales {
         let scaled_learning_rate = cfg.sgd.learning_rate * scale;
@@ -250,6 +266,13 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             Some(selection_baseline),
         )?;
         let candidate_beats = render_selection_candidate_metrics_beats(&selection, &best_selection);
+        let progress_candidate =
+            render_selection_training_progress_beats(&selection, &no_op_selection);
+        let mut candidate_report = direct_line_search_candidate_report(scale, &selection, &report);
+        candidate_report.checkpoint_candidate = candidate_beats
+            || (best_scale == 0.0
+                && render_selection_morphology_recovery_beats(&selection, &best_selection));
+        candidate_report.progress_candidate = progress_candidate;
         if candidate_beats
             || (best_scale == 0.0
                 && render_selection_morphology_recovery_beats(&selection, &best_selection))
@@ -258,7 +281,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             best_report = report;
             best_scale = scale;
             best_selection = selection;
-        } else if render_selection_training_progress_beats(&selection, &no_op_selection)
+        } else if progress_candidate
             && (best_progress_model.is_none()
                 || selection.render_loss < best_progress_selection.render_loss
                 || selection.score < best_progress_selection.score)
@@ -268,6 +291,7 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             best_progress_scale = scale;
             best_progress_selection = selection;
         }
+        candidate_reports.push(candidate_report);
     }
 
     if best_scale == 0.0
@@ -275,11 +299,105 @@ pub(crate) fn render_direct_rollout_training_step_with_line_search(
             (best_progress_model, best_progress_report)
     {
         *model = progress_model;
-        return Ok((progress_report, best_progress_scale));
+        mark_selected_line_search_candidate(&mut candidate_reports, best_progress_scale, false);
+        return Ok((progress_report, best_progress_scale, candidate_reports));
     }
 
     *model = best_model;
-    Ok((best_report, best_scale))
+    mark_selected_line_search_candidate(&mut candidate_reports, best_scale, true);
+    Ok((best_report, best_scale, candidate_reports))
+}
+
+fn direct_line_search_candidate_report(
+    scale: f32,
+    selection: &RenderSelectionMetrics,
+    report: &TrainingRunReport,
+) -> DirectLineSearchCandidateReport {
+    let last_history = report.history.last();
+    DirectLineSearchCandidateReport {
+        inner_step: 0,
+        scale,
+        checkpoint_candidate: false,
+        progress_candidate: false,
+        selected_checkpoint: false,
+        selected_progress: false,
+        render_loss: selection.render_loss,
+        score: selection.score,
+        density_psnr_db: selection.density_psnr_db,
+        morphology_non_regressed: selection.morphology_non_regressed,
+        active_surface_max: selection.active_surface_max,
+        target_coverage_fraction: selection.target_coverage_fraction,
+        material_visible_target_mean_distance: selection.material_visible_target_mean_distance,
+        material_visible_target_max_distance: selection.material_visible_target_max_distance,
+        material_visible_target_coverage_fraction: selection
+            .material_visible_target_coverage_fraction,
+        material_visible_inactive_fraction: selection.material_visible_inactive_fraction,
+        material_visible_max_inactive_opacity: selection.material_visible_max_inactive_opacity,
+        material_active_mean_opacity: selection.material_active_mean_opacity,
+        material_visible_count: selection.material_visible_count,
+        surface_covered_bin_fraction: selection.surface_covered_bin_fraction,
+        surface_mean_bin_covered_fraction: selection.surface_mean_bin_covered_fraction,
+        material_visible_surface_covered_bin_fraction: selection
+            .material_visible_surface_covered_bin_fraction,
+        material_visible_surface_mean_bin_covered_fraction: selection
+            .material_visible_surface_mean_bin_covered_fraction,
+        surface_normal_covered_bin_fraction: selection.surface_normal_covered_bin_fraction,
+        surface_normal_mean_bin_covered_fraction: selection
+            .surface_normal_mean_bin_covered_fraction,
+        material_visible_surface_normal_covered_bin_fraction: selection
+            .material_visible_surface_normal_covered_bin_fraction,
+        material_visible_surface_normal_mean_bin_covered_fraction: selection
+            .material_visible_surface_normal_mean_bin_covered_fraction,
+        material_visible_surface_tail_p99_distance: selection
+            .material_visible_surface_tail_p99_distance,
+        material_visible_surface_tail_over_threshold_fraction: selection
+            .material_visible_surface_tail_over_threshold_fraction,
+        min_active_extent_bbox_ratio: selection.min_active_extent_bbox_ratio,
+        min_active_extent_min_axis_ratio: selection.min_active_extent_min_axis_ratio,
+        min_final_active_count: selection.min_final_active_count,
+        min_newly_activated_fraction: selection.min_newly_activated_fraction,
+        min_front_local_newly_activated_fraction: selection
+            .min_front_local_newly_activated_fraction,
+        max_front_liveness_margin: selection.max_front_liveness_margin,
+        min_front_liveness_candidate_count: selection.min_front_liveness_candidate_count,
+        max_extent_front_liveness_margin: selection.max_extent_front_liveness_margin,
+        min_extent_front_liveness_candidate_count: selection
+            .min_extent_front_liveness_candidate_count,
+        max_temporal_front_liveness_margin: selection.max_temporal_front_liveness_margin,
+        min_temporal_front_liveness_candidate_count: selection
+            .min_temporal_front_liveness_candidate_count,
+        max_temporal_extent_front_liveness_margin: selection
+            .max_temporal_extent_front_liveness_margin,
+        min_temporal_extent_front_liveness_candidate_count: selection
+            .min_temporal_extent_front_liveness_candidate_count,
+        max_temporal_activation_schedule_error: selection.max_temporal_activation_schedule_error,
+        all_temporal_activation_progressive: selection.all_temporal_activation_progressive,
+        all_temporal_geometry_progressive: selection.all_temporal_geometry_progressive,
+        train_final_loss: report.final_loss,
+        train_grad_norm: last_history.map(|entry| entry.grad_norm).unwrap_or(0.0),
+        train_grad_scale: last_history.map(|entry| entry.grad_scale).unwrap_or(0.0),
+        failure_reasons: selection.worst_failure_reasons.clone(),
+    }
+}
+
+fn mark_selected_line_search_candidate(
+    reports: &mut [DirectLineSearchCandidateReport],
+    selected_scale: f32,
+    checkpoint: bool,
+) {
+    if selected_scale <= 0.0 || !selected_scale.is_finite() {
+        return;
+    }
+    if let Some(report) = reports
+        .iter_mut()
+        .find(|report| (report.scale - selected_scale).abs() <= f32::EPSILON)
+    {
+        if checkpoint {
+            report.selected_checkpoint = true;
+        } else {
+            report.selected_progress = true;
+        }
+    }
 }
 
 pub(crate) fn sanitized_direct_line_search_scales(cfg: &RenderProxyTrainingConfig) -> Vec<f32> {

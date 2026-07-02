@@ -101,6 +101,124 @@ fn render_direct_rollout_backend_applies_mlp_gradients() {
 }
 
 #[test]
+fn render_proxy_history_records_direct_line_search_candidates() {
+    let config = NpaConfig::growing_3dgs();
+    let grid = crate::kernels::HashGridConfig::growing_3dgs();
+    let mut model =
+        local_growth_student_model(config, 21, 0.0, LOCAL_GROWTH_EXPANSION_GAIN).unwrap();
+    let target = mesh_target_for_arg(MeshTargetArg::Torus, 0.72);
+    let cfg = RenderProxyTrainingConfig {
+        target: MeshTargetArg::Torus,
+        rounds: 1,
+        supervised_steps_per_round: 1,
+        particles: 32,
+        rollout_steps: 2,
+        gradient_particles: 32,
+        gradient_mode: RenderGradientModeArg::Analytic,
+        finite_diff_eps: 1.0e-3,
+        motion_gain: 1.0,
+        perception_position_gain: 1.0,
+        max_update_norm: 0.05,
+        trajectory_supervision: true,
+        trajectory_render_gain: 0.0,
+        trajectory_mesh_gain: 0.0,
+        trajectory_render_samples: 0,
+        liveness_gain: 0.0,
+        liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
+        liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
+        coverage_gain: 0.0,
+        coverage_samples: 0,
+        coverage_mode: CoverageUpdateModeArg::HardNearest,
+        coverage_softness: 0.0,
+        coverage_repulsion_gain: 0.0,
+        coverage_gap_gain: 0.0,
+        coverage_repulsion_radius: 0.0,
+        coverage_normal_weight: 0.0,
+        extent_gain: 0.0,
+        full_coverage_adjoint: false,
+        surface_gain: 0.0,
+        surface_escape_gain: 0.0,
+        opacity_gain: 0.0,
+        material_liveness_gain: 0.0,
+        material_tail_gain: 0.0,
+        material_suppression_update_multiplier: ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
+        material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
+        scale_gain: 0.0,
+        scale_budget_weight: 0.0,
+        max_opacity_update: 0.05,
+        direct_output_gradient_rms_cap: ROBUST_3D_DIRECT_OUTPUT_GRADIENT_RMS_CAP,
+        direct_line_search: true,
+        direct_line_search_scales: vec![0.5, 1.0, 2.0],
+        direct_material_output_only: false,
+        training_backend: RenderTrainingBackendArg::DirectRollout,
+        direct_selection_seed_training: false,
+        seed: 17,
+        selection_seed: None,
+        selection_seeds: Vec::new(),
+        seed_scale: 0.72,
+        seed_mode: ParticleSeed::UniformCircle,
+        render: RenderLossConfig {
+            image_size: 8,
+            target_samples: 64,
+            world_scale: 1.44,
+            ..RenderLossConfig::default()
+        },
+        sgd: SgdConfig {
+            learning_rate: 1.0e-3,
+            grad_clip_norm: 1.0,
+            weight_decay: 0.0,
+        },
+    };
+
+    let report = run_render_proxy_training(&mut model, &grid, &target, cfg).unwrap();
+    let history = &report.history[0];
+    let candidates = &history.direct_line_search_candidates;
+
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.scale)
+            .collect::<Vec<_>>(),
+        vec![0.5, 1.0, 2.0]
+    );
+    assert!(candidates.iter().all(|candidate| candidate.inner_step == 0));
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.render_loss.is_finite())
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.score.is_finite())
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.train_final_loss.is_finite())
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.train_grad_norm.is_finite())
+    );
+    let selected_count = candidates
+        .iter()
+        .filter(|candidate| candidate.selected_checkpoint || candidate.selected_progress)
+        .count();
+    assert!(selected_count <= 1);
+    let serialized = serde_json::to_value(history).unwrap();
+    assert_eq!(
+        serialized["direct_line_search_candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
 fn direct_rollout_objective_diagnostics_reports_channel_pressure() {
     let config = NpaConfig::growing_3dgs();
     let grid = crate::kernels::HashGridConfig::growing_3dgs();
@@ -356,12 +474,13 @@ fn direct_rollout_training_honors_supervised_steps_per_round() {
         },
     };
     let baseline = render_selection_baseline(&model, &grid, &target, &cfg, cfg.render).unwrap();
-    let (report, step_scale) = render_direct_rollout_training_steps(
+    let (report, step_scale, line_search_candidates) = render_direct_rollout_training_steps(
         &mut model, &grid, &target, &cfg, 0, cfg.render, &baseline,
     )
     .unwrap();
 
     assert_eq!(step_scale, 1.0);
+    assert!(line_search_candidates.is_empty());
     assert_eq!(report.steps, cfg.supervised_steps_per_round);
     assert_eq!(report.history.len(), cfg.supervised_steps_per_round);
     assert_eq!(
