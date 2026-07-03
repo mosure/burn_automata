@@ -175,6 +175,7 @@ pub(crate) fn run_ablate_local_3d(command: Command) -> Result<(), Box<dyn std::e
     });
     let output_report = CliTrainingReport {
         preset: AutomataPreset::Growing3dGs,
+        objective: "supervised_mesh_update_distillation",
         target_source: output_source,
         student_seed,
         sgd,

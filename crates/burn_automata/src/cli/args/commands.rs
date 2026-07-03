@@ -111,6 +111,139 @@ pub(crate) enum Command {
         #[arg(long, default_value = "uniform-circle")]
         seed_mode: SeedModeArg,
     },
+    #[command(name = "eval-target2d", alias = "eval-target-2d")]
+    EvalTarget2d {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        target_image: PathBuf,
+        #[arg(long)]
+        reference_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 4096)]
+        particles: usize,
+        #[arg(long, default_value_t = 64)]
+        steps: usize,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 4096)]
+        target_points: usize,
+        #[arg(long)]
+        target_image_size: Option<usize>,
+        #[arg(long, default_value_t = 0.05)]
+        target_threshold: f32,
+        #[arg(long, default_value_t = 256)]
+        image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        splat_sigma: f32,
+        #[arg(long, default_value_t = 2.0)]
+        splat_loss_weight: f32,
+        #[arg(long, default_value_t = 5.0)]
+        color_loss_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.01)]
+        displacement_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        overflow_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        bound_regularizer_weight: f32,
+        #[arg(long, default_value = "/tmp/burn_automata_target2d_eval.json")]
+        output: PathBuf,
+    },
+    #[command(name = "train-target2d", alias = "train-target-2d")]
+    TrainTarget2d {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        target_image: PathBuf,
+        #[arg(
+            long,
+            default_value = "/tmp/burn_automata_target2d_training_report.json"
+        )]
+        output: PathBuf,
+        #[arg(long)]
+        model_output: Option<PathBuf>,
+        #[arg(long)]
+        reference_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 10000)]
+        epochs: usize,
+        #[arg(long, default_value_t = 3)]
+        repetitions: usize,
+        #[arg(long, default_value_t = 100)]
+        report_interval: usize,
+        #[arg(long, default_value_t = 8)]
+        batch_size: usize,
+        #[arg(long, default_value_t = 512)]
+        pool_size: usize,
+        #[arg(long, default_value_t = 4096)]
+        particles: usize,
+        #[arg(long, default_value_t = 32)]
+        step_min: usize,
+        #[arg(long, default_value_t = 96)]
+        step_max: usize,
+        #[arg(long, default_value_t = 16)]
+        inject_seed_interval: usize,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 42)]
+        student_seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 0.1)]
+        brush_size: f32,
+        #[arg(long, default_value_t = 5.0e-4)]
+        learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        weight_decay: f32,
+        #[arg(long, default_value_t = 0.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.9)]
+        adam_beta1: f32,
+        #[arg(long, default_value_t = 0.999)]
+        adam_beta2: f32,
+        #[arg(long, default_value_t = 1.0e-8)]
+        adam_epsilon: f32,
+        #[arg(long = "scheduler-milestone", value_delimiter = ',')]
+        scheduler_milestones: Vec<usize>,
+        #[arg(long, default_value_t = 0.3)]
+        scheduler_gamma: f32,
+        #[arg(long, action = ArgAction::SetFalse)]
+        per_parameter_grad_normalization: bool,
+        #[arg(long, default_value_t = 4096)]
+        target_points: usize,
+        #[arg(long)]
+        target_image_size: Option<usize>,
+        #[arg(long, default_value_t = 0.05)]
+        target_threshold: f32,
+        #[arg(long, default_value_t = 256)]
+        image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        splat_sigma: f32,
+        #[arg(long, default_value_t = 2.0)]
+        splat_loss_weight: f32,
+        #[arg(long, default_value_t = 5.0)]
+        color_loss_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.01)]
+        displacement_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        overflow_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        bound_regularizer_weight: f32,
+    },
     #[command(name = "eval-dynamics2d", alias = "eval-dynamics-2d")]
     EvalDynamics2d {
         #[arg(long, default_value = "growing-2d")]

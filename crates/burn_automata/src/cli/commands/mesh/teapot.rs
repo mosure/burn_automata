@@ -263,6 +263,7 @@ pub(crate) fn run_train_teapot_morphogen_3d(
     };
     let output_report = CliTrainingReport {
         preset: AutomataPreset::Growing3dGs,
+        objective: "supervised_mesh_update_distillation",
         target_source: target_source.to_string(),
         student_seed: 0,
         sgd,

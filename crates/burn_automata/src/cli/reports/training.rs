@@ -5,6 +5,7 @@ use super::mesh_rollout::MeshRolloutReport;
 #[derive(Serialize)]
 pub(crate) struct CliTrainingReport {
     pub(crate) preset: AutomataPreset,
+    pub(crate) objective: &'static str,
     pub(crate) target_source: String,
     pub(crate) student_seed: u64,
     pub(crate) sgd: SgdConfig,
@@ -18,6 +19,44 @@ pub(crate) struct CliTrainingReport {
     pub(crate) rollout_supervision: Option<CliRolloutSupervisionReport>,
     pub(crate) mesh_rollout: Option<MeshRolloutReport>,
     pub(crate) render_loss: Option<MultiViewRenderLossReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTarget2dEvalReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) model: String,
+    pub(crate) target_image: String,
+    pub(crate) reference_model: Option<String>,
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) update_prob: f32,
+    pub(crate) seed: u64,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) loss_config: Target2dLossConfig,
+    pub(crate) target_source_width: usize,
+    pub(crate) target_source_height: usize,
+    pub(crate) target_points: usize,
+    pub(crate) loss: Target2dLossReport,
+    pub(crate) reference_loss: Option<Target2dLossReport>,
+    pub(crate) total_loss_gap_to_reference: Option<f32>,
+    pub(crate) total_loss_ratio_to_reference: Option<f32>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTarget2dTrainingReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) target_image: String,
+    pub(crate) target_source_width: usize,
+    pub(crate) target_source_height: usize,
+    pub(crate) target_points: usize,
+    pub(crate) model_output: Option<String>,
+    pub(crate) reference_model: Option<String>,
+    pub(crate) reference_loss: Option<Target2dLossReport>,
+    pub(crate) final_loss_gap_to_reference: Option<f32>,
+    pub(crate) final_loss_ratio_to_reference: Option<f32>,
+    pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
+    pub(crate) training: Target2dTrainingReport,
 }
 
 #[derive(Serialize)]

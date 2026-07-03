@@ -488,8 +488,8 @@ fn inferred_hashgrid(eps0: f32) -> HashGridConfig {
         HashGridConfig {
             dim: 2,
             boundary: Boundary::Clamped,
-            mode: HashGridMode::Particle,
-            grid_size: [64, 64, 1],
+            mode: HashGridMode::Grid,
+            grid_size: [16, 16, 1],
             eps: eps0,
             max_particles_per_block: 32,
         }

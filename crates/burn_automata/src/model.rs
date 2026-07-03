@@ -38,6 +38,30 @@ impl NpaWeights {
         weights
     }
 
+    pub fn upstream_seeded(config: &NpaConfig, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut weights = Self::zeros(config);
+        fill_xavier_uniform(
+            &mut weights.w1,
+            config.perception_dims(),
+            config.hidden_dims,
+            0.1,
+            &mut rng,
+        );
+        fill_xavier_uniform(
+            &mut weights.w2,
+            config.hidden_dims,
+            config.update_dims(),
+            0.1,
+            &mut rng,
+        );
+        let b1_bound = (config.perception_dims() as f32).sqrt().recip();
+        for value in &mut weights.b1 {
+            *value = rng.random_range(-b1_bound..b1_bound);
+        }
+        weights
+    }
+
     pub fn validate(&self, config: &NpaConfig) -> AutomataResult<()> {
         let expected_w1 = config.hidden_dims * config.perception_dims();
         let expected_w2 = config.update_dims() * config.hidden_dims;
@@ -384,6 +408,11 @@ impl NpaModel {
         Self { config, weights }
     }
 
+    pub fn upstream_seeded(config: NpaConfig, seed: u64) -> Self {
+        let weights = NpaWeights::upstream_seeded(&config, seed);
+        Self { config, weights }
+    }
+
     pub fn validate(&self) -> AutomataResult<()> {
         if !(self.config.spatial_dims == 2 || self.config.spatial_dims == 3) {
             return Err(AutomataError::InvalidModel(format!(
@@ -577,6 +606,20 @@ impl NpaModel {
     }
 }
 
+fn fill_xavier_uniform(
+    values: &mut [f32],
+    fan_in: usize,
+    fan_out: usize,
+    gain: f32,
+    rng: &mut StdRng,
+) {
+    let denom = (fan_in + fan_out).max(1) as f32;
+    let bound = gain * (6.0 / denom).sqrt();
+    for value in values {
+        *value = rng.random_range(-bound..bound);
+    }
+}
+
 fn repeated_rows(values: &[f32], rows: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(values.len() * rows);
     for _ in 0..rows {
@@ -599,6 +642,19 @@ mod tests {
 
         adapter.validate(&config).unwrap();
         assert!(adapter.parameter_count() < full_count);
+    }
+
+    #[test]
+    fn upstream_seeded_matches_npa_initializer_shape() {
+        let config = NpaConfig::growing_2d();
+        let weights = NpaWeights::upstream_seeded(&config, 42);
+        let w1_bound = 0.1 * (6.0 / (config.perception_dims() + config.hidden_dims) as f32).sqrt();
+        let w2_bound = 0.1 * (6.0 / (config.hidden_dims + config.update_dims()) as f32).sqrt();
+
+        assert!(weights.w1.iter().all(|value| value.abs() <= w1_bound));
+        assert!(weights.w2.iter().all(|value| value.abs() <= w2_bound));
+        assert!(weights.b1.iter().any(|value| *value != 0.0));
+        assert!(weights.b2.iter().all(|value| *value == 0.0));
     }
 
     #[test]

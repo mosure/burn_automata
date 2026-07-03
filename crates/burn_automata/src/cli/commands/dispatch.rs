@@ -1,10 +1,12 @@
-use super::{basic, bench_handlers, dynamics2d, hyper, mesh, render, training_bench};
+use super::{basic, bench_handlers, dynamics2d, hyper, mesh, render, target2d, training_bench};
 use crate::cli::prelude::*;
 
 pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         command @ Command::Infer { .. } => basic::run_infer(command),
         command @ Command::Train { .. } => basic::run_train(command),
+        command @ Command::EvalTarget2d { .. } => target2d::run_eval_target_2d(command),
+        command @ Command::TrainTarget2d { .. } => target2d::run_train_target_2d(command),
         command @ Command::EvalDynamics2d { .. } => dynamics2d::run_eval_dynamics_2d(command),
         command @ Command::TrainHyper2d { .. } => hyper::run_train_hyper_2d(command),
         command @ Command::InferHyper2d { .. } => hyper::run_infer_hyper_2d(command),

@@ -9,6 +9,7 @@ mod hyper_support;
 mod mesh;
 mod options;
 mod render;
+mod target2d;
 mod training_bench;
 
 pub(crate) use dispatch::run_command;

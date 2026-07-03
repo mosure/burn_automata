@@ -261,6 +261,7 @@ pub(crate) fn run_train(command: Command) -> Result<(), Box<dyn std::error::Erro
     let training_source = training_source_with_batch(batch_source, &target_source);
     let output_report = CliTrainingReport {
         preset,
+        objective: "supervised_update_distillation",
         target_source: training_source,
         student_seed,
         sgd: cfg,

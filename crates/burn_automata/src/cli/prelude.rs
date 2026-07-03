@@ -54,6 +54,11 @@ pub(crate) use crate::{
     },
     rollout_supervised_batch_from_model, run_rollout,
     target_geometry::{TriangleMeshTarget, dot3},
+    target2d::{
+        Target2dLossConfig, Target2dLossReport, Target2dTrainingConfig, Target2dTrainingReport,
+        TargetImage2d, TargetImage2dExtractConfig, target_2d_loss, target_2d_loss_with_adjoint,
+        train_target_2d, upstream_growing_2d_hashgrid,
+    },
     training::{
         AdamWConfig, SgdConfig, SupervisedGradients, SupervisedOptimizerConfig,
         SupervisedStepReport, TrainingHistoryEntry, TrainingRunConfig, TrainingRunReport,
