@@ -98,6 +98,22 @@ mutually exclusive with teacher-seed and teacher-model targets.
 Use `--batch-source features` only for low-level MLP regression checks; it is no
 longer the default path for 2D or 3D training.
 
+Run upstream-aligned 2D target-image training on CUDA. `train-target2d`
+defaults to `--training-device gpu` and refuses to fall back to CPU; use
+`--training-device cpu` only for small deterministic reference tests. The GPU
+path expects a Python environment with CUDA PyTorch and the upstream NPA-wave
+`sphops` extension available:
+
+```bash
+cargo run -p burn_automata --features cli --bin burn_automata -- train-target2d \
+  --python ~/.venvs/torch/bin/python \
+  --gpu-upstream-root /tmp/NPA-wave \
+  --target-image assets/catalog_thumbnails/lizard.png \
+  --reference-model models/catalog/growing/lizard.bpk \
+  --output target/gpu_lizard_report.json \
+  --model-output target/gpu_lizard.bpk
+```
+
 The retired built-in 3D mesh commands now default to writing legacy diagnostic
 artifacts under `artifacts/`, not catalog models. Multi-view render-proxy
 experiments should write to `target/` or `artifacts/` until they pass the

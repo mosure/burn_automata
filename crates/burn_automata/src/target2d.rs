@@ -6,7 +6,7 @@ use crate::{
     SupervisedGradients, apply_adamw_gradients,
     kernels::{HashGridConfig, PerceptionOptions, euler_step, perceive_adjoint_with_options},
     mlp_backward_from_output_gradients,
-    rollout::{seed_particles_scaled, stochastic_mask},
+    rollout::{RolloutConfig, run_rollout, seed_particles_scaled, stochastic_mask},
 };
 
 const DEFAULT_AABB: [f32; 4] = [-1.0, 1.0, -1.0, 1.0];
@@ -236,6 +236,7 @@ pub struct Target2dTrainingHistoryEntry {
     pub epoch: usize,
     pub rollout_steps: usize,
     pub loss: Target2dLossReport,
+    pub eval_loss: Option<Target2dLossReport>,
     pub grad_norm: f32,
     pub grad_scale: f32,
     pub elapsed_ms: f64,
@@ -250,9 +251,12 @@ pub struct Target2dTrainingReport {
     pub config: Target2dTrainingConfig,
     pub loss_config: Target2dLossConfig,
     pub initial_loss: Target2dLossReport,
+    pub initial_eval_loss: Target2dLossReport,
     pub final_loss: Target2dLossReport,
     pub best_loss: Target2dLossReport,
     pub best_epoch: usize,
+    pub best_eval_loss: Target2dLossReport,
+    pub best_eval_epoch: usize,
     pub epochs_completed: usize,
     pub repetitions_completed: usize,
     pub total_elapsed_ms: f64,
@@ -477,8 +481,11 @@ pub fn train_target_2d(
         total_loss: f32::INFINITY,
         ..Target2dLossReport::default()
     };
-    let mut best_model = model.clone();
     let mut best_epoch = 0usize;
+    let initial_eval_loss = evaluate_seed_rollout_loss(model, grid, target, &cfg, loss_cfg)?;
+    let mut best_eval_loss = initial_eval_loss;
+    let mut best_eval_model = model.clone();
+    let mut best_eval_epoch = 0usize;
     let mut initial_loss = None;
     let mut final_loss = Target2dLossReport::default();
     let mut history = Vec::new();
@@ -523,7 +530,6 @@ pub fn train_target_2d(
             final_loss = loss.report;
             if final_loss.total_loss < best_loss.total_loss {
                 best_loss = final_loss;
-                best_model = model.clone();
                 best_epoch = epoch;
             }
             let mut gradients = bptt_gradients(model, grid, &rollout, &loss, loss_cfg)?;
@@ -545,12 +551,26 @@ pub fn train_target_2d(
             let throughput =
                 particle_steps / epoch_start.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
             throughputs.push(throughput);
-            if update_index + 1 == total_updates || epoch.is_multiple_of(cfg.report_interval.max(1))
-            {
+            let should_report = update_index + 1 == total_updates
+                || epoch.is_multiple_of(cfg.report_interval.max(1));
+            let eval_loss = if should_report {
+                Some(evaluate_seed_rollout_loss(
+                    model, grid, target, &cfg, loss_cfg,
+                )?)
+            } else {
+                None
+            };
+            if let Some(eval_loss) = eval_loss {
+                if eval_loss.total_loss < best_eval_loss.total_loss {
+                    best_eval_loss = eval_loss;
+                    best_eval_model = model.clone();
+                    best_eval_epoch = epoch;
+                }
                 history.push(Target2dTrainingHistoryEntry {
                     epoch,
                     rollout_steps,
                     loss: final_loss,
+                    eval_loss: Some(eval_loss),
                     grad_norm: step_report.grad_norm,
                     grad_scale: step_report.grad_scale,
                     elapsed_ms,
@@ -567,9 +587,9 @@ pub fn train_target_2d(
         .unwrap_or_default();
     let epochs_completed = total_updates;
     let repetitions_completed = cfg.repetitions;
-    if best_loss.total_loss.is_finite() {
-        *model = best_model;
-        final_loss = best_loss;
+    if best_eval_loss.total_loss.is_finite() {
+        *model = best_eval_model;
+        final_loss = best_eval_loss;
     }
     Ok(Target2dTrainingReport {
         objective: "upstream_target_image_splat_loss",
@@ -578,15 +598,53 @@ pub fn train_target_2d(
         config: cfg,
         loss_config: loss_cfg,
         initial_loss: initial_loss.unwrap_or_default(),
+        initial_eval_loss,
         final_loss,
         best_loss,
         best_epoch,
+        best_eval_loss,
+        best_eval_epoch,
         epochs_completed,
         repetitions_completed,
         total_elapsed_ms: total_start.elapsed().as_secs_f64() * 1000.0,
         median_particle_steps_per_sec,
         history,
     })
+}
+
+fn evaluate_seed_rollout_loss(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    target: &TargetImage2d,
+    cfg: &Target2dTrainingConfig,
+    loss_cfg: Target2dLossConfig,
+) -> AutomataResult<Target2dLossReport> {
+    let trace = run_rollout(
+        model,
+        grid,
+        &RolloutConfig {
+            batch_size: 1,
+            particle_count: cfg.particle_count,
+            steps: cfg.step_max,
+            update_prob: cfg.update_prob,
+            seed: cfg.seed,
+            seed_scale: cfg.seed_scale,
+            ..RolloutConfig::default()
+        },
+        cfg.seed_mode,
+    )?;
+    Ok(target_2d_loss_with_adjoint(
+        &trace.positions,
+        &trace.states,
+        trace.batch_size,
+        trace.particle_count,
+        trace.state_dims,
+        target,
+        loss_cfg,
+        trace.mean_dx.iter().copied().sum(),
+        trace.steps,
+    )?
+    .report)
 }
 
 fn validate_target_loss_inputs(
@@ -1514,6 +1572,79 @@ mod tests {
     }
 
     #[test]
+    fn bptt_weight_gradients_match_rollout_finite_difference() {
+        let target = single_point_target();
+        let grid = upstream_growing_2d_hashgrid();
+        let model = upstream_growing_2d_model(11);
+        let loss_cfg = finite_difference_loss_config();
+        let (positions, states) = seed_particles_scaled(
+            1,
+            2,
+            model.config.state_dims,
+            model.config.spatial_dims,
+            37,
+            ParticleSeed::UniformCircle,
+            0.2,
+        );
+        let rollout = rollout_for_training(
+            &model,
+            &grid,
+            positions.clone(),
+            states.clone(),
+            1,
+            2,
+            2,
+            1.0,
+            91,
+        )
+        .unwrap();
+        let loss = target_2d_loss_with_adjoint(
+            &rollout.final_positions,
+            &rollout.final_states,
+            1,
+            2,
+            model.config.state_dims,
+            &target,
+            loss_cfg,
+            rollout.mean_dx_norm_sum,
+            rollout.steps,
+        )
+        .unwrap();
+        let grads = bptt_gradients(&model, &grid, &rollout, &loss, loss_cfg).unwrap();
+
+        assert_rollout_gradient_matches_finite_difference(
+            &model,
+            &grid,
+            &target,
+            loss_cfg,
+            &positions,
+            &states,
+            GradientParam::B2(largest_abs_index(&grads.b2)),
+            &grads,
+        );
+        assert_rollout_gradient_matches_finite_difference(
+            &model,
+            &grid,
+            &target,
+            loss_cfg,
+            &positions,
+            &states,
+            GradientParam::W2(largest_abs_index(&grads.w2)),
+            &grads,
+        );
+        assert_rollout_gradient_matches_finite_difference(
+            &model,
+            &grid,
+            &target,
+            loss_cfg,
+            &positions,
+            &states,
+            GradientParam::W1(largest_abs_index(&grads.w1)),
+            &grads,
+        );
+    }
+
+    #[test]
     fn target_training_uses_upstream_inclusive_epochs_and_restores_best() {
         let target = single_point_target();
         let mut model = upstream_growing_2d_model(7);
@@ -1547,7 +1678,7 @@ mod tests {
             &mut model,
             &upstream_growing_2d_hashgrid(),
             &target,
-            cfg,
+            cfg.clone(),
             loss_cfg,
         )
         .unwrap();
@@ -1556,7 +1687,21 @@ mod tests {
         assert_eq!(report.repetitions_completed, 2);
         assert_eq!(report.history.len(), 4);
         assert!(report.best_loss.total_loss.is_finite());
-        assert_eq!(report.final_loss.total_loss, report.best_loss.total_loss);
+        assert!(report.best_eval_loss.total_loss.is_finite());
+        assert_eq!(
+            report.final_loss.total_loss,
+            report.best_eval_loss.total_loss
+        );
+        assert!(report.history.iter().all(|entry| entry.eval_loss.is_some()));
+        let restored_eval = evaluate_seed_rollout_loss(
+            &model,
+            &upstream_growing_2d_hashgrid(),
+            &target,
+            &cfg,
+            loss_cfg,
+        )
+        .unwrap();
+        assert_eq!(report.final_loss.total_loss, restored_eval.total_loss);
     }
 
     fn single_point_target() -> TargetImage2d {
@@ -1580,6 +1725,105 @@ mod tests {
             overflow_regularizer_weight: 0.0,
             bound_regularizer_weight: 0.0,
             ..Target2dLossConfig::default()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum GradientParam {
+        W1(usize),
+        W2(usize),
+        B2(usize),
+    }
+
+    fn assert_rollout_gradient_matches_finite_difference(
+        model: &NpaModel,
+        grid: &HashGridConfig,
+        target: &TargetImage2d,
+        loss_cfg: Target2dLossConfig,
+        positions: &[[f32; 4]],
+        states: &[f32],
+        param: GradientParam,
+        grads: &SupervisedGradients,
+    ) {
+        let analytic = gradient_value(grads, param);
+        let eps = 1.0e-3;
+        let mut plus = model.clone();
+        perturb_param(&mut plus, param, eps);
+        let plus_loss = rollout_total_loss(
+            &plus,
+            grid,
+            target,
+            loss_cfg,
+            positions.to_vec(),
+            states.to_vec(),
+        );
+        let mut minus = model.clone();
+        perturb_param(&mut minus, param, -eps);
+        let minus_loss = rollout_total_loss(
+            &minus,
+            grid,
+            target,
+            loss_cfg,
+            positions.to_vec(),
+            states.to_vec(),
+        );
+        let finite = (plus_loss - minus_loss) / (2.0 * eps);
+        let tolerance = 5.0e-2_f32.max(0.08 * finite.abs());
+
+        assert!(
+            (analytic - finite).abs() <= tolerance,
+            "param={param:?} analytic={analytic} finite={finite} tolerance={tolerance}"
+        );
+    }
+
+    fn rollout_total_loss(
+        model: &NpaModel,
+        grid: &HashGridConfig,
+        target: &TargetImage2d,
+        loss_cfg: Target2dLossConfig,
+        positions: Vec<[f32; 4]>,
+        states: Vec<f32>,
+    ) -> f32 {
+        let rollout =
+            rollout_for_training(model, grid, positions, states, 1, 2, 2, 1.0, 91).unwrap();
+        target_2d_loss_with_adjoint(
+            &rollout.final_positions,
+            &rollout.final_states,
+            1,
+            2,
+            model.config.state_dims,
+            target,
+            loss_cfg,
+            rollout.mean_dx_norm_sum,
+            rollout.steps,
+        )
+        .unwrap()
+        .report
+        .total_loss
+    }
+
+    fn largest_abs_index(values: &[f32]) -> usize {
+        values
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+            .map(|(index, _)| index)
+            .unwrap()
+    }
+
+    fn gradient_value(grads: &SupervisedGradients, param: GradientParam) -> f32 {
+        match param {
+            GradientParam::W1(index) => grads.w1[index],
+            GradientParam::W2(index) => grads.w2[index],
+            GradientParam::B2(index) => grads.b2[index],
+        }
+    }
+
+    fn perturb_param(model: &mut NpaModel, param: GradientParam, delta: f32) {
+        match param {
+            GradientParam::W1(index) => model.weights.w1[index] += delta,
+            GradientParam::W2(index) => model.weights.w2[index] += delta,
+            GradientParam::B2(index) => model.weights.b2[index] += delta,
         }
     }
 }

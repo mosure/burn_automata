@@ -1,4 +1,6 @@
-use super::{basic, bench_handlers, dynamics2d, hyper, mesh, render, target2d, training_bench};
+use super::{
+    basic, bench_handlers, dynamics2d, hyper, hyper_e2e, mesh, render, target2d, training_bench,
+};
 use crate::cli::prelude::*;
 
 pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -9,6 +11,7 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::TrainTarget2d { .. } => target2d::run_train_target_2d(command),
         command @ Command::EvalDynamics2d { .. } => dynamics2d::run_eval_dynamics_2d(command),
         command @ Command::TrainHyper2d { .. } => hyper::run_train_hyper_2d(command),
+        command @ Command::TrainHyper2dE2e { .. } => hyper_e2e::run_train_hyper_2d_e2e(command),
         command @ Command::InferHyper2d { .. } => hyper::run_infer_hyper_2d(command),
         command @ Command::EvalHyper2d { .. } => hyper::run_eval_hyper_2d(command),
         command @ Command::TrainTorus3d { .. } => mesh::run_train_torus_3d(command),

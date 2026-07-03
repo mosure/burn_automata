@@ -5,6 +5,7 @@ mod bench_handlers;
 mod dispatch;
 mod dynamics2d;
 mod hyper;
+mod hyper_e2e;
 mod hyper_support;
 mod mesh;
 mod options;

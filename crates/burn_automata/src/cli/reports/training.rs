@@ -46,17 +46,33 @@ pub(crate) struct CliTarget2dEvalReport {
 #[derive(Serialize)]
 pub(crate) struct CliTarget2dTrainingReport {
     pub(crate) preset: AutomataPreset,
+    pub(crate) requested_training_device: TrainingDeviceArg,
+    pub(crate) training_device: TrainingDeviceArg,
     pub(crate) target_image: String,
     pub(crate) target_source_width: usize,
     pub(crate) target_source_height: usize,
     pub(crate) target_points: usize,
     pub(crate) model_output: Option<String>,
+    pub(crate) model_eval_loss: Option<Target2dLossReport>,
+    pub(crate) gpu_training: Option<CliTarget2dGpuTrainingReport>,
     pub(crate) reference_model: Option<String>,
     pub(crate) reference_loss: Option<Target2dLossReport>,
     pub(crate) final_loss_gap_to_reference: Option<f32>,
     pub(crate) final_loss_ratio_to_reference: Option<f32>,
     pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
-    pub(crate) training: Target2dTrainingReport,
+    pub(crate) training: Option<Target2dTrainingReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTarget2dGpuTrainingReport {
+    pub(crate) backend: &'static str,
+    pub(crate) python: String,
+    pub(crate) device: String,
+    pub(crate) upstream_root: Option<String>,
+    pub(crate) checkpoint_output: String,
+    pub(crate) metrics_output: String,
+    pub(crate) import: crate::import::ImportReport,
+    pub(crate) metrics: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -161,6 +177,129 @@ pub(crate) struct CliHyper2dTrainingReport {
     pub(crate) holdout_examples: Vec<CliHyper2dExampleReport>,
     pub(crate) adapter_parameter_count: usize,
     pub(crate) materialized_parameter_count: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eTrainingReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) target_images: Vec<String>,
+    pub(crate) catalog: Option<String>,
+    pub(crate) catalog_group: Option<Hyper2dCatalogGroupArg>,
+    pub(crate) catalog_targets: Vec<String>,
+    pub(crate) output_dir: String,
+    pub(crate) report_output: String,
+    pub(crate) scratch_catalog_output: String,
+    pub(crate) shared_base_output: String,
+    pub(crate) hyper_output: String,
+    pub(crate) generated_output_dir: String,
+    pub(crate) condition_encoder: &'static str,
+    pub(crate) shared_base_strategy: &'static str,
+    pub(crate) static_adapter_strategy: &'static str,
+    pub(crate) npa_config: NpaConfig,
+    pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
+    pub(crate) target_loss_config: Target2dLossConfig,
+    pub(crate) target_training_config: Target2dTrainingConfig,
+    pub(crate) hyper_config: HyperNpa2dConfig,
+    pub(crate) hyper_sgd: SgdConfig,
+    pub(crate) flow_sgd: Option<SgdConfig>,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
+    pub(crate) exact_adapter_required_rank: usize,
+    pub(crate) target_training: Vec<CliHyper2dE2eTargetReport>,
+    pub(crate) shared_basis_fit: CliHyper2dE2eSharedBasisFitReport,
+    pub(crate) static_adapters: Vec<CliHyper2dE2eAdapterReport>,
+    pub(crate) initial_adapter_loss: f32,
+    pub(crate) final_adapter_loss: f32,
+    pub(crate) best_adapter_loss: f32,
+    pub(crate) best_adapter_step: usize,
+    pub(crate) initial_flow_loss: Option<f32>,
+    pub(crate) final_flow_loss: Option<f32>,
+    pub(crate) best_flow_loss: Option<f32>,
+    pub(crate) best_flow_step: Option<usize>,
+    pub(crate) adapter_history: Vec<CliHyper2dE2eHyperHistoryEntry>,
+    pub(crate) flow_history: Vec<CliHyper2dE2eHyperHistoryEntry>,
+    pub(crate) eval: Vec<CliHyper2dE2eEvalReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eSharedBasisFitReport {
+    pub(crate) enabled: bool,
+    pub(crate) steps: usize,
+    pub(crate) report_interval: usize,
+    pub(crate) rows: usize,
+    pub(crate) base_sgd: SgdConfig,
+    pub(crate) adapter_sgd: SgdConfig,
+    pub(crate) initial_loss: f32,
+    pub(crate) final_loss: f32,
+    pub(crate) best_loss: f32,
+    pub(crate) best_step: usize,
+    pub(crate) history: Vec<CliHyper2dE2eSharedBasisHistoryEntry>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eSharedBasisHistoryEntry {
+    pub(crate) step: usize,
+    pub(crate) loss: f32,
+    pub(crate) base_grad_norm: f32,
+    pub(crate) base_grad_scale: f32,
+    pub(crate) mean_adapter_grad_norm: f32,
+    pub(crate) max_adapter_grad_norm: f32,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eTargetReport {
+    pub(crate) slug: String,
+    pub(crate) title: Option<String>,
+    pub(crate) group: Option<String>,
+    pub(crate) condition: String,
+    pub(crate) target_model: String,
+    pub(crate) target_source_width: usize,
+    pub(crate) target_source_height: usize,
+    pub(crate) target_points: usize,
+    pub(crate) training: Target2dTrainingReport,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eAdapterReport {
+    pub(crate) slug: String,
+    pub(crate) adapter_output: String,
+    pub(crate) materialized_output: String,
+    pub(crate) method: &'static str,
+    pub(crate) steps: usize,
+    pub(crate) rows: usize,
+    pub(crate) initial_loss: f32,
+    pub(crate) final_loss: f32,
+    pub(crate) best_loss: f32,
+    pub(crate) adapter_parameter_count: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eHyperHistoryEntry {
+    pub(crate) step: usize,
+    pub(crate) loss: f32,
+    pub(crate) grad_norm: f32,
+    pub(crate) grad_scale: f32,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dE2eEvalReport {
+    pub(crate) slug: String,
+    pub(crate) condition: String,
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) update_prob: f32,
+    pub(crate) seed: u64,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) trained_target_loss: Target2dLossReport,
+    pub(crate) static_adapter_loss: Target2dLossReport,
+    pub(crate) hyper_loss: Target2dLossReport,
+    pub(crate) static_adapter_gap_to_trained_target: f32,
+    pub(crate) hyper_gap_to_trained_target: f32,
+    pub(crate) hyper_gap_to_static_adapter: f32,
+    pub(crate) static_adapter_ratio_to_trained_target: Option<f32>,
+    pub(crate) hyper_ratio_to_trained_target: Option<f32>,
+    pub(crate) hyper_ratio_to_static_adapter: Option<f32>,
 }
 
 #[derive(Serialize)]

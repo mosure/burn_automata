@@ -28,6 +28,7 @@ pub(crate) struct CliArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
     Infer {
         #[arg(long, default_value = "growing-2d")]
@@ -169,6 +170,18 @@ pub(crate) enum Command {
             default_value = "/tmp/burn_automata_target2d_training_report.json"
         )]
         output: PathBuf,
+        #[arg(long, default_value = "gpu")]
+        training_device: TrainingDeviceArg,
+        #[arg(long, default_value = "python3")]
+        python: PathBuf,
+        #[arg(long)]
+        gpu_upstream_root: Option<PathBuf>,
+        #[arg(long, default_value = "cuda:0")]
+        gpu_device: String,
+        #[arg(long)]
+        gpu_checkpoint_output: Option<PathBuf>,
+        #[arg(long)]
+        gpu_metrics_output: Option<PathBuf>,
         #[arg(long)]
         model_output: Option<PathBuf>,
         #[arg(long)]
@@ -349,6 +362,177 @@ pub(crate) enum Command {
         seed_scale: Option<f32>,
         #[arg(long, default_value = "uniform-circle")]
         seed_mode: SeedModeArg,
+    },
+    #[command(
+        name = "train-hyper2d-e2e",
+        alias = "train-hyper-2d-e2e",
+        alias = "train-hypernpa2d-e2e"
+    )]
+    TrainHyper2dE2e {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long = "target-image", value_delimiter = ',')]
+        target_images: Vec<PathBuf>,
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        #[arg(long, default_value = "assets/catalog_thumbnails")]
+        catalog_thumbnail_dir: PathBuf,
+        #[arg(long)]
+        catalog_group: Option<Hyper2dCatalogGroupArg>,
+        #[arg(long = "catalog-target", value_delimiter = ',')]
+        catalog_targets: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        catalog_limit: usize,
+        #[arg(long, default_value = "artifacts/hyper2d_e2e")]
+        output_dir: PathBuf,
+        #[arg(long)]
+        report_output: Option<PathBuf>,
+        #[arg(long)]
+        scratch_catalog_output: Option<PathBuf>,
+        #[arg(long)]
+        shared_base_output: Option<PathBuf>,
+        #[arg(long)]
+        hyper_output: Option<PathBuf>,
+        #[arg(long)]
+        generated_output_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 10000)]
+        target_epochs: usize,
+        #[arg(long, default_value_t = 3)]
+        target_repetitions: usize,
+        #[arg(long, default_value_t = 100)]
+        target_report_interval: usize,
+        #[arg(long, default_value_t = 8)]
+        target_batch_size: usize,
+        #[arg(long, default_value_t = 512)]
+        target_pool_size: usize,
+        #[arg(long, default_value_t = 4096)]
+        target_particles: usize,
+        #[arg(long, default_value_t = 32)]
+        target_step_min: usize,
+        #[arg(long, default_value_t = 96)]
+        target_step_max: usize,
+        #[arg(long, default_value_t = 16)]
+        target_inject_seed_interval: usize,
+        #[arg(long, default_value_t = 0.5)]
+        target_update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        target_seed: u64,
+        #[arg(long, default_value_t = 42)]
+        student_seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 0.1)]
+        target_brush_size: f32,
+        #[arg(long, default_value_t = 5.0e-4)]
+        target_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        target_weight_decay: f32,
+        #[arg(long, default_value_t = 0.0)]
+        target_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.9)]
+        target_adam_beta1: f32,
+        #[arg(long, default_value_t = 0.999)]
+        target_adam_beta2: f32,
+        #[arg(long, default_value_t = 1.0e-8)]
+        target_adam_epsilon: f32,
+        #[arg(long = "target-scheduler-milestone", value_delimiter = ',')]
+        target_scheduler_milestones: Vec<usize>,
+        #[arg(long, default_value_t = 0.3)]
+        target_scheduler_gamma: f32,
+        #[arg(long, action = ArgAction::SetFalse)]
+        target_per_parameter_grad_normalization: bool,
+        #[arg(long, default_value_t = 4096)]
+        target_points: usize,
+        #[arg(long)]
+        target_image_size: Option<usize>,
+        #[arg(long, default_value_t = 0.05)]
+        target_threshold: f32,
+        #[arg(long, default_value_t = 256)]
+        target_loss_image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        target_splat_sigma: f32,
+        #[arg(long, default_value_t = 2.0)]
+        target_splat_loss_weight: f32,
+        #[arg(long, default_value_t = 5.0)]
+        target_color_loss_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        target_density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.01)]
+        target_displacement_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_overflow_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_bound_regularizer_weight: f32,
+        #[arg(long, default_value_t = 16)]
+        adapter_rank: usize,
+        #[arg(long, default_value_t = 16.0)]
+        adapter_alpha: f32,
+        #[arg(long, default_value_t = 512)]
+        adapter_rows: usize,
+        #[arg(long, default_value_t = 256)]
+        adapter_train_steps: usize,
+        #[arg(long, default_value_t = 1.0e-3)]
+        adapter_learning_rate: f32,
+        #[arg(long, default_value_t = 1.0)]
+        adapter_grad_clip_norm: f32,
+        #[arg(long)]
+        adapter_rollout_particles: Option<usize>,
+        #[arg(long, default_value_t = 64)]
+        adapter_rollout_steps: usize,
+        #[arg(long, default_value_t = 1)]
+        adapter_rollouts: usize,
+        #[arg(long, default_value_t = 128)]
+        shared_fit_steps: usize,
+        #[arg(long, default_value_t = 16)]
+        shared_fit_report_interval: usize,
+        #[arg(long, default_value_t = 1.0e-4)]
+        shared_fit_base_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        shared_fit_base_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        shared_fit_base_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 1.0e-3)]
+        shared_fit_adapter_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        shared_fit_adapter_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        shared_fit_adapter_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 512)]
+        hyper_steps: usize,
+        #[arg(long, default_value_t = 1.0e-3)]
+        hyper_learning_rate: f32,
+        #[arg(long, default_value_t = 1.0)]
+        hyper_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.0)]
+        hyper_weight_decay: f32,
+        #[arg(long, default_value_t = 512)]
+        hyper_hidden: usize,
+        #[arg(long, default_value_t = 8.0)]
+        hyper_output_scale: f32,
+        #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_WIDTH)]
+        condition_token_grid_width: usize,
+        #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_HEIGHT)]
+        condition_token_grid_height: usize,
+        #[arg(long, default_value_t = 42)]
+        hyper_seed: u64,
+        #[arg(long, default_value_t = 0)]
+        flow_steps: usize,
+        #[arg(long, default_value_t = 512)]
+        flow_rows: usize,
+        #[arg(long)]
+        flow_rollout_particles: Option<usize>,
+        #[arg(long, default_value_t = 64)]
+        flow_rollout_steps: usize,
+        #[arg(long, default_value_t = 1)]
+        flow_rollouts: usize,
+        #[arg(long)]
+        eval_particles: Option<usize>,
+        #[arg(long)]
+        eval_steps: Option<usize>,
+        #[arg(long, default_value_t = 42)]
+        eval_seed: u64,
     },
     #[command(name = "infer-hyper2d", alias = "infer-hyper-2d")]
     InferHyper2d {
