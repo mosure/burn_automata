@@ -1,9 +1,10 @@
 use super::*;
 use burn_automata::{
-    CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionImage2d, HyperAdapterExample2d,
-    HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, ParticlePriorConfig,
-    condition_feature_dims_for_token_grid, generate_conditioned_npa_2d,
-    hyper_adapter_regression_loss, hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
+    CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionEncoder2d, ConditionImage2d,
+    DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS, HyperAdapterExample2d, HyperFlowExample2d, HyperNpa2d,
+    HyperNpa2dConfig, ParticlePriorConfig, condition_feature_dims_for_token_grid,
+    generate_conditioned_npa_2d, hyper_adapter_regression_loss,
+    hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
     hyper_rectified_flow_train_step,
 };
 
@@ -83,6 +84,31 @@ fn hyper_config_supports_legacy_summary_only_condition_features() {
             .len(),
         hyper.adapter_parameter_count()
     );
+}
+
+#[test]
+fn dino_condition_encoder_uses_attached_descriptor() {
+    let config = small_2d_config();
+    let hyper = HyperNpa2d::zeros(
+        config,
+        HyperNpa2dConfig {
+            condition_encoder: ConditionEncoder2d::DinoVitsClsPatchMean,
+            condition_feature_dims: DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS,
+            condition_token_grid_width: 0,
+            condition_token_grid_height: 0,
+            ..hyper_config()
+        },
+    )
+    .unwrap();
+    let condition = condition_image()
+        .with_dino_vits_cls_patch_mean(vec![0.0; DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS])
+        .unwrap();
+
+    assert_eq!(
+        hyper.predict_adapter_vector(&condition).unwrap().len(),
+        hyper.adapter_parameter_count()
+    );
+    assert!(hyper.predict_adapter_vector(&condition_image()).is_err());
 }
 
 #[test]

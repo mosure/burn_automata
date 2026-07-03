@@ -10,12 +10,13 @@ pub(crate) use crate::kernels::build_hashgrid;
 #[cfg(feature = "backend_wgpu")]
 pub(crate) use crate::run_supervised_training_wgpu;
 pub(crate) use crate::{
-    AutomataPreset, BpkAdapterManifest, BpkModelManifest, ConditionImage2d, ConditionSummary2d,
-    FeatureBatchConfig, GaussianDecodeMode, HyperAdapterExample2d, HyperFlowExample2d, HyperNpa2d,
-    HyperNpa2dConfig, NpaConfig, NpaLowRankAdapter, NpaModel, NpaWeights, ParticlePrior2d,
-    ParticlePriorConfig, ParticleSeed, RolloutConfig, RolloutSupervisionConfig, SupervisedBatch,
-    SupervisedTarget, condition_feature_dims_for_token_grid, feature_supervised_batch,
-    generate_conditioned_npa_2d, hyper_adapter_regression_loss,
+    AutomataPreset, BpkAdapterManifest, BpkModelManifest, ConditionEncoder2d, ConditionImage2d,
+    ConditionSummary2d, FeatureBatchConfig, GaussianDecodeMode, HyperAdapterExample2d,
+    HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, NpaConfig, NpaLowRankAdapter, NpaModel,
+    NpaWeights, ParticlePrior2d, ParticlePriorConfig, ParticleSeed, RolloutConfig,
+    RolloutSupervisionConfig, SupervisedBatch, SupervisedTarget,
+    condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
+    feature_supervised_batch, generate_conditioned_npa_2d, hyper_adapter_regression_loss,
     hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
     hyper_rectified_flow_train_step, import_model,
     kernels::perceive_adjoint_with_options,
@@ -57,7 +58,7 @@ pub(crate) use crate::{
     target2d::{
         Target2dLossConfig, Target2dLossReport, Target2dTrainingConfig, Target2dTrainingReport,
         TargetImage2d, TargetImage2dExtractConfig, target_2d_loss, target_2d_loss_with_adjoint,
-        train_target_2d, upstream_growing_2d_hashgrid,
+        target_2d_rollout_loss_with_gradients, train_target_2d, upstream_growing_2d_hashgrid,
     },
     training::{
         AdamWConfig, SgdConfig, SupervisedGradients, SupervisedOptimizerConfig,
@@ -69,7 +70,7 @@ pub(crate) use crate::{
 };
 pub(crate) use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 pub(crate) use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
-pub(crate) use serde::Serialize;
+pub(crate) use serde::{Deserialize, Serialize};
 
 pub(crate) use super::{
     args::*, bench::*, growth_validation::*, mesh_training::*, render_training::*, reports::*,

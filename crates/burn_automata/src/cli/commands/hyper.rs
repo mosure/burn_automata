@@ -99,6 +99,7 @@ pub(crate) fn run_train_hyper_2d(command: Command) -> Result<(), Box<dyn std::er
         &base,
         &base_manifest,
         &descriptors,
+        None,
         rows,
         rollout_particles,
         rollout_steps,
@@ -115,7 +116,9 @@ pub(crate) fn run_train_hyper_2d(command: Command) -> Result<(), Box<dyn std::er
     let holdout_examples = flow_examples(&holdout_loaded);
 
     let hyper_config = HyperNpa2dConfig {
-        condition_feature_dims: condition_feature_dims_for_token_grid(
+        condition_encoder: ConditionEncoder2d::SummaryTokens,
+        condition_feature_dims: condition_feature_dims_for_encoder(
+            ConditionEncoder2d::SummaryTokens,
             condition_token_grid_width,
             condition_token_grid_height,
         )?,
@@ -609,6 +612,7 @@ pub(crate) fn run_eval_hyper_2d(command: Command) -> Result<(), Box<dyn std::err
         &base,
         &base_manifest,
         &descriptors,
+        None,
         rows,
         rollout_particles,
         rollout_steps,

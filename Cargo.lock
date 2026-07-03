@@ -2551,8 +2551,10 @@ dependencies = [
 name = "burn_automata"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "burn",
  "burn_automata_kernels",
+ "burn_dino",
  "bytemuck",
  "clap",
  "criterion",
@@ -2564,6 +2566,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "ureq",
  "wgpu",
  "zip 7.2.0",
 ]
@@ -2575,6 +2578,20 @@ dependencies = [
  "rayon",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "burn_dino"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a66361edc4643cb18e01cfa19ce430b0163f431d9c4ad39970267789a5dc6373"
+dependencies = [
+ "burn",
+ "console_error_panic_hook",
+ "safetensors 0.6.2",
+ "serde",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -7431,6 +7448,16 @@ name = "safetensors"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d93279b86b3de76f820a8854dd06cbc33cfa57a417b19c47f6a25280112fb1df"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "safetensors"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "172dd94c5a87b5c79f945c863da53b2ebc7ccef4eca24ac63cca66a41aab2178"
 dependencies = [
  "serde",
  "serde_json",

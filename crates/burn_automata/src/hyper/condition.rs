@@ -6,6 +6,15 @@ pub const CONDITION_FEATURE_DIMS: usize = 17;
 pub const CONDITION_TOKEN_FEATURE_DIMS: usize = CONDITION_FEATURE_DIMS + 4;
 pub const DEFAULT_CONDITION_TOKEN_GRID_WIDTH: usize = 4;
 pub const DEFAULT_CONDITION_TOKEN_GRID_HEIGHT: usize = 4;
+pub const DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS: usize = 768;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConditionEncoder2d {
+    #[default]
+    SummaryTokens,
+    DinoVitsClsPatchMean,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConditionImage2d {
@@ -13,6 +22,8 @@ pub struct ConditionImage2d {
     pub height: usize,
     pub channels: usize,
     pub values: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dino_vits_cls_patch_mean: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,6 +69,7 @@ impl ConditionImage2d {
             height,
             channels,
             values,
+            dino_vits_cls_patch_mean: None,
         };
         image.validate()?;
         Ok(image)
@@ -87,6 +99,15 @@ impl ConditionImage2d {
             return Err(AutomataError::InvalidArgument(
                 "condition image contains non-finite values".to_string(),
             ));
+        }
+        if let Some(features) = &self.dino_vits_cls_patch_mean
+            && (!features.iter().all(|value| value.is_finite())
+                || features.len() != DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS)
+        {
+            return Err(AutomataError::InvalidArgument(format!(
+                "DINO condition feature vector len {} must be {DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS} with finite values",
+                features.len()
+            )));
         }
         Ok(())
     }
@@ -198,6 +219,32 @@ impl ConditionImage2d {
             features.extend_from_slice(&token.features);
         }
         Ok(features)
+    }
+
+    pub fn feature_vector_for_encoder(
+        &self,
+        encoder: ConditionEncoder2d,
+        grid_width: usize,
+        grid_height: usize,
+    ) -> AutomataResult<Vec<f32>> {
+        match encoder {
+            ConditionEncoder2d::SummaryTokens => {
+                self.feature_vector_with_tokens(grid_width, grid_height)
+            }
+            ConditionEncoder2d::DinoVitsClsPatchMean => {
+                self.dino_vits_cls_patch_mean.clone().ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "condition is missing DINO vits cls+patch-mean features".to_string(),
+                    )
+                })
+            }
+        }
+    }
+
+    pub fn with_dino_vits_cls_patch_mean(mut self, features: Vec<f32>) -> AutomataResult<Self> {
+        self.dino_vits_cls_patch_mean = Some(features);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn pooled_tokens(
@@ -337,4 +384,17 @@ pub fn condition_feature_dims_for_token_grid(
                 "condition token grid {grid_width}x{grid_height} feature dims overflow"
             ))
         })
+}
+
+pub fn condition_feature_dims_for_encoder(
+    encoder: ConditionEncoder2d,
+    grid_width: usize,
+    grid_height: usize,
+) -> AutomataResult<usize> {
+    match encoder {
+        ConditionEncoder2d::SummaryTokens => {
+            condition_feature_dims_for_token_grid(grid_width, grid_height)
+        }
+        ConditionEncoder2d::DinoVitsClsPatchMean => Ok(DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS),
+    }
 }

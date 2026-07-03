@@ -1,5 +1,8 @@
 use crate::cli::prelude::*;
 
+mod omnisvg;
+pub(super) use omnisvg::OmniSvgSourceConfig;
+
 #[derive(Clone, Debug)]
 pub(super) struct Hyper2dScratchSource {
     pub(super) slug: String,
@@ -22,22 +25,47 @@ struct SelfOrgCatalogEntry {
     update_prob: Option<f32>,
 }
 
+pub(super) struct ScratchSourceResolveConfig<'a> {
+    pub(super) preset: PresetArg,
+    pub(super) target_images: &'a [PathBuf],
+    pub(super) target_image_dirs: &'a [PathBuf],
+    pub(super) target_image_recursive: bool,
+    pub(super) image_extensions: &'a [String],
+    pub(super) catalog: Option<&'a PathBuf>,
+    pub(super) catalog_thumbnail_dir: &'a Path,
+    pub(super) catalog_group: Option<Hyper2dCatalogGroupArg>,
+    pub(super) catalog_targets: &'a [String],
+    pub(super) catalog_limit: usize,
+    pub(super) omnisvg: Option<OmniSvgSourceConfig<'a>>,
+}
+
 pub(super) fn resolve_scratch_sources(
-    preset: PresetArg,
-    target_images: &[PathBuf],
-    catalog: Option<&PathBuf>,
-    catalog_thumbnail_dir: &Path,
-    catalog_group: Option<Hyper2dCatalogGroupArg>,
-    catalog_targets: &[String],
-    catalog_limit: usize,
+    config: ScratchSourceResolveConfig<'_>,
 ) -> Result<Vec<Hyper2dScratchSource>, Box<dyn std::error::Error>> {
+    let ScratchSourceResolveConfig {
+        preset,
+        target_images,
+        target_image_dirs,
+        target_image_recursive,
+        image_extensions,
+        catalog,
+        catalog_thumbnail_dir,
+        catalog_group,
+        catalog_targets,
+        catalog_limit,
+        omnisvg,
+    } = config;
+    let uses_direct_sources = !target_images.is_empty() || !target_image_dirs.is_empty();
+    let source_mode_count = usize::from(uses_direct_sources)
+        + usize::from(catalog.is_some())
+        + usize::from(omnisvg.is_some());
+    if source_mode_count > 1 {
+        return Err(std::io::Error::other(
+            "--target-image/--target-image-dir, --catalog, and --omnisvg-dataset are mutually exclusive source modes for train-hyper2d",
+        )
+        .into());
+    }
     if let Some(catalog_path) = catalog {
-        if !target_images.is_empty() {
-            return Err(std::io::Error::other(
-                "--catalog cannot be combined with --target-image for train-hyper2d-e2e",
-            )
-            .into());
-        }
         return resolve_catalog_scratch_sources(
             preset,
             catalog_path,
@@ -47,19 +75,21 @@ pub(super) fn resolve_scratch_sources(
             catalog_limit,
         );
     }
+    if let Some(omnisvg) = omnisvg {
+        if catalog_group.is_some() || !catalog_targets.is_empty() || catalog_limit > 0 {
+            return Err(std::io::Error::other(
+                "catalog filters require --catalog for train-hyper2d",
+            )
+            .into());
+        }
+        return omnisvg::resolve_omnisvg_scratch_sources(omnisvg);
+    }
     if catalog_group.is_some() || !catalog_targets.is_empty() || catalog_limit > 0 {
-        return Err(std::io::Error::other(
-            "catalog filters require --catalog for train-hyper2d-e2e",
-        )
-        .into());
+        return Err(
+            std::io::Error::other("catalog filters require --catalog for train-hyper2d").into(),
+        );
     }
-    if target_images.is_empty() {
-        return Err(std::io::Error::other(
-            "train-hyper2d-e2e requires --target-image or --catalog",
-        )
-        .into());
-    }
-    Ok(target_images
+    let mut sources = target_images
         .iter()
         .map(|path| {
             let slug = path_slug(path);
@@ -73,7 +103,45 @@ pub(super) fn resolve_scratch_sources(
                 update_prob: None,
             }
         })
-        .collect())
+        .collect::<Vec<_>>();
+    let extensions = normalized_image_extensions(image_extensions);
+    for dir in target_image_dirs {
+        collect_image_dir_sources(dir, dir, target_image_recursive, &extensions, &mut sources)?;
+    }
+    sources.sort_by(|left, right| left.condition_path.cmp(&right.condition_path));
+    sources.dedup_by(|left, right| left.condition_path == right.condition_path);
+    if sources.is_empty() {
+        return Err(std::io::Error::other(
+            "train-hyper2d requires --target-image, --target-image-dir, --catalog, or --omnisvg-dataset",
+        )
+        .into());
+    }
+    Ok(sources)
+}
+
+#[allow(dead_code)]
+pub(super) fn resolve_scratch_sources_legacy(
+    preset: PresetArg,
+    target_images: &[PathBuf],
+    catalog: Option<&PathBuf>,
+    catalog_thumbnail_dir: &Path,
+    catalog_group: Option<Hyper2dCatalogGroupArg>,
+    catalog_targets: &[String],
+    catalog_limit: usize,
+) -> Result<Vec<Hyper2dScratchSource>, Box<dyn std::error::Error>> {
+    resolve_scratch_sources(ScratchSourceResolveConfig {
+        preset,
+        target_images,
+        target_image_dirs: &[],
+        target_image_recursive: false,
+        image_extensions: &[],
+        catalog,
+        catalog_thumbnail_dir,
+        catalog_group,
+        catalog_targets,
+        catalog_limit,
+        omnisvg: None,
+    })
 }
 
 fn resolve_catalog_scratch_sources(
@@ -141,6 +209,12 @@ fn path_slug(path: &Path) -> String {
         .unwrap_or_else(|| "condition".to_string())
 }
 
+fn relative_path_slug(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let stem_path = relative.with_extension("");
+    sanitize_slug(&stem_path.to_string_lossy())
+}
+
 pub(super) fn sanitize_slug(value: &str) -> String {
     let slug = value
         .chars()
@@ -159,25 +233,165 @@ pub(super) fn sanitize_slug(value: &str) -> String {
     }
 }
 
+fn normalized_image_extensions(values: &[String]) -> std::collections::BTreeSet<String> {
+    let values = if values.is_empty() {
+        ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>()
+    } else {
+        values.to_vec()
+    };
+    values
+        .into_iter()
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn collect_image_dir_sources(
+    root: &Path,
+    dir: &Path,
+    recursive: bool,
+    extensions: &std::collections::BTreeSet<String>,
+    sources: &mut Vec<Hyper2dScratchSource>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            if recursive {
+                collect_image_dir_sources(root, &path, recursive, extensions, sources)?;
+            }
+            continue;
+        }
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            continue;
+        };
+        if !extensions.contains(&extension.to_ascii_lowercase()) {
+            continue;
+        }
+        let slug = relative_path_slug(root, &path);
+        sources.push(Hyper2dScratchSource {
+            title: Some(slug.clone()),
+            slug,
+            group: Some("image-dir".to_string()),
+            condition_path: path,
+            particles: None,
+            seed_scale: None,
+            update_prob: None,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn direct_image_sources_reject_catalog_filters() {
-        let err = resolve_scratch_sources(
-            PresetArg::Growing2d,
-            &[PathBuf::from("lizard.png")],
-            None,
-            Path::new("assets/catalog_thumbnails"),
-            Some(Hyper2dCatalogGroupArg::Growing),
-            &[],
-            0,
-        )
+        let err = resolve_scratch_sources(ScratchSourceResolveConfig {
+            preset: PresetArg::Growing2d,
+            target_images: &[PathBuf::from("lizard.png")],
+            target_image_dirs: &[],
+            target_image_recursive: false,
+            image_extensions: &[],
+            catalog: None,
+            catalog_thumbnail_dir: Path::new("assets/catalog_thumbnails"),
+            catalog_group: Some(Hyper2dCatalogGroupArg::Growing),
+            catalog_targets: &[],
+            catalog_limit: 0,
+            omnisvg: None,
+        })
         .unwrap_err()
         .to_string();
 
         assert!(err.contains("catalog filters require --catalog"));
+    }
+
+    #[test]
+    fn omnisvg_sources_reject_mixed_source_modes() {
+        let err = resolve_scratch_sources(ScratchSourceResolveConfig {
+            preset: PresetArg::Growing2d,
+            target_images: &[PathBuf::from("lizard.png")],
+            target_image_dirs: &[],
+            target_image_recursive: false,
+            image_extensions: &[],
+            catalog: None,
+            catalog_thumbnail_dir: Path::new("assets/catalog_thumbnails"),
+            catalog_group: None,
+            catalog_targets: &[],
+            catalog_limit: 0,
+            omnisvg: Some(OmniSvgSourceConfig {
+                dataset: OmniSvgDatasetArg::MmsvgIllustration,
+                split: "train",
+                cache_dir: Path::new("data/omnisvg"),
+                offset: 0,
+                limit: 1,
+                page_size: 100,
+                download: false,
+                refresh: false,
+                token_env: "HF_TOKEN",
+            }),
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("mutually exclusive source modes"));
+    }
+
+    #[test]
+    fn direct_image_sources_collect_directory_images_deterministically() {
+        let root =
+            std::env::temp_dir().join(format!("burn_automata_sources_{}", std::process::id()));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("b.png"), []).unwrap();
+        std::fs::write(nested.join("a.jpg"), []).unwrap();
+        std::fs::write(nested.join("ignore.svg"), []).unwrap();
+
+        let flat = resolve_scratch_sources(ScratchSourceResolveConfig {
+            preset: PresetArg::Growing2d,
+            target_images: &[],
+            target_image_dirs: std::slice::from_ref(&root),
+            target_image_recursive: false,
+            image_extensions: &[],
+            catalog: None,
+            catalog_thumbnail_dir: Path::new("assets/catalog_thumbnails"),
+            catalog_group: None,
+            catalog_targets: &[],
+            catalog_limit: 0,
+            omnisvg: None,
+        })
+        .unwrap();
+        let recursive = resolve_scratch_sources(ScratchSourceResolveConfig {
+            preset: PresetArg::Growing2d,
+            target_images: &[],
+            target_image_dirs: std::slice::from_ref(&root),
+            target_image_recursive: true,
+            image_extensions: &[],
+            catalog: None,
+            catalog_thumbnail_dir: Path::new("assets/catalog_thumbnails"),
+            catalog_group: None,
+            catalog_targets: &[],
+            catalog_limit: 0,
+            omnisvg: None,
+        })
+        .unwrap();
+
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].slug, "b");
+        assert_eq!(
+            recursive
+                .iter()
+                .map(|source| source.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "nested_a"]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

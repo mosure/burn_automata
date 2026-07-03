@@ -11,9 +11,10 @@ pub mod prior;
 pub mod training;
 
 pub use condition::{
-    CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionImage2d, ConditionSummary2d,
-    ConditionToken2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT, DEFAULT_CONDITION_TOKEN_GRID_WIDTH,
-    condition_feature_dims_for_token_grid,
+    CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionEncoder2d, ConditionImage2d,
+    ConditionSummary2d, ConditionToken2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
+    DEFAULT_CONDITION_TOKEN_GRID_WIDTH, DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS,
+    condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
 };
 pub use hypernet::{HyperNpa2d, HyperNpa2dConfig, HyperNpa2dWeights};
 pub use inference::{ConditionedNpa2d, generate_conditioned_npa_2d};

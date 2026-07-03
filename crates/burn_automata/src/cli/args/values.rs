@@ -1,4 +1,4 @@
-use crate::{AutomataPreset, GaussianDecodeMode, ParticleSeed};
+use crate::{AutomataPreset, ConditionEncoder2d, GaussianDecodeMode, ParticleSeed};
 use clap::ValueEnum;
 use serde::Serialize;
 
@@ -78,10 +78,54 @@ pub(crate) enum TrainingDeviceArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum Hyper2dDirectBasisGpuBackendArg {
+    #[value(name = "burn-wgpu", alias = "burn", alias = "wgpu")]
+    BurnWgpu,
+    #[value(name = "upstream-python", alias = "python", alias = "torch-cuda")]
+    UpstreamPython,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum OmniSvgDatasetArg {
+    #[value(
+        name = "mmsvg-illustration",
+        alias = "illustration",
+        alias = "omnisvg-illustration"
+    )]
+    MmsvgIllustration,
+    #[value(name = "mmsvg-icon", alias = "icon", alias = "omnisvg-icon")]
+    MmsvgIcon,
+}
+
+impl OmniSvgDatasetArg {
+    pub(crate) fn dataset_id(self) -> &'static str {
+        match self {
+            Self::MmsvgIllustration => "OmniSVG/MMSVG-Illustration",
+            Self::MmsvgIcon => "OmniSVG/MMSVG-Icon",
+        }
+    }
+
+    pub(crate) fn cache_slug(self) -> &'static str {
+        match self {
+            Self::MmsvgIllustration => "mmsvg-illustration",
+            Self::MmsvgIcon => "mmsvg-icon",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
 pub(crate) enum Hyper2dCatalogGroupArg {
     Growing,
     Texture,
     All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum Hyper2dConditionEncoderArg {
+    #[value(name = "summary-tokens", alias = "summary")]
+    SummaryTokens,
+    #[value(name = "dino-vits-cls-patch-mean", alias = "dino")]
+    DinoVitsClsPatchMean,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
@@ -344,6 +388,15 @@ impl From<SeedModeArg> for ParticleSeed {
             SeedModeArg::TeapotLocalSubstrateGrowth3d => Self::TeapotLocalSubstrateGrowth3d,
             SeedModeArg::TorusMorphogenDense3d => Self::TorusMorphogenDense3d,
             SeedModeArg::TeapotMorphogenDense3d => Self::TeapotMorphogenDense3d,
+        }
+    }
+}
+
+impl From<Hyper2dConditionEncoderArg> for ConditionEncoder2d {
+    fn from(value: Hyper2dConditionEncoderArg) -> Self {
+        match value {
+            Hyper2dConditionEncoderArg::SummaryTokens => Self::SummaryTokens,
+            Hyper2dConditionEncoderArg::DinoVitsClsPatchMean => Self::DinoVitsClsPatchMean,
         }
     }
 }

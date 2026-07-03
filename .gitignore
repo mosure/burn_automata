@@ -6,6 +6,7 @@
 /artifacts/
 /models/
 /assets/models/
+/data/omnisvg/
 
 # Web build output
 /www/pkg/

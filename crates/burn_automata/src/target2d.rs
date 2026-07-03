@@ -647,6 +647,70 @@ fn evaluate_seed_rollout_loss(
     .report)
 }
 
+pub fn target_2d_rollout_loss_with_gradients(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    target: &TargetImage2d,
+    cfg: RolloutConfig,
+    seed_mode: ParticleSeed,
+    loss_cfg: Target2dLossConfig,
+    per_parameter_grad_normalization: bool,
+) -> AutomataResult<(Target2dLossReport, SupervisedGradients)> {
+    model.validate()?;
+    if model.config.spatial_dims != SPATIAL_DIMS_2D || grid.dim != SPATIAL_DIMS_2D {
+        return Err(AutomataError::InvalidArgument(
+            "target 2D rollout gradients require a 2D model and hashgrid".to_string(),
+        ));
+    }
+    if cfg.batch_size == 0 || cfg.particle_count == 0 || cfg.steps == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "target 2D rollout gradients require non-zero batch, particles, and steps".to_string(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&cfg.update_prob) || !cfg.update_prob.is_finite() {
+        return Err(AutomataError::InvalidArgument(
+            "target 2D rollout gradients require finite update_prob in [0, 1]".to_string(),
+        ));
+    }
+    let (positions, states) = seed_particles_scaled(
+        cfg.batch_size,
+        cfg.particle_count,
+        model.config.state_dims,
+        model.config.spatial_dims,
+        cfg.seed,
+        seed_mode,
+        cfg.seed_scale,
+    );
+    let rollout = rollout_for_training(
+        model,
+        grid,
+        positions,
+        states,
+        cfg.batch_size,
+        cfg.particle_count,
+        cfg.steps,
+        cfg.update_prob,
+        cfg.seed,
+    )?;
+    let loss = target_2d_loss_with_adjoint(
+        &rollout.final_positions,
+        &rollout.final_states,
+        cfg.batch_size,
+        cfg.particle_count,
+        model.config.state_dims,
+        target,
+        loss_cfg,
+        rollout.mean_dx_norm_sum,
+        rollout.steps,
+    )?;
+    let report = loss.report;
+    let mut gradients = bptt_gradients(model, grid, &rollout, &loss, loss_cfg)?;
+    if per_parameter_grad_normalization {
+        normalize_gradient_tensors(&mut gradients);
+    }
+    Ok((report, gradients))
+}
+
 fn validate_target_loss_inputs(
     positions: &[[f32; 4]],
     states: &[f32],
@@ -1645,6 +1709,47 @@ mod tests {
     }
 
     #[test]
+    fn target_rollout_loss_gradient_wrapper_returns_finite_gradients() {
+        let target = single_point_target();
+        let grid = upstream_growing_2d_hashgrid();
+        let model = upstream_growing_2d_model(13);
+        let (loss, grads) = target_2d_rollout_loss_with_gradients(
+            &model,
+            &grid,
+            &target,
+            RolloutConfig {
+                batch_size: 1,
+                particle_count: 2,
+                steps: 2,
+                update_prob: 1.0,
+                seed: 37,
+                seed_scale: 0.2,
+                ..RolloutConfig::default()
+            },
+            ParticleSeed::UniformCircle,
+            finite_difference_loss_config(),
+            false,
+        )
+        .unwrap();
+
+        let grad_norm = grads
+            .w1
+            .iter()
+            .chain(grads.b1.iter())
+            .chain(grads.w2.iter())
+            .chain(grads.b2.iter())
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        assert!(loss.total_loss.is_finite());
+        assert_eq!(grads.w1.len(), model.weights.w1.len());
+        assert_eq!(grads.b1.len(), model.weights.b1.len());
+        assert_eq!(grads.w2.len(), model.weights.w2.len());
+        assert_eq!(grads.b2.len(), model.weights.b2.len());
+        assert!(grad_norm.is_finite() && grad_norm > 0.0);
+    }
+
+    #[test]
     fn target_training_uses_upstream_inclusive_epochs_and_restores_best() {
         let target = single_point_target();
         let mut model = upstream_growing_2d_model(7);
@@ -1735,6 +1840,7 @@ mod tests {
         B2(usize),
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assert_rollout_gradient_matches_finite_difference(
         model: &NpaModel,
         grid: &HashGridConfig,

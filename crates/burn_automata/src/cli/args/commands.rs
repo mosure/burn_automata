@@ -383,6 +383,32 @@ pub(crate) enum Command {
         catalog_targets: Vec<String>,
         #[arg(long, default_value_t = 0)]
         catalog_limit: usize,
+        #[arg(long)]
+        omnisvg_dataset: Option<OmniSvgDatasetArg>,
+        #[arg(long, default_value = "train")]
+        omnisvg_split: String,
+        #[arg(long, default_value = "data/omnisvg")]
+        omnisvg_cache_dir: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        omnisvg_offset: usize,
+        #[arg(long, default_value_t = 128)]
+        omnisvg_limit: usize,
+        #[arg(long, default_value_t = 100)]
+        omnisvg_page_size: usize,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        omnisvg_download: bool,
+        #[arg(long)]
+        omnisvg_refresh: bool,
+        #[arg(long, default_value = "HF_TOKEN")]
+        omnisvg_token_env: String,
+        #[arg(long = "holdout-target", value_delimiter = ',')]
+        holdout_targets: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        holdout_stride: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_offset: usize,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        fit_holdout_static_oracles: bool,
         #[arg(long, default_value = "artifacts/hyper2d_e2e")]
         output_dir: PathBuf,
         #[arg(long)]
@@ -483,10 +509,22 @@ pub(crate) enum Command {
         adapter_rollout_steps: usize,
         #[arg(long, default_value_t = 1)]
         adapter_rollouts: usize,
+        #[arg(long, default_value = "summary-tokens")]
+        condition_encoder: Hyper2dConditionEncoderArg,
+        #[arg(long)]
+        dino_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 518)]
+        dino_image_size: usize,
         #[arg(long, default_value_t = 128)]
         shared_fit_steps: usize,
         #[arg(long, default_value_t = 16)]
         shared_fit_report_interval: usize,
+        #[arg(long, default_value_t = 0)]
+        shared_fit_example_batch_size: usize,
+        #[arg(long, default_value_t = 0.0)]
+        shared_fit_adapter_l2: f32,
+        #[arg(long, default_value_t = 42)]
+        shared_fit_seed: u64,
         #[arg(long, default_value_t = 1.0e-4)]
         shared_fit_base_learning_rate: f32,
         #[arg(long, default_value_t = 0.0)]
@@ -527,10 +565,183 @@ pub(crate) enum Command {
         flow_rollout_steps: usize,
         #[arg(long, default_value_t = 1)]
         flow_rollouts: usize,
+        #[arg(long, default_value_t = 0)]
+        direct_finetune_steps: usize,
+        #[arg(long, default_value_t = 16)]
+        direct_finetune_report_interval: usize,
+        #[arg(long)]
+        direct_finetune_rollout_particles: Option<usize>,
+        #[arg(long, default_value_t = 64)]
+        direct_finetune_rollout_steps: usize,
+        #[arg(long, default_value_t = 42)]
+        direct_finetune_seed: u64,
+        #[arg(long, default_value_t = 1.0e-4)]
+        direct_finetune_hyper_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        direct_finetune_hyper_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        direct_finetune_hyper_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.0)]
+        direct_finetune_adapter_l2: f32,
         #[arg(long)]
         eval_particles: Option<usize>,
         #[arg(long)]
         eval_steps: Option<usize>,
+        #[arg(long, default_value_t = 42)]
+        eval_seed: u64,
+        #[arg(long)]
+        quality_max_static_ratio: Option<f32>,
+        #[arg(long)]
+        quality_max_hyper_static_ratio: Option<f32>,
+        #[arg(long)]
+        quality_max_hyper_target_ratio: Option<f32>,
+    },
+    #[command(
+        name = "train-hyper2d-direct-basis",
+        alias = "train-hyper-2d-direct-basis",
+        alias = "train-hyper2d-image-lora-suite"
+    )]
+    TrainHyper2dDirectBasis {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long = "target-image", value_delimiter = ',')]
+        target_images: Vec<PathBuf>,
+        #[arg(long = "target-image-dir", value_delimiter = ',')]
+        target_image_dirs: Vec<PathBuf>,
+        #[arg(long)]
+        target_image_recursive: bool,
+        #[arg(
+            long = "image-extension",
+            value_delimiter = ',',
+            default_value = "png,jpg,jpeg,webp,bmp,tif,tiff"
+        )]
+        image_extensions: Vec<String>,
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        #[arg(long, default_value = "assets/catalog_thumbnails")]
+        catalog_thumbnail_dir: PathBuf,
+        #[arg(long)]
+        catalog_group: Option<Hyper2dCatalogGroupArg>,
+        #[arg(long = "catalog-target", value_delimiter = ',')]
+        catalog_targets: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        catalog_limit: usize,
+        #[arg(long)]
+        omnisvg_dataset: Option<OmniSvgDatasetArg>,
+        #[arg(long, default_value = "train")]
+        omnisvg_split: String,
+        #[arg(long, default_value = "data/omnisvg")]
+        omnisvg_cache_dir: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        omnisvg_offset: usize,
+        #[arg(long, default_value_t = 128)]
+        omnisvg_limit: usize,
+        #[arg(long, default_value_t = 100)]
+        omnisvg_page_size: usize,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        omnisvg_download: bool,
+        #[arg(long)]
+        omnisvg_refresh: bool,
+        #[arg(long, default_value = "HF_TOKEN")]
+        omnisvg_token_env: String,
+        #[arg(long, default_value_t = 0)]
+        source_limit: usize,
+        #[arg(long = "holdout-target", value_delimiter = ',')]
+        holdout_targets: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        holdout_stride: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_offset: usize,
+        #[arg(long, default_value = "artifacts/hyper2d_direct_basis")]
+        output_dir: PathBuf,
+        #[arg(long)]
+        report_output: Option<PathBuf>,
+        #[arg(long)]
+        shared_base_output: Option<PathBuf>,
+        #[arg(long)]
+        adapter_bank_output: Option<PathBuf>,
+        #[arg(long)]
+        adapter_output_dir: Option<PathBuf>,
+        #[arg(long, default_value = "gpu")]
+        training_device: TrainingDeviceArg,
+        #[arg(long, default_value = "burn-wgpu")]
+        gpu_backend: Hyper2dDirectBasisGpuBackendArg,
+        #[arg(long, default_value = "python3")]
+        python: PathBuf,
+        #[arg(long)]
+        gpu_upstream_root: Option<PathBuf>,
+        #[arg(long, default_value = "cuda:0")]
+        gpu_device: String,
+        #[arg(long)]
+        gpu_payload_output: Option<PathBuf>,
+        #[arg(long, default_value_t = 16)]
+        adapter_rank: usize,
+        #[arg(long, default_value_t = 16.0)]
+        adapter_alpha: f32,
+        #[arg(long, default_value_t = 1024)]
+        steps: usize,
+        #[arg(long, default_value_t = 16)]
+        report_interval: usize,
+        #[arg(long, default_value_t = 8)]
+        example_batch_size: usize,
+        #[arg(long, default_value_t = 128)]
+        rollout_particles: usize,
+        #[arg(long, default_value_t = 32)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 42)]
+        base_seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 4096)]
+        target_points: usize,
+        #[arg(long)]
+        target_image_size: Option<usize>,
+        #[arg(long, default_value_t = 0.05)]
+        target_threshold: f32,
+        #[arg(long, default_value_t = 128)]
+        target_loss_image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        target_splat_sigma: f32,
+        #[arg(long, default_value_t = 2.0)]
+        target_splat_loss_weight: f32,
+        #[arg(long, default_value_t = 5.0)]
+        target_color_loss_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        target_density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.01)]
+        target_displacement_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_overflow_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_bound_regularizer_weight: f32,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        per_parameter_grad_normalization: bool,
+        #[arg(long, default_value_t = 1.0e-4)]
+        base_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        base_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        base_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 1.0e-3)]
+        adapter_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        adapter_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        adapter_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.0)]
+        adapter_l2: f32,
+        #[arg(long, default_value_t = 0)]
+        holdout_adapter_steps: usize,
+        #[arg(long, default_value_t = 8)]
+        holdout_adapter_batch_size: usize,
+        #[arg(long, default_value_t = 16)]
+        eval_examples: usize,
         #[arg(long, default_value_t = 42)]
         eval_seed: u64,
     },

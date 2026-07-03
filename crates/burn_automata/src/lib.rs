@@ -29,12 +29,14 @@ pub use burn_automata_kernels::GaussianDecodeMode;
 pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
 pub use error::{AutomataError, AutomataResult};
 pub use hyper::{
-    CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionImage2d, ConditionSummary2d,
-    ConditionToken2d, ConditionedNpa2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
-    DEFAULT_CONDITION_TOKEN_GRID_WIDTH, HyperAdapterExample2d, HyperAdapterTrainingReport,
-    HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, HyperNpa2dWeights, ParticlePrior2d,
-    ParticlePriorConfig, condition_feature_dims_for_token_grid, generate_conditioned_npa_2d,
-    hyper_adapter_regression_loss, hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
+    CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionEncoder2d, ConditionImage2d,
+    ConditionSummary2d, ConditionToken2d, ConditionedNpa2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
+    DEFAULT_CONDITION_TOKEN_GRID_WIDTH, DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS,
+    HyperAdapterExample2d, HyperAdapterTrainingReport, HyperFlowExample2d, HyperNpa2d,
+    HyperNpa2dConfig, HyperNpa2dWeights, ParticlePrior2d, ParticlePriorConfig,
+    condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
+    generate_conditioned_npa_2d, hyper_adapter_regression_loss,
+    hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
     hyper_rectified_flow_train_step,
 };
 pub use import::{
@@ -64,8 +66,9 @@ pub use target_geometry::{
 pub use target2d::{
     Target2dLossConfig, Target2dLossOutput, Target2dLossReport, Target2dTrainingConfig,
     Target2dTrainingHistoryEntry, Target2dTrainingReport, TargetImage2d,
-    TargetImage2dExtractConfig, target_2d_loss, target_2d_loss_with_adjoint, train_target_2d,
-    upstream_growing_2d_hashgrid, upstream_growing_2d_model,
+    TargetImage2dExtractConfig, target_2d_loss, target_2d_loss_with_adjoint,
+    target_2d_rollout_loss_with_gradients, train_target_2d, upstream_growing_2d_hashgrid,
+    upstream_growing_2d_model,
 };
 pub use training::{
     AdamWConfig, AdamWState, LowRankAdapterGradients, SgdConfig, SupervisedBatch,

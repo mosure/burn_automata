@@ -157,7 +157,7 @@ fn adapter_from_cache(
     )
 }
 
-fn adapter_gradient_vector(grads: &LowRankAdapterGradients) -> Vec<f32> {
+pub(crate) fn adapter_gradient_vector(grads: &LowRankAdapterGradients) -> Vec<f32> {
     let mut values = Vec::with_capacity(
         grads.w1_down.len()
             + grads.w1_up.len()
@@ -204,7 +204,7 @@ fn validate_base(base_model: &NpaModel, hyper: &HyperNpa2d) -> AutomataResult<()
     Ok(())
 }
 
-fn apply_hyper_sgd(
+pub(crate) fn apply_hyper_sgd(
     hyper: &mut HyperNpa2d,
     grads: &HyperNpa2dGradients,
     cfg: SgdConfig,

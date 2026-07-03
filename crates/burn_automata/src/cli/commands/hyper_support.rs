@@ -1,5 +1,7 @@
 use crate::cli::prelude::*;
 
+pub(super) type Hyper2dConditionFeatureCache = std::collections::HashMap<PathBuf, Vec<f32>>;
+
 #[derive(Clone, Debug)]
 pub(super) struct Hyper2dSourceDescriptor {
     pub(super) slug: String,
@@ -143,6 +145,7 @@ pub(super) fn load_hyper2d_examples(
     base: &NpaModel,
     base_manifest: &BpkModelManifest,
     descriptors: &[Hyper2dSourceDescriptor],
+    condition_features: Option<&Hyper2dConditionFeatureCache>,
     rows: usize,
     rollout_particles: Option<usize>,
     rollout_steps: usize,
@@ -179,7 +182,11 @@ pub(super) fn load_hyper2d_examples(
             .unwrap_or(1.0);
         let actual_particles = rollout_particles.or(descriptor.particles).unwrap_or(1024);
         let actual_seed = seed.wrapping_add(idx as u64);
-        let condition = load_condition_image_2d(&descriptor.condition_path)?;
+        let condition = attach_condition_features(
+            load_condition_image_2d(&descriptor.condition_path)?,
+            &descriptor.condition_path,
+            condition_features,
+        )?;
         let batch = rollout_supervised_batch_from_model(
             base,
             &target,
@@ -212,6 +219,20 @@ pub(super) fn load_hyper2d_examples(
         });
     }
     Ok(examples)
+}
+
+pub(super) fn attach_condition_features(
+    condition: ConditionImage2d,
+    path: &Path,
+    features: Option<&Hyper2dConditionFeatureCache>,
+) -> Result<ConditionImage2d, Box<dyn std::error::Error>> {
+    let Some(features) = features else {
+        return Ok(condition);
+    };
+    let Some(values) = features.get(path) else {
+        return Ok(condition);
+    };
+    Ok(condition.with_dino_vits_cls_patch_mean(values.clone())?)
 }
 
 pub(super) fn split_hyper2d_examples(
@@ -353,10 +374,7 @@ pub(super) fn initialize_hyper_adapter_residual_fit(
             .into());
         }
 
-        let input = example.condition.feature_vector_with_tokens(
-            hyper.config.condition_token_grid_width,
-            hyper.config.condition_token_grid_height,
-        )?;
+        let input = hyper.condition_input_vector(&example.condition)?;
         if input.len() != input_dims {
             return Err(std::io::Error::other("condition feature dimensions changed").into());
         }

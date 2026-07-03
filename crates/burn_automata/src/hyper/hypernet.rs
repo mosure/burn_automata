@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use crate::{AutomataError, AutomataResult, NpaConfig, NpaLowRankAdapter};
 
 use super::condition::{
-    ConditionImage2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT, DEFAULT_CONDITION_TOKEN_GRID_WIDTH,
-    condition_feature_dims_for_token_grid,
+    ConditionEncoder2d, ConditionImage2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
+    DEFAULT_CONDITION_TOKEN_GRID_WIDTH, condition_feature_dims_for_encoder,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct HyperNpa2dConfig {
+    #[serde(default)]
+    pub condition_encoder: ConditionEncoder2d,
     pub condition_feature_dims: usize,
     #[serde(default)]
     pub condition_token_grid_width: usize,
@@ -23,12 +25,15 @@ pub struct HyperNpa2dConfig {
 
 impl Default for HyperNpa2dConfig {
     fn default() -> Self {
-        let condition_feature_dims = condition_feature_dims_for_token_grid(
+        let condition_encoder = ConditionEncoder2d::SummaryTokens;
+        let condition_feature_dims = condition_feature_dims_for_encoder(
+            condition_encoder,
             DEFAULT_CONDITION_TOKEN_GRID_WIDTH,
             DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
         )
         .expect("default condition token grid is valid");
         Self {
+            condition_encoder,
             condition_feature_dims,
             condition_token_grid_width: DEFAULT_CONDITION_TOKEN_GRID_WIDTH,
             condition_token_grid_height: DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
@@ -198,6 +203,10 @@ impl HyperNpa2d {
         self.validate()
     }
 
+    pub fn condition_input_vector(&self, condition: &ConditionImage2d) -> AutomataResult<Vec<f32>> {
+        self.condition_input(condition)
+    }
+
     pub(crate) fn forward_cache(
         &self,
         condition: &ConditionImage2d,
@@ -225,7 +234,8 @@ impl HyperNpa2d {
     }
 
     fn condition_input(&self, condition: &ConditionImage2d) -> AutomataResult<Vec<f32>> {
-        let input = condition.feature_vector_with_tokens(
+        let input = condition.feature_vector_for_encoder(
+            self.config.condition_encoder,
             self.config.condition_token_grid_width,
             self.config.condition_token_grid_height,
         )?;
@@ -443,14 +453,16 @@ fn validate_hyper_config(npa_config: &NpaConfig, config: HyperNpa2dConfig) -> Au
             config.condition_feature_dims, config.hidden_dims, config.adapter_rank
         )));
     }
-    let expected_condition_feature_dims = condition_feature_dims_for_token_grid(
+    let expected_condition_feature_dims = condition_feature_dims_for_encoder(
+        config.condition_encoder,
         config.condition_token_grid_width,
         config.condition_token_grid_height,
     )?;
     if config.condition_feature_dims != expected_condition_feature_dims {
         return Err(AutomataError::InvalidArgument(format!(
-            "hyper condition_feature_dims {} does not match token grid {}x{} expected {}",
+            "hyper condition_feature_dims {} does not match encoder {:?} token grid {}x{} expected {}",
             config.condition_feature_dims,
+            config.condition_encoder,
             config.condition_token_grid_width,
             config.condition_token_grid_height,
             expected_condition_feature_dims

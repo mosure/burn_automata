@@ -13,10 +13,11 @@ keywords = ["burn", "automata", "particle", "nca"]
 categories = ["science", "simulation", "computer-vision"]
 
 [features]
-default = ["cli", "backend_ndarray"]
+default = ["cli", "backend_ndarray", "backend_wgpu"]
 backend_ndarray = ["burn/ndarray"]
-backend_wgpu = ["burn/wgpu", "burn/webgpu", "burn/fusion"]
-cli = ["dep:clap", "dep:image"]
+backend_wgpu = ["burn/wgpu", "burn/webgpu", "burn/fusion", "burn/autodiff"]
+cli = ["dep:base64", "dep:clap", "dep:image", "dep:ureq"]
+dino = ["dep:burn_dino", "backend_ndarray"]
 gpu_wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
 import = []
 train = []
@@ -24,6 +25,8 @@ train = []
 [dependencies]
 burn_automata_kernels = { path = "../burn_automata_kernels", version = "0.1.0" }
 burn = { workspace = true, features = ["std"] }
+burn_dino = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
@@ -34,6 +37,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+ureq = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 zip.workspace = true
 
