@@ -16,7 +16,7 @@ categories = ["science", "simulation", "computer-vision"]
 default = ["cli", "backend_ndarray"]
 backend_ndarray = ["burn/ndarray"]
 backend_wgpu = ["burn/wgpu", "burn/webgpu", "burn/fusion"]
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:image"]
 gpu_wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
 import = []
 train = []
@@ -26,6 +26,7 @@ burn_automata_kernels = { path = "../burn_automata_kernels", version = "0.1.0" }
 burn = { workspace = true, features = ["std"] }
 bytemuck = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 rand.workspace = true
 rayon.workspace = true

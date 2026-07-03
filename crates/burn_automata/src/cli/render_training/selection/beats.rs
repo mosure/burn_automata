@@ -203,8 +203,10 @@ pub(crate) fn render_selection_training_progress_beats(
         && material_precursor_improved
         && (previous.material_visible_count < MATURE_VISIBLE_MATERIAL_COUNT
             || material_surface_support_progressed(selection, previous));
+    let strict_surface_material_supported = material_visible_surface_supported
+        || mature_strict_surface_material_support_progressed(selection, previous);
     let strict_surface_material_precursor_improved = strict_surface_material_progress > 0.0
-        && material_visible_surface_supported
+        && strict_surface_material_supported
         && render_selection_render_within_strict_surface_materialization_slack(
             selection.max_render_loss,
             previous.max_render_loss,
@@ -479,6 +481,15 @@ fn material_surface_support_progressed(
             STRICT_MATERIAL_MEAN_PROGRESS,
             STRICT_MATERIAL_MARGIN_PROGRESS,
         ) > 0.0
+}
+
+fn mature_strict_surface_material_support_progressed(
+    selection: &RenderSelectionMetrics,
+    previous: &RenderSelectionMetrics,
+) -> bool {
+    previous.material_visible_count >= MATURE_VISIBLE_MATERIAL_COUNT
+        && selection.material_visible_count >= previous.material_visible_count
+        && selection.all_temporal_geometry_progressive
 }
 
 fn material_visible_surface_support_progressed(

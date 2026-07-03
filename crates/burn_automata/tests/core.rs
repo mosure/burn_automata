@@ -35,6 +35,8 @@ use support::*;
 mod catalog_growth;
 #[path = "core/equivariance.rs"]
 mod equivariance;
+#[path = "core/hyper.rs"]
+mod hyper;
 #[path = "core/import_bridge.rs"]
 mod import_bridge;
 #[path = "core/mesh_targets.rs"]

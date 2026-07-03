@@ -266,6 +266,10 @@ pub(crate) fn run_train_teapot_morphogen_3d(
         target_source: target_source.to_string(),
         student_seed: 0,
         sgd,
+        optimizer: SupervisedOptimizerConfig::Sgd(sgd),
+        training_device: TrainingDeviceArg::Cpu,
+        rounds: 1,
+        total_rows_seen: report.rows,
         report,
         model_output: Some(model_output.display().to_string()),
         batch_source: if matches!(

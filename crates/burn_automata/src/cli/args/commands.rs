@@ -72,6 +72,18 @@ pub(crate) enum Command {
         grad_clip_norm: f32,
         #[arg(long, default_value_t = 0.0)]
         weight_decay: f32,
+        #[arg(long, default_value = "adam-w")]
+        optimizer: TrainingOptimizerArg,
+        #[arg(long, default_value = "auto")]
+        training_device: TrainingDeviceArg,
+        #[arg(long, default_value_t = 0.9)]
+        adam_beta1: f32,
+        #[arg(long, default_value_t = 0.999)]
+        adam_beta2: f32,
+        #[arg(long, default_value_t = 1e-8)]
+        adam_epsilon: f32,
+        #[arg(long, default_value_t = 1)]
+        rounds: usize,
         #[arg(long, default_value_t = 1)]
         report_interval: usize,
         #[arg(long)]
@@ -90,12 +102,238 @@ pub(crate) enum Command {
         rollout_steps: usize,
         #[arg(long, default_value_t = 1)]
         rollouts: usize,
+        #[arg(long, default_value_t = 5)]
+        temporal_samples: usize,
         #[arg(long, default_value_t = 1.0)]
         rollout_update_prob: f32,
         #[arg(long)]
         seed_scale: Option<f32>,
         #[arg(long, default_value = "uniform-circle")]
         seed_mode: SeedModeArg,
+    },
+    #[command(name = "eval-dynamics2d", alias = "eval-dynamics-2d")]
+    EvalDynamics2d {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        target_model: PathBuf,
+        #[arg(long, default_value_t = 4096)]
+        particles: usize,
+        #[arg(long, default_value_t = 64)]
+        steps: usize,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 123)]
+        seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 64)]
+        image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        render_sigma_px: f32,
+        #[arg(long, default_value = "/tmp/burn_automata_dynamics2d_eval.json")]
+        output: PathBuf,
+    },
+    #[command(name = "train-hyper2d", alias = "train-hyper-2d")]
+    TrainHyper2d {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        condition: Option<PathBuf>,
+        #[arg(long)]
+        target_model: Option<PathBuf>,
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        #[arg(long, default_value = "assets/catalog_thumbnails")]
+        catalog_thumbnail_dir: PathBuf,
+        #[arg(long)]
+        catalog_group: Option<Hyper2dCatalogGroupArg>,
+        #[arg(long = "catalog-target", value_delimiter = ',')]
+        catalog_targets: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        catalog_limit: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_stride: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_offset: usize,
+        #[arg(long)]
+        base_model: Option<PathBuf>,
+        #[arg(long)]
+        hyper_input: Option<PathBuf>,
+        #[arg(long, default_value = "artifacts/hyper_2d.json")]
+        hyper_output: PathBuf,
+        #[arg(long, default_value = "artifacts/hyper_2d_training_report.json")]
+        report_output: PathBuf,
+        #[arg(long)]
+        adapter_output: Option<PathBuf>,
+        #[arg(long)]
+        materialized_output: Option<PathBuf>,
+        #[arg(long)]
+        generated_output_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 64)]
+        steps: usize,
+        #[arg(long, default_value_t = 512)]
+        rows: usize,
+        #[arg(long, default_value_t = 1.0e-3)]
+        learning_rate: f32,
+        #[arg(long, default_value_t = 1.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.0)]
+        weight_decay: f32,
+        #[arg(long, default_value_t = 66)]
+        adapter_rank: usize,
+        #[arg(long, default_value_t = 66.0)]
+        adapter_alpha: f32,
+        #[arg(long, default_value_t = 512)]
+        hyper_hidden: usize,
+        #[arg(long, default_value_t = 8.0)]
+        hyper_output_scale: f32,
+        #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_WIDTH)]
+        condition_token_grid_width: usize,
+        #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_HEIGHT)]
+        condition_token_grid_height: usize,
+        #[arg(long, default_value_t = 42)]
+        hyper_seed: u64,
+        #[arg(long, default_value_t = 1)]
+        adapter_bootstrap_steps: usize,
+        #[arg(long)]
+        adapter_bootstrap_learning_rate: Option<f32>,
+        #[arg(long)]
+        adapter_bootstrap_grad_clip_norm: Option<f32>,
+        #[arg(long)]
+        rollout_particles: Option<usize>,
+        #[arg(long, default_value_t = 16)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 1)]
+        rollouts: usize,
+        #[arg(long)]
+        rollout_update_prob: Option<f32>,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+    },
+    #[command(name = "infer-hyper2d", alias = "infer-hyper-2d")]
+    InferHyper2d {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        condition: PathBuf,
+        #[arg(long)]
+        hyper: PathBuf,
+        #[arg(long)]
+        base_model: Option<PathBuf>,
+        #[arg(long, default_value = "artifacts/hyper_2d_infer_report.json")]
+        report_output: PathBuf,
+        #[arg(long)]
+        adapter_output: Option<PathBuf>,
+        #[arg(long)]
+        materialized_output: Option<PathBuf>,
+        #[arg(long)]
+        rollout_output: Option<PathBuf>,
+        #[arg(long, default_value_t = 32)]
+        steps: usize,
+        #[arg(long)]
+        particles: Option<usize>,
+        #[arg(long, default_value_t = 1.0)]
+        update_prob: f32,
+        #[arg(long)]
+        seed: Option<u64>,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long)]
+        gpu: bool,
+        #[arg(long, default_value = "auto")]
+        neighbor_mode: NeighborModeArg,
+        #[arg(long)]
+        bucket_capacity: Option<usize>,
+        #[arg(long, default_value_t = 256)]
+        min_particles: usize,
+        #[arg(long, default_value_t = 4096)]
+        max_particles: usize,
+        #[arg(long, default_value_t = 0.05)]
+        min_seed_scale: f32,
+        #[arg(long, default_value_t = 1.0)]
+        max_seed_scale: f32,
+    },
+    #[command(name = "eval-hyper2d", alias = "eval-hyper-2d")]
+    EvalHyper2d {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        condition: Option<PathBuf>,
+        #[arg(long)]
+        target_model: Option<PathBuf>,
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        #[arg(long, default_value = "assets/catalog_thumbnails")]
+        catalog_thumbnail_dir: PathBuf,
+        #[arg(long)]
+        catalog_group: Option<Hyper2dCatalogGroupArg>,
+        #[arg(long = "catalog-target", value_delimiter = ',')]
+        catalog_targets: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        catalog_limit: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_stride: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_offset: usize,
+        #[arg(long)]
+        hyper: PathBuf,
+        #[arg(long)]
+        base_model: Option<PathBuf>,
+        #[arg(long, default_value = "artifacts/hyper_2d_eval_report.json")]
+        report_output: PathBuf,
+        #[arg(long)]
+        generated_output_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 512)]
+        rows: usize,
+        #[arg(long)]
+        rollout_particles: Option<usize>,
+        #[arg(long, default_value_t = 16)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 1)]
+        rollouts: usize,
+        #[arg(long)]
+        rollout_update_prob: Option<f32>,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        image_metrics: bool,
+        #[arg(long, default_value_t = 64)]
+        image_metric_size: usize,
+        #[arg(long, default_value_t = 32)]
+        image_metric_steps: usize,
+        #[arg(long)]
+        image_metric_particles: Option<usize>,
+        #[arg(long)]
+        image_metric_update_prob: Option<f32>,
+        #[arg(long, default_value_t = 1.25)]
+        image_metric_sigma: f32,
+        #[arg(long, default_value_t = 0.05)]
+        image_metric_threshold: f32,
+        #[arg(long)]
+        dynamics_metrics: bool,
+        #[arg(long, default_value_t = 1024)]
+        dynamics_metric_particles: usize,
+        #[arg(long, default_value_t = 32)]
+        dynamics_metric_steps: usize,
+        #[arg(long)]
+        dynamics_metric_update_prob: Option<f32>,
+        #[arg(long, default_value_t = 64)]
+        dynamics_metric_image_size: usize,
+        #[arg(long, default_value_t = 1.25)]
+        dynamics_metric_sigma: f32,
     },
     TrainTorus3d {
         #[arg(long, default_value = "artifacts/legacy_uv_torus_3d.bpk")]
@@ -661,6 +899,59 @@ pub(crate) enum Command {
         gaussian: bool,
         #[arg(long)]
         step_timing: bool,
+    },
+    #[command(name = "bench-training", alias = "training-bench")]
+    BenchTraining {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        target_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 32768)]
+        rows: usize,
+        #[arg(long, default_value_t = 64)]
+        steps: usize,
+        #[arg(long, default_value_t = 3)]
+        repeats: usize,
+        #[arg(long, default_value_t = 2)]
+        warmup_steps: usize,
+        #[arg(long, default_value_t = 0)]
+        report_interval: usize,
+        #[arg(long, default_value_t = 1e-3)]
+        learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.0)]
+        weight_decay: f32,
+        #[arg(long, default_value = "adam-w")]
+        optimizer: TrainingOptimizerArg,
+        #[arg(long, default_value = "auto")]
+        training_device: TrainingDeviceArg,
+        #[arg(long, default_value_t = 0.9)]
+        adam_beta1: f32,
+        #[arg(long, default_value_t = 0.999)]
+        adam_beta2: f32,
+        #[arg(long, default_value_t = 1e-8)]
+        adam_epsilon: f32,
+        #[arg(long, default_value_t = 7)]
+        student_seed: u64,
+        #[arg(long, default_value = "features")]
+        batch_source: TrainingBatchArg,
+        #[arg(long, default_value_t = 1024)]
+        rollout_particles: usize,
+        #[arg(long, default_value_t = 16)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 1)]
+        rollouts: usize,
+        #[arg(long, default_value_t = 5)]
+        temporal_samples: usize,
+        #[arg(long, default_value_t = 1.0)]
+        rollout_update_prob: f32,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value = "/tmp/burn_automata_training_bench.json")]
+        output: PathBuf,
     },
     #[command(name = "bench-spatial", alias = "spatial-bench")]
     BenchSpatial {

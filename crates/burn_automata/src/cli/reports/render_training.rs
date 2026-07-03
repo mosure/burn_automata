@@ -2,8 +2,13 @@ use crate::cli::prelude::*;
 
 use super::{growth3d::CliGrowth3dValidationReport, render_proxy::RenderProxyTrainingReport};
 
+pub(crate) const CLI_RENDER_TRAINING_REPORT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const CLI_RENDER_ADAPTER_SUITE_REPORT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const CLI_RENDER_ADAPTER_BANK_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Serialize)]
 pub(crate) struct CliRenderTrainingReport {
+    pub(crate) schema_version: u32,
     pub(crate) target: MeshTargetArg,
     pub(crate) base_model: Option<String>,
     pub(crate) model_output: String,
@@ -22,6 +27,7 @@ pub(crate) struct CliRenderTrainingReport {
 
 #[derive(Serialize)]
 pub(crate) struct CliRenderAdapterSuiteReport {
+    pub(crate) schema_version: u32,
     pub(crate) strategy: CliRenderAdapterSuiteStrategy,
     pub(crate) contract: CliRenderAdapterSuiteContract,
     pub(crate) base_model_input: Option<String>,

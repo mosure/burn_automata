@@ -489,7 +489,7 @@ pub fn growth_3d_seed_writes_coordinate_scaffold(seed_mode: ParticleSeed) -> boo
     )
 }
 
-fn stochastic_mask(count: usize, update_prob: f32, rng: &mut StdRng) -> Vec<f32> {
+pub(crate) fn stochastic_mask(count: usize, update_prob: f32, rng: &mut StdRng) -> Vec<f32> {
     if update_prob >= 1.0 {
         return vec![1.0; count];
     }

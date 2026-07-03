@@ -4,8 +4,9 @@ use crate::{
     AutomataError, AutomataPreset, AutomataResult, BpkModelManifest, NpaConfig, NpaModel,
     ParticleSeed, RolloutConfig, RolloutTrace, SupervisedBatch,
     kernels::HashGridConfig,
-    rollout::{run_rollout, seed_particles_scaled},
+    rollout::{seed_particles_scaled, stochastic_mask},
 };
+use rand::{SeedableRng, rngs::StdRng};
 
 #[derive(Clone, Debug)]
 pub struct AutomataPipeline {
@@ -123,6 +124,7 @@ pub struct RolloutSupervisionConfig {
     pub particle_count: usize,
     pub rollout_steps: usize,
     pub rollouts: usize,
+    pub temporal_samples: usize,
     pub dt: f32,
     pub update_prob: f32,
     pub seed: u64,
@@ -137,6 +139,7 @@ impl Default for RolloutSupervisionConfig {
             particle_count: 1024,
             rollout_steps: 16,
             rollouts: 1,
+            temporal_samples: 1,
             dt: 1.0,
             update_prob: 1.0,
             seed: 42,
@@ -216,45 +219,71 @@ pub fn rollout_supervised_batch_from_model(
     let mut features = Vec::new();
     let mut target_update = Vec::new();
     let mut remaining_rows = cfg.max_rows;
+    let snapshot_steps = rollout_snapshot_steps(cfg.rollout_steps, cfg.temporal_samples);
+    let total_snapshots = cfg.rollouts.saturating_mul(snapshot_steps.len()).max(1);
+    let distributed_row_limit = cfg.max_rows.div_ceil(total_snapshots).max(1);
     for rollout_idx in 0..cfg.rollouts {
         if remaining_rows == 0 {
             break;
         }
-        let trace = run_rollout(
-            rollout_model,
-            grid,
-            &RolloutConfig {
-                particle_count: cfg.particle_count,
-                steps: cfg.rollout_steps,
-                dt: cfg.dt,
-                update_prob: cfg.update_prob,
-                seed: cfg
-                    .seed
-                    .wrapping_add((rollout_idx as u64).wrapping_mul(0x9e37_79b9)),
-                seed_scale: cfg.seed_scale,
-                ..RolloutConfig::default()
-            },
+        let rollout_seed = cfg
+            .seed
+            .wrapping_add((rollout_idx as u64).wrapping_mul(0x9e37_79b9));
+        let (mut positions, mut states) = seed_particles_scaled(
+            1,
+            cfg.particle_count,
+            rollout_model.config.state_dims,
+            rollout_model.config.spatial_dims,
+            rollout_seed,
             cfg.seed_mode,
-        )?;
-        let batch = rollout_supervised_batch(
-            model,
-            grid,
-            &trace,
-            target,
-            RolloutBatchConfig {
-                max_rows: remaining_rows,
-                dt: cfg.dt,
-            },
-        )?;
-        remaining_rows = remaining_rows.saturating_sub(
-            batch
+            cfg.seed_scale,
+        );
+        let mut rng = StdRng::seed_from_u64(rollout_seed ^ 0x5eed);
+        let mut current_step = 0usize;
+        for &snapshot_step in &snapshot_steps {
+            while current_step < snapshot_step {
+                let mask = stochastic_mask(cfg.particle_count, cfg.update_prob, &mut rng);
+                let step = rollout_model.step_cpu(
+                    &positions,
+                    &states,
+                    1,
+                    cfg.particle_count,
+                    grid,
+                    cfg.dt,
+                    Some(&mask),
+                )?;
+                positions = step.next_positions;
+                states = step.next_states;
+                current_step += 1;
+            }
+            let row_limit = if snapshot_steps.len() == 1 {
+                remaining_rows
+            } else {
+                remaining_rows.min(distributed_row_limit)
+            };
+            let batch = rollout_supervised_snapshot_batch(
+                model,
+                grid,
+                &positions,
+                &states,
+                target,
+                RolloutBatchConfig {
+                    max_rows: row_limit,
+                    dt: cfg.dt,
+                },
+            )?;
+            let batch_rows = batch
                 .features
                 .len()
                 .checked_div(model.config.perception_dims())
-                .unwrap_or_default(),
-        );
-        features.extend(batch.features);
-        target_update.extend(batch.target_update);
+                .unwrap_or_default();
+            remaining_rows = remaining_rows.saturating_sub(batch_rows);
+            features.extend(batch.features);
+            target_update.extend(batch.target_update);
+            if remaining_rows == 0 {
+                break;
+            }
+        }
     }
 
     if features.is_empty() {
@@ -266,6 +295,53 @@ pub fn rollout_supervised_batch_from_model(
         features,
         target_update,
     })
+}
+
+fn rollout_supervised_snapshot_batch(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    positions: &[[f32; 4]],
+    states: &[f32],
+    target: SupervisedTarget<'_>,
+    cfg: RolloutBatchConfig,
+) -> AutomataResult<SupervisedBatch> {
+    let rows = positions.len().min(cfg.max_rows);
+    if rows == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "rollout snapshot produced no rows".to_string(),
+        ));
+    }
+    let step = model.step_cpu(
+        &positions[..rows],
+        &states[..rows * model.config.state_dims],
+        1,
+        rows,
+        grid,
+        cfg.dt,
+        None,
+    )?;
+    target_batch_from_features(model, target, step.perception.features)
+}
+
+fn rollout_snapshot_steps(rollout_steps: usize, temporal_samples: usize) -> Vec<usize> {
+    let samples = temporal_samples.max(1);
+    if samples == 1 {
+        return vec![rollout_steps];
+    }
+    if rollout_steps == 0 {
+        return vec![0];
+    }
+    let mut steps = Vec::with_capacity(samples);
+    for sample_idx in 0..samples {
+        let step = sample_idx * rollout_steps / (samples - 1);
+        if steps.last().copied() != Some(step) {
+            steps.push(step);
+        }
+    }
+    if steps.last().copied() != Some(rollout_steps) {
+        steps.push(rollout_steps);
+    }
+    steps
 }
 
 fn target_batch_from_features(
@@ -298,6 +374,11 @@ fn validate_rollout_supervision_config(cfg: RolloutSupervisionConfig) -> Automat
     if cfg.rollouts == 0 {
         return Err(AutomataError::InvalidArgument(
             "rollout supervision rollouts must be non-zero".to_string(),
+        ));
+    }
+    if cfg.temporal_samples == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "rollout supervision temporal_samples must be non-zero".to_string(),
         ));
     }
     if !cfg.dt.is_finite() {

@@ -1,7 +1,10 @@
 use crate::cli::prelude::*;
 
+pub(crate) const RENDER_PROXY_TRAINING_REPORT_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RenderProxyTrainingReport {
+    pub(crate) schema_version: u32,
     pub(crate) rounds: usize,
     pub(crate) supervised_steps_per_round: usize,
     pub(crate) objective: MeshRolloutObjectiveConfig,

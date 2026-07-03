@@ -29,6 +29,7 @@ clap = { version = "4.5", features = ["derive"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rand = "0.9"
 pollster = "0.4"
 rayon = "1.12"

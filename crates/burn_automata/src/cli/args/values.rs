@@ -64,6 +64,27 @@ pub(crate) enum TrainingBatchArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum TrainingOptimizerArg {
+    Sgd,
+    #[value(name = "adam-w", alias = "adamw", alias = "adam")]
+    AdamW,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum TrainingDeviceArg {
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum Hyper2dCatalogGroupArg {
+    Growing,
+    Texture,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
 pub(crate) enum MeshTrainingModeArg {
     #[value(name = "position-field", alias = "field")]
     PositionField,

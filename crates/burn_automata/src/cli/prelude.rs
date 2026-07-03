@@ -7,10 +7,17 @@ pub(crate) use std::{
 
 #[cfg(feature = "gpu_wgpu")]
 pub(crate) use crate::kernels::build_hashgrid;
+#[cfg(feature = "backend_wgpu")]
+pub(crate) use crate::run_supervised_training_wgpu;
 pub(crate) use crate::{
-    AutomataPreset, BpkModelManifest, FeatureBatchConfig, GaussianDecodeMode, NpaConfig,
-    NpaLowRankAdapter, NpaModel, NpaWeights, ParticleSeed, RolloutConfig, RolloutSupervisionConfig,
-    SupervisedBatch, SupervisedTarget, feature_supervised_batch, import_model,
+    AutomataPreset, BpkAdapterManifest, BpkModelManifest, ConditionImage2d, ConditionSummary2d,
+    FeatureBatchConfig, GaussianDecodeMode, HyperAdapterExample2d, HyperFlowExample2d, HyperNpa2d,
+    HyperNpa2dConfig, NpaConfig, NpaLowRankAdapter, NpaModel, NpaWeights, ParticlePrior2d,
+    ParticlePriorConfig, ParticleSeed, RolloutConfig, RolloutSupervisionConfig, SupervisedBatch,
+    SupervisedTarget, condition_feature_dims_for_token_grid, feature_supervised_batch,
+    generate_conditioned_npa_2d, hyper_adapter_regression_loss,
+    hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
+    hyper_rectified_flow_train_step, import_model,
     kernels::perceive_adjoint_with_options,
     kernels::{PerceptionOptions, euler_step, perceive_with_options},
     mesh_objective::{
@@ -48,10 +55,11 @@ pub(crate) use crate::{
     rollout_supervised_batch_from_model, run_rollout,
     target_geometry::{TriangleMeshTarget, dot3},
     training::{
-        SgdConfig, SupervisedGradients, SupervisedStepReport, TrainingHistoryEntry,
-        TrainingRunConfig, TrainingRunReport, apply_sgd_adapter_gradients, apply_sgd_gradients,
-        mlp_backward_from_output_gradients, project_low_rank_adapter_gradients,
-        run_supervised_adapter_training, run_supervised_training,
+        AdamWConfig, SgdConfig, SupervisedGradients, SupervisedOptimizerConfig,
+        SupervisedStepReport, TrainingHistoryEntry, TrainingRunConfig, TrainingRunReport,
+        apply_sgd_adapter_gradients, apply_sgd_gradients, mlp_backward_from_output_gradients,
+        project_low_rank_adapter_gradients, run_supervised_adapter_training,
+        run_supervised_training, run_supervised_training_with_optimizer, supervised_adapter_loss,
     },
 };
 pub(crate) use clap::{ArgAction, Parser, Subcommand, ValueEnum};

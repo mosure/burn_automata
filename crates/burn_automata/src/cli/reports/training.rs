@@ -8,12 +8,46 @@ pub(crate) struct CliTrainingReport {
     pub(crate) target_source: String,
     pub(crate) student_seed: u64,
     pub(crate) sgd: SgdConfig,
+    pub(crate) optimizer: SupervisedOptimizerConfig,
+    pub(crate) training_device: TrainingDeviceArg,
+    pub(crate) rounds: usize,
+    pub(crate) total_rows_seen: usize,
     pub(crate) report: TrainingRunReport,
     pub(crate) model_output: Option<String>,
     pub(crate) batch_source: TrainingBatchArg,
     pub(crate) rollout_supervision: Option<CliRolloutSupervisionReport>,
     pub(crate) mesh_rollout: Option<MeshRolloutReport>,
     pub(crate) render_loss: Option<MultiViewRenderLossReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTrainingBenchReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) requested_training_device: TrainingDeviceArg,
+    pub(crate) training_device: TrainingDeviceArg,
+    pub(crate) batch_source: TrainingBatchArg,
+    pub(crate) optimizer: SupervisedOptimizerConfig,
+    pub(crate) rows: usize,
+    pub(crate) steps: usize,
+    pub(crate) repeats: usize,
+    pub(crate) warmup_steps: usize,
+    pub(crate) report_interval: usize,
+    pub(crate) target_model: Option<String>,
+    pub(crate) runs: Vec<CliTrainingBenchRunReport>,
+    pub(crate) min_row_steps_per_sec: f64,
+    pub(crate) median_row_steps_per_sec: f64,
+    pub(crate) max_row_steps_per_sec: f64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTrainingBenchRunReport {
+    pub(crate) repeat: usize,
+    pub(crate) elapsed_ms: f64,
+    pub(crate) row_steps_per_sec: f64,
+    pub(crate) initial_loss: f32,
+    pub(crate) final_loss: f32,
+    pub(crate) best_loss: f32,
+    pub(crate) history_points: usize,
 }
 
 #[derive(Serialize)]
@@ -29,6 +63,22 @@ pub(crate) struct CliRenderLossEvalReport {
 }
 
 #[derive(Serialize)]
+pub(crate) struct CliDynamics2dEvalReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) model: String,
+    pub(crate) target_model: String,
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) update_prob: f32,
+    pub(crate) seed: u64,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) image_size: usize,
+    pub(crate) render_sigma_px: f32,
+    pub(crate) metrics: CliHyper2dDynamicsMetricsReport,
+}
+
+#[derive(Serialize)]
 pub(crate) struct CliTorusTrainingReport {
     pub(crate) preset: AutomataPreset,
     pub(crate) target_source: String,
@@ -40,6 +90,171 @@ pub(crate) struct CliTorusTrainingReport {
     pub(crate) batch_source: TrainingBatchArg,
     pub(crate) training_mode: MeshTrainingModeArg,
     pub(crate) rollout_supervision: Option<CliRolloutSupervisionReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dTrainingReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) condition: Option<String>,
+    pub(crate) catalog: Option<String>,
+    pub(crate) catalog_group: Option<Hyper2dCatalogGroupArg>,
+    pub(crate) catalog_targets: Vec<String>,
+    pub(crate) base_model: Option<String>,
+    pub(crate) target_model: Option<String>,
+    pub(crate) hyper_input: Option<String>,
+    pub(crate) hyper_output: String,
+    pub(crate) adapter_output: Option<String>,
+    pub(crate) materialized_output: Option<String>,
+    pub(crate) generated_output_dir: Option<String>,
+    pub(crate) npa_config: NpaConfig,
+    pub(crate) hyper_config: HyperNpa2dConfig,
+    pub(crate) sgd: SgdConfig,
+    pub(crate) rollout_supervision: CliRolloutSupervisionReport,
+    pub(crate) initial_loss: f32,
+    pub(crate) holdout_initial_loss: Option<f32>,
+    pub(crate) final_loss: f32,
+    pub(crate) holdout_final_loss: Option<f32>,
+    pub(crate) best_loss: f32,
+    pub(crate) best_step: usize,
+    pub(crate) history: Vec<CliHyper2dHistoryEntry>,
+    pub(crate) adapter_bootstrap: Vec<CliHyper2dAdapterBootstrapReport>,
+    pub(crate) train_examples: Vec<CliHyper2dExampleReport>,
+    pub(crate) holdout_examples: Vec<CliHyper2dExampleReport>,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dHistoryEntry {
+    pub(crate) step: usize,
+    pub(crate) loss: f32,
+    pub(crate) holdout_loss: Option<f32>,
+    pub(crate) grad_norm: f32,
+    pub(crate) grad_scale: f32,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct CliHyper2dAdapterBootstrapReport {
+    pub(crate) slug: String,
+    pub(crate) method: &'static str,
+    pub(crate) steps: usize,
+    pub(crate) rows: usize,
+    pub(crate) initial_loss: f32,
+    pub(crate) final_loss: f32,
+    pub(crate) best_loss: f32,
+    pub(crate) adapter_parameter_count: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dExampleReport {
+    pub(crate) slug: String,
+    pub(crate) title: Option<String>,
+    pub(crate) group: Option<String>,
+    pub(crate) condition: String,
+    pub(crate) target_model: String,
+    pub(crate) initial_loss: f32,
+    pub(crate) final_loss: f32,
+    pub(crate) rows: usize,
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) rollouts: usize,
+    pub(crate) update_prob: f32,
+    pub(crate) seed_scale: f32,
+    pub(crate) condition_summary: ConditionSummary2d,
+    pub(crate) prior: ParticlePrior2d,
+    pub(crate) image_metrics: Option<CliHyper2dImageMetricsReport>,
+    pub(crate) dynamics_metrics: Option<CliHyper2dDynamicsMetricsReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dImageMetricsReport {
+    pub(crate) image_size: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) particle_count: usize,
+    pub(crate) update_prob: f32,
+    pub(crate) seed: u64,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) decoder: &'static str,
+    pub(crate) render_sigma_px: f32,
+    pub(crate) domain_radius: f32,
+    pub(crate) mse: f32,
+    pub(crate) psnr_db: f32,
+    pub(crate) luma_mse: f32,
+    pub(crate) luma_psnr_db: f32,
+    pub(crate) occupancy_mse: f32,
+    pub(crate) occupancy_psnr_db: f32,
+    pub(crate) foreground_iou: f32,
+    pub(crate) generated_occupancy: f32,
+    pub(crate) target_occupancy: f32,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dDynamicsMetricsReport {
+    pub(crate) particle_count: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) update_prob: f32,
+    pub(crate) seed: u64,
+    pub(crate) seed_scale: f32,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) image_size: usize,
+    pub(crate) render_sigma_px: f32,
+    pub(crate) position_mse: f32,
+    pub(crate) position_psnr_db: f32,
+    pub(crate) state_mse: f32,
+    pub(crate) state_psnr_db: f32,
+    pub(crate) tail_rgb_mse: f32,
+    pub(crate) tail_rgb_psnr_db: f32,
+    pub(crate) render_rgb_mse: f32,
+    pub(crate) render_rgb_psnr_db: f32,
+    pub(crate) mean_dx_mse: f32,
+    pub(crate) mean_dx_mae: f32,
+    pub(crate) target_final_mean_dx: f32,
+    pub(crate) generated_final_mean_dx: f32,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dInferReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) condition: String,
+    pub(crate) base_model: Option<String>,
+    pub(crate) hyper: String,
+    pub(crate) adapter_output: Option<String>,
+    pub(crate) materialized_output: Option<String>,
+    pub(crate) rollout_output: Option<String>,
+    pub(crate) npa_config: NpaConfig,
+    pub(crate) hyper_config: HyperNpa2dConfig,
+    pub(crate) condition_summary: ConditionSummary2d,
+    pub(crate) prior: ParticlePrior2d,
+    pub(crate) rollout_particles: Option<usize>,
+    pub(crate) rollout_steps: Option<usize>,
+    pub(crate) seed: Option<u64>,
+    pub(crate) seed_scale: Option<f32>,
+    pub(crate) seed_mode: ParticleSeed,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliHyper2dEvalReport {
+    pub(crate) preset: AutomataPreset,
+    pub(crate) condition: Option<String>,
+    pub(crate) catalog: Option<String>,
+    pub(crate) catalog_group: Option<Hyper2dCatalogGroupArg>,
+    pub(crate) catalog_targets: Vec<String>,
+    pub(crate) base_model: Option<String>,
+    pub(crate) hyper: String,
+    pub(crate) report_output: String,
+    pub(crate) generated_output_dir: Option<String>,
+    pub(crate) npa_config: NpaConfig,
+    pub(crate) hyper_config: HyperNpa2dConfig,
+    pub(crate) rollout_supervision: CliRolloutSupervisionReport,
+    pub(crate) train_loss: f32,
+    pub(crate) holdout_loss: Option<f32>,
+    pub(crate) train_examples: Vec<CliHyper2dExampleReport>,
+    pub(crate) holdout_examples: Vec<CliHyper2dExampleReport>,
+    pub(crate) adapter_parameter_count: usize,
+    pub(crate) materialized_parameter_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]

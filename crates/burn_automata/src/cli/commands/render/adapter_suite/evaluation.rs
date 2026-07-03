@@ -1,6 +1,6 @@
 use crate::cli::prelude::*;
 
-use super::splits::adapter_suite_split;
+use super::{config::AdapterSuiteRenderSettings, splits::adapter_suite_split};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn adapter_suite_shared_base_evaluations(
@@ -14,17 +14,7 @@ pub(super) fn adapter_suite_shared_base_evaluations(
     rollout_steps: usize,
     selection_seed: u64,
     training_selection_seeds: &[u64],
-    image_size: usize,
-    target_samples: usize,
-    sigma: f32,
-    min_sigma: f32,
-    max_sigma: f32,
-    gaussian_decode_mode: RenderGaussianDecodeModeArg,
-    world_scale: Option<f32>,
-    render_opacity_logit_bias: f32,
-    density_weight: f32,
-    color_weight: f32,
-    depth_weight: f32,
+    render_settings: AdapterSuiteRenderSettings,
 ) -> Result<Vec<CliRenderAdapterSuiteBaseEvalEntry>, Box<dyn std::error::Error>> {
     let base_model = base_manifest.clone().into_model();
     let validation_extra_seeds =
@@ -36,19 +26,7 @@ pub(super) fn adapter_suite_shared_base_evaluations(
         let target_seed_mode = seed_mode
             .map(ParticleSeed::from)
             .unwrap_or_else(|| default_render_training_seed_mode(target, &base_model));
-        let render = RenderLossConfig {
-            image_size,
-            sigma,
-            min_sigma,
-            max_sigma,
-            gaussian_decode_mode: gaussian_decode_mode.into(),
-            world_scale: world_scale.unwrap_or(target_seed_scale * 2.0),
-            target_samples,
-            opacity_logit_bias: render_opacity_logit_bias,
-            density_weight,
-            color_weight,
-            depth_weight,
-        };
+        let render = render_settings.loss_config(target_seed_scale);
         let growth_validation = growth_3d_validation_report(
             shared_base_output,
             target,

@@ -485,6 +485,7 @@ pub(crate) fn run_render_proxy_training(
     let final_gaussian_volume = gaussian_volume_stats_for_trace(&final_trace, render_cfg);
 
     Ok(RenderProxyTrainingReport {
+        schema_version: RENDER_PROXY_TRAINING_REPORT_SCHEMA_VERSION,
         rounds: cfg.rounds,
         supervised_steps_per_round: cfg.supervised_steps_per_round,
         objective: render_training_objective_config(&cfg, render_cfg),

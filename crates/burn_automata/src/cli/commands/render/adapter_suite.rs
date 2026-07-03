@@ -3,6 +3,7 @@ use crate::cli::prelude::*;
 use super::super::resolve_direct_selection_seed_training;
 
 mod bank;
+mod config;
 mod contract;
 mod evaluation;
 mod signal;
@@ -10,6 +11,9 @@ mod splits;
 mod summary;
 
 use bank::adapter_suite_bank_entries;
+use config::{
+    AdapterSuiteRenderSettings, AdapterSuiteTrainingPhaseConfig, AdapterSuiteTrainingSettings,
+};
 use contract::adapter_suite_contract;
 use evaluation::adapter_suite_shared_base_evaluations;
 use signal::{adapter_suite_missing_signal_labels, adapter_suite_missing_train_signal};
@@ -138,6 +142,45 @@ pub(crate) fn run_train_render_3d_adapters(
         grad_clip_norm,
         weight_decay: 0.0,
     };
+    let render_settings = AdapterSuiteRenderSettings {
+        image_size,
+        target_samples,
+        sigma,
+        min_sigma,
+        max_sigma,
+        gaussian_decode_mode,
+        world_scale,
+        render_opacity_logit_bias,
+        density_weight,
+        color_weight,
+        depth_weight,
+    };
+    let training_settings = AdapterSuiteTrainingSettings {
+        supervised_steps_per_round,
+        particles,
+        rollout_steps,
+        gradient_particles,
+        gradient_mode,
+        finite_diff_eps,
+        motion_gain,
+        perception_position_gain,
+        max_update_norm,
+        trajectory_supervision,
+        training_backend,
+        direct_output_gradient_rms_cap,
+        direct_line_search,
+        direct_line_search_scales,
+        direct_material_output_only,
+        direct_selection_seed_training,
+        selection_seed,
+        selection_seeds: render_training_default_extra_selection_seeds(
+            selection_seed,
+            &extra_selection_seeds,
+        ),
+        sgd,
+        adapter_rank,
+        adapter_alpha,
+    };
 
     std::fs::create_dir_all(&output_dir)?;
     if let Some(parent) = shared_base_output.parent() {
@@ -195,8 +238,7 @@ pub(crate) fn run_train_render_3d_adapters(
             )?;
             (model, hashgrid, None, true)
         };
-    let training_selection_seeds =
-        render_training_default_extra_selection_seeds(selection_seed, &extra_selection_seeds);
+    let training_selection_seeds = training_settings.selection_seeds.clone();
     let mut shared_base_training = Vec::new();
     for cycle in 0..shared_base_cycles {
         for (target_index, target) in shared_base_targets.iter().copied().enumerate() {
@@ -206,82 +248,25 @@ pub(crate) fn run_train_render_3d_adapters(
             let target_seed_mode = seed_mode
                 .map(ParticleSeed::from)
                 .unwrap_or_else(|| default_render_training_seed_mode(target, &shared_model));
-            let render = RenderLossConfig {
-                image_size,
-                sigma,
-                min_sigma,
-                max_sigma,
-                gaussian_decode_mode: gaussian_decode_mode.into(),
-                world_scale: world_scale.unwrap_or(target_seed_scale * 2.0),
-                target_samples,
-                opacity_logit_bias: render_opacity_logit_bias,
-                density_weight,
-                color_weight,
-                depth_weight,
-            };
+            let render = render_settings.loss_config(target_seed_scale);
             let report = run_render_proxy_training(
                 &mut shared_model,
                 &hashgrid,
                 &target_mesh,
-                RenderProxyTrainingConfig {
-                    target,
-                    rounds: 1,
-                    supervised_steps_per_round,
-                    particles,
-                    rollout_steps,
-                    gradient_particles,
-                    gradient_mode,
-                    finite_diff_eps,
-                    motion_gain,
-                    perception_position_gain,
-                    max_update_norm,
-                    trajectory_supervision,
-                    trajectory_render_gain: ROBUST_3D_TRAJECTORY_RENDER_GAIN,
-                    trajectory_mesh_gain: ROBUST_3D_TRAJECTORY_MESH_GAIN,
-                    trajectory_render_samples: ROBUST_3D_TRAJECTORY_RENDER_SAMPLES,
-                    liveness_gain: ROBUST_3D_LIVENESS_GAIN,
-                    liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-                    liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-                    coverage_gain: ROBUST_3D_COVERAGE_GAIN,
-                    coverage_samples: ROBUST_3D_COVERAGE_SAMPLES,
-                    coverage_mode: CoverageUpdateModeArg::SlicedOt,
-                    coverage_softness: 0.0,
-                    coverage_repulsion_gain: ROBUST_3D_COVERAGE_REPULSION_GAIN,
-                    coverage_gap_gain: ROBUST_3D_COVERAGE_REPULSION_GAIN,
-                    coverage_repulsion_radius: 0.0,
-                    coverage_normal_weight: ROBUST_3D_COVERAGE_NORMAL_WEIGHT,
-                    extent_gain: ROBUST_3D_EXTENT_GAIN,
-                    full_coverage_adjoint: true,
-                    surface_gain: ROBUST_3D_SURFACE_GAIN,
-                    surface_escape_gain: ROBUST_3D_SURFACE_ESCAPE_GAIN,
-                    opacity_gain: ROBUST_3D_OPACITY_GAIN,
-                    material_liveness_gain: ROBUST_3D_MATERIAL_LIVENESS_GAIN,
-                    material_tail_gain: ROBUST_3D_MATERIAL_TAIL_GAIN,
-                    material_suppression_update_multiplier:
-                        ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-                    material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-                    scale_gain: ROBUST_3D_SCALE_GAIN,
-                    scale_budget_weight: ROBUST_3D_SCALE_BUDGET_WEIGHT,
-                    max_opacity_update: 0.05,
-                    direct_output_gradient_rms_cap,
-                    direct_line_search,
-                    direct_line_search_scales: direct_line_search_scales.clone(),
-                    direct_material_output_only,
-                    training_backend,
-                    weight_update_mode: RenderWeightUpdateModeArg::Full,
-                    adapter_rank,
-                    adapter_alpha,
-                    adapter_seed: adapter_seed.wrapping_add(target_index as u64),
-                    direct_selection_seed_training,
-                    seed: shared_base_seed
-                        .wrapping_add((cycle * shared_base_targets.len() + target_index) as u64),
-                    selection_seed: Some(selection_seed),
-                    selection_seeds: training_selection_seeds.clone(),
-                    seed_scale: target_seed_scale,
-                    seed_mode: target_seed_mode,
+                training_settings.render_proxy_config(
+                    AdapterSuiteTrainingPhaseConfig {
+                        target,
+                        rounds: 1,
+                        weight_update_mode: RenderWeightUpdateModeArg::Full,
+                        adapter_seed: adapter_seed.wrapping_add(target_index as u64),
+                        seed: shared_base_seed.wrapping_add(
+                            (cycle * shared_base_targets.len() + target_index) as u64,
+                        ),
+                        seed_scale: target_seed_scale,
+                        seed_mode: target_seed_mode,
+                    },
                     render,
-                    sgd,
-                },
+                ),
             )?;
             shared_base_training.push(CliRenderAdapterSuiteBaseEntry {
                 cycle,
@@ -318,17 +303,7 @@ pub(crate) fn run_train_render_3d_adapters(
             rollout_steps,
             selection_seed,
             &training_selection_seeds,
-            image_size,
-            target_samples,
-            sigma,
-            min_sigma,
-            max_sigma,
-            gaussian_decode_mode,
-            world_scale,
-            render_opacity_logit_bias,
-            density_weight,
-            color_weight,
-            depth_weight,
+            render_settings,
         )?
     };
 
@@ -341,85 +316,25 @@ pub(crate) fn run_train_render_3d_adapters(
         let target_seed_mode = seed_mode
             .map(ParticleSeed::from)
             .unwrap_or_else(|| default_render_training_seed_mode(target, &base_npa));
-        let training_selection_seeds =
-            render_training_default_extra_selection_seeds(selection_seed, &extra_selection_seeds);
-        let render = RenderLossConfig {
-            image_size,
-            sigma,
-            min_sigma,
-            max_sigma,
-            gaussian_decode_mode: gaussian_decode_mode.into(),
-            world_scale: world_scale.unwrap_or(target_seed_scale * 2.0),
-            target_samples,
-            opacity_logit_bias: render_opacity_logit_bias,
-            density_weight,
-            color_weight,
-            depth_weight,
-        };
+        let render = render_settings.loss_config(target_seed_scale);
         let mut model = base_npa;
         let target_adapter_seed = adapter_seed.wrapping_add(target_index as u64);
         let report = run_render_proxy_training(
             &mut model,
             &hashgrid,
             &target_mesh,
-            RenderProxyTrainingConfig {
-                target,
-                rounds,
-                supervised_steps_per_round,
-                particles,
-                rollout_steps,
-                gradient_particles,
-                gradient_mode,
-                finite_diff_eps,
-                motion_gain,
-                perception_position_gain,
-                max_update_norm,
-                trajectory_supervision,
-                trajectory_render_gain: ROBUST_3D_TRAJECTORY_RENDER_GAIN,
-                trajectory_mesh_gain: ROBUST_3D_TRAJECTORY_MESH_GAIN,
-                trajectory_render_samples: ROBUST_3D_TRAJECTORY_RENDER_SAMPLES,
-                liveness_gain: ROBUST_3D_LIVENESS_GAIN,
-                liveness_front_radius: ROBUST_3D_LIVENESS_FRONT_RADIUS,
-                liveness_update_multiplier: ROBUST_3D_LIVENESS_UPDATE_MULTIPLIER,
-                coverage_gain: ROBUST_3D_COVERAGE_GAIN,
-                coverage_samples: ROBUST_3D_COVERAGE_SAMPLES,
-                coverage_mode: CoverageUpdateModeArg::SlicedOt,
-                coverage_softness: 0.0,
-                coverage_repulsion_gain: ROBUST_3D_COVERAGE_REPULSION_GAIN,
-                coverage_gap_gain: ROBUST_3D_COVERAGE_REPULSION_GAIN,
-                coverage_repulsion_radius: 0.0,
-                coverage_normal_weight: ROBUST_3D_COVERAGE_NORMAL_WEIGHT,
-                extent_gain: ROBUST_3D_EXTENT_GAIN,
-                full_coverage_adjoint: true,
-                surface_gain: ROBUST_3D_SURFACE_GAIN,
-                surface_escape_gain: ROBUST_3D_SURFACE_ESCAPE_GAIN,
-                opacity_gain: ROBUST_3D_OPACITY_GAIN,
-                material_liveness_gain: ROBUST_3D_MATERIAL_LIVENESS_GAIN,
-                material_tail_gain: ROBUST_3D_MATERIAL_TAIL_GAIN,
-                material_suppression_update_multiplier:
-                    ROBUST_3D_MATERIAL_SUPPRESSION_UPDATE_MULTIPLIER,
-                material_max_opacity_update: ROBUST_3D_MATERIAL_MAX_OPACITY_UPDATE,
-                scale_gain: ROBUST_3D_SCALE_GAIN,
-                scale_budget_weight: ROBUST_3D_SCALE_BUDGET_WEIGHT,
-                max_opacity_update: 0.05,
-                direct_output_gradient_rms_cap,
-                direct_line_search,
-                direct_line_search_scales: direct_line_search_scales.clone(),
-                direct_material_output_only,
-                training_backend,
-                weight_update_mode: RenderWeightUpdateModeArg::Adapter,
-                adapter_rank,
-                adapter_alpha,
-                adapter_seed: target_adapter_seed,
-                direct_selection_seed_training,
-                seed: 0x005a_173d,
-                selection_seed: Some(selection_seed),
-                selection_seeds: training_selection_seeds.clone(),
-                seed_scale: target_seed_scale,
-                seed_mode: target_seed_mode,
+            training_settings.render_proxy_config(
+                AdapterSuiteTrainingPhaseConfig {
+                    target,
+                    rounds,
+                    weight_update_mode: RenderWeightUpdateModeArg::Adapter,
+                    adapter_seed: target_adapter_seed,
+                    seed: 0x005a_173d,
+                    seed_scale: target_seed_scale,
+                    seed_mode: target_seed_mode,
+                },
                 render,
-                sgd,
-            },
+            ),
         )?;
 
         let adapter = report.trained_adapter.clone().ok_or_else(|| {
@@ -530,7 +445,7 @@ pub(crate) fn run_train_render_3d_adapters(
     );
     let shared_base_training_visit_count = shared_base_training.len();
     let adapter_bank_manifest = CliRenderAdapterBankManifest {
-        schema_version: 1,
+        schema_version: CLI_RENDER_ADAPTER_BANK_SCHEMA_VERSION,
         strategy,
         contract: contract.clone(),
         base_model: shared_base_output.display().to_string(),
@@ -557,6 +472,7 @@ pub(crate) fn run_train_render_3d_adapters(
         serde_json::to_string_pretty(&adapter_bank_manifest)?,
     )?;
     let suite_report = CliRenderAdapterSuiteReport {
+        schema_version: CLI_RENDER_ADAPTER_SUITE_REPORT_SCHEMA_VERSION,
         strategy,
         contract,
         base_model_input,

@@ -203,6 +203,59 @@ fn rollout_supervised_batch_supports_2d_and_3d_perception_features() {
         assert!(batch.features.iter().all(|value| value.is_finite()));
     }
 }
+
+#[test]
+fn rollout_supervision_temporal_samples_cover_multiple_snapshots() {
+    let (mut config, grid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    config.hidden_dims = 8;
+    let teacher = NpaModel::seeded(config.clone(), 31);
+    let student = NpaModel::seeded(config.clone(), 7);
+    let terminal = rollout_supervised_batch_from_model(
+        &student,
+        &teacher,
+        &grid,
+        SupervisedTarget::Teacher(&teacher),
+        RolloutSupervisionConfig {
+            max_rows: 18,
+            particle_count: 36,
+            rollout_steps: 4,
+            rollouts: 1,
+            temporal_samples: 1,
+            update_prob: 0.5,
+            seed: 99,
+            seed_scale: NpaConfig::seed_scale_for_preset(AutomataPreset::Growing2d),
+            seed_mode: ParticleSeed::UniformCircle,
+            ..RolloutSupervisionConfig::default()
+        },
+    )
+    .unwrap();
+    let temporal = rollout_supervised_batch_from_model(
+        &student,
+        &teacher,
+        &grid,
+        SupervisedTarget::Teacher(&teacher),
+        RolloutSupervisionConfig {
+            max_rows: 18,
+            particle_count: 36,
+            rollout_steps: 4,
+            rollouts: 1,
+            temporal_samples: 3,
+            update_prob: 0.5,
+            seed: 99,
+            seed_scale: NpaConfig::seed_scale_for_preset(AutomataPreset::Growing2d),
+            seed_mode: ParticleSeed::UniformCircle,
+            ..RolloutSupervisionConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(terminal.features.len(), 18 * config.perception_dims());
+    assert_eq!(temporal.features.len(), 18 * config.perception_dims());
+    assert_eq!(temporal.target_update.len(), 18 * config.update_dims());
+    assert!(temporal.features.iter().all(|value| value.is_finite()));
+    assert_ne!(terminal.features, temporal.features);
+}
+
 #[test]
 fn rollout_supervision_trains_from_local_2d_and_3d_rollout_states() {
     for preset in [AutomataPreset::Growing2d, AutomataPreset::Growing3dGs] {

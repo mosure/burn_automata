@@ -320,6 +320,7 @@ pub(crate) fn run_train_render_3d(command: Command) -> Result<(), Box<dyn std::e
         promotion_rejection_reason,
     );
     let output_report = CliRenderTrainingReport {
+        schema_version: CLI_RENDER_TRAINING_REPORT_SCHEMA_VERSION,
         target,
         base_model: base_model.as_ref().map(|path| path.display().to_string()),
         model_output: model_output.display().to_string(),

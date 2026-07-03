@@ -122,6 +122,152 @@ impl NpaLowRankAdapter {
             + self.b2_delta.len()
     }
 
+    pub fn parameter_count_for_config(config: &NpaConfig, rank: usize) -> usize {
+        let rank = rank.max(1);
+        rank * config.perception_dims()
+            + config.hidden_dims * rank
+            + rank * config.hidden_dims
+            + config.update_dims() * rank
+            + config.hidden_dims
+            + config.update_dims()
+    }
+
+    pub fn to_parameter_vector(&self) -> Vec<f32> {
+        let mut values = Vec::with_capacity(self.parameter_count());
+        values.extend_from_slice(&self.w1_down);
+        values.extend_from_slice(&self.w1_up);
+        values.extend_from_slice(&self.w2_down);
+        values.extend_from_slice(&self.w2_up);
+        values.extend_from_slice(&self.b1_delta);
+        values.extend_from_slice(&self.b2_delta);
+        values
+    }
+
+    pub fn from_parameter_vector(
+        config: &NpaConfig,
+        rank: usize,
+        alpha: f32,
+        values: Vec<f32>,
+    ) -> AutomataResult<Self> {
+        let rank = rank.max(1);
+        let expected = Self::parameter_count_for_config(config, rank);
+        if values.len() != expected {
+            return Err(AutomataError::InvalidModel(format!(
+                "adapter parameter vector len {} != {expected}",
+                values.len()
+            )));
+        }
+        if !values.iter().all(|value| value.is_finite()) {
+            return Err(AutomataError::InvalidModel(
+                "adapter parameter vector contains non-finite values".to_string(),
+            ));
+        }
+        if !alpha.is_finite() {
+            return Err(AutomataError::InvalidModel(format!(
+                "adapter alpha must be finite, got {alpha}"
+            )));
+        }
+
+        let input_dims = config.perception_dims();
+        let hidden_dims = config.hidden_dims;
+        let output_dims = config.update_dims();
+        let mut offset = 0;
+        let mut take = |len: usize| {
+            let end = offset + len;
+            let out = values[offset..end].to_vec();
+            offset = end;
+            out
+        };
+        let adapter = Self {
+            rank,
+            alpha,
+            w1_down: take(rank * input_dims),
+            w1_up: take(hidden_dims * rank),
+            w2_down: take(rank * hidden_dims),
+            w2_up: take(output_dims * rank),
+            b1_delta: take(hidden_dims),
+            b2_delta: take(output_dims),
+        };
+        adapter.validate(config)?;
+        Ok(adapter)
+    }
+
+    pub fn exact_model_delta(
+        base: &NpaModel,
+        target: &NpaModel,
+        rank: usize,
+        alpha: f32,
+    ) -> AutomataResult<Self> {
+        base.validate()?;
+        target.validate()?;
+        if base.config != target.config {
+            return Err(AutomataError::InvalidArgument(
+                "exact adapter delta requires matching NPA configs".to_string(),
+            ));
+        }
+        let rank = rank.max(1);
+        let input_dims = base.config.perception_dims();
+        let output_dims = base.config.update_dims();
+        let required_rank = input_dims.max(output_dims);
+        if rank < required_rank {
+            return Err(AutomataError::InvalidArgument(format!(
+                "exact adapter delta rank {rank} is too small; need at least {required_rank}"
+            )));
+        }
+        if !alpha.is_finite() {
+            return Err(AutomataError::InvalidArgument(format!(
+                "exact adapter alpha must be finite, got {alpha}"
+            )));
+        }
+        let scale = alpha / rank as f32;
+        if !scale.is_finite() || scale == 0.0 {
+            return Err(AutomataError::InvalidArgument(format!(
+                "exact adapter scale must be finite and non-zero, got {scale}"
+            )));
+        }
+
+        let hidden_dims = base.config.hidden_dims;
+        let mut adapter = Self::zeros(&base.config, rank, alpha);
+        for idx in 0..input_dims {
+            adapter.w1_down[idx * input_dims + idx] = 1.0;
+        }
+        for row in 0..hidden_dims {
+            let matrix_base = row * input_dims;
+            let adapter_base = row * rank;
+            for col in 0..input_dims {
+                let delta =
+                    target.weights.w1[matrix_base + col] - base.weights.w1[matrix_base + col];
+                adapter.w1_up[adapter_base + col] = delta / scale;
+            }
+        }
+        for row in 0..output_dims {
+            adapter.w2_up[row * rank + row] = 1.0;
+            let matrix_base = row * hidden_dims;
+            let adapter_base = row * hidden_dims;
+            for col in 0..hidden_dims {
+                let delta =
+                    target.weights.w2[matrix_base + col] - base.weights.w2[matrix_base + col];
+                adapter.w2_down[adapter_base + col] = delta / scale;
+            }
+        }
+        for (delta, (target_value, base_value)) in adapter
+            .b1_delta
+            .iter_mut()
+            .zip(target.weights.b1.iter().zip(base.weights.b1.iter()))
+        {
+            *delta = target_value - base_value;
+        }
+        for (delta, (target_value, base_value)) in adapter
+            .b2_delta
+            .iter_mut()
+            .zip(target.weights.b2.iter().zip(base.weights.b2.iter()))
+        {
+            *delta = target_value - base_value;
+        }
+        adapter.validate(&base.config)?;
+        Ok(adapter)
+    }
+
     pub fn validate(&self, config: &NpaConfig) -> AutomataResult<()> {
         if self.rank == 0 {
             return Err(AutomataError::InvalidModel(
@@ -493,5 +639,65 @@ mod tests {
 
         let err = adapter.validate(&config).unwrap_err().to_string();
         assert!(err.contains("w1_down len"));
+    }
+
+    #[test]
+    fn low_rank_adapter_parameter_vector_roundtrips() {
+        let config = NpaConfig::for_preset(AutomataPreset::Growing2d).0;
+        let adapter = NpaLowRankAdapter::seeded(&config, 3, 2.0, 19);
+        let values = adapter.to_parameter_vector();
+
+        assert_eq!(
+            values.len(),
+            NpaLowRankAdapter::parameter_count_for_config(&config, 3)
+        );
+        let restored =
+            NpaLowRankAdapter::from_parameter_vector(&config, 3, 2.0, values.clone()).unwrap();
+
+        assert_eq!(restored.to_parameter_vector(), values);
+        assert_eq!(restored.rank, 3);
+        assert_eq!(restored.alpha, 2.0);
+    }
+
+    #[test]
+    fn exact_low_rank_adapter_reconstructs_target_weights() {
+        let config = NpaConfig {
+            state_dims: 2,
+            hidden_dims: 4,
+            ..NpaConfig::growing_2d()
+        };
+        let base = NpaModel {
+            weights: NpaWeights::seeded(&config, 1),
+            config: config.clone(),
+        };
+        let target = NpaModel {
+            weights: NpaWeights::seeded(&config, 2),
+            config: config.clone(),
+        };
+        let rank = config.perception_dims().max(config.update_dims());
+        let adapter =
+            NpaLowRankAdapter::exact_model_delta(&base, &target, rank, rank as f32).unwrap();
+        let reconstructed = adapter.apply_to_model(&base).unwrap();
+
+        assert_eq!(reconstructed.config, target.config);
+        for (actual, expected) in reconstructed
+            .weights
+            .w1
+            .iter()
+            .chain(reconstructed.weights.b1.iter())
+            .chain(reconstructed.weights.w2.iter())
+            .chain(reconstructed.weights.b2.iter())
+            .zip(
+                target
+                    .weights
+                    .w1
+                    .iter()
+                    .chain(target.weights.b1.iter())
+                    .chain(target.weights.w2.iter())
+                    .chain(target.weights.b2.iter()),
+            )
+        {
+            assert!((actual - expected).abs() <= 1.0e-6);
+        }
     }
 }

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{AutomataResult, NpaLowRankAdapter, NpaModel};
+use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SgdConfig {
@@ -16,6 +17,42 @@ impl Default for SgdConfig {
             weight_decay: 0.0,
             grad_clip_norm: 1.0,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct AdamWConfig {
+    pub learning_rate: f32,
+    pub weight_decay: f32,
+    pub grad_clip_norm: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub epsilon: f32,
+}
+
+impl Default for AdamWConfig {
+    fn default() -> Self {
+        Self {
+            learning_rate: 1e-3,
+            weight_decay: 0.0,
+            grad_clip_norm: 1.0,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SupervisedOptimizerConfig {
+    Sgd(SgdConfig),
+    AdamW(AdamWConfig),
+}
+
+impl Default for SupervisedOptimizerConfig {
+    fn default() -> Self {
+        Self::Sgd(SgdConfig::default())
     }
 }
 
@@ -102,6 +139,56 @@ impl LowRankAdapterGradients {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct AdamWState {
+    pub step: usize,
+    w1_m: Vec<f32>,
+    w1_v: Vec<f32>,
+    b1_m: Vec<f32>,
+    b1_v: Vec<f32>,
+    w2_m: Vec<f32>,
+    w2_v: Vec<f32>,
+    b2_m: Vec<f32>,
+    b2_v: Vec<f32>,
+}
+
+impl AdamWState {
+    pub fn for_model(model: &NpaModel) -> Self {
+        Self {
+            step: 0,
+            w1_m: vec![0.0; model.weights.w1.len()],
+            w1_v: vec![0.0; model.weights.w1.len()],
+            b1_m: vec![0.0; model.weights.b1.len()],
+            b1_v: vec![0.0; model.weights.b1.len()],
+            w2_m: vec![0.0; model.weights.w2.len()],
+            w2_v: vec![0.0; model.weights.w2.len()],
+            b2_m: vec![0.0; model.weights.b2.len()],
+            b2_v: vec![0.0; model.weights.b2.len()],
+        }
+    }
+
+    fn validate_for_model(&self, model: &NpaModel) -> AutomataResult<()> {
+        let expected = [
+            ("w1_m", model.weights.w1.len(), self.w1_m.len()),
+            ("w1_v", model.weights.w1.len(), self.w1_v.len()),
+            ("b1_m", model.weights.b1.len(), self.b1_m.len()),
+            ("b1_v", model.weights.b1.len(), self.b1_v.len()),
+            ("w2_m", model.weights.w2.len(), self.w2_m.len()),
+            ("w2_v", model.weights.w2.len(), self.w2_v.len()),
+            ("b2_m", model.weights.b2.len(), self.b2_m.len()),
+            ("b2_v", model.weights.b2.len(), self.b2_v.len()),
+        ];
+        for (name, expected_len, actual_len) in expected {
+            if actual_len != expected_len {
+                return Err(crate::AutomataError::InvalidArgument(format!(
+                    "AdamW state {name} len {actual_len} != {expected_len}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn supervised_train_step(
     model: &mut NpaModel,
     batch: &SupervisedBatch,
@@ -110,6 +197,22 @@ pub fn supervised_train_step(
     validate_sgd_config(cfg)?;
     let (grads, mut report) = supervised_backward(model, batch)?;
     let step = apply_sgd_gradients(model, &grads, cfg)?;
+    report.grad_norm = step.grad_norm;
+    report.grad_scale = step.grad_scale;
+    report.clipped = step.clipped;
+    Ok(report)
+}
+
+pub fn supervised_adamw_train_step(
+    model: &mut NpaModel,
+    batch: &SupervisedBatch,
+    state: &mut AdamWState,
+    cfg: AdamWConfig,
+) -> AutomataResult<SupervisedStepReport> {
+    validate_adamw_config(cfg)?;
+    state.validate_for_model(model)?;
+    let (grads, mut report) = supervised_backward(model, batch)?;
+    let step = apply_adamw_gradients(model, grads, state, cfg)?;
     report.grad_norm = step.grad_norm;
     report.grad_scale = step.grad_scale;
     report.clipped = step.clipped;
@@ -147,17 +250,38 @@ pub fn run_supervised_training(
     batch: &SupervisedBatch,
     cfg: TrainingRunConfig,
 ) -> AutomataResult<TrainingRunReport> {
+    run_supervised_training_with_optimizer(
+        model,
+        batch,
+        cfg,
+        SupervisedOptimizerConfig::Sgd(cfg.sgd),
+    )
+}
+
+pub fn run_supervised_training_with_optimizer(
+    model: &mut NpaModel,
+    batch: &SupervisedBatch,
+    cfg: TrainingRunConfig,
+    optimizer: SupervisedOptimizerConfig,
+) -> AutomataResult<TrainingRunReport> {
     validate_sgd_config(cfg.sgd)?;
+    validate_optimizer_config(optimizer)?;
     let (rows, _) = validate_batch(model, batch)?;
     let initial_loss = supervised_loss(model, batch)?;
     let mut final_loss = initial_loss;
     let mut best_loss = initial_loss;
     let mut best_model = model.clone();
+    let mut adamw_state = AdamWState::for_model(model);
     let report_interval = cfg.report_interval.max(1);
     let mut history = Vec::new();
 
     for step in 1..=cfg.steps {
-        let step_report = supervised_train_step(model, batch, cfg.sgd)?;
+        let step_report = match optimizer {
+            SupervisedOptimizerConfig::Sgd(sgd) => supervised_train_step(model, batch, sgd)?,
+            SupervisedOptimizerConfig::AdamW(adamw) => {
+                supervised_adamw_train_step(model, batch, &mut adamw_state, adamw)?
+            }
+        };
         if step == cfg.steps || step.is_multiple_of(report_interval) {
             final_loss = supervised_loss(model, batch)?;
             if final_loss < best_loss {
@@ -260,31 +384,64 @@ pub fn supervised_loss(model: &NpaModel, batch: &SupervisedBatch) -> AutomataRes
     Ok(loss)
 }
 
-pub fn supervised_backward(
-    model: &NpaModel,
-    batch: &SupervisedBatch,
-) -> AutomataResult<(SupervisedGradients, SupervisedStepReport)> {
-    let (rows, output_dims) = validate_batch(model, batch)?;
-    let input_dims = model.config.perception_dims();
+struct BackwardAccum {
+    w1: Vec<f32>,
+    b1: Vec<f32>,
+    w2: Vec<f32>,
+    b2: Vec<f32>,
+    loss: f32,
+}
 
-    let mut gw1 = vec![0.0; model.weights.w1.len()];
-    let mut gb1 = vec![0.0; model.weights.b1.len()];
-    let mut gw2 = vec![0.0; model.weights.w2.len()];
-    let mut gb2 = vec![0.0; model.weights.b2.len()];
-    let mut gfeatures = vec![0.0; batch.features.len()];
-    let mut hidden = vec![0.0; model.config.hidden_dims];
-    let mut pre_hidden = vec![0.0; model.config.hidden_dims];
-    let mut output = vec![0.0; output_dims];
-    let mut d_hidden = vec![0.0; model.config.hidden_dims];
-    let mut loss = 0.0;
+impl BackwardAccum {
+    fn new(model: &NpaModel) -> Self {
+        Self {
+            w1: vec![0.0; model.weights.w1.len()],
+            b1: vec![0.0; model.weights.b1.len()],
+            w2: vec![0.0; model.weights.w2.len()],
+            b2: vec![0.0; model.weights.b2.len()],
+            loss: 0.0,
+        }
+    }
 
-    for row in 0..rows {
-        output.fill(0.0);
-        d_hidden.fill(0.0);
+    fn add_assign(&mut self, other: &Self) {
+        add_assign_slice(&mut self.w1, &other.w1);
+        add_assign_slice(&mut self.b1, &other.b1);
+        add_assign_slice(&mut self.w2, &other.w2);
+        add_assign_slice(&mut self.b2, &other.b2);
+        self.loss += other.loss;
+    }
+}
 
-        let feature = &batch.features[row * input_dims..(row + 1) * input_dims];
-        for (h, (pre_hidden_value, hidden_value)) in
-            pre_hidden.iter_mut().zip(hidden.iter_mut()).enumerate()
+struct BackwardWorker {
+    accum: BackwardAccum,
+    hidden: Vec<f32>,
+    pre_hidden: Vec<f32>,
+    output: Vec<f32>,
+    d_hidden: Vec<f32>,
+}
+
+impl BackwardWorker {
+    fn new(model: &NpaModel) -> Self {
+        Self {
+            accum: BackwardAccum::new(model),
+            hidden: vec![0.0; model.config.hidden_dims],
+            pre_hidden: vec![0.0; model.config.hidden_dims],
+            output: vec![0.0; model.config.update_dims()],
+            d_hidden: vec![0.0; model.config.hidden_dims],
+        }
+    }
+
+    fn accumulate_row(&mut self, model: &NpaModel, feature: &[f32], target: &[f32], rows: usize) {
+        let input_dims = model.config.perception_dims();
+        let output_dims = model.config.update_dims();
+        self.output.fill(0.0);
+        self.d_hidden.fill(0.0);
+
+        for (h, (pre_hidden_value, hidden_value)) in self
+            .pre_hidden
+            .iter_mut()
+            .zip(self.hidden.iter_mut())
+            .enumerate()
         {
             let mut sum = model.weights.b1[h];
             let base = h * input_dims;
@@ -295,45 +452,86 @@ pub fn supervised_backward(
             *hidden_value = sum.max(0.0);
         }
 
-        for (o, out) in output.iter_mut().enumerate() {
+        for (o, out) in self.output.iter_mut().enumerate().take(output_dims) {
             let mut sum = model.weights.b2[o];
             let base = o * model.config.hidden_dims;
-            for (h, value) in hidden.iter().enumerate().take(model.config.hidden_dims) {
+            for (h, value) in self
+                .hidden
+                .iter()
+                .enumerate()
+                .take(model.config.hidden_dims)
+            {
                 sum += model.weights.w2[base + h] * *value;
             }
             *out = sum;
         }
 
-        let target = &batch.target_update[row * output_dims..(row + 1) * output_dims];
-        for o in 0..output_dims {
-            let diff = output[o] - target[o];
-            loss += diff * diff;
+        for (o, target_value) in target.iter().copied().enumerate().take(output_dims) {
+            let diff = self.output[o] - target_value;
+            self.accum.loss += diff * diff;
             let d_out = 2.0 * diff / rows as f32;
-            gb2[o] += d_out;
+            self.accum.b2[o] += d_out;
             let w2_base = o * model.config.hidden_dims;
             for h in 0..model.config.hidden_dims {
-                gw2[w2_base + h] += d_out * hidden[h];
-                d_hidden[h] += d_out * model.weights.w2[w2_base + h];
+                self.accum.w2[w2_base + h] += d_out * self.hidden[h];
+                self.d_hidden[h] += d_out * model.weights.w2[w2_base + h];
             }
         }
 
         for h in 0..model.config.hidden_dims {
-            let d_pre = if pre_hidden[h] > 0.0 {
-                d_hidden[h]
+            let d_pre = if self.pre_hidden[h] > 0.0 {
+                self.d_hidden[h]
             } else {
                 0.0
             };
-            gb1[h] += d_pre;
+            self.accum.b1[h] += d_pre;
             let w1_base = h * input_dims;
-            for i in 0..input_dims {
-                gw1[w1_base + i] += d_pre * feature[i];
-                gfeatures[row * input_dims + i] += d_pre * model.weights.w1[w1_base + i];
+            for (i, value) in feature.iter().enumerate().take(input_dims) {
+                self.accum.w1[w1_base + i] += d_pre * *value;
             }
         }
     }
 
-    loss /= rows as f32;
-    let grad_norm = grad_norm(&[&gw1, &gb1, &gw2, &gb2]);
+    fn into_accum(self) -> BackwardAccum {
+        self.accum
+    }
+}
+
+fn add_assign_slice(left: &mut [f32], right: &[f32]) {
+    for (left_value, right_value) in left.iter_mut().zip(right.iter()) {
+        *left_value += *right_value;
+    }
+}
+
+pub fn supervised_backward(
+    model: &NpaModel,
+    batch: &SupervisedBatch,
+) -> AutomataResult<(SupervisedGradients, SupervisedStepReport)> {
+    let (rows, output_dims) = validate_batch(model, batch)?;
+    let input_dims = model.config.perception_dims();
+
+    let accum = batch
+        .features
+        .par_chunks_exact(input_dims)
+        .zip(batch.target_update.par_chunks_exact(output_dims))
+        .fold(
+            || BackwardWorker::new(model),
+            |mut worker, (feature, target)| {
+                worker.accumulate_row(model, feature, target, rows);
+                worker
+            },
+        )
+        .map(BackwardWorker::into_accum)
+        .reduce(
+            || BackwardAccum::new(model),
+            |mut left, right| {
+                left.add_assign(&right);
+                left
+            },
+        );
+
+    let loss = accum.loss / rows as f32;
+    let grad_norm = grad_norm(&[&accum.w1, &accum.b1, &accum.w2, &accum.b2]);
     if !loss.is_finite() || !grad_norm.is_finite() {
         return Err(crate::AutomataError::InvalidArgument(
             "supervised backward produced non-finite values".to_string(),
@@ -341,11 +539,11 @@ pub fn supervised_backward(
     }
     Ok((
         SupervisedGradients {
-            w1: gw1,
-            b1: gb1,
-            w2: gw2,
-            b2: gb2,
-            features: gfeatures,
+            w1: accum.w1,
+            b1: accum.b1,
+            w2: accum.w2,
+            b2: accum.b2,
+            features: vec![0.0; batch.features.len()],
         },
         SupervisedStepReport {
             loss,
@@ -471,6 +669,87 @@ pub fn apply_sgd_gradients(
     apply_sgd(&mut model.weights.b1, &grads.b1, cfg, scale);
     apply_sgd(&mut model.weights.w2, &grads.w2, cfg, scale);
     apply_sgd(&mut model.weights.b2, &grads.b2, cfg, scale);
+
+    Ok(SupervisedStepReport {
+        loss: 0.0,
+        rows,
+        grad_norm,
+        grad_scale: scale,
+        clipped: scale < 1.0,
+    })
+}
+
+pub fn apply_adamw_gradients(
+    model: &mut NpaModel,
+    grads: SupervisedGradients,
+    state: &mut AdamWState,
+    cfg: AdamWConfig,
+) -> AutomataResult<SupervisedStepReport> {
+    validate_adamw_config(cfg)?;
+    state.validate_for_model(model)?;
+    validate_gradients(&grads)?;
+    let input_dims = model.config.perception_dims();
+    let rows = if grads.features.is_empty() {
+        0
+    } else {
+        grads.features.len() / input_dims
+    };
+    let grad_norm = grad_norm(&[&grads.w1, &grads.b1, &grads.w2, &grads.b2]);
+    if !grad_norm.is_finite() {
+        return Err(crate::AutomataError::InvalidArgument(
+            "gradient norm is not finite".to_string(),
+        ));
+    }
+    let scale = if cfg.grad_clip_norm > 0.0 && grad_norm > cfg.grad_clip_norm {
+        cfg.grad_clip_norm / grad_norm
+    } else {
+        1.0
+    };
+
+    state.step = state.step.saturating_add(1);
+    let step = state.step as i32;
+    let bias_correction1 = 1.0 - cfg.beta1.powi(step);
+    let bias_correction2 = 1.0 - cfg.beta2.powi(step);
+    apply_adamw(
+        &mut model.weights.w1,
+        &grads.w1,
+        &mut state.w1_m,
+        &mut state.w1_v,
+        cfg,
+        scale,
+        bias_correction1,
+        bias_correction2,
+    );
+    apply_adamw(
+        &mut model.weights.b1,
+        &grads.b1,
+        &mut state.b1_m,
+        &mut state.b1_v,
+        cfg,
+        scale,
+        bias_correction1,
+        bias_correction2,
+    );
+    apply_adamw(
+        &mut model.weights.w2,
+        &grads.w2,
+        &mut state.w2_m,
+        &mut state.w2_v,
+        cfg,
+        scale,
+        bias_correction1,
+        bias_correction2,
+    );
+    apply_adamw(
+        &mut model.weights.b2,
+        &grads.b2,
+        &mut state.b2_m,
+        &mut state.b2_v,
+        cfg,
+        scale,
+        bias_correction1,
+        bias_correction2,
+    );
 
     Ok(SupervisedStepReport {
         loss: 0.0,
@@ -615,6 +894,42 @@ fn apply_sgd(values: &mut [f32], grads: &[f32], cfg: SgdConfig, scale: f32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_adamw(
+    values: &mut [f32],
+    grads: &[f32],
+    moments: &mut [f32],
+    velocities: &mut [f32],
+    cfg: AdamWConfig,
+    grad_scale: f32,
+    bias_correction1: f32,
+    bias_correction2: f32,
+) {
+    for (((value, grad), moment), velocity) in values
+        .iter_mut()
+        .zip(grads.iter())
+        .zip(moments.iter_mut())
+        .zip(velocities.iter_mut())
+    {
+        if cfg.weight_decay > 0.0 {
+            *value *= 1.0 - cfg.learning_rate * cfg.weight_decay;
+        }
+        let grad = grad * grad_scale;
+        *moment = cfg.beta1 * *moment + (1.0 - cfg.beta1) * grad;
+        *velocity = cfg.beta2 * *velocity + (1.0 - cfg.beta2) * grad * grad;
+        let moment_hat = *moment / bias_correction1.max(f32::MIN_POSITIVE);
+        let velocity_hat = *velocity / bias_correction2.max(f32::MIN_POSITIVE);
+        *value -= cfg.learning_rate * moment_hat / (velocity_hat.sqrt() + cfg.epsilon);
+    }
+}
+
+fn validate_optimizer_config(cfg: SupervisedOptimizerConfig) -> AutomataResult<()> {
+    match cfg {
+        SupervisedOptimizerConfig::Sgd(sgd) => validate_sgd_config(sgd),
+        SupervisedOptimizerConfig::AdamW(adamw) => validate_adamw_config(adamw),
+    }
+}
+
 fn validate_sgd_config(cfg: SgdConfig) -> AutomataResult<()> {
     if !cfg.learning_rate.is_finite() || cfg.learning_rate < 0.0 {
         return Err(crate::AutomataError::InvalidArgument(format!(
@@ -632,6 +947,46 @@ fn validate_sgd_config(cfg: SgdConfig) -> AutomataResult<()> {
         return Err(crate::AutomataError::InvalidArgument(format!(
             "grad_clip_norm must be finite and non-negative, got {}",
             cfg.grad_clip_norm
+        )));
+    }
+    Ok(())
+}
+
+fn validate_adamw_config(cfg: AdamWConfig) -> AutomataResult<()> {
+    if !cfg.learning_rate.is_finite() || cfg.learning_rate < 0.0 {
+        return Err(crate::AutomataError::InvalidArgument(format!(
+            "AdamW learning_rate must be finite and non-negative, got {}",
+            cfg.learning_rate
+        )));
+    }
+    if !cfg.weight_decay.is_finite() || cfg.weight_decay < 0.0 {
+        return Err(crate::AutomataError::InvalidArgument(format!(
+            "AdamW weight_decay must be finite and non-negative, got {}",
+            cfg.weight_decay
+        )));
+    }
+    if !cfg.grad_clip_norm.is_finite() || cfg.grad_clip_norm < 0.0 {
+        return Err(crate::AutomataError::InvalidArgument(format!(
+            "AdamW grad_clip_norm must be finite and non-negative, got {}",
+            cfg.grad_clip_norm
+        )));
+    }
+    if !(0.0..1.0).contains(&cfg.beta1) || !cfg.beta1.is_finite() {
+        return Err(crate::AutomataError::InvalidArgument(format!(
+            "AdamW beta1 must be finite and in [0, 1), got {}",
+            cfg.beta1
+        )));
+    }
+    if !(0.0..1.0).contains(&cfg.beta2) || !cfg.beta2.is_finite() {
+        return Err(crate::AutomataError::InvalidArgument(format!(
+            "AdamW beta2 must be finite and in [0, 1), got {}",
+            cfg.beta2
+        )));
+    }
+    if !cfg.epsilon.is_finite() || cfg.epsilon <= 0.0 {
+        return Err(crate::AutomataError::InvalidArgument(format!(
+            "AdamW epsilon must be finite and positive, got {}",
+            cfg.epsilon
         )));
     }
     Ok(())
