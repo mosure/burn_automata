@@ -1,0 +1,86 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\title{Shared Neural Particle Automata Bases with Low-Rank Image-Specific Adapters}
+\author{burn\_automata local validation report}
+\date{July 4, 2026}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We evaluate a 2D Neural Particle Automata (NPA) training stage intended to support conditional generation of particle dynamics from images. The evaluated system learns a shared NPA base and directly optimized per-sample LoRA adapters over a 10k OmniSVG thumbnail slice. This is an intermediate representation for a future conditional hypernetwork, not yet an end-to-end image-to-LoRA model. On a 9k/1k train/holdout split, the shared-base plus stored-adapter system reduces sampled target-image rollout loss by 44.4\% on train examples and 44.5\% on holdout examples. A broader oracle comparison estimates the gap to independently overfit 2D NPAs and provides the calibration target for the next image-conditioned LoRA generator stage.
+\end{abstract}
+
+\section{Introduction}
+Conditional Neural Particle Automata aim to turn a static image condition into an executable particle-growth program. Instead of directly predicting pixels, the model predicts dynamics: particles exchange local information, update positions and latent state, and are rendered into a target image by differentiable splatting. This report evaluates the shared-dynamics stage needed before training a condition-to-dynamics hypernetwork.
+
+The central question is whether many 2D targets can share a common NPA update rule while retaining enough sample-specific capacity through low-rank adapters. If this basis is weak, a downstream hypernetwork has no stable adapter manifold to predict. If the basis is strong, the next stage can train an image encoder and rectified-flow adapter generator against a meaningful target.
+
+\section{Conditional NPA Architecture}
+The intended end-to-end model has three pieces. First, an image encoder extracts condition features from the target thumbnail. Second, a rectified-flow hypernetwork maps those features and flow time to a LoRA adapter vector. Third, the adapter modulates a shared NPA base and the NPA rolls out particle dynamics:
+\[
+x_{t+1}, h_{t+1} = F_{\theta_0 + \Delta\theta(c)}(x_t, h_t, \mathcal{N}(x_t)),
+\]
+where \(x_t\) are particle positions, \(h_t\) are particle states, \(\mathcal{N}\) denotes local particle neighborhoods, \(\theta_0\) is the shared base, and \(c\) is the image condition. For the MLP update layers, the adapter uses low-rank deltas,
+\[
+\Delta W_i = \frac{\alpha}{r} U_i V_i,
+\]
+with rank \(r=16\) and alpha \(\alpha=16.0\).
+
+This paper evaluates the basis stage only: \(\theta_0\) and one stored adapter per sample are optimized directly from image loss. The image encoder and rectified-flow hypernetwork are described as the next stage, not claimed as validated here.
+
+\section{Training Protocol}
+The evaluated artifact is the 10k Burn/WGPU direct-basis run recorded in the companion validation summary. It contains 9000 train adapters and 1000 holdout adapters, each rank 16 with alpha 16.0. Training used 600 shared-base plus adapter steps, followed by 300 train-adapter refinement steps and 300 holdout-adapter steps. Rollouts used 64 particles and 8 objective steps.
+
+The dataset is a 10k OmniSVG thumbnail slice split into 9000 train samples and 1000 holdout samples. Each sample owns a persistent LoRA adapter, while the base NPA weights are shared during the joint stage. Holdout adapters are optimized against the frozen final shared base to test whether the learned basis supports unseen targets. The target objective combines splat reconstruction, color, density, displacement regularization, overflow regularization, and bound regularization. The report configuration used image-size 64, splat weight 2.000, color weight 5.000, and density weight 1.000.
+
+\section{Oracle Validation Protocol}
+To calibrate adapter quality, selected train and holdout samples are compared against independently overfit 2D NPA oracle models trained from scratch on the same target objective. The oracle is not a hypernetwork and does not share weights across samples; it estimates the per-sample quality ceiling under the current NPA architecture and training recipe. The broader validation uses 8 train and 8 holdout oracle fits for 2048 epochs each.
+
+\section{Results}
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+split & initial mean loss & final mean loss & reduction \\
+\midrule
+train sample eval & 12.112 & 6.735 & 44.4\% \\
+holdout sample eval & 11.656 & 6.473 & 44.5\% \\
+\bottomrule
+\end{tabular}
+\caption{Main 10k shared-base plus stored-LoRA adapter training result.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+split & examples & shared loss & oracle loss & mean ratio & max ratio \\
+\midrule
+train & 8 & 7.830 & 7.188 & 1.079 & 1.141 \\
+holdout & 8 & 7.243 & 6.676 & 1.075 & 1.126 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison against independently overfit 2D NPA oracle models. Oracle checkpoints were persisted for this validation, so selected oracle rollouts are rendered in Figure~\ref{fig:rollouts}.}
+\end{table}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{figures/rollout\_grid.png}
+\caption{Selected condition thumbnails and shared-base plus stored-LoRA rollouts at multiple step counts. Rows include matched oracle-overfit panels when the selected validation saved oracle checkpoints. These panels probe long-rollout stability of the stored-adapter baseline; they are not generated by an image-conditioned hypernetwork.}
+\label{fig:rollouts}
+\end{figure}
+
+\section{Interpretation}
+The train and holdout curves are close, indicating that the shared basis is not simply memorizing train-only dynamics. The oracle ratios measure how far the shared-base plus adapter representation remains from single-sample overfit NPAs. Ratios near one would indicate parity with a fully overfit oracle; larger ratios indicate remaining adapter/base expressivity or optimization gap. In this run, train and holdout oracle ratios are similar: 1.079 on train and 1.075 on holdout. That supports the shared-basis hypothesis, but does not prove image-conditioned generalization.
+
+\section{Reproducibility Artifacts}
+The companion Markdown report, JSON summary, LaTeX source, and rollout figures are generated by \path|scripts/render_hyper2d_direct_basis_paper.py| from the 10k training report and the 8x8 oracle-validation report. The generated rollout grid in Figure~\ref{fig:rollouts} selects high-ratio train and holdout cases, making the visualization intentionally stress the samples where the shared-basis representation is furthest from oracle parity.
+
+\section{Limitations and Next Experiment}
+This report does not validate generalized image-to-LoRA inference. The missing experiment is to train a DINO-family image-condition encoder and rectified-flow LoRA generator over the stored adapter bank, then evaluate generated adapters against direct adapters and oracle overfits on the same train/holdout samples and rollout stability panels. Future validation should use oracle reports with persisted checkpoints to render oracle dynamics directly beside generated and direct adapters.
+
+\end{document}

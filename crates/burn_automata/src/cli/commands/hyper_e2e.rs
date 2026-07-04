@@ -22,7 +22,9 @@ mod direct_basis;
 mod shared_basis;
 mod sources;
 
-pub(crate) use direct_basis::run_train_hyper_2d_direct_basis;
+pub(crate) use direct_basis::{
+    run_train_hyper_2d_direct_basis, run_validate_hyper_2d_direct_basis_oracles,
+};
 
 #[derive(Clone, Debug)]
 struct Hyper2dTrainedSource {

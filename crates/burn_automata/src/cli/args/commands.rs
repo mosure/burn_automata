@@ -602,6 +602,8 @@ pub(crate) enum Command {
         alias = "train-hyper2d-image-lora-suite"
     )]
     TrainHyper2dDirectBasis {
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long, default_value = "growing-2d")]
         preset: PresetArg,
         #[arg(long = "target-image", value_delimiter = ',')]
@@ -740,10 +742,123 @@ pub(crate) enum Command {
         holdout_adapter_steps: usize,
         #[arg(long, default_value_t = 8)]
         holdout_adapter_batch_size: usize,
+        #[arg(long, default_value_t = 0)]
+        train_adapter_refine_steps: usize,
+        #[arg(long, default_value_t = 0)]
+        train_adapter_refine_batch_size: usize,
+        #[arg(long)]
+        train_adapter_refine_learning_rate: Option<f32>,
+        #[arg(long)]
+        train_adapter_refine_weight_decay: Option<f32>,
+        #[arg(long)]
+        train_adapter_refine_grad_clip_norm: Option<f32>,
+        #[arg(long)]
+        holdout_adapter_learning_rate: Option<f32>,
+        #[arg(long)]
+        holdout_adapter_weight_decay: Option<f32>,
+        #[arg(long)]
+        holdout_adapter_grad_clip_norm: Option<f32>,
         #[arg(long, default_value_t = 16)]
         eval_examples: usize,
         #[arg(long, default_value_t = 42)]
         eval_seed: u64,
+        #[arg(long, default_value_t = 0)]
+        oracle_train_examples: usize,
+        #[arg(long, default_value_t = 0)]
+        oracle_holdout_examples: usize,
+        #[arg(long, default_value_t = 256)]
+        oracle_epochs: usize,
+        #[arg(long, default_value_t = 1)]
+        oracle_repetitions: usize,
+        #[arg(long, default_value_t = 64)]
+        oracle_report_interval: usize,
+        #[arg(long, default_value_t = 4)]
+        oracle_batch_size: usize,
+        #[arg(long, default_value_t = 128)]
+        oracle_pool_size: usize,
+        #[arg(long, default_value_t = 5.0e-4)]
+        oracle_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        oracle_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        oracle_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 42)]
+        oracle_seed: u64,
+    },
+    #[command(
+        name = "validate-hyper2d-direct-basis-oracles",
+        alias = "validate-hyper-2d-direct-basis-oracles"
+    )]
+    ValidateHyper2dDirectBasisOracles {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        shared_base: PathBuf,
+        #[arg(long)]
+        adapter_bank: PathBuf,
+        #[arg(
+            long,
+            default_value = "artifacts/hyper2d_direct_basis_oracles/report.json"
+        )]
+        report_output: PathBuf,
+        #[arg(long, default_value_t = 128)]
+        rollout_particles: usize,
+        #[arg(long, default_value_t = 32)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        eval_seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        per_parameter_grad_normalization: bool,
+        #[arg(long, default_value_t = 4096)]
+        target_points: usize,
+        #[arg(long)]
+        target_image_size: Option<usize>,
+        #[arg(long, default_value_t = 0.05)]
+        target_threshold: f32,
+        #[arg(long, default_value_t = 128)]
+        target_loss_image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        target_splat_sigma: f32,
+        #[arg(long, default_value_t = 2.0)]
+        target_splat_loss_weight: f32,
+        #[arg(long, default_value_t = 5.0)]
+        target_color_loss_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        target_density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.01)]
+        target_displacement_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_overflow_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_bound_regularizer_weight: f32,
+        #[arg(long, default_value_t = 8)]
+        oracle_train_examples: usize,
+        #[arg(long, default_value_t = 8)]
+        oracle_holdout_examples: usize,
+        #[arg(long, default_value_t = 256)]
+        oracle_epochs: usize,
+        #[arg(long, default_value_t = 1)]
+        oracle_repetitions: usize,
+        #[arg(long, default_value_t = 64)]
+        oracle_report_interval: usize,
+        #[arg(long, default_value_t = 4)]
+        oracle_batch_size: usize,
+        #[arg(long, default_value_t = 128)]
+        oracle_pool_size: usize,
+        #[arg(long, default_value_t = 5.0e-4)]
+        oracle_learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        oracle_weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        oracle_grad_clip_norm: f32,
+        #[arg(long, default_value_t = 42)]
+        oracle_seed: u64,
     },
     #[command(name = "infer-hyper2d", alias = "infer-hyper-2d")]
     InferHyper2d {

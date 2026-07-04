@@ -383,6 +383,7 @@ pub(crate) struct CliHyper2dE2eQualityReport {
 
 #[derive(Serialize)]
 pub(crate) struct CliHyper2dDirectBasisTrainingReport {
+    pub(crate) experiment_config: Option<String>,
     pub(crate) preset: AutomataPreset,
     pub(crate) target_images: Vec<String>,
     pub(crate) target_image_dirs: Vec<String>,
@@ -423,7 +424,11 @@ pub(crate) struct CliHyper2dDirectBasisTrainingReport {
     pub(crate) per_parameter_grad_normalization: bool,
     pub(crate) base_sgd: SgdConfig,
     pub(crate) adapter_sgd: SgdConfig,
+    pub(crate) train_refine_adapter_sgd: SgdConfig,
+    pub(crate) holdout_adapter_sgd: SgdConfig,
     pub(crate) adapter_l2_weight: f32,
+    pub(crate) train_adapter_refine_steps: usize,
+    pub(crate) train_adapter_refine_batch_size: usize,
     pub(crate) holdout_adapter_steps: usize,
     pub(crate) holdout_adapter_batch_size: usize,
     pub(crate) eval_examples: usize,
@@ -434,7 +439,9 @@ pub(crate) struct CliHyper2dDirectBasisTrainingReport {
     pub(crate) best_train_loss: Option<f32>,
     pub(crate) best_train_step: usize,
     pub(crate) history: Vec<CliHyper2dDirectBasisHistoryEntry>,
+    pub(crate) train_refine_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
     pub(crate) holdout_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
+    pub(crate) oracle_validation: Option<CliHyper2dDirectBasisOracleReport>,
     pub(crate) adapters: Vec<CliHyper2dDirectBasisAdapterReport>,
 }
 
@@ -473,6 +480,52 @@ pub(crate) struct CliHyper2dDirectBasisHistoryEntry {
     pub(crate) examples_seen: usize,
     pub(crate) particle_steps_per_sec: f64,
     pub(crate) elapsed_ms: f64,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct CliHyper2dDirectBasisOracleReport {
+    pub(crate) train_examples_requested: usize,
+    pub(crate) holdout_examples_requested: usize,
+    pub(crate) train_examples: usize,
+    pub(crate) holdout_examples: usize,
+    pub(crate) epochs: usize,
+    pub(crate) repetitions: usize,
+    pub(crate) batch_size: usize,
+    pub(crate) pool_size: usize,
+    pub(crate) learning_rate: f32,
+    pub(crate) weight_decay: f32,
+    pub(crate) grad_clip_norm: f32,
+    pub(crate) seed: u64,
+    pub(crate) train_summary: Option<CliHyper2dDirectBasisOracleSummary>,
+    pub(crate) holdout_summary: Option<CliHyper2dDirectBasisOracleSummary>,
+    pub(crate) entries: Vec<CliHyper2dDirectBasisOracleEntry>,
+    pub(crate) elapsed_ms: f64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct CliHyper2dDirectBasisOracleSummary {
+    pub(crate) examples: usize,
+    pub(crate) mean_shared_loss: f32,
+    pub(crate) mean_oracle_loss: f32,
+    pub(crate) mean_gap_to_oracle: f32,
+    pub(crate) mean_ratio_to_oracle: f32,
+    pub(crate) max_ratio_to_oracle: f32,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct CliHyper2dDirectBasisOracleEntry {
+    pub(crate) slug: String,
+    pub(crate) split: &'static str,
+    pub(crate) condition: String,
+    pub(crate) oracle_model_output: Option<String>,
+    pub(crate) shared_loss: Target2dLossReport,
+    pub(crate) oracle_initial_eval_loss: Target2dLossReport,
+    pub(crate) oracle_final_loss: Target2dLossReport,
+    pub(crate) oracle_best_eval_loss: Target2dLossReport,
+    pub(crate) oracle_epochs_completed: usize,
+    pub(crate) oracle_median_particle_steps_per_sec: f64,
+    pub(crate) loss_gap_to_oracle: f32,
+    pub(crate) loss_ratio_to_oracle: f32,
 }
 
 #[derive(Clone, Serialize)]

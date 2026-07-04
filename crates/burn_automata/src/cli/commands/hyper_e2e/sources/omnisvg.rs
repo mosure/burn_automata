@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io::Read};
+use std::{collections::BTreeMap, io::Read, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose};
 
@@ -9,6 +9,8 @@ const HF_DATASET_ROWS_URL: &str = "https://datasets-server.huggingface.co/rows";
 const HF_DATASET_CONFIG: &str = "default";
 const MANIFEST_VERSION: u32 = 1;
 const HTTP_USER_AGENT: &str = "burn_automata/0.1 omnisvg-thumbnail-loader";
+const HTTP_FETCH_ATTEMPTS: usize = 12;
+const HTTP_FETCH_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::cli::commands::hyper_e2e) struct OmniSvgSourceConfig<'a> {
@@ -224,16 +226,12 @@ fn ensure_omnisvg_cache(
                     },
                 );
             }
+            save_entries_manifest(paths, config.dataset, config.split, &entries_by_offset)?;
         }
         page_offset += page_len;
     }
 
-    let manifest = OmniSvgCacheManifest {
-        version: MANIFEST_VERSION,
-        dataset: config.dataset.dataset_id().to_string(),
-        split: config.split.to_string(),
-        entries: entries_by_offset.into_values().collect(),
-    };
+    let manifest = entries_manifest(config.dataset, config.split, &entries_by_offset);
     save_manifest(paths, &manifest)?;
     Ok(manifest)
 }
@@ -274,6 +272,29 @@ fn save_manifest(
     std::fs::create_dir_all(&paths.root)?;
     std::fs::write(&paths.manifest, serde_json::to_string_pretty(manifest)?)?;
     Ok(())
+}
+
+fn save_entries_manifest(
+    paths: &OmniSvgCachePaths,
+    dataset: OmniSvgDatasetArg,
+    split: &str,
+    entries_by_offset: &BTreeMap<usize, OmniSvgCacheEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = entries_manifest(dataset, split, entries_by_offset);
+    save_manifest(paths, &manifest)
+}
+
+fn entries_manifest(
+    dataset: OmniSvgDatasetArg,
+    split: &str,
+    entries_by_offset: &BTreeMap<usize, OmniSvgCacheEntry>,
+) -> OmniSvgCacheManifest {
+    OmniSvgCacheManifest {
+        version: MANIFEST_VERSION,
+        dataset: dataset.dataset_id().to_string(),
+        split: split.to_string(),
+        entries: entries_by_offset.values().cloned().collect(),
+    }
 }
 
 fn fetch_hf_rows_page(
@@ -403,6 +424,28 @@ fn http_get_text(url: &str, token: Option<&str>) -> Result<String, Box<dyn std::
 }
 
 fn http_get_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut delay = Duration::from_millis(500);
+    for attempt in 1..=HTTP_FETCH_ATTEMPTS {
+        match http_get_bytes_once(url, token) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) if attempt == HTTP_FETCH_ATTEMPTS => return Err(err),
+            Err(err) => {
+                eprintln!(
+                    "warning: HTTP fetch attempt {attempt}/{HTTP_FETCH_ATTEMPTS} failed for {url}: {err}; retrying in {} ms",
+                    delay.as_millis()
+                );
+                std::thread::sleep(delay);
+                delay = delay.saturating_mul(2).min(HTTP_FETCH_MAX_BACKOFF);
+            }
+        }
+    }
+    unreachable!("HTTP retry loop always returns")
+}
+
+fn http_get_bytes_once(
+    url: &str,
+    token: Option<&str>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut request = ureq::get(url)
         .set("User-Agent", HTTP_USER_AGENT)
         .set("Accept", "*/*");
@@ -415,7 +458,10 @@ fn http_get_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, Box<dyn std
         .call()
         .map_err(|err| std::io::Error::other(format!("HTTP fetch failed for {url}: {err}")))?;
     let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes)?;
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|err| std::io::Error::other(format!("HTTP body read failed for {url}: {err}")))?;
     Ok(bytes)
 }
 

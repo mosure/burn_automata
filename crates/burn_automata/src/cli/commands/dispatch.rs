@@ -15,6 +15,9 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::TrainHyper2dDirectBasis { .. } => {
             hyper_e2e::run_train_hyper_2d_direct_basis(command)
         }
+        command @ Command::ValidateHyper2dDirectBasisOracles { .. } => {
+            hyper_e2e::run_validate_hyper_2d_direct_basis_oracles(command)
+        }
         command @ Command::InferHyper2d { .. } => hyper::run_infer_hyper_2d(command),
         command @ Command::EvalHyper2d { .. } => hyper::run_eval_hyper_2d(command),
         command @ Command::TrainTorus3d { .. } => mesh::run_train_torus_3d(command),

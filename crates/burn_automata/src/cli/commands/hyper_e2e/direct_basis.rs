@@ -11,6 +11,9 @@ use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
 
 mod burn_wgpu;
+mod oracle;
+
+use oracle::evaluate_direct_basis_oracles;
 
 #[derive(Clone)]
 struct DirectBasisExample {
@@ -32,6 +35,8 @@ struct DirectBasisTrainConfig {
     seed: u64,
     seed_scale: f32,
     seed_mode: ParticleSeed,
+    grid_eps: f32,
+    motion_scale: f32,
     loss_config: Target2dLossConfig,
     per_parameter_grad_normalization: bool,
     base_sgd: SgdConfig,
@@ -60,12 +65,80 @@ struct DirectBasisPhaseReport {
     best_step: usize,
 }
 
+#[derive(Clone, Copy)]
+struct DirectBasisOracleConfig {
+    train_examples: usize,
+    holdout_examples: usize,
+    epochs: usize,
+    repetitions: usize,
+    report_interval: usize,
+    batch_size: usize,
+    pool_size: usize,
+    learning_rate: f32,
+    weight_decay: f32,
+    grad_clip_norm: f32,
+    seed: u64,
+}
+
 #[derive(Serialize)]
 struct DirectBasisAdapterBankManifest {
     base_model: String,
     adapter_rank: usize,
     adapter_alpha: f32,
     entries: Vec<CliHyper2dDirectBasisAdapterReport>,
+}
+
+#[derive(Deserialize)]
+struct DirectBasisAdapterBankLoadManifest {
+    base_model: String,
+    adapter_rank: usize,
+    adapter_alpha: f32,
+    entries: Vec<DirectBasisAdapterBankLoadEntry>,
+}
+
+#[derive(Deserialize)]
+struct DirectBasisAdapterBankLoadEntry {
+    slug: String,
+    split: String,
+    title: Option<String>,
+    group: Option<String>,
+    condition: String,
+    adapter_output: String,
+    #[serde(default)]
+    target_source_width: usize,
+    #[serde(default)]
+    target_source_height: usize,
+    #[serde(default)]
+    target_points: usize,
+    #[serde(default)]
+    last_train_loss: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct DirectBasisOracleValidationReport {
+    preset: AutomataPreset,
+    shared_base: String,
+    adapter_bank: String,
+    report_output: String,
+    adapter_bank_base_model: String,
+    adapter_rank: usize,
+    adapter_alpha: f32,
+    npa_config: NpaConfig,
+    hashgrid: burn_automata_kernels::HashGridConfig,
+    target_loss_config: Target2dLossConfig,
+    target_threshold: f32,
+    target_points_fallback: usize,
+    target_image_size: Option<usize>,
+    train_examples: usize,
+    holdout_examples: usize,
+    rollout_particles: usize,
+    rollout_steps: usize,
+    update_prob: f32,
+    eval_seed: u64,
+    seed_scale: f32,
+    seed_mode: ParticleSeed,
+    per_parameter_grad_normalization: bool,
+    oracle_validation: Option<CliHyper2dDirectBasisOracleReport>,
 }
 
 #[derive(Serialize)]
@@ -128,11 +201,226 @@ struct GpuDirectBasisAdapter {
     adapter: Vec<f32>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisExperimentConfig {
+    preset: Option<String>,
+    source: DirectBasisSourceExperimentConfig,
+    split: DirectBasisSplitExperimentConfig,
+    output: DirectBasisOutputExperimentConfig,
+    training: DirectBasisTrainingExperimentConfig,
+    gpu: DirectBasisGpuExperimentConfig,
+    adapter: DirectBasisAdapterExperimentConfig,
+    rollout: DirectBasisRolloutExperimentConfig,
+    target: DirectBasisTargetExperimentConfig,
+    optimizer: DirectBasisOptimizerExperimentConfig,
+    train_refine: DirectBasisAdapterPhaseExperimentConfig,
+    holdout_adapter: DirectBasisAdapterPhaseExperimentConfig,
+    eval: DirectBasisEvalExperimentConfig,
+    oracle: DirectBasisOracleExperimentConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisSourceExperimentConfig {
+    target_images: Option<Vec<PathBuf>>,
+    target_image_dirs: Option<Vec<PathBuf>>,
+    target_image_recursive: Option<bool>,
+    image_extensions: Option<Vec<String>>,
+    catalog: Option<PathBuf>,
+    catalog_thumbnail_dir: Option<PathBuf>,
+    catalog_group: Option<String>,
+    catalog_targets: Option<Vec<String>>,
+    catalog_limit: Option<usize>,
+    source_limit: Option<usize>,
+    omnisvg: DirectBasisOmniSvgExperimentConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisOmniSvgExperimentConfig {
+    dataset: Option<String>,
+    split: Option<String>,
+    cache_dir: Option<PathBuf>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    page_size: Option<usize>,
+    download: Option<bool>,
+    refresh: Option<bool>,
+    token_env: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisSplitExperimentConfig {
+    holdout_targets: Option<Vec<String>>,
+    holdout_stride: Option<usize>,
+    holdout_offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisOutputExperimentConfig {
+    output_dir: Option<PathBuf>,
+    report_output: Option<PathBuf>,
+    shared_base_output: Option<PathBuf>,
+    adapter_bank_output: Option<PathBuf>,
+    adapter_output_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisTrainingExperimentConfig {
+    device: Option<String>,
+    steps: Option<usize>,
+    report_interval: Option<usize>,
+    example_batch_size: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisGpuExperimentConfig {
+    backend: Option<String>,
+    python: Option<PathBuf>,
+    upstream_root: Option<PathBuf>,
+    device: Option<String>,
+    payload_output: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisAdapterExperimentConfig {
+    rank: Option<usize>,
+    alpha: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisRolloutExperimentConfig {
+    particles: Option<usize>,
+    steps: Option<usize>,
+    update_prob: Option<f32>,
+    seed: Option<u64>,
+    base_seed: Option<u64>,
+    seed_scale: Option<f32>,
+    seed_mode: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisTargetExperimentConfig {
+    points: Option<usize>,
+    image_size: Option<usize>,
+    threshold: Option<f32>,
+    loss_image_size: Option<usize>,
+    splat_sigma: Option<f32>,
+    splat_loss_weight: Option<f32>,
+    color_loss_weight: Option<f32>,
+    density_loss_weight: Option<f32>,
+    displacement_regularizer_weight: Option<f32>,
+    overflow_regularizer_weight: Option<f32>,
+    bound_regularizer_weight: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisOptimizerExperimentConfig {
+    per_parameter_grad_normalization: Option<bool>,
+    base_learning_rate: Option<f32>,
+    base_weight_decay: Option<f32>,
+    base_grad_clip_norm: Option<f32>,
+    adapter_learning_rate: Option<f32>,
+    adapter_weight_decay: Option<f32>,
+    adapter_grad_clip_norm: Option<f32>,
+    adapter_l2: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisAdapterPhaseExperimentConfig {
+    steps: Option<usize>,
+    batch_size: Option<usize>,
+    learning_rate: Option<f32>,
+    weight_decay: Option<f32>,
+    grad_clip_norm: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisEvalExperimentConfig {
+    examples: Option<usize>,
+    seed: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisOracleExperimentConfig {
+    train_examples: Option<usize>,
+    holdout_examples: Option<usize>,
+    epochs: Option<usize>,
+    repetitions: Option<usize>,
+    report_interval: Option<usize>,
+    batch_size: Option<usize>,
+    pool_size: Option<usize>,
+    learning_rate: Option<f32>,
+    weight_decay: Option<f32>,
+    grad_clip_norm: Option<f32>,
+    seed: Option<u64>,
+}
+
+fn load_direct_basis_experiment_config(
+    path: Option<&Path>,
+) -> Result<DirectBasisExperimentConfig, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(DirectBasisExperimentConfig::default());
+    };
+    let text = std::fs::read_to_string(path)?;
+    toml::from_str(&text).map_err(|err| {
+        std::io::Error::other(format!(
+            "failed to parse direct-basis experiment config {}: {err}",
+            path.display()
+        ))
+        .into()
+    })
+}
+
+fn config_value_enum<T: ValueEnum>(
+    field: &str,
+    value: Option<String>,
+    fallback: T,
+) -> Result<T, Box<dyn std::error::Error>> {
+    match value {
+        Some(value) => T::from_str(&value, true).map_err(|err| {
+            std::io::Error::other(format!(
+                "invalid {field} `{value}` in direct-basis TOML config: {err}"
+            ))
+            .into()
+        }),
+        None => Ok(fallback),
+    }
+}
+
+fn config_value_enum_option<T: ValueEnum>(
+    field: &str,
+    value: Option<String>,
+    fallback: Option<T>,
+) -> Result<Option<T>, Box<dyn std::error::Error>> {
+    match value {
+        Some(value) => Ok(Some(T::from_str(&value, true).map_err(|err| {
+            std::io::Error::other(format!(
+                "invalid {field} `{value}` in direct-basis TOML config: {err}"
+            ))
+        })?)),
+        None => Ok(fallback),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_train_hyper_2d_direct_basis(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Command::TrainHyper2dDirectBasis {
+        config,
         preset,
         target_images,
         target_image_dirs,
@@ -200,12 +488,280 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         adapter_l2,
         holdout_adapter_steps,
         holdout_adapter_batch_size,
+        train_adapter_refine_steps,
+        train_adapter_refine_batch_size,
+        train_adapter_refine_learning_rate,
+        train_adapter_refine_weight_decay,
+        train_adapter_refine_grad_clip_norm,
+        holdout_adapter_learning_rate,
+        holdout_adapter_weight_decay,
+        holdout_adapter_grad_clip_norm,
         eval_examples,
         eval_seed,
+        oracle_train_examples,
+        oracle_holdout_examples,
+        oracle_epochs,
+        oracle_repetitions,
+        oracle_report_interval,
+        oracle_batch_size,
+        oracle_pool_size,
+        oracle_learning_rate,
+        oracle_weight_decay,
+        oracle_grad_clip_norm,
+        oracle_seed,
     } = command
     else {
         unreachable!("run_train_hyper_2d_direct_basis called with the wrong command variant");
     };
+
+    let experiment_config_path = config;
+    let experiment_config_report = experiment_config_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let experiment_config = load_direct_basis_experiment_config(experiment_config_path.as_deref())?;
+    let DirectBasisExperimentConfig {
+        preset: config_preset,
+        source: config_source,
+        split: config_split,
+        output: config_output,
+        training: config_training,
+        gpu: config_gpu,
+        adapter: config_adapter,
+        rollout: config_rollout,
+        target: config_target,
+        optimizer: config_optimizer,
+        train_refine: config_train_refine,
+        holdout_adapter: config_holdout_adapter,
+        eval: config_eval,
+        oracle: config_oracle,
+    } = experiment_config;
+    let DirectBasisSourceExperimentConfig {
+        target_images: config_target_images,
+        target_image_dirs: config_target_image_dirs,
+        target_image_recursive: config_target_image_recursive,
+        image_extensions: config_image_extensions,
+        catalog: config_catalog,
+        catalog_thumbnail_dir: config_catalog_thumbnail_dir,
+        catalog_group: config_catalog_group,
+        catalog_targets: config_catalog_targets,
+        catalog_limit: config_catalog_limit,
+        source_limit: config_source_limit,
+        omnisvg: config_omnisvg,
+    } = config_source;
+    let DirectBasisOmniSvgExperimentConfig {
+        dataset: config_omnisvg_dataset,
+        split: config_omnisvg_split,
+        cache_dir: config_omnisvg_cache_dir,
+        offset: config_omnisvg_offset,
+        limit: config_omnisvg_limit,
+        page_size: config_omnisvg_page_size,
+        download: config_omnisvg_download,
+        refresh: config_omnisvg_refresh,
+        token_env: config_omnisvg_token_env,
+    } = config_omnisvg;
+    let DirectBasisSplitExperimentConfig {
+        holdout_targets: config_holdout_targets,
+        holdout_stride: config_holdout_stride,
+        holdout_offset: config_holdout_offset,
+    } = config_split;
+    let DirectBasisOutputExperimentConfig {
+        output_dir: config_output_dir,
+        report_output: config_report_output,
+        shared_base_output: config_shared_base_output,
+        adapter_bank_output: config_adapter_bank_output,
+        adapter_output_dir: config_adapter_output_dir,
+    } = config_output;
+    let DirectBasisTrainingExperimentConfig {
+        device: config_training_device,
+        steps: config_steps,
+        report_interval: config_report_interval,
+        example_batch_size: config_example_batch_size,
+    } = config_training;
+    let DirectBasisGpuExperimentConfig {
+        backend: config_gpu_backend,
+        python: config_python,
+        upstream_root: config_gpu_upstream_root,
+        device: config_gpu_device,
+        payload_output: config_gpu_payload_output,
+    } = config_gpu;
+    let DirectBasisAdapterExperimentConfig {
+        rank: config_adapter_rank,
+        alpha: config_adapter_alpha,
+    } = config_adapter;
+    let DirectBasisRolloutExperimentConfig {
+        particles: config_rollout_particles,
+        steps: config_rollout_steps,
+        update_prob: config_update_prob,
+        seed: config_seed,
+        base_seed: config_base_seed,
+        seed_scale: config_seed_scale,
+        seed_mode: config_seed_mode,
+    } = config_rollout;
+    let DirectBasisTargetExperimentConfig {
+        points: config_target_points,
+        image_size: config_target_image_size,
+        threshold: config_target_threshold,
+        loss_image_size: config_target_loss_image_size,
+        splat_sigma: config_target_splat_sigma,
+        splat_loss_weight: config_target_splat_loss_weight,
+        color_loss_weight: config_target_color_loss_weight,
+        density_loss_weight: config_target_density_loss_weight,
+        displacement_regularizer_weight: config_target_displacement_regularizer_weight,
+        overflow_regularizer_weight: config_target_overflow_regularizer_weight,
+        bound_regularizer_weight: config_target_bound_regularizer_weight,
+    } = config_target;
+    let DirectBasisOptimizerExperimentConfig {
+        per_parameter_grad_normalization: config_per_parameter_grad_normalization,
+        base_learning_rate: config_base_learning_rate,
+        base_weight_decay: config_base_weight_decay,
+        base_grad_clip_norm: config_base_grad_clip_norm,
+        adapter_learning_rate: config_adapter_learning_rate,
+        adapter_weight_decay: config_adapter_weight_decay,
+        adapter_grad_clip_norm: config_adapter_grad_clip_norm,
+        adapter_l2: config_adapter_l2,
+    } = config_optimizer;
+    let DirectBasisAdapterPhaseExperimentConfig {
+        steps: config_train_adapter_refine_steps,
+        batch_size: config_train_adapter_refine_batch_size,
+        learning_rate: config_train_adapter_refine_learning_rate,
+        weight_decay: config_train_adapter_refine_weight_decay,
+        grad_clip_norm: config_train_adapter_refine_grad_clip_norm,
+    } = config_train_refine;
+    let DirectBasisAdapterPhaseExperimentConfig {
+        steps: config_holdout_adapter_steps,
+        batch_size: config_holdout_adapter_batch_size,
+        learning_rate: config_holdout_adapter_learning_rate,
+        weight_decay: config_holdout_adapter_weight_decay,
+        grad_clip_norm: config_holdout_adapter_grad_clip_norm,
+    } = config_holdout_adapter;
+    let DirectBasisEvalExperimentConfig {
+        examples: config_eval_examples,
+        seed: config_eval_seed,
+    } = config_eval;
+    let DirectBasisOracleExperimentConfig {
+        train_examples: config_oracle_train_examples,
+        holdout_examples: config_oracle_holdout_examples,
+        epochs: config_oracle_epochs,
+        repetitions: config_oracle_repetitions,
+        report_interval: config_oracle_report_interval,
+        batch_size: config_oracle_batch_size,
+        pool_size: config_oracle_pool_size,
+        learning_rate: config_oracle_learning_rate,
+        weight_decay: config_oracle_weight_decay,
+        grad_clip_norm: config_oracle_grad_clip_norm,
+        seed: config_oracle_seed,
+    } = config_oracle;
+
+    let preset = config_value_enum("preset", config_preset, preset)?;
+    let target_images = config_target_images.unwrap_or(target_images);
+    let target_image_dirs = config_target_image_dirs.unwrap_or(target_image_dirs);
+    let target_image_recursive = config_target_image_recursive.unwrap_or(target_image_recursive);
+    let image_extensions = config_image_extensions.unwrap_or(image_extensions);
+    let catalog = config_catalog.or(catalog);
+    let catalog_thumbnail_dir = config_catalog_thumbnail_dir.unwrap_or(catalog_thumbnail_dir);
+    let catalog_group =
+        config_value_enum_option("source.catalog_group", config_catalog_group, catalog_group)?;
+    let catalog_targets = config_catalog_targets.unwrap_or(catalog_targets);
+    let catalog_limit = config_catalog_limit.unwrap_or(catalog_limit);
+    let omnisvg_dataset = config_value_enum_option(
+        "source.omnisvg.dataset",
+        config_omnisvg_dataset,
+        omnisvg_dataset,
+    )?;
+    let omnisvg_split = config_omnisvg_split.unwrap_or(omnisvg_split);
+    let omnisvg_cache_dir = config_omnisvg_cache_dir.unwrap_or(omnisvg_cache_dir);
+    let omnisvg_offset = config_omnisvg_offset.unwrap_or(omnisvg_offset);
+    let omnisvg_limit = config_omnisvg_limit.unwrap_or(omnisvg_limit);
+    let omnisvg_page_size = config_omnisvg_page_size.unwrap_or(omnisvg_page_size);
+    let omnisvg_download = config_omnisvg_download.unwrap_or(omnisvg_download);
+    let omnisvg_refresh = config_omnisvg_refresh.unwrap_or(omnisvg_refresh);
+    let omnisvg_token_env = config_omnisvg_token_env.unwrap_or(omnisvg_token_env);
+    let source_limit = config_source_limit.unwrap_or(source_limit);
+    let holdout_targets = config_holdout_targets.unwrap_or(holdout_targets);
+    let holdout_stride = config_holdout_stride.unwrap_or(holdout_stride);
+    let holdout_offset = config_holdout_offset.unwrap_or(holdout_offset);
+    let output_dir = config_output_dir.unwrap_or(output_dir);
+    let report_output = config_report_output.or(report_output);
+    let shared_base_output = config_shared_base_output.or(shared_base_output);
+    let adapter_bank_output = config_adapter_bank_output.or(adapter_bank_output);
+    let adapter_output_dir = config_adapter_output_dir.or(adapter_output_dir);
+    let training_device =
+        config_value_enum("training.device", config_training_device, training_device)?;
+    let gpu_backend = config_value_enum("gpu.backend", config_gpu_backend, gpu_backend)?;
+    let python = config_python.unwrap_or(python);
+    let gpu_upstream_root = config_gpu_upstream_root.or(gpu_upstream_root);
+    let gpu_device = config_gpu_device.unwrap_or(gpu_device);
+    let gpu_payload_output = config_gpu_payload_output.or(gpu_payload_output);
+    let adapter_rank = config_adapter_rank.unwrap_or(adapter_rank);
+    let adapter_alpha = config_adapter_alpha.unwrap_or(adapter_alpha);
+    let steps = config_steps.unwrap_or(steps);
+    let report_interval = config_report_interval.unwrap_or(report_interval);
+    let example_batch_size = config_example_batch_size.unwrap_or(example_batch_size);
+    let rollout_particles = config_rollout_particles.unwrap_or(rollout_particles);
+    let rollout_steps = config_rollout_steps.unwrap_or(rollout_steps);
+    let update_prob = config_update_prob.unwrap_or(update_prob);
+    let seed = config_seed.unwrap_or(seed);
+    let base_seed = config_base_seed.unwrap_or(base_seed);
+    let seed_scale = config_seed_scale.or(seed_scale);
+    let seed_mode = config_value_enum("rollout.seed_mode", config_seed_mode, seed_mode)?;
+    let target_points = config_target_points.unwrap_or(target_points);
+    let target_image_size = config_target_image_size.or(target_image_size);
+    let target_threshold = config_target_threshold.unwrap_or(target_threshold);
+    let target_loss_image_size = config_target_loss_image_size.unwrap_or(target_loss_image_size);
+    let target_splat_sigma = config_target_splat_sigma.unwrap_or(target_splat_sigma);
+    let target_splat_loss_weight =
+        config_target_splat_loss_weight.unwrap_or(target_splat_loss_weight);
+    let target_color_loss_weight =
+        config_target_color_loss_weight.unwrap_or(target_color_loss_weight);
+    let target_density_loss_weight =
+        config_target_density_loss_weight.unwrap_or(target_density_loss_weight);
+    let target_displacement_regularizer_weight = config_target_displacement_regularizer_weight
+        .unwrap_or(target_displacement_regularizer_weight);
+    let target_overflow_regularizer_weight =
+        config_target_overflow_regularizer_weight.unwrap_or(target_overflow_regularizer_weight);
+    let target_bound_regularizer_weight =
+        config_target_bound_regularizer_weight.unwrap_or(target_bound_regularizer_weight);
+    let per_parameter_grad_normalization =
+        config_per_parameter_grad_normalization.unwrap_or(per_parameter_grad_normalization);
+    let base_learning_rate = config_base_learning_rate.unwrap_or(base_learning_rate);
+    let base_weight_decay = config_base_weight_decay.unwrap_or(base_weight_decay);
+    let base_grad_clip_norm = config_base_grad_clip_norm.unwrap_or(base_grad_clip_norm);
+    let adapter_learning_rate = config_adapter_learning_rate.unwrap_or(adapter_learning_rate);
+    let adapter_weight_decay = config_adapter_weight_decay.unwrap_or(adapter_weight_decay);
+    let adapter_grad_clip_norm = config_adapter_grad_clip_norm.unwrap_or(adapter_grad_clip_norm);
+    let adapter_l2 = config_adapter_l2.unwrap_or(adapter_l2);
+    let holdout_adapter_steps = config_holdout_adapter_steps.unwrap_or(holdout_adapter_steps);
+    let holdout_adapter_batch_size =
+        config_holdout_adapter_batch_size.unwrap_or(holdout_adapter_batch_size);
+    let train_adapter_refine_steps =
+        config_train_adapter_refine_steps.unwrap_or(train_adapter_refine_steps);
+    let train_adapter_refine_batch_size =
+        config_train_adapter_refine_batch_size.unwrap_or(train_adapter_refine_batch_size);
+    let train_adapter_refine_learning_rate =
+        config_train_adapter_refine_learning_rate.or(train_adapter_refine_learning_rate);
+    let train_adapter_refine_weight_decay =
+        config_train_adapter_refine_weight_decay.or(train_adapter_refine_weight_decay);
+    let train_adapter_refine_grad_clip_norm =
+        config_train_adapter_refine_grad_clip_norm.or(train_adapter_refine_grad_clip_norm);
+    let holdout_adapter_learning_rate =
+        config_holdout_adapter_learning_rate.or(holdout_adapter_learning_rate);
+    let holdout_adapter_weight_decay =
+        config_holdout_adapter_weight_decay.or(holdout_adapter_weight_decay);
+    let holdout_adapter_grad_clip_norm =
+        config_holdout_adapter_grad_clip_norm.or(holdout_adapter_grad_clip_norm);
+    let eval_examples = config_eval_examples.unwrap_or(eval_examples);
+    let eval_seed = config_eval_seed.unwrap_or(eval_seed);
+    let oracle_train_examples = config_oracle_train_examples.unwrap_or(oracle_train_examples);
+    let oracle_holdout_examples = config_oracle_holdout_examples.unwrap_or(oracle_holdout_examples);
+    let oracle_epochs = config_oracle_epochs.unwrap_or(oracle_epochs);
+    let oracle_repetitions = config_oracle_repetitions.unwrap_or(oracle_repetitions);
+    let oracle_report_interval = config_oracle_report_interval.unwrap_or(oracle_report_interval);
+    let oracle_batch_size = config_oracle_batch_size.unwrap_or(oracle_batch_size);
+    let oracle_pool_size = config_oracle_pool_size.unwrap_or(oracle_pool_size);
+    let oracle_learning_rate = config_oracle_learning_rate.unwrap_or(oracle_learning_rate);
+    let oracle_weight_decay = config_oracle_weight_decay.unwrap_or(oracle_weight_decay);
+    let oracle_grad_clip_norm = config_oracle_grad_clip_norm.unwrap_or(oracle_grad_clip_norm);
+    let oracle_seed = config_oracle_seed.unwrap_or(oracle_seed);
 
     let preset_arg = preset;
     let preset: AutomataPreset = preset.into();
@@ -223,11 +779,27 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         update_prob,
         base_learning_rate,
         adapter_learning_rate,
+        train_adapter_refine_learning_rate,
+        holdout_adapter_learning_rate,
         adapter_l2,
     })?;
 
     let seed_mode: ParticleSeed = seed_mode.into();
     let seed_scale = seed_scale.unwrap_or_else(|| NpaConfig::seed_scale_for_preset(preset));
+    let oracle_config = DirectBasisOracleConfig {
+        train_examples: oracle_train_examples,
+        holdout_examples: oracle_holdout_examples,
+        epochs: oracle_epochs,
+        repetitions: oracle_repetitions,
+        report_interval: oracle_report_interval,
+        batch_size: oracle_batch_size,
+        pool_size: oracle_pool_size,
+        learning_rate: oracle_learning_rate,
+        weight_decay: oracle_weight_decay,
+        grad_clip_norm: oracle_grad_clip_norm,
+        seed: oracle_seed,
+    };
+    validate_oracle_config(oracle_config)?;
     let report_output = report_output.unwrap_or_else(|| output_dir.join("report.json"));
     let shared_base_output =
         shared_base_output.unwrap_or_else(|| output_dir.join("shared_base.bpk"));
@@ -265,6 +837,8 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let splits = resolve_e2e_splits(&sources, &holdout_targets, holdout_stride, holdout_offset)?;
 
     let hashgrid = upstream_growing_2d_hashgrid();
+    let base_config = NpaConfig::growing_2d();
+    let motion_scale = base_config.alpha * base_config.motion_eps(hashgrid.eps);
     let loss_config = super::super::target2d::target2d_loss_config(
         target_loss_image_size,
         target_splat_sigma,
@@ -275,8 +849,31 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         target_overflow_regularizer_weight,
         target_bound_regularizer_weight,
     )?;
+    let base_sgd = SgdConfig {
+        learning_rate: base_learning_rate,
+        weight_decay: base_weight_decay,
+        grad_clip_norm: base_grad_clip_norm,
+    };
+    let adapter_sgd = SgdConfig {
+        learning_rate: adapter_learning_rate,
+        weight_decay: adapter_weight_decay,
+        grad_clip_norm: adapter_grad_clip_norm,
+    };
+    let holdout_adapter_sgd = SgdConfig {
+        learning_rate: holdout_adapter_learning_rate.unwrap_or(adapter_sgd.learning_rate),
+        weight_decay: holdout_adapter_weight_decay.unwrap_or(adapter_sgd.weight_decay),
+        grad_clip_norm: holdout_adapter_grad_clip_norm.unwrap_or(adapter_sgd.grad_clip_norm),
+    };
+    let train_refine_adapter_sgd = SgdConfig {
+        learning_rate: train_adapter_refine_learning_rate
+            .unwrap_or(holdout_adapter_sgd.learning_rate),
+        weight_decay: train_adapter_refine_weight_decay.unwrap_or(holdout_adapter_sgd.weight_decay),
+        grad_clip_norm: train_adapter_refine_grad_clip_norm
+            .unwrap_or(holdout_adapter_sgd.grad_clip_norm),
+    };
     if training_device != TrainingDeviceArg::Cpu {
         let request = GpuDirectBasisRunRequest {
+            experiment_config: experiment_config_report,
             preset,
             requested_training_device: training_device,
             target_images: &target_images,
@@ -321,21 +918,18 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
             target_image_size,
             target_threshold,
             per_parameter_grad_normalization,
-            base_sgd: SgdConfig {
-                learning_rate: base_learning_rate,
-                weight_decay: base_weight_decay,
-                grad_clip_norm: base_grad_clip_norm,
-            },
-            adapter_sgd: SgdConfig {
-                learning_rate: adapter_learning_rate,
-                weight_decay: adapter_weight_decay,
-                grad_clip_norm: adapter_grad_clip_norm,
-            },
+            base_sgd,
+            adapter_sgd,
+            train_refine_adapter_sgd,
+            holdout_adapter_sgd,
             adapter_l2,
             holdout_adapter_steps,
             holdout_adapter_batch_size,
+            train_adapter_refine_steps,
+            train_adapter_refine_batch_size,
             eval_examples,
             eval_seed,
+            oracle_config,
         };
         return match gpu_backend {
             Hyper2dDirectBasisGpuBackendArg::BurnWgpu => run_burn_wgpu_direct_basis(request),
@@ -366,16 +960,6 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         );
     }
 
-    let base_sgd = SgdConfig {
-        learning_rate: base_learning_rate,
-        weight_decay: base_weight_decay,
-        grad_clip_norm: base_grad_clip_norm,
-    };
-    let adapter_sgd = SgdConfig {
-        learning_rate: adapter_learning_rate,
-        weight_decay: adapter_weight_decay,
-        grad_clip_norm: adapter_grad_clip_norm,
-    };
     let train_config = DirectBasisTrainConfig {
         steps,
         report_interval,
@@ -386,6 +970,8 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         seed,
         seed_scale,
         seed_mode,
+        grid_eps: hashgrid.eps,
+        motion_scale,
         loss_config,
         per_parameter_grad_normalization,
         base_sgd,
@@ -413,9 +999,30 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     )?;
     let train_phase =
         train_direct_basis_phase(&mut base, &mut train_examples, &hashgrid, train_config)?;
+    let train_refine_batch_size = if train_adapter_refine_batch_size == 0 {
+        example_batch_size
+    } else {
+        train_adapter_refine_batch_size
+    };
+    let train_refine_config = DirectBasisTrainConfig {
+        steps: train_adapter_refine_steps,
+        example_batch_size: train_refine_batch_size,
+        adapter_sgd: train_refine_adapter_sgd,
+        update_base: false,
+        seed: seed ^ 0x7a_1d_2d,
+        eval_seed: eval_seed ^ 0x7a_1d_2d,
+        ..train_config
+    };
+    let train_refine_phase = train_direct_basis_phase(
+        &mut base,
+        &mut train_examples,
+        &hashgrid,
+        train_refine_config,
+    )?;
     let holdout_config = DirectBasisTrainConfig {
         steps: holdout_adapter_steps,
         example_batch_size: holdout_adapter_batch_size,
+        adapter_sgd: holdout_adapter_sgd,
         update_base: false,
         seed: seed ^ 0x90_1d_2d,
         eval_seed: eval_seed ^ 0x90_1d_2d,
@@ -423,6 +1030,13 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     };
     let holdout_phase =
         train_direct_basis_phase(&mut base, &mut holdout_examples, &hashgrid, holdout_config)?;
+    let (best_train_loss, best_train_step) = match train_refine_phase.best_loss {
+        Some(loss) => (
+            Some(loss),
+            train_config.steps + train_refine_phase.best_step,
+        ),
+        None => (train_phase.best_loss, train_phase.best_step),
+    };
     let final_train_loss = evaluate_direct_basis_examples(
         &base,
         &train_examples,
@@ -466,8 +1080,19 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         entries: adapter_reports.clone(),
     };
     write_pretty_json(&adapter_bank_output, &adapter_bank)?;
+    let oracle_model_dir = output_dir.join("oracle_models");
+    let oracle_validation = evaluate_direct_basis_oracles(
+        &base,
+        &train_examples,
+        &holdout_examples,
+        &hashgrid,
+        train_config,
+        oracle_config,
+        Some(&oracle_model_dir),
+    )?;
 
     let report = CliHyper2dDirectBasisTrainingReport {
+        experiment_config: experiment_config_report,
         preset,
         target_images: target_images
             .iter()
@@ -514,7 +1139,14 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         per_parameter_grad_normalization,
         base_sgd,
         adapter_sgd,
+        train_refine_adapter_sgd,
+        holdout_adapter_sgd,
         adapter_l2_weight: adapter_l2,
+        train_adapter_refine_steps,
+        train_adapter_refine_batch_size: normalized_example_batch_size(
+            train_refine_batch_size,
+            train_examples.len(),
+        ),
         holdout_adapter_steps,
         holdout_adapter_batch_size: normalized_example_batch_size(
             holdout_adapter_batch_size,
@@ -525,10 +1157,12 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         final_train_loss,
         initial_holdout_loss,
         final_holdout_loss,
-        best_train_loss: train_phase.best_loss,
-        best_train_step: train_phase.best_step,
+        best_train_loss,
+        best_train_step,
         history: train_phase.history,
+        train_refine_history: train_refine_phase.history,
         holdout_history: holdout_phase.history,
+        oracle_validation,
         adapters: adapter_reports,
     };
     write_pretty_json(&report_output, &report)?;
@@ -543,7 +1177,204 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
+    command: Command,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::ValidateHyper2dDirectBasisOracles {
+        preset,
+        shared_base,
+        adapter_bank,
+        report_output,
+        rollout_particles,
+        rollout_steps,
+        update_prob,
+        eval_seed,
+        seed_scale,
+        seed_mode,
+        per_parameter_grad_normalization,
+        target_points,
+        target_image_size,
+        target_threshold,
+        target_loss_image_size,
+        target_splat_sigma,
+        target_splat_loss_weight,
+        target_color_loss_weight,
+        target_density_loss_weight,
+        target_displacement_regularizer_weight,
+        target_overflow_regularizer_weight,
+        target_bound_regularizer_weight,
+        oracle_train_examples,
+        oracle_holdout_examples,
+        oracle_epochs,
+        oracle_repetitions,
+        oracle_report_interval,
+        oracle_batch_size,
+        oracle_pool_size,
+        oracle_learning_rate,
+        oracle_weight_decay,
+        oracle_grad_clip_norm,
+        oracle_seed,
+    } = command
+    else {
+        unreachable!(
+            "run_validate_hyper_2d_direct_basis_oracles called with the wrong command variant"
+        );
+    };
+
+    let preset: AutomataPreset = preset.into();
+    if preset != AutomataPreset::Growing2d {
+        return Err(std::io::Error::other(
+            "validate-hyper2d-direct-basis-oracles currently supports growing-2d",
+        )
+        .into());
+    }
+    let seed_mode: ParticleSeed = seed_mode.into();
+    let seed_scale = seed_scale.unwrap_or_else(|| NpaConfig::seed_scale_for_preset(preset));
+    let loss_config = super::super::target2d::target2d_loss_config(
+        target_loss_image_size,
+        target_splat_sigma,
+        target_splat_loss_weight,
+        target_color_loss_weight,
+        target_density_loss_weight,
+        target_displacement_regularizer_weight,
+        target_overflow_regularizer_weight,
+        target_bound_regularizer_weight,
+    )?;
+    let oracle_config = DirectBasisOracleConfig {
+        train_examples: oracle_train_examples,
+        holdout_examples: oracle_holdout_examples,
+        epochs: oracle_epochs,
+        repetitions: oracle_repetitions,
+        report_interval: oracle_report_interval,
+        batch_size: oracle_batch_size,
+        pool_size: oracle_pool_size,
+        learning_rate: oracle_learning_rate,
+        weight_decay: oracle_weight_decay,
+        grad_clip_norm: oracle_grad_clip_norm,
+        seed: oracle_seed,
+    };
+    validate_direct_basis_args(DirectBasisArgCheck {
+        adapter_rank: 1,
+        adapter_alpha: 1.0,
+        rollout_particles,
+        rollout_steps,
+        update_prob,
+        base_learning_rate: 0.0,
+        adapter_learning_rate: 0.0,
+        train_adapter_refine_learning_rate: None,
+        holdout_adapter_learning_rate: None,
+        adapter_l2: 0.0,
+    })?;
+    validate_oracle_config(oracle_config)?;
+
+    let base_manifest = crate::import::load_manifest(&shared_base)?;
+    let hashgrid = base_manifest.hashgrid.clone();
+    let base = base_manifest.clone().into_model();
+    base.validate()?;
+    let examples = load_direct_basis_examples_from_adapter_bank(
+        &adapter_bank,
+        &base,
+        DirectBasisTargetConfig {
+            threshold: target_threshold,
+            points: target_points,
+            image_size: target_image_size,
+        },
+    )?;
+    let (train_examples, holdout_examples): (Vec<_>, Vec<_>) = examples
+        .into_iter()
+        .partition(|example| example.split == Hyper2dE2eSplit::Train);
+    if train_examples.is_empty() {
+        return Err(std::io::Error::other(
+            "validate-hyper2d-direct-basis-oracles requires at least one train example",
+        )
+        .into());
+    }
+    let eval_config = DirectBasisTrainConfig {
+        steps: 0,
+        report_interval: 1,
+        example_batch_size: 1,
+        rollout_particles,
+        rollout_steps,
+        update_prob,
+        seed: eval_seed,
+        seed_scale,
+        seed_mode,
+        grid_eps: hashgrid.eps,
+        motion_scale: base.config.alpha * base.config.motion_eps(hashgrid.eps),
+        loss_config,
+        per_parameter_grad_normalization,
+        base_sgd: SgdConfig {
+            learning_rate: 0.0,
+            weight_decay: 0.0,
+            grad_clip_norm: 0.0,
+        },
+        adapter_sgd: SgdConfig {
+            learning_rate: 0.0,
+            weight_decay: 0.0,
+            grad_clip_norm: 0.0,
+        },
+        adapter_l2_weight: 0.0,
+        update_base: false,
+        eval_examples: 0,
+        eval_seed,
+    };
+    let oracle_model_dir = report_output.with_file_name("oracle_models");
+    let oracle_validation = evaluate_direct_basis_oracles(
+        &base,
+        &train_examples,
+        &holdout_examples,
+        &hashgrid,
+        eval_config,
+        oracle_config,
+        Some(&oracle_model_dir),
+    )?;
+    let bank = load_direct_basis_adapter_bank(&adapter_bank)?;
+    let report = DirectBasisOracleValidationReport {
+        preset,
+        shared_base: shared_base.display().to_string(),
+        adapter_bank: adapter_bank.display().to_string(),
+        report_output: report_output.display().to_string(),
+        adapter_bank_base_model: bank.base_model,
+        adapter_rank: bank.adapter_rank,
+        adapter_alpha: bank.adapter_alpha,
+        npa_config: base.config.clone(),
+        hashgrid,
+        target_loss_config: loss_config,
+        target_threshold,
+        target_points_fallback: target_points,
+        target_image_size,
+        train_examples: train_examples.len(),
+        holdout_examples: holdout_examples.len(),
+        rollout_particles,
+        rollout_steps,
+        update_prob,
+        eval_seed,
+        seed_scale,
+        seed_mode,
+        per_parameter_grad_normalization,
+        oracle_validation,
+    };
+    write_pretty_json(&report_output, &report)?;
+    println!(
+        "wrote {} train={} holdout={} oracle_train={} oracle_holdout={}",
+        report_output.display(),
+        report.train_examples,
+        report.holdout_examples,
+        report
+            .oracle_validation
+            .as_ref()
+            .map_or(0, |oracle| oracle.train_examples),
+        report
+            .oracle_validation
+            .as_ref()
+            .map_or(0, |oracle| oracle.holdout_examples)
+    );
+    Ok(())
+}
+
 struct GpuDirectBasisRunRequest<'a> {
+    experiment_config: Option<String>,
     preset: AutomataPreset,
     requested_training_device: TrainingDeviceArg,
     target_images: &'a [PathBuf],
@@ -589,11 +1420,16 @@ struct GpuDirectBasisRunRequest<'a> {
     per_parameter_grad_normalization: bool,
     base_sgd: SgdConfig,
     adapter_sgd: SgdConfig,
+    train_refine_adapter_sgd: SgdConfig,
+    holdout_adapter_sgd: SgdConfig,
     adapter_l2: f32,
     holdout_adapter_steps: usize,
     holdout_adapter_batch_size: usize,
+    train_adapter_refine_steps: usize,
+    train_adapter_refine_batch_size: usize,
     eval_examples: usize,
     eval_seed: u64,
+    oracle_config: DirectBasisOracleConfig,
 }
 
 fn run_burn_wgpu_direct_basis(
@@ -633,6 +1469,8 @@ fn run_burn_wgpu_direct_basis(
         seed: request.seed,
         seed_scale: request.seed_scale,
         seed_mode: request.seed_mode,
+        grid_eps: request.hashgrid.eps,
+        motion_scale: base.config.alpha * base.config.motion_eps(request.hashgrid.eps),
         loss_config: request.loss_config,
         per_parameter_grad_normalization: request.per_parameter_grad_normalization,
         base_sgd: request.base_sgd,
@@ -658,9 +1496,24 @@ fn run_burn_wgpu_direct_basis(
         request.eval_examples,
         request.eval_seed ^ 0x90_1d_2d,
     )?;
+    let train_refine_batch_size = if request.train_adapter_refine_batch_size == 0 {
+        request.example_batch_size
+    } else {
+        request.train_adapter_refine_batch_size
+    };
+    let train_refine_config = DirectBasisTrainConfig {
+        steps: request.train_adapter_refine_steps,
+        example_batch_size: train_refine_batch_size,
+        adapter_sgd: request.train_refine_adapter_sgd,
+        update_base: false,
+        seed: request.seed ^ 0x7a_1d_2d,
+        eval_seed: request.eval_seed ^ 0x7a_1d_2d,
+        ..train_config
+    };
     let holdout_config = DirectBasisTrainConfig {
         steps: request.holdout_adapter_steps,
         example_batch_size: request.holdout_adapter_batch_size,
+        adapter_sgd: request.holdout_adapter_sgd,
         update_base: false,
         seed: request.seed ^ 0x90_1d_2d,
         eval_seed: request.eval_seed ^ 0x90_1d_2d,
@@ -671,6 +1524,7 @@ fn run_burn_wgpu_direct_basis(
         &mut train_examples,
         &mut holdout_examples,
         train_config,
+        train_refine_config,
         holdout_config,
     )?;
     let final_train_loss = evaluate_direct_basis_examples(
@@ -717,7 +1571,18 @@ fn run_burn_wgpu_direct_basis(
         entries: adapter_reports.clone(),
     };
     write_pretty_json(request.adapter_bank_output, &adapter_bank)?;
+    let oracle_model_dir = request.output_dir.join("oracle_models");
+    let oracle_validation = evaluate_direct_basis_oracles(
+        &base,
+        &train_examples,
+        &holdout_examples,
+        &request.hashgrid,
+        train_config,
+        request.oracle_config,
+        Some(&oracle_model_dir),
+    )?;
     let report = CliHyper2dDirectBasisTrainingReport {
+        experiment_config: request.experiment_config.clone(),
         preset: request.preset,
         target_images: request
             .target_images
@@ -779,7 +1644,14 @@ fn run_burn_wgpu_direct_basis(
         per_parameter_grad_normalization: request.per_parameter_grad_normalization,
         base_sgd: request.base_sgd,
         adapter_sgd: request.adapter_sgd,
+        train_refine_adapter_sgd: request.train_refine_adapter_sgd,
+        holdout_adapter_sgd: request.holdout_adapter_sgd,
         adapter_l2_weight: request.adapter_l2,
+        train_adapter_refine_steps: request.train_adapter_refine_steps,
+        train_adapter_refine_batch_size: normalized_example_batch_size(
+            train_refine_batch_size,
+            train_examples.len(),
+        ),
         holdout_adapter_steps: request.holdout_adapter_steps,
         holdout_adapter_batch_size: normalized_example_batch_size(
             request.holdout_adapter_batch_size,
@@ -793,7 +1665,9 @@ fn run_burn_wgpu_direct_basis(
         best_train_loss: burn_report.best_train_loss,
         best_train_step: burn_report.best_train_step,
         history: burn_report.history,
+        train_refine_history: burn_report.train_refine_history,
         holdout_history: burn_report.holdout_history,
+        oracle_validation,
         adapters: adapter_reports,
     };
     write_pretty_json(request.report_output, &report)?;
@@ -957,6 +1831,7 @@ fn run_python_gpu_direct_basis(
     };
     write_pretty_json(request.adapter_bank_output, &adapter_bank)?;
     let report = CliHyper2dDirectBasisTrainingReport {
+        experiment_config: request.experiment_config.clone(),
         preset: request.preset,
         target_images: request
             .target_images
@@ -1015,7 +1890,15 @@ fn run_python_gpu_direct_basis(
         per_parameter_grad_normalization: request.per_parameter_grad_normalization,
         base_sgd: request.base_sgd,
         adapter_sgd: request.adapter_sgd,
+        train_refine_adapter_sgd: request.train_refine_adapter_sgd,
+        holdout_adapter_sgd: request.holdout_adapter_sgd,
         adapter_l2_weight: request.adapter_l2,
+        train_adapter_refine_steps: request.train_adapter_refine_steps,
+        train_adapter_refine_batch_size: if request.train_adapter_refine_batch_size == 0 {
+            request.example_batch_size
+        } else {
+            request.train_adapter_refine_batch_size
+        },
         holdout_adapter_steps: request.holdout_adapter_steps,
         holdout_adapter_batch_size: request.holdout_adapter_batch_size,
         eval_examples: request.eval_examples,
@@ -1026,7 +1909,9 @@ fn run_python_gpu_direct_basis(
         best_train_loss: payload.best_train_loss,
         best_train_step: payload.best_train_step,
         history: payload.history,
+        train_refine_history: Vec::new(),
         holdout_history: payload.holdout_history,
+        oracle_validation: None,
         adapters: adapter_reports,
     };
     write_pretty_json(request.report_output, &report)?;
@@ -1137,6 +2022,8 @@ struct DirectBasisArgCheck {
     update_prob: f32,
     base_learning_rate: f32,
     adapter_learning_rate: f32,
+    train_adapter_refine_learning_rate: Option<f32>,
+    holdout_adapter_learning_rate: Option<f32>,
     adapter_l2: f32,
 }
 
@@ -1165,6 +2052,12 @@ fn validate_direct_basis_args(
         || config.base_learning_rate < 0.0
         || !config.adapter_learning_rate.is_finite()
         || config.adapter_learning_rate < 0.0
+        || config
+            .train_adapter_refine_learning_rate
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || config
+            .holdout_adapter_learning_rate
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
         return Err(std::io::Error::other("learning rates must be finite and non-negative").into());
     }
@@ -1172,6 +2065,37 @@ fn validate_direct_basis_args(
         return Err(
             std::io::Error::other("adapter L2 weight must be finite and non-negative").into(),
         );
+    }
+    Ok(())
+}
+
+fn validate_oracle_config(
+    config: DirectBasisOracleConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if config.train_examples == 0 && config.holdout_examples == 0 {
+        return Ok(());
+    }
+    if config.epochs == 0
+        || config.repetitions == 0
+        || config.batch_size == 0
+        || config.pool_size == 0
+    {
+        return Err(std::io::Error::other(
+            "oracle epochs, repetitions, batch size, and pool size must be greater than zero",
+        )
+        .into());
+    }
+    if !config.learning_rate.is_finite()
+        || config.learning_rate < 0.0
+        || !config.weight_decay.is_finite()
+        || config.weight_decay < 0.0
+        || !config.grad_clip_norm.is_finite()
+        || config.grad_clip_norm < 0.0
+    {
+        return Err(std::io::Error::other(
+            "oracle optimizer settings must be finite and non-negative",
+        )
+        .into());
     }
     Ok(())
 }
@@ -1218,6 +2142,103 @@ fn load_direct_basis_examples(
         });
     }
     Ok(examples)
+}
+
+fn load_direct_basis_examples_from_adapter_bank(
+    adapter_bank_path: &Path,
+    base: &NpaModel,
+    target_config: DirectBasisTargetConfig,
+) -> Result<Vec<DirectBasisExample>, Box<dyn std::error::Error>> {
+    let bank = load_direct_basis_adapter_bank(adapter_bank_path)?;
+    if bank.entries.is_empty() {
+        return Err(std::io::Error::other("adapter bank has no entries").into());
+    }
+    let anchor = adapter_bank_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut examples = Vec::with_capacity(bank.entries.len());
+    for entry in bank.entries {
+        let split = parse_direct_basis_split(&entry.split)?;
+        let condition_path = resolve_direct_basis_artifact_path(anchor, &entry.condition);
+        let adapter_path = resolve_direct_basis_artifact_path(anchor, &entry.adapter_output);
+        let adapter_manifest = crate::import::load_adapter_manifest(&adapter_path)?;
+        adapter_manifest.adapter.validate(&base.config)?;
+        let target = super::super::target2d::load_target_image_2d_adaptive(
+            &condition_path,
+            target_config.threshold,
+            target_config.points,
+            target_config.image_size,
+        )?;
+        let source = super::sources::Hyper2dScratchSource {
+            slug: entry.slug,
+            title: entry.title,
+            group: entry.group,
+            condition_path,
+            particles: None,
+            seed_scale: None,
+            update_prob: None,
+        };
+        if entry.target_source_width > 0 && entry.target_source_width != target.source_width {
+            eprintln!(
+                "warning: adapter-bank source width {} for {} differs from reloaded target width {}",
+                entry.target_source_width, source.slug, target.source_width
+            );
+        }
+        if entry.target_source_height > 0 && entry.target_source_height != target.source_height {
+            eprintln!(
+                "warning: adapter-bank source height {} for {} differs from reloaded target height {}",
+                entry.target_source_height, source.slug, target.source_height
+            );
+        }
+        if entry.target_points > 0 && entry.target_points != target.point_count() {
+            eprintln!(
+                "warning: adapter-bank target points {} for {} differs from reloaded target points {}",
+                entry.target_points,
+                source.slug,
+                target.point_count()
+            );
+        }
+        examples.push(DirectBasisExample {
+            source,
+            split,
+            target,
+            adapter: adapter_manifest.adapter,
+            last_train_loss: entry.last_train_loss,
+        });
+    }
+    Ok(examples)
+}
+
+fn load_direct_basis_adapter_bank(
+    adapter_bank_path: &Path,
+) -> Result<DirectBasisAdapterBankLoadManifest, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(adapter_bank_path)?;
+    let bank: DirectBasisAdapterBankLoadManifest = serde_json::from_str(&text)?;
+    if bank.adapter_rank == 0 || !bank.adapter_alpha.is_finite() || bank.adapter_alpha <= 0.0 {
+        return Err(std::io::Error::other(
+            "adapter bank rank must be non-zero and alpha must be finite and positive",
+        )
+        .into());
+    }
+    Ok(bank)
+}
+
+fn resolve_direct_basis_artifact_path(anchor: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() || path.exists() {
+        path
+    } else {
+        anchor.join(path)
+    }
+}
+
+fn parse_direct_basis_split(label: &str) -> Result<Hyper2dE2eSplit, Box<dyn std::error::Error>> {
+    match label {
+        "train" => Ok(Hyper2dE2eSplit::Train),
+        "holdout" => Ok(Hyper2dE2eSplit::Holdout),
+        other => Err(std::io::Error::other(format!(
+            "unknown direct-basis adapter split {other:?}"
+        ))
+        .into()),
+    }
 }
 
 fn train_direct_basis_phase(
@@ -1530,11 +2551,88 @@ mod tests {
             update_prob: 0.5,
             base_learning_rate: 1.0e-4,
             adapter_learning_rate: 1.0e-3,
+            train_adapter_refine_learning_rate: None,
+            holdout_adapter_learning_rate: None,
             adapter_l2: 0.0,
         })
         .unwrap_err()
         .to_string();
 
         assert!(err.contains("rollout particles"));
+    }
+
+    #[test]
+    fn direct_basis_experiment_config_accepts_cli_enum_names() {
+        let config: DirectBasisExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            catalog_group = "growing"
+
+            [source.omnisvg]
+            dataset = "illustration"
+
+            [training]
+            device = "gpu"
+
+            [gpu]
+            backend = "burn-wgpu"
+
+            [rollout]
+            seed_mode = "uniform-circle"
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config_value_enum("preset", config.preset, PresetArg::Texture2d).unwrap(),
+            PresetArg::Growing2d
+        ));
+        assert!(matches!(
+            config_value_enum_option::<Hyper2dCatalogGroupArg>(
+                "source.catalog_group",
+                config.source.catalog_group,
+                None,
+            )
+            .unwrap(),
+            Some(Hyper2dCatalogGroupArg::Growing)
+        ));
+        assert!(matches!(
+            config_value_enum_option::<OmniSvgDatasetArg>(
+                "source.omnisvg.dataset",
+                config.source.omnisvg.dataset,
+                None,
+            )
+            .unwrap(),
+            Some(OmniSvgDatasetArg::MmsvgIllustration)
+        ));
+        assert!(matches!(
+            config_value_enum(
+                "training.device",
+                config.training.device,
+                TrainingDeviceArg::Cpu,
+            )
+            .unwrap(),
+            TrainingDeviceArg::Gpu
+        ));
+        assert!(matches!(
+            config_value_enum(
+                "gpu.backend",
+                config.gpu.backend,
+                Hyper2dDirectBasisGpuBackendArg::UpstreamPython,
+            )
+            .unwrap(),
+            Hyper2dDirectBasisGpuBackendArg::BurnWgpu
+        ));
+        assert!(matches!(
+            config_value_enum(
+                "rollout.seed_mode",
+                config.rollout.seed_mode,
+                SeedModeArg::Uniform
+            )
+            .unwrap(),
+            SeedModeArg::UniformCircle
+        ));
     }
 }

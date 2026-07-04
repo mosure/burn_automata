@@ -4,10 +4,7 @@ mod imp {
 
     use burn::{
         backend::{Autodiff, Wgpu},
-        tensor::{
-            Device, Tensor, TensorData,
-            activation::{relu, sigmoid},
-        },
+        tensor::{Device, Tensor, TensorData, activation::relu},
     };
     use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
     use serde_json::json;
@@ -17,8 +14,10 @@ mod imp {
         CliHyper2dDirectBasisHistoryEntry, CliHyper2dDirectBasisLossSummary,
     };
     use crate::{
-        AutomataError, AutomataResult, NpaLowRankAdapter, NpaModel, NpaWeights, SgdConfig,
-        rollout::seed_particles_scaled,
+        AdamWConfig, AutomataError, AutomataResult, NpaLowRankAdapter, NpaModel, NpaWeights,
+        SgdConfig,
+        rollout::{seed_particles_scaled, stochastic_mask},
+        target2d::render_target_2d_splat,
     };
 
     type InnerBackend = Wgpu<f32>;
@@ -26,6 +25,9 @@ mod imp {
     type BurnDevice = Device<BurnBackend>;
     type Tensor1 = Tensor<BurnBackend, 1>;
     type Tensor2 = Tensor<BurnBackend, 2>;
+    type Tensor3 = Tensor<BurnBackend, 3>;
+    type Tensor4 = Tensor<BurnBackend, 4>;
+    type Tensor1Inner = Tensor<InnerBackend, 1>;
     type Tensor2Inner = Tensor<InnerBackend, 2>;
 
     const BACKEND: &str = "burn_wgpu_autodiff_dense_direct_basis";
@@ -36,11 +38,13 @@ mod imp {
         pub(crate) device: String,
         pub(crate) metrics: serde_json::Value,
         pub(crate) history: Vec<CliHyper2dDirectBasisHistoryEntry>,
+        pub(crate) train_refine_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
         pub(crate) holdout_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
         pub(crate) best_train_loss: Option<f32>,
         pub(crate) best_train_step: usize,
     }
 
+    #[derive(Clone)]
     struct BurnBaseParams {
         w1: Tensor2,
         b1: Tensor2,
@@ -48,6 +52,7 @@ mod imp {
         b2: Tensor2,
     }
 
+    #[derive(Clone)]
     struct BurnAdapterParams {
         rank: usize,
         alpha: f32,
@@ -59,15 +64,65 @@ mod imp {
         b2_delta: Tensor2,
     }
 
+    struct BurnAdapterBatch {
+        rank: usize,
+        alpha: f32,
+        w1_down: Tensor3,
+        w1_up: Tensor3,
+        w2_down: Tensor3,
+        w2_up: Tensor3,
+        b1_delta: Tensor3,
+        b2_delta: Tensor3,
+    }
+
+    struct BurnBaseAdamWState {
+        step: usize,
+        w1_m: Tensor2Inner,
+        w1_v: Tensor2Inner,
+        b1_m: Tensor2Inner,
+        b1_v: Tensor2Inner,
+        w2_m: Tensor2Inner,
+        w2_v: Tensor2Inner,
+        b2_m: Tensor2Inner,
+        b2_v: Tensor2Inner,
+    }
+
+    struct BurnAdapterAdamWState {
+        step: usize,
+        w1_down_m: Tensor2Inner,
+        w1_down_v: Tensor2Inner,
+        w1_up_m: Tensor2Inner,
+        w1_up_v: Tensor2Inner,
+        w2_down_m: Tensor2Inner,
+        w2_down_v: Tensor2Inner,
+        w2_up_m: Tensor2Inner,
+        w2_up_v: Tensor2Inner,
+        b1_delta_m: Tensor2Inner,
+        b1_delta_v: Tensor2Inner,
+        b2_delta_m: Tensor2Inner,
+        b2_delta_v: Tensor2Inner,
+    }
+
     struct BurnTargetExample {
-        positions: Tensor2,
-        colors: Tensor2,
+        target_rgb: Tensor2,
+        target_density: Tensor2,
+        target_mean: Tensor2,
+        pixel_xy: Tensor2,
+        pixel_size: f32,
+        target_points: usize,
         particle_count: usize,
         update_prob: f32,
         seed_scale: f32,
     }
 
     struct BurnLossTensors {
+        total: Tensor1,
+        splat: Tensor1,
+        color: Tensor1,
+        density: Tensor1,
+    }
+
+    struct BurnLossBatchTensors {
         total: Tensor1,
         splat: Tensor1,
         color: Tensor1,
@@ -87,6 +142,7 @@ mod imp {
         train_examples: &mut [DirectBasisExample],
         holdout_examples: &mut [DirectBasisExample],
         train_config: DirectBasisTrainConfig,
+        train_refine_config: DirectBasisTrainConfig,
         holdout_config: DirectBasisTrainConfig,
     ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
         if base.config.spatial_dims != 2 {
@@ -111,6 +167,14 @@ mod imp {
             "train",
         )?;
         params.write_to_model(base)?;
+        let train_refine_phase = run_phase(
+            &mut params,
+            &mut train_adapters,
+            &train_targets,
+            train_refine_config,
+            false,
+            "train-refine",
+        )?;
         write_adapters(train_examples, &train_adapters)?;
 
         let mut holdout_adapters = holdout_examples
@@ -131,30 +195,65 @@ mod imp {
         let metrics = json!({
             "backend": BACKEND,
             "device": "wgpu-default",
-            "objective": "dense_burn_target_point_splat_loss",
-            "perception": "dense_all_pairs_blur_density_grad_zero_state_grad",
+            "objective": "target2d_pixel_splat_loss_full_image",
+            "perception": "dense_compact_sph_blur_state_grad_density_grad_hybrid_moment_log_norm",
             "adapter_cache": adapter_cache_metrics(
                 base,
+                &params,
                 &train_adapters,
                 &holdout_adapters,
                 &train_targets,
                 &holdout_targets,
-            ),
+            )?,
             "train_examples": train_examples.len(),
             "holdout_examples": holdout_examples.len(),
             "train_steps": train_config.steps,
+            "train_adapter_refine_steps": train_refine_config.steps,
             "holdout_adapter_steps": holdout_config.steps,
             "train_final_dense_loss": train_phase.history.last().map(|entry| entry.loss),
+            "train_refine_final_dense_loss": train_refine_phase.history.last().map(|entry| entry.loss),
             "holdout_final_dense_loss": holdout_phase.history.last().map(|entry| entry.loss),
+            "checkpoint_selection": "restore_best_reported_eval_loss",
+            "optimizer": "adamw",
+            "optimizer_cli_fields": "base/adapter learning_rate, weight_decay, grad_clip_norm",
+            "adamw_beta1": 0.9,
+            "adamw_beta2": 0.999,
+            "adamw_epsilon": 1.0e-8,
+            "adapter_gradient_scale": "unaverage_batch_loss_for_per_sample_adapter_adamw",
+            "batching": "homogeneous_particle_count_batched_rollout_perception_splat_loss",
+            "evaluation": "homogeneous_particle_count_batched_loss_vectors",
+            "train_mean_adapter_updates_per_sample": mean_updates_per_sample(
+                train_config.steps,
+                train_config.example_batch_size,
+                train_examples.len(),
+            ),
+            "train_refine_mean_adapter_updates_per_sample": mean_updates_per_sample(
+                train_refine_config.steps,
+                train_refine_config.example_batch_size,
+                train_examples.len(),
+            ),
+            "holdout_mean_adapter_updates_per_sample": mean_updates_per_sample(
+                holdout_config.steps,
+                holdout_config.example_batch_size,
+                holdout_examples.len(),
+            ),
         });
+        let (best_train_loss, best_train_step) = match train_refine_phase.best_loss {
+            Some(loss) => (
+                Some(loss),
+                train_config.steps + train_refine_phase.best_step,
+            ),
+            None => (train_phase.best_loss, train_phase.best_step),
+        };
         Ok(BurnWgpuDirectBasisOutput {
             backend: BACKEND,
             device: "wgpu-default".to_string(),
             metrics,
             history: train_phase.history,
+            train_refine_history: train_refine_phase.history,
             holdout_history: holdout_phase.history,
-            best_train_loss: train_phase.best_loss,
-            best_train_step: train_phase.best_step,
+            best_train_loss,
+            best_train_step,
         })
     }
 
@@ -183,41 +282,93 @@ mod imp {
         let mut history = Vec::new();
         let mut best_loss = None;
         let mut best_step = 0;
+        let mut best_params = None::<BurnBaseParams>;
+        let mut best_adapters = None::<Vec<BurnAdapterParams>>;
+        let mut base_optimizer = BurnBaseAdamWState::zeros_like(params);
+        let mut adapter_optimizers = adapters
+            .iter()
+            .map(BurnAdapterAdamWState::zeros_like)
+            .collect::<Vec<_>>();
         for step in 1usize..=config.steps {
+            let should_report =
+                step == config.steps || step.is_multiple_of(config.report_interval.max(1));
             let started = Instant::now();
             let indices = sample_indices(targets.len(), config.example_batch_size, &mut rng);
-            let mut total = None::<Tensor1>;
-            let mut loss_sum = 0.0_f32;
-            let mut particle_steps = 0.0_f64;
-            for &idx in &indices {
-                let loss = example_loss(
-                    params,
-                    &adapters[idx],
-                    &targets[idx],
-                    config,
-                    config
-                        .seed
-                        .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9))
-                        .wrapping_add(idx as u64),
-                );
-                let scalars = loss_scalars(&loss)?;
-                loss_sum += scalars.total;
-                particle_steps += targets[idx].particle_count as f64 * config.rollout_steps as f64;
-                let scaled = loss.total.div_scalar(indices.len() as f32);
-                total = Some(match total {
-                    Some(value) => value + scaled,
-                    None => scaled,
-                });
-            }
-            let Some(total_loss) = total else {
+            let step_seed = config
+                .seed
+                .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9));
+            let (loss, loss_sum, particle_steps) = if homogeneous_particle_count(targets, &indices)
+                .is_some()
+            {
+                let loss =
+                    batch_example_loss(params, adapters, targets, &indices, config, step_seed)?;
+                let loss_sum = if should_report {
+                    Some(loss_scalars(&loss)?.total * indices.len() as f32)
+                } else {
+                    None
+                };
+                let particle_steps = indices
+                    .iter()
+                    .map(|idx| targets[*idx].particle_count as f64 * config.rollout_steps as f64)
+                    .sum::<f64>();
+                (loss, loss_sum, particle_steps)
+            } else {
+                let mut total = None::<Tensor1>;
+                let mut loss_sum = should_report.then_some(0.0_f32);
+                let mut particle_steps = 0.0_f64;
+                for &idx in &indices {
+                    let loss = example_loss(
+                        params,
+                        &adapters[idx],
+                        &targets[idx],
+                        config,
+                        step_seed.wrapping_add(idx as u64),
+                    );
+                    if let Some(loss_sum) = loss_sum.as_mut() {
+                        *loss_sum += loss_scalars(&loss)?.total;
+                    }
+                    particle_steps +=
+                        targets[idx].particle_count as f64 * config.rollout_steps as f64;
+                    let scaled = loss.total.div_scalar(indices.len() as f32);
+                    total = Some(match total {
+                        Some(value) => value + scaled,
+                        None => scaled,
+                    });
+                }
+                let Some(total_loss) = total else {
+                    return Err(std::io::Error::other("Burn direct-basis batch was empty").into());
+                };
+                (
+                    BurnLossTensors {
+                        total: total_loss,
+                        splat: Tensor::<BurnBackend, 1>::zeros(
+                            [1],
+                            &targets[indices[0]].target_rgb.device(),
+                        ),
+                        color: Tensor::<BurnBackend, 1>::zeros(
+                            [1],
+                            &targets[indices[0]].target_rgb.device(),
+                        ),
+                        density: Tensor::<BurnBackend, 1>::zeros(
+                            [1],
+                            &targets[indices[0]].target_rgb.device(),
+                        ),
+                    },
+                    loss_sum,
+                    particle_steps,
+                )
+            };
+            if indices.is_empty() {
                 return Err(std::io::Error::other("Burn direct-basis batch was empty").into());
             };
-            let mut grads = total_loss.backward();
+            let mut grads = loss.total.backward();
             let (base_grad_norm, base_grad_scale) = if update_base {
-                params.apply_sgd(
+                params.apply_adamw(
                     &mut grads,
-                    config.base_sgd,
+                    &mut base_optimizer,
+                    adamw_from_sgd(config.base_sgd),
                     config.per_parameter_grad_normalization,
+                    should_report,
                 )?
             } else {
                 (0.0, 1.0)
@@ -225,17 +376,20 @@ mod imp {
             let mut adapter_grad_sum = 0.0_f32;
             let mut adapter_grad_max = 0.0_f32;
             for &idx in &indices {
-                let (grad_norm, _) = adapters[idx].apply_sgd(
+                let (grad_norm, _) = adapters[idx].apply_adamw(
                     &mut grads,
-                    config.adapter_sgd,
+                    &mut adapter_optimizers[idx],
+                    adamw_from_sgd(config.adapter_sgd),
                     config.per_parameter_grad_normalization,
+                    indices.len() as f32,
+                    should_report,
                 )?;
-                adapter_grad_sum += grad_norm;
-                adapter_grad_max = adapter_grad_max.max(grad_norm);
+                if should_report {
+                    adapter_grad_sum += grad_norm;
+                    adapter_grad_max = adapter_grad_max.max(grad_norm);
+                }
             }
             let elapsed = started.elapsed();
-            let should_report =
-                step == config.steps || step.is_multiple_of(config.report_interval.max(1));
             if should_report {
                 let eval_loss = evaluate_targets(
                     params,
@@ -246,13 +400,20 @@ mod imp {
                     config.eval_seed + step as u64,
                 )?;
                 if let Some(eval_loss) = eval_loss {
+                    let loss_mean = loss_sum.ok_or_else(|| {
+                        std::io::Error::other(
+                            "Burn direct-basis report step missing scalar loss readback",
+                        )
+                    })? / indices.len() as f32;
                     if best_loss.is_none_or(|best| eval_loss.mean_total_loss < best) {
                         best_loss = Some(eval_loss.mean_total_loss);
                         best_step = step;
+                        best_params = update_base.then(|| params.clone());
+                        best_adapters = Some(adapters.to_vec());
                     }
                     history.push(CliHyper2dDirectBasisHistoryEntry {
                         step,
-                        loss: loss_sum / indices.len() as f32,
+                        loss: loss_mean,
                         eval_loss: Some(eval_loss),
                         base_grad_norm,
                         base_grad_scale,
@@ -266,7 +427,7 @@ mod imp {
                     println!(
                         "burn-wgpu direct-basis {phase_label} step {step}/{} loss={:.6} eval_mean={:.6} examples={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
                         config.steps,
-                        loss_sum / indices.len() as f32,
+                        loss_mean,
                         eval_loss.mean_total_loss,
                         indices.len(),
                         particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
@@ -274,6 +435,12 @@ mod imp {
                     );
                 }
             }
+        }
+        if let Some(saved) = best_params {
+            *params = saved;
+        }
+        if let Some(saved) = best_adapters {
+            adapters.clone_from_slice(&saved);
         }
         Ok(BurnPhaseReport {
             history,
@@ -308,20 +475,34 @@ mod imp {
             mean_color_loss: 0.0,
             mean_density_loss: 0.0,
         };
-        for &idx in &indices {
-            let loss = example_loss(
-                params,
-                &adapters[idx],
-                &targets[idx],
-                config,
-                seed.wrapping_add(idx as u64),
-            );
-            let scalars = loss_scalars(&loss)?;
-            summary.mean_total_loss += scalars.total;
-            summary.max_total_loss = summary.max_total_loss.max(scalars.total);
-            summary.mean_splat_loss += scalars.splat;
-            summary.mean_color_loss += scalars.color;
-            summary.mean_density_loss += scalars.density;
+        let eval_batch_size = normalized_eval_batch_size(config.example_batch_size, indices.len());
+        for chunk in indices.chunks(eval_batch_size) {
+            if homogeneous_particle_count(targets, chunk).is_some() {
+                let loss = batch_example_eval_loss(params, adapters, targets, chunk, config, seed)?;
+                for scalars in loss_vector_scalars(loss)? {
+                    summary.mean_total_loss += scalars.total;
+                    summary.max_total_loss = summary.max_total_loss.max(scalars.total);
+                    summary.mean_splat_loss += scalars.splat;
+                    summary.mean_color_loss += scalars.color;
+                    summary.mean_density_loss += scalars.density;
+                }
+            } else {
+                for &idx in chunk {
+                    let loss = example_loss(
+                        params,
+                        &adapters[idx],
+                        &targets[idx],
+                        config,
+                        seed.wrapping_add(idx as u64),
+                    );
+                    let scalars = loss_scalars(&loss)?;
+                    summary.mean_total_loss += scalars.total;
+                    summary.max_total_loss = summary.max_total_loss.max(scalars.total);
+                    summary.mean_splat_loss += scalars.splat;
+                    summary.mean_color_loss += scalars.color;
+                    summary.mean_density_loss += scalars.density;
+                }
+            }
         }
         let scale = 1.0 / indices.len() as f32;
         summary.mean_total_loss *= scale;
@@ -329,6 +510,14 @@ mod imp {
         summary.mean_color_loss *= scale;
         summary.mean_density_loss *= scale;
         Ok(Some(summary))
+    }
+
+    fn normalized_eval_batch_size(requested: usize, examples: usize) -> usize {
+        if requested == 0 {
+            examples.max(1)
+        } else {
+            requested.min(examples).max(1)
+        }
     }
 
     fn example_loss(
@@ -343,10 +532,12 @@ mod imp {
             config,
             target.seed_scale,
             seed,
-            &target.positions.device(),
+            &target.target_rgb.device(),
         );
+        let mut rng = StdRng::seed_from_u64(seed ^ 0x005e_ed2d);
+        let mut displacement = Tensor::<BurnBackend, 1>::zeros([1], &target.target_rgb.device());
         for _ in 0..config.rollout_steps {
-            let features = dense_perception(&x, &s, target.seed_scale);
+            let features = dense_perception(&x, &s, config);
             let update = params.forward_adapter(features, adapter, config);
             let dx_raw = update.clone().narrow(1, 0, 2);
             let ds = update.narrow(1, 2, s.shape().dims::<2>()[1]);
@@ -354,17 +545,170 @@ mod imp {
                 .clone()
                 .mul(dx_raw.clone())
                 .sum_dim(1)
+                .add_scalar(EPSILON * EPSILON)
                 .sqrt()
                 .add_scalar(1.0)
                 .expand([target.particle_count, 2]);
-            let dx = dx_raw.mul_scalar(0.1 * 0.5 * target.update_prob).div(norm);
-            x = x + dx;
-            s = s + ds.mul_scalar(target.update_prob);
+            let dx = dx_raw.mul_scalar(config.motion_scale).div(norm);
+            let dx_norm = dx
+                .clone()
+                .mul(dx.clone())
+                .sum_dim(1)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .mean();
+            displacement = displacement + dx_norm;
+            let mask = tensor(
+                stochastic_mask(target.particle_count, target.update_prob, &mut rng),
+                [target.particle_count, 1],
+                &target.target_rgb.device(),
+            );
+            let state_dims = s.shape().dims::<2>()[1];
+            x = x + dx.mul(mask.clone().expand([target.particle_count, 2]));
+            s = s + ds.mul(mask.expand([target.particle_count, state_dims]));
         }
-        target_point_loss(&x, &s, target, config, adapter)
+        target_splat_loss(&x, &s, target, config, adapter, displacement)
     }
 
-    fn dense_perception(x: &Tensor2, s: &Tensor2, seed_scale: f32) -> Tensor2 {
+    fn batch_example_loss(
+        params: &BurnBaseParams,
+        adapters: &[BurnAdapterParams],
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        step_seed: u64,
+    ) -> Result<BurnLossTensors, Box<dyn std::error::Error>> {
+        let Some(particle_count) = homogeneous_particle_count(targets, indices) else {
+            return Err(std::io::Error::other(
+                "Burn batch path requires homogeneous particle counts",
+            )
+            .into());
+        };
+        let device = &targets[indices[0]].target_rgb.device();
+        let adapter_batch = BurnAdapterBatch::from_indices(adapters, indices);
+        let (mut x, mut s) =
+            seed_batch_tensors(targets, indices, particle_count, config, step_seed, device);
+        let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
+        let mut displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
+        for _ in 0..config.rollout_steps {
+            let features = dense_perception_batch(&x, &s, config);
+            let update = params.forward_adapter_batch(features, &adapter_batch);
+            let state_dims = s.shape().dims::<3>()[2];
+            let dx_raw = update.clone().narrow(2, 0, 2);
+            let ds = update.narrow(2, 2, state_dims);
+            let norm = dx_raw
+                .clone()
+                .mul(dx_raw.clone())
+                .sum_dim(2)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .add_scalar(1.0)
+                .expand([indices.len(), particle_count, 2]);
+            let dx = dx_raw.mul_scalar(config.motion_scale).div(norm);
+            let dx_norm = dx
+                .clone()
+                .mul(dx.clone())
+                .sum_dim(2)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .mean();
+            displacement = displacement + dx_norm;
+            let mask = tensor3(
+                batch_masks(targets, indices, particle_count, &mut rng),
+                [indices.len(), particle_count, 1],
+                device,
+            );
+            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+        }
+        Ok(target_splat_loss_batch(
+            &x,
+            &s,
+            targets,
+            indices,
+            config,
+            &adapter_batch,
+            displacement,
+        ))
+    }
+
+    fn batch_example_eval_loss(
+        params: &BurnBaseParams,
+        adapters: &[BurnAdapterParams],
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        seed: u64,
+    ) -> Result<BurnLossBatchTensors, Box<dyn std::error::Error>> {
+        let Some(particle_count) = homogeneous_particle_count(targets, indices) else {
+            return Err(std::io::Error::other(
+                "Burn eval batch path requires homogeneous particle counts",
+            )
+            .into());
+        };
+        let device = &targets[indices[0]].target_rgb.device();
+        let adapter_batch = BurnAdapterBatch::from_indices(adapters, indices);
+        let (mut x, mut s) =
+            seed_batch_tensors(targets, indices, particle_count, config, seed, device);
+        let mut rngs = indices
+            .iter()
+            .map(|idx| StdRng::seed_from_u64(seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
+            .collect::<Vec<_>>();
+        let mut displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
+        for _ in 0..config.rollout_steps {
+            let features = dense_perception_batch(&x, &s, config);
+            let update = params.forward_adapter_batch(features, &adapter_batch);
+            let state_dims = s.shape().dims::<3>()[2];
+            let dx_raw = update.clone().narrow(2, 0, 2);
+            let ds = update.narrow(2, 2, state_dims);
+            let norm = dx_raw
+                .clone()
+                .mul(dx_raw.clone())
+                .sum_dim(2)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .add_scalar(1.0)
+                .expand([indices.len(), particle_count, 2]);
+            let dx = dx_raw.mul_scalar(config.motion_scale).div(norm);
+            let dx_norm = dx
+                .clone()
+                .mul(dx.clone())
+                .sum_dim(2)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .reshape([indices.len(), particle_count])
+                .mean_dim(1)
+                .squeeze_dim::<1>(1);
+            displacement = displacement + dx_norm;
+            let mask = tensor3(
+                batch_masks_with_rngs(targets, indices, particle_count, &mut rngs),
+                [indices.len(), particle_count, 1],
+                device,
+            );
+            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+        }
+        Ok(target_splat_loss_batch_vector(
+            &x,
+            &s,
+            targets,
+            indices,
+            config,
+            &adapter_batch,
+            displacement,
+        ))
+    }
+
+    fn homogeneous_particle_count(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+    ) -> Option<usize> {
+        let mut iter = indices.iter().map(|idx| targets[*idx].particle_count);
+        let first = iter.next()?;
+        iter.all(|count| count == first).then_some(first)
+    }
+
+    fn dense_perception(x: &Tensor2, s: &Tensor2, config: DirectBasisTrainConfig) -> Tensor2 {
         let dims = s.shape().dims::<2>();
         let rows = dims[0];
         let state_dims = dims[1];
@@ -376,67 +720,171 @@ mod imp {
             .mul(diff.clone())
             .sum_dim(2)
             .squeeze_dim::<2>(2);
-        let sigma = seed_scale.max(0.05);
-        let weights = dist2.mul_scalar(-0.5 / (sigma * sigma)).exp();
-        let density = weights
+        let eps = config.grid_eps.max(EPSILON);
+        let compact = relu(dist2.clone().mul_scalar(-1.0).add_scalar(eps * eps));
+        let compact2 = compact.clone().mul(compact.clone());
+        let smooth = compact2
+            .mul(compact)
+            .mul_scalar(4.0 / (std::f32::consts::PI * eps.powi(8)));
+        let density = smooth.clone().sum_dim(1).clamp_min(EPSILON);
+        let volume_j = density.clone().transpose().recip().expand([rows, rows]);
+        let blur = smooth.clone().mul(volume_j.clone()).matmul(s.clone());
+
+        let r = dist2.add_scalar(EPSILON * EPSILON).sqrt();
+        let spiky = relu(r.clone().mul_scalar(-1.0).add_scalar(eps));
+        let spiky_mag = spiky
             .clone()
-            .sum_dim(1)
-            .clamp_min(EPSILON)
-            .expand([rows, state_dims]);
-        let blur = weights.clone().matmul(s.clone()).div(density);
-        let state_grad = Tensor::<BurnBackend, 2>::zeros([rows, state_dims * 2], &s.device());
-        let density_grad = weights
+            .mul(spiky)
+            .div(r)
+            .mul_scalar(30.0 / (std::f32::consts::PI * eps.powi(5)));
+        let grad = diff
             .clone()
-            .unsqueeze_dim::<3>(2)
-            .mul(diff)
+            .mul(spiky_mag.unsqueeze_dim::<3>(2).expand([rows, rows, 2]));
+        let density_grad = log_normalize_vectors(
+            grad.clone()
+                .sum_dim(1)
+                .squeeze_dim::<2>(1)
+                .mul_scalar((eps / 0.1).powi(3) / rows.max(1) as f32),
+        );
+
+        let sj = s
+            .clone()
+            .unsqueeze_dim::<3>(0)
+            .expand([rows, rows, state_dims]);
+        let si = s
+            .clone()
+            .unsqueeze_dim::<3>(1)
+            .expand([rows, rows, state_dims]);
+        let state_diff = sj - si;
+        let volume_grad = grad.mul(volume_j.unsqueeze_dim::<3>(2).expand([rows, rows, 2]));
+        let state_grad = state_diff
+            .unsqueeze_dim::<4>(3)
+            .expand([rows, rows, state_dims, 2])
+            .mul(
+                volume_grad
+                    .clone()
+                    .unsqueeze_dim::<4>(2)
+                    .expand([rows, rows, state_dims, 2]),
+            )
             .sum_dim(1)
-            .squeeze_dim::<2>(1)
-            .div(weights.sum_dim(1).clamp_min(EPSILON).expand([rows, 2]))
-            .div_scalar(rows.max(1) as f32);
+            .squeeze_dim::<3>(1);
+        let state_grad = apply_moment_correction_2d(state_grad, diff, volume_grad);
+        let state_grad = log_normalize_state_gradient(state_grad);
+
         Tensor::cat(vec![s.clone(), blur, state_grad, density_grad], 1)
     }
 
-    fn target_point_loss(
+    fn dense_perception_batch(x: &Tensor3, s: &Tensor3, config: DirectBasisTrainConfig) -> Tensor3 {
+        let dims = s.shape().dims::<3>();
+        let batches = dims[0];
+        let rows = dims[1];
+        let state_dims = dims[2];
+        let xi = x
+            .clone()
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, rows, rows, 2]);
+        let xj = x
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .expand([batches, rows, rows, 2]);
+        let diff = xj - xi;
+        let dist2 = diff
+            .clone()
+            .mul(diff.clone())
+            .sum_dim(3)
+            .squeeze_dim::<3>(3);
+        let eps = config.grid_eps.max(EPSILON);
+        let compact = relu(dist2.clone().mul_scalar(-1.0).add_scalar(eps * eps));
+        let compact2 = compact.clone().mul(compact.clone());
+        let smooth = compact2
+            .mul(compact)
+            .mul_scalar(4.0 / (std::f32::consts::PI * eps.powi(8)));
+        let density = smooth.clone().sum_dim(2).clamp_min(EPSILON);
+        let volume_j = density
+            .clone()
+            .swap_dims(1, 2)
+            .recip()
+            .expand([batches, rows, rows]);
+        let blur = smooth.clone().mul(volume_j.clone()).matmul(s.clone());
+
+        let r = dist2.add_scalar(EPSILON * EPSILON).sqrt();
+        let spiky = relu(r.clone().mul_scalar(-1.0).add_scalar(eps));
+        let spiky_mag = spiky
+            .clone()
+            .mul(spiky)
+            .div(r)
+            .mul_scalar(30.0 / (std::f32::consts::PI * eps.powi(5)));
+        let grad = diff.clone().mul(
+            spiky_mag
+                .unsqueeze_dim::<4>(3)
+                .expand([batches, rows, rows, 2]),
+        );
+        let density_grad = log_normalize_vectors_batch(
+            grad.clone()
+                .sum_dim(2)
+                .squeeze_dim::<3>(2)
+                .mul_scalar((eps / 0.1).powi(3) / rows.max(1) as f32),
+        );
+
+        let sj = s
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .expand([batches, rows, rows, state_dims]);
+        let si = s
+            .clone()
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, rows, rows, state_dims]);
+        let state_diff = sj - si;
+        let volume_grad = grad.mul(
+            volume_j
+                .unsqueeze_dim::<4>(3)
+                .expand([batches, rows, rows, 2]),
+        );
+        let state_grad = state_diff
+            .unsqueeze_dim::<5>(4)
+            .expand([batches, rows, rows, state_dims, 2])
+            .mul(
+                volume_grad
+                    .clone()
+                    .unsqueeze_dim::<5>(3)
+                    .expand([batches, rows, rows, state_dims, 2]),
+            )
+            .sum_dim(2)
+            .squeeze_dim::<4>(2);
+        let state_grad = apply_moment_correction_2d_batch(state_grad, diff, volume_grad);
+        let state_grad = log_normalize_state_gradient_batch(state_grad);
+
+        Tensor::cat(vec![s.clone(), blur, state_grad, density_grad], 2)
+    }
+
+    fn target_splat_loss(
         x: &Tensor2,
         s: &Tensor2,
         target: &BurnTargetExample,
         config: DirectBasisTrainConfig,
         adapter: &BurnAdapterParams,
+        displacement: Tensor1,
     ) -> BurnLossTensors {
-        let target_shape = target.positions.shape().dims::<2>();
-        let target_points = target_shape[0];
         let particle_count = x.shape().dims::<2>()[0];
-        let target_i = target.positions.clone().unsqueeze_dim::<3>(1).expand([
-            target_points,
-            particle_count,
-            2,
+        let state_dims = s.shape().dims::<2>()[1];
+        let centered = if config.loss_config.center {
+            x.clone() - x.clone().mean_dim(0).expand([particle_count, 2])
+                + target.target_mean.clone().expand([particle_count, 2])
+        } else {
+            x.clone()
+        };
+        let colors = s.clone().narrow(1, state_dims - 3, 3).add_scalar(0.5);
+        let (rgb, density) = splat_render(&centered, &colors, target, config, particle_count);
+        let density_diff = density - target.target_density.clone();
+        let density_term = l1l2_tensor(density_diff);
+        let density_loss = density_term.clone().mean();
+        let color_gate = density_term.mul_scalar(-1.0).exp().expand([
+            config.loss_config.image_size * config.loss_config.image_size,
+            3,
         ]);
-        let xj = x
-            .clone()
-            .unsqueeze_dim::<3>(0)
-            .expand([target_points, particle_count, 2]);
-        let diff = target_i - xj;
-        let dist2 = diff.clone().mul(diff).sum_dim(2).squeeze_dim::<2>(2);
-        let sigma = (config.loss_config.sigma * 0.01).max(0.01);
-        let weights = dist2.mul_scalar(-0.5 / (sigma * sigma)).exp();
-        let density = weights
-            .clone()
-            .sum_dim(1)
-            .div_scalar(particle_count.max(1) as f32)
-            .clamp_min(EPSILON);
-        let colors = sigmoid(s.clone().narrow(1, s.shape().dims::<2>()[1] - 3, 3));
-        let predicted_colors = weights.matmul(colors).div(
-            density
-                .clone()
-                .expand([target_points, 3])
-                .mul_scalar(particle_count.max(1) as f32),
-        );
-        let color_diff = predicted_colors - target.colors.clone();
-        let color_loss = color_diff.clone().mul(color_diff).mean();
-        let density_diff = density
-            - Tensor::<BurnBackend, 2>::ones([target_points, 1], &x.device())
-                .div_scalar(target_points.max(1) as f32);
-        let density_loss = density_diff.clone().mul(density_diff).mean();
+        let color_loss = l1l2_tensor(rgb - target.target_rgb.clone())
+            .mul(color_gate)
+            .mean();
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
@@ -444,12 +892,13 @@ mod imp {
                 .clone()
                 .mul_scalar(config.loss_config.density_loss_weight);
         let bound = relu(x.clone().abs().add_scalar(-1.0));
-        let bound_loss = bound.clone().mul(bound).mean();
-        let overflow = relu(s.clone().abs().add_scalar(-4.0));
-        let overflow_loss = overflow.clone().mul(overflow).mean();
+        let bound_loss = bound.mean();
+        let overflow = relu(s.clone().abs().add_scalar(-1.0));
+        let overflow_loss = overflow.mean();
         let mut total = splat
             .clone()
             .mul_scalar(config.loss_config.splat_loss_weight)
+            + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
             + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
             + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
         if config.adapter_l2_weight > 0.0 {
@@ -460,6 +909,516 @@ mod imp {
             splat,
             color: color_loss,
             density: density_loss,
+        }
+    }
+
+    fn target_splat_loss_batch(
+        x: &Tensor3,
+        s: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        adapter: &BurnAdapterBatch,
+        displacement: Tensor1,
+    ) -> BurnLossTensors {
+        let dims = x.shape().dims::<3>();
+        let batches = dims[0];
+        let particle_count = dims[1];
+        let state_dims = s.shape().dims::<3>()[2];
+        let target_mean = stack_target_mean(targets, indices);
+        let centered = if config.loss_config.center {
+            x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
+                + target_mean.expand([batches, particle_count, 2])
+        } else {
+            x.clone()
+        };
+        let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
+        let (rgb, density) =
+            splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        let target_density = stack_target_density(targets, indices);
+        let density_diff = density - target_density;
+        let density_term = l1l2_tensor3(density_diff);
+        let density_loss = density_term.clone().mean();
+        let color_gate = density_term.mul_scalar(-1.0).exp().expand([
+            batches,
+            config.loss_config.image_size * config.loss_config.image_size,
+            3,
+        ]);
+        let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
+            .mul(color_gate)
+            .mean();
+        let splat = color_loss
+            .clone()
+            .mul_scalar(config.loss_config.color_loss_weight)
+            + density_loss
+                .clone()
+                .mul_scalar(config.loss_config.density_loss_weight);
+        let bound_loss = relu(x.clone().abs().add_scalar(-1.0)).mean();
+        let overflow_loss = relu(s.clone().abs().add_scalar(-1.0)).mean();
+        let mut total = splat
+            .clone()
+            .mul_scalar(config.loss_config.splat_loss_weight)
+            + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
+            + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
+            + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
+        if config.adapter_l2_weight > 0.0 {
+            total = total + adapter.l2_loss().mul_scalar(config.adapter_l2_weight);
+        }
+        BurnLossTensors {
+            total,
+            splat,
+            color: color_loss,
+            density: density_loss,
+        }
+    }
+
+    fn target_splat_loss_batch_vector(
+        x: &Tensor3,
+        s: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        adapter: &BurnAdapterBatch,
+        displacement: Tensor1,
+    ) -> BurnLossBatchTensors {
+        let dims = x.shape().dims::<3>();
+        let batches = dims[0];
+        let particle_count = dims[1];
+        let state_dims = s.shape().dims::<3>()[2];
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let target_mean = stack_target_mean(targets, indices);
+        let centered = if config.loss_config.center {
+            x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
+                + target_mean.expand([batches, particle_count, 2])
+        } else {
+            x.clone()
+        };
+        let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
+        let (rgb, density) =
+            splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        let density_diff = density - stack_target_density(targets, indices);
+        let density_term = l1l2_tensor3(density_diff);
+        let density_loss = density_term
+            .clone()
+            .reshape([batches, pixels])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let color_gate = density_term
+            .mul_scalar(-1.0)
+            .exp()
+            .expand([batches, pixels, 3]);
+        let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
+            .mul(color_gate)
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let splat = color_loss
+            .clone()
+            .mul_scalar(config.loss_config.color_loss_weight)
+            + density_loss
+                .clone()
+                .mul_scalar(config.loss_config.density_loss_weight);
+        let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
+            .reshape([batches, particle_count * 2])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let overflow_loss = relu(s.clone().abs().add_scalar(-1.0))
+            .reshape([batches, particle_count * state_dims])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let mut total = splat
+            .clone()
+            .mul_scalar(config.loss_config.splat_loss_weight)
+            + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
+            + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
+            + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
+        if config.adapter_l2_weight > 0.0 {
+            total = total
+                + adapter
+                    .l2_loss_vector()
+                    .mul_scalar(config.adapter_l2_weight);
+        }
+        BurnLossBatchTensors {
+            total,
+            splat,
+            color: color_loss,
+            density: density_loss,
+        }
+    }
+
+    fn splat_render(
+        x: &Tensor2,
+        colors: &Tensor2,
+        target: &BurnTargetExample,
+        config: DirectBasisTrainConfig,
+        particle_count: usize,
+    ) -> (Tensor2, Tensor2) {
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let particle_pixels = particle_pixel_positions(x, config);
+        let pixel_i =
+            target
+                .pixel_xy
+                .clone()
+                .unsqueeze_dim::<3>(1)
+                .expand([pixels, particle_count, 2]);
+        let particle_j = particle_pixels
+            .unsqueeze_dim::<3>(0)
+            .expand([pixels, particle_count, 2]);
+        let diff = pixel_i - particle_j;
+        let dist2 = diff.clone().mul(diff).sum_dim(2).squeeze_dim::<2>(2);
+        let sigma =
+            (config.loss_config.sigma * config.loss_config.image_size as f32 * target.pixel_size
+                / (config.loss_config.hi - config.loss_config.lo))
+                .max(EPSILON);
+        let g = dist2.mul_scalar(-0.5 / (sigma * sigma)).exp();
+        let denom = g
+            .clone()
+            .sum_dim(0)
+            .add_scalar(EPSILON)
+            .expand([pixels, particle_count]);
+        let norm_scale = (config.loss_config.image_size as f32 * target.pixel_size
+            / (config.loss_config.hi - config.loss_config.lo))
+            .powi(2);
+        let output_scale = target.target_points as f32 / particle_count.max(1) as f32;
+        let weights = g.div(denom).mul_scalar(output_scale * norm_scale);
+        let density = weights.clone().sum_dim(1);
+        let rgb = weights.matmul(colors.clone());
+        (rgb, density)
+    }
+
+    fn splat_render_batch(
+        x: &Tensor3,
+        colors: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        particle_count: usize,
+    ) -> (Tensor3, Tensor3) {
+        let batches = indices.len();
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let particle_pixels = particle_pixel_positions_batch(x, config);
+        let pixel_i = targets[indices[0]]
+            .pixel_xy
+            .clone()
+            .unsqueeze_dim::<3>(0)
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, pixels, particle_count, 2]);
+        let particle_j =
+            particle_pixels
+                .unsqueeze_dim::<4>(1)
+                .expand([batches, pixels, particle_count, 2]);
+        let diff = pixel_i - particle_j;
+        let dist2 = diff.clone().mul(diff).sum_dim(3).squeeze_dim::<3>(3);
+        let sigma = stack_pixel_sizes(targets, indices)
+            .mul_scalar(config.loss_config.sigma * config.loss_config.image_size as f32)
+            .div_scalar(config.loss_config.hi - config.loss_config.lo)
+            .clamp_min(EPSILON);
+        let sigma2 = sigma
+            .clone()
+            .mul(sigma.clone())
+            .expand([batches, pixels, particle_count]);
+        let g = dist2.mul_scalar(-0.5).div(sigma2).exp();
+        let denom =
+            g.clone()
+                .sum_dim(1)
+                .add_scalar(EPSILON)
+                .expand([batches, pixels, particle_count]);
+        let norm_scale = stack_pixel_sizes(targets, indices)
+            .mul_scalar(config.loss_config.image_size as f32)
+            .div_scalar(config.loss_config.hi - config.loss_config.lo);
+        let norm_scale =
+            norm_scale
+                .clone()
+                .mul(norm_scale)
+                .expand([batches, pixels, particle_count]);
+        let output_scale = stack_target_point_counts(targets, indices)
+            .div_scalar(particle_count.max(1) as f32)
+            .expand([batches, pixels, particle_count]);
+        let weights = g.div(denom).mul(norm_scale).mul(output_scale);
+        let density = weights.clone().sum_dim(2);
+        let rgb = weights.matmul(colors.clone());
+        (rgb, density)
+    }
+
+    fn particle_pixel_positions(x: &Tensor2, config: DirectBasisTrainConfig) -> Tensor2 {
+        let size = config.loss_config.image_size as f32;
+        let world_scale = (size - 1.0) / (config.loss_config.hi - config.loss_config.lo);
+        let px = x
+            .clone()
+            .narrow(1, 0, 1)
+            .add_scalar(-config.loss_config.lo)
+            .mul_scalar(world_scale);
+        let py = x
+            .clone()
+            .narrow(1, 1, 1)
+            .add_scalar(-config.loss_config.lo)
+            .mul_scalar(-world_scale)
+            .add_scalar(size - 1.0);
+        Tensor::cat(vec![px, py], 1)
+    }
+
+    fn particle_pixel_positions_batch(x: &Tensor3, config: DirectBasisTrainConfig) -> Tensor3 {
+        let size = config.loss_config.image_size as f32;
+        let world_scale = (size - 1.0) / (config.loss_config.hi - config.loss_config.lo);
+        let px = x
+            .clone()
+            .narrow(2, 0, 1)
+            .add_scalar(-config.loss_config.lo)
+            .mul_scalar(world_scale);
+        let py = x
+            .clone()
+            .narrow(2, 1, 1)
+            .add_scalar(-config.loss_config.lo)
+            .mul_scalar(-world_scale)
+            .add_scalar(size - 1.0);
+        Tensor::cat(vec![px, py], 2)
+    }
+
+    fn l1l2_tensor(value: Tensor2) -> Tensor2 {
+        value.clone().abs() + value.clone().mul(value)
+    }
+
+    fn l1l2_tensor3(value: Tensor3) -> Tensor3 {
+        value.clone().abs() + value.clone().mul(value)
+    }
+
+    fn log_normalize_vectors(values: Tensor2) -> Tensor2 {
+        let dims = values.shape().dims::<2>();
+        let norm = values
+            .clone()
+            .mul(values.clone())
+            .sum_dim(1)
+            .add_scalar(EPSILON * EPSILON)
+            .sqrt()
+            .clamp_min(EPSILON);
+        values * norm.clone().log1p().div(norm).expand([dims[0], dims[1]])
+    }
+
+    fn log_normalize_vectors_batch(values: Tensor3) -> Tensor3 {
+        let dims = values.shape().dims::<3>();
+        let norm = values
+            .clone()
+            .mul(values.clone())
+            .sum_dim(2)
+            .add_scalar(EPSILON * EPSILON)
+            .sqrt()
+            .clamp_min(EPSILON);
+        values
+            * norm
+                .clone()
+                .log1p()
+                .div(norm)
+                .expand([dims[0], dims[1], dims[2]])
+    }
+
+    fn log_normalize_state_gradient(values: Tensor3) -> Tensor2 {
+        let dims = values.shape().dims::<3>();
+        let norm = values
+            .clone()
+            .mul(values.clone())
+            .sum_dim(2)
+            .add_scalar(EPSILON * EPSILON)
+            .sqrt()
+            .clamp_min(EPSILON);
+        (values
+            * norm
+                .clone()
+                .log1p()
+                .div(norm)
+                .expand([dims[0], dims[1], dims[2]]))
+        .reshape([dims[0], dims[1] * dims[2]])
+    }
+
+    fn log_normalize_state_gradient_batch(values: Tensor4) -> Tensor3 {
+        let dims = values.shape().dims::<4>();
+        let norm = values
+            .clone()
+            .mul(values.clone())
+            .sum_dim(3)
+            .add_scalar(EPSILON * EPSILON)
+            .sqrt()
+            .clamp_min(EPSILON);
+        (values
+            * norm
+                .clone()
+                .log1p()
+                .div(norm)
+                .expand([dims[0], dims[1], dims[2], dims[3]]))
+        .reshape([dims[0], dims[1], dims[2] * dims[3]])
+    }
+
+    fn apply_moment_correction_2d(
+        state_gradient: Tensor3,
+        diff: Tensor3,
+        volume_grad: Tensor3,
+    ) -> Tensor3 {
+        let dims = state_gradient.shape().dims::<3>();
+        let rows = dims[0];
+        let state_dims = dims[1];
+        let moment = diff
+            .unsqueeze_dim::<4>(3)
+            .expand([rows, rows, 2, 2])
+            .mul(volume_grad.unsqueeze_dim::<4>(2).expand([rows, rows, 2, 2]))
+            .sum_dim(1)
+            .squeeze_dim::<3>(1);
+        let a = moment
+            .clone()
+            .narrow(1, 0, 1)
+            .narrow(2, 0, 1)
+            .reshape([rows, 1]);
+        let b = moment
+            .clone()
+            .narrow(1, 0, 1)
+            .narrow(2, 1, 1)
+            .reshape([rows, 1]);
+        let d = moment.narrow(1, 1, 1).narrow(2, 1, 1).reshape([rows, 1]);
+        let det = a.clone().mul(d.clone()) - b.clone().mul(b.clone());
+        let near_singular = det.clone().abs().lower_elem(1.0e-3);
+        let ones = Tensor::<BurnBackend, 2>::ones([rows, 1], &state_gradient.device());
+        let zeros = Tensor::<BurnBackend, 2>::zeros([rows, 1], &state_gradient.device());
+        let inv_det = det.mask_where(near_singular.clone(), ones.clone()).recip();
+        let inv00 = d
+            .mul(inv_det.clone())
+            .mask_where(near_singular.clone(), ones);
+        let inv01 = b
+            .mul_scalar(-1.0)
+            .mul(inv_det.clone())
+            .mask_where(near_singular.clone(), zeros.clone());
+        let inv11 = a.mul(inv_det).mask_where(
+            near_singular,
+            Tensor::<BurnBackend, 2>::ones([rows, 1], &state_gradient.device()),
+        );
+        let gx = state_gradient.clone().narrow(2, 0, 1);
+        let gy = state_gradient.narrow(2, 1, 1);
+        let inv00 = inv00.unsqueeze_dim::<3>(1).expand([rows, state_dims, 1]);
+        let inv01 = inv01.unsqueeze_dim::<3>(1).expand([rows, state_dims, 1]);
+        let inv11 = inv11.unsqueeze_dim::<3>(1).expand([rows, state_dims, 1]);
+        let corrected_x = gx.clone().mul(inv00) + gy.clone().mul(inv01.clone());
+        let corrected_y = gx.mul(inv01) + gy.mul(inv11);
+        Tensor::cat(vec![corrected_x, corrected_y], 2)
+    }
+
+    fn apply_moment_correction_2d_batch(
+        state_gradient: Tensor4,
+        diff: Tensor4,
+        volume_grad: Tensor4,
+    ) -> Tensor4 {
+        let dims = state_gradient.shape().dims::<4>();
+        let batches = dims[0];
+        let rows = dims[1];
+        let state_dims = dims[2];
+        let moment = diff
+            .unsqueeze_dim::<5>(4)
+            .expand([batches, rows, rows, 2, 2])
+            .mul(
+                volume_grad
+                    .unsqueeze_dim::<5>(3)
+                    .expand([batches, rows, rows, 2, 2]),
+            )
+            .sum_dim(2)
+            .squeeze_dim::<4>(2);
+        let a = moment
+            .clone()
+            .narrow(2, 0, 1)
+            .narrow(3, 0, 1)
+            .reshape([batches, rows, 1]);
+        let b = moment
+            .clone()
+            .narrow(2, 0, 1)
+            .narrow(3, 1, 1)
+            .reshape([batches, rows, 1]);
+        let d = moment
+            .narrow(2, 1, 1)
+            .narrow(3, 1, 1)
+            .reshape([batches, rows, 1]);
+        let det = a.clone().mul(d.clone()) - b.clone().mul(b.clone());
+        let near_singular = det.clone().abs().lower_elem(1.0e-3);
+        let ones = Tensor::<BurnBackend, 3>::ones([batches, rows, 1], &state_gradient.device());
+        let zeros = Tensor::<BurnBackend, 3>::zeros([batches, rows, 1], &state_gradient.device());
+        let inv_det = det.mask_where(near_singular.clone(), ones.clone()).recip();
+        let inv00 = d
+            .mul(inv_det.clone())
+            .mask_where(near_singular.clone(), ones);
+        let inv01 = b
+            .mul_scalar(-1.0)
+            .mul(inv_det.clone())
+            .mask_where(near_singular.clone(), zeros);
+        let inv11 = a.mul(inv_det).mask_where(
+            near_singular,
+            Tensor::<BurnBackend, 3>::ones([batches, rows, 1], &state_gradient.device()),
+        );
+        let gx = state_gradient.clone().narrow(3, 0, 1);
+        let gy = state_gradient.narrow(3, 1, 1);
+        let inv00 = inv00
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, rows, state_dims, 1]);
+        let inv01 = inv01
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, rows, state_dims, 1]);
+        let inv11 = inv11
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, rows, state_dims, 1]);
+        let corrected_x = gx.clone().mul(inv00) + gy.clone().mul(inv01.clone());
+        let corrected_y = gx.mul(inv01) + gy.mul(inv11);
+        Tensor::cat(vec![corrected_x, corrected_y], 3)
+    }
+
+    #[derive(Clone, Copy)]
+    struct AdamWBiasCorrection {
+        beta1: f32,
+        beta2: f32,
+    }
+
+    impl BurnBaseAdamWState {
+        fn zeros_like(params: &BurnBaseParams) -> Self {
+            Self {
+                step: 0,
+                w1_m: params.w1.clone().inner().zeros_like(),
+                w1_v: params.w1.clone().inner().zeros_like(),
+                b1_m: params.b1.clone().inner().zeros_like(),
+                b1_v: params.b1.clone().inner().zeros_like(),
+                w2_m: params.w2.clone().inner().zeros_like(),
+                w2_v: params.w2.clone().inner().zeros_like(),
+                b2_m: params.b2.clone().inner().zeros_like(),
+                b2_v: params.b2.clone().inner().zeros_like(),
+            }
+        }
+
+        fn next_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
+            next_adamw_bias_correction(&mut self.step, cfg)
+        }
+    }
+
+    impl BurnAdapterAdamWState {
+        fn zeros_like(params: &BurnAdapterParams) -> Self {
+            Self {
+                step: 0,
+                w1_down_m: params.w1_down.clone().inner().zeros_like(),
+                w1_down_v: params.w1_down.clone().inner().zeros_like(),
+                w1_up_m: params.w1_up.clone().inner().zeros_like(),
+                w1_up_v: params.w1_up.clone().inner().zeros_like(),
+                w2_down_m: params.w2_down.clone().inner().zeros_like(),
+                w2_down_v: params.w2_down.clone().inner().zeros_like(),
+                w2_up_m: params.w2_up.clone().inner().zeros_like(),
+                w2_up_v: params.w2_up.clone().inner().zeros_like(),
+                b1_delta_m: params.b1_delta.clone().inner().zeros_like(),
+                b1_delta_v: params.b1_delta.clone().inner().zeros_like(),
+                b2_delta_m: params.b2_delta.clone().inner().zeros_like(),
+                b2_delta_v: params.b2_delta.clone().inner().zeros_like(),
+            }
+        }
+
+        fn next_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
+            next_adamw_bias_correction(&mut self.step, cfg)
+        }
+    }
+
+    fn next_adamw_bias_correction(step: &mut usize, cfg: AdamWConfig) -> AdamWBiasCorrection {
+        *step = step.saturating_add(1);
+        let step_i32 = (*step).min(i32::MAX as usize) as i32;
+        AdamWBiasCorrection {
+            beta1: 1.0 - cfg.beta1.powi(step_i32),
+            beta2: 1.0 - cfg.beta2.powi(step_i32),
         }
     }
 
@@ -511,11 +1470,59 @@ mod imp {
                 + b2.expand([rows, output_dims])
         }
 
-        fn apply_sgd(
+        fn forward_adapter_batch(&self, features: Tensor3, adapter: &BurnAdapterBatch) -> Tensor3 {
+            let dims = features.shape().dims::<3>();
+            let batches = dims[0];
+            let rows = dims[1];
+            let scale = adapter.alpha / adapter.rank.max(1) as f32;
+            let w1 = self.w1.clone().unsqueeze_dim::<3>(0).expand([
+                batches,
+                self.w1.shape().dims::<2>()[0],
+                self.w1.shape().dims::<2>()[1],
+            ]) + adapter
+                .w1_up
+                .clone()
+                .matmul(adapter.w1_down.clone())
+                .mul_scalar(scale);
+            let w2 = self.w2.clone().unsqueeze_dim::<3>(0).expand([
+                batches,
+                self.w2.shape().dims::<2>()[0],
+                self.w2.shape().dims::<2>()[1],
+            ]) + adapter
+                .w2_up
+                .clone()
+                .matmul(adapter.w2_down.clone())
+                .mul_scalar(scale);
+            let hidden_dims = self.b1.shape().dims::<2>()[1];
+            let output_dims = self.b2.shape().dims::<2>()[1];
+            let b1 = self
+                .b1
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, rows, hidden_dims])
+                + adapter
+                    .b1_delta
+                    .clone()
+                    .expand([batches, rows, hidden_dims]);
+            let b2 = self
+                .b2
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, rows, output_dims])
+                + adapter
+                    .b2_delta
+                    .clone()
+                    .expand([batches, rows, output_dims]);
+            relu(features.matmul(w1.swap_dims(1, 2)) + b1).matmul(w2.swap_dims(1, 2)) + b2
+        }
+
+        fn apply_adamw(
             &mut self,
             grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
-            cfg: SgdConfig,
+            state: &mut BurnBaseAdamWState,
+            cfg: AdamWConfig,
             normalize: bool,
+            collect_metrics: bool,
         ) -> AutomataResult<(f32, f32)> {
             let mut tensors = vec![
                 self.w1
@@ -531,30 +1538,44 @@ mod imp {
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.b2.clone().inner().zeros_like()),
             ];
-            let (norm, scale) = prepare_grad_group(&mut tensors, cfg.grad_clip_norm, normalize)?;
-            self.w1 = track(apply_sgd_tensor(
+            let (norm, scale, scale_tensor) =
+                prepare_grad_group(&mut tensors, cfg.grad_clip_norm, normalize, collect_metrics)?;
+            let bias = state.next_bias_correction(cfg);
+            self.w1 = track(apply_adamw_tensor(
                 self.w1.clone().inner(),
                 tensors.remove(0),
+                &mut state.w1_m,
+                &mut state.w1_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.b1 = track(apply_sgd_tensor(
+            self.b1 = track(apply_adamw_tensor(
                 self.b1.clone().inner(),
                 tensors.remove(0),
+                &mut state.b1_m,
+                &mut state.b1_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.w2 = track(apply_sgd_tensor(
+            self.w2 = track(apply_adamw_tensor(
                 self.w2.clone().inner(),
                 tensors.remove(0),
+                &mut state.w2_m,
+                &mut state.w2_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.b2 = track(apply_sgd_tensor(
+            self.b2 = track(apply_adamw_tensor(
                 self.b2.clone().inner(),
                 tensors.remove(0),
+                &mut state.b2_m,
+                &mut state.b2_v,
                 cfg,
-                scale,
+                scale_tensor,
+                bias,
             ));
             Ok((norm, scale))
         }
@@ -642,11 +1663,14 @@ mod imp {
             total.expect("adapter has parameters").div_scalar(6.0)
         }
 
-        fn apply_sgd(
+        fn apply_adamw(
             &mut self,
             grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
-            cfg: SgdConfig,
+            state: &mut BurnAdapterAdamWState,
+            cfg: AdamWConfig,
             normalize: bool,
+            gradient_scale: f32,
+            collect_metrics: bool,
         ) -> AutomataResult<(f32, f32)> {
             let mut tensors = vec![
                 self.w1_down
@@ -668,45 +1692,146 @@ mod imp {
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.b2_delta.clone().inner().zeros_like()),
             ];
-            let (norm, scale) = prepare_grad_group(&mut tensors, cfg.grad_clip_norm, normalize)?;
-            self.w1_down = track(apply_sgd_tensor(
+            if gradient_scale != 1.0 {
+                for tensor in &mut tensors {
+                    *tensor = tensor.clone().mul_scalar(gradient_scale);
+                }
+            }
+            let (norm, scale, scale_tensor) =
+                prepare_grad_group(&mut tensors, cfg.grad_clip_norm, normalize, collect_metrics)?;
+            let bias = state.next_bias_correction(cfg);
+            self.w1_down = track(apply_adamw_tensor(
                 self.w1_down.clone().inner(),
                 tensors.remove(0),
+                &mut state.w1_down_m,
+                &mut state.w1_down_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.w1_up = track(apply_sgd_tensor(
+            self.w1_up = track(apply_adamw_tensor(
                 self.w1_up.clone().inner(),
                 tensors.remove(0),
+                &mut state.w1_up_m,
+                &mut state.w1_up_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.w2_down = track(apply_sgd_tensor(
+            self.w2_down = track(apply_adamw_tensor(
                 self.w2_down.clone().inner(),
                 tensors.remove(0),
+                &mut state.w2_down_m,
+                &mut state.w2_down_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.w2_up = track(apply_sgd_tensor(
+            self.w2_up = track(apply_adamw_tensor(
                 self.w2_up.clone().inner(),
                 tensors.remove(0),
+                &mut state.w2_up_m,
+                &mut state.w2_up_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.b1_delta = track(apply_sgd_tensor(
+            self.b1_delta = track(apply_adamw_tensor(
                 self.b1_delta.clone().inner(),
                 tensors.remove(0),
+                &mut state.b1_delta_m,
+                &mut state.b1_delta_v,
                 cfg,
-                scale,
+                scale_tensor.clone(),
+                bias,
             ));
-            self.b2_delta = track(apply_sgd_tensor(
+            self.b2_delta = track(apply_adamw_tensor(
                 self.b2_delta.clone().inner(),
                 tensors.remove(0),
+                &mut state.b2_delta_m,
+                &mut state.b2_delta_v,
                 cfg,
-                scale,
+                scale_tensor,
+                bias,
             ));
             Ok((norm, scale))
         }
+    }
+
+    impl BurnAdapterBatch {
+        fn from_indices(adapters: &[BurnAdapterParams], indices: &[usize]) -> Self {
+            let first = &adapters[indices[0]];
+            Self {
+                rank: first.rank,
+                alpha: first.alpha,
+                w1_down: stack_adapter_tensor(adapters, indices, |adapter| &adapter.w1_down),
+                w1_up: stack_adapter_tensor(adapters, indices, |adapter| &adapter.w1_up),
+                w2_down: stack_adapter_tensor(adapters, indices, |adapter| &adapter.w2_down),
+                w2_up: stack_adapter_tensor(adapters, indices, |adapter| &adapter.w2_up),
+                b1_delta: stack_adapter_tensor(adapters, indices, |adapter| &adapter.b1_delta),
+                b2_delta: stack_adapter_tensor(adapters, indices, |adapter| &adapter.b2_delta),
+            }
+        }
+
+        fn l2_loss(&self) -> Tensor1 {
+            let terms = vec![
+                self.w1_down.clone(),
+                self.w1_up.clone(),
+                self.w2_down.clone(),
+                self.w2_up.clone(),
+                self.b1_delta.clone(),
+                self.b2_delta.clone(),
+            ];
+            let mut total = None::<Tensor1>;
+            for tensor in terms {
+                let value = tensor.clone().mul(tensor).mean();
+                total = Some(match total {
+                    Some(total) => total + value,
+                    None => value,
+                });
+            }
+            total.expect("adapter batch has parameters").div_scalar(6.0)
+        }
+
+        fn l2_loss_vector(&self) -> Tensor1 {
+            let terms = vec![
+                self.w1_down.clone(),
+                self.w1_up.clone(),
+                self.w2_down.clone(),
+                self.w2_up.clone(),
+                self.b1_delta.clone(),
+                self.b2_delta.clone(),
+            ];
+            let mut total = None::<Tensor1>;
+            for tensor in terms {
+                let dims = tensor.shape().dims::<3>();
+                let value = tensor
+                    .clone()
+                    .mul(tensor)
+                    .reshape([dims[0], dims[1] * dims[2]])
+                    .mean_dim(1)
+                    .squeeze_dim::<1>(1);
+                total = Some(match total {
+                    Some(total) => total + value,
+                    None => value,
+                });
+            }
+            total.expect("adapter batch has parameters").div_scalar(6.0)
+        }
+    }
+
+    fn stack_adapter_tensor(
+        adapters: &[BurnAdapterParams],
+        indices: &[usize],
+        select: impl Fn(&BurnAdapterParams) -> &Tensor2,
+    ) -> Tensor3 {
+        Tensor::cat(
+            indices
+                .iter()
+                .map(|idx| select(&adapters[*idx]).clone().unsqueeze_dim::<3>(0))
+                .collect::<Vec<_>>(),
+            0,
+        )
     }
 
     fn burn_targets(
@@ -714,24 +1839,24 @@ mod imp {
         config: DirectBasisTrainConfig,
         device: &BurnDevice,
     ) -> AutomataResult<Vec<BurnTargetExample>> {
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let pixel_xy = tensor(
+            pixel_xy_values(config.loss_config.image_size),
+            [pixels, 2],
+            device,
+        );
         examples
             .iter()
             .map(|example| {
-                let positions = example
-                    .target
-                    .positions
-                    .iter()
-                    .flat_map(|position| [position[0], position[1]])
-                    .collect::<Vec<_>>();
-                let colors = example
-                    .target
-                    .colors
-                    .iter()
-                    .flat_map(|color| [color[0], color[1], color[2]])
-                    .collect::<Vec<_>>();
+                let render = render_target_2d_splat(&example.target, config.loss_config)?;
+                let target_mean = example.target.mean_position();
                 Ok(BurnTargetExample {
-                    positions: tensor(positions, [example.target.positions.len(), 2], device),
-                    colors: tensor(colors, [example.target.colors.len(), 3], device),
+                    target_rgb: tensor(render.rgb, [pixels, 3], device),
+                    target_density: tensor(render.density, [pixels, 1], device),
+                    target_mean: tensor([target_mean[0], target_mean[1]].to_vec(), [1, 2], device),
+                    pixel_xy: pixel_xy.clone(),
+                    pixel_size: example.target.pixel_size,
+                    target_points: example.target.point_count(),
                     particle_count: example.source.particles.unwrap_or(config.rollout_particles),
                     update_prob: example.source.update_prob.unwrap_or(config.update_prob),
                     seed_scale: example.source.seed_scale.unwrap_or(config.seed_scale),
@@ -740,13 +1865,146 @@ mod imp {
             .collect()
     }
 
+    fn seed_batch_tensors(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        config: DirectBasisTrainConfig,
+        step_seed: u64,
+        device: &BurnDevice,
+    ) -> (Tensor3, Tensor3) {
+        let mut positions = Vec::with_capacity(indices.len() * particle_count * 2);
+        let mut states = Vec::with_capacity(indices.len() * particle_count * 16);
+        for &idx in indices {
+            let (example_positions, example_states) = seed_particles_scaled(
+                1,
+                particle_count,
+                16,
+                2,
+                step_seed.wrapping_add(idx as u64),
+                config.seed_mode,
+                targets[idx].seed_scale,
+            );
+            positions.extend(
+                example_positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]]),
+            );
+            states.extend(example_states);
+        }
+        (
+            tensor3(positions, [indices.len(), particle_count, 2], device),
+            tensor3(states, [indices.len(), particle_count, 16], device),
+        )
+    }
+
+    fn batch_masks(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        rng: &mut StdRng,
+    ) -> Vec<f32> {
+        let mut values = Vec::with_capacity(indices.len() * particle_count);
+        for &idx in indices {
+            values.extend(stochastic_mask(
+                particle_count,
+                targets[idx].update_prob,
+                rng,
+            ));
+        }
+        values
+    }
+
+    fn batch_masks_with_rngs(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        rngs: &mut [StdRng],
+    ) -> Vec<f32> {
+        let mut values = Vec::with_capacity(indices.len() * particle_count);
+        for (local, &idx) in indices.iter().enumerate() {
+            values.extend(stochastic_mask(
+                particle_count,
+                targets[idx].update_prob,
+                &mut rngs[local],
+            ));
+        }
+        values
+    }
+
+    fn stack_target_rgb(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        Tensor::cat(
+            indices
+                .iter()
+                .map(|idx| targets[*idx].target_rgb.clone().unsqueeze_dim::<3>(0))
+                .collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn stack_target_density(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        Tensor::cat(
+            indices
+                .iter()
+                .map(|idx| targets[*idx].target_density.clone().unsqueeze_dim::<3>(0))
+                .collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn stack_target_mean(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        Tensor::cat(
+            indices
+                .iter()
+                .map(|idx| targets[*idx].target_mean.clone().unsqueeze_dim::<3>(0))
+                .collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn stack_pixel_sizes(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        let values = indices
+            .iter()
+            .map(|idx| targets[*idx].pixel_size)
+            .collect::<Vec<_>>();
+        tensor3(
+            values,
+            [indices.len(), 1, 1],
+            &targets[indices[0]].target_rgb.device(),
+        )
+    }
+
+    fn stack_target_point_counts(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        let values = indices
+            .iter()
+            .map(|idx| targets[*idx].target_points as f32)
+            .collect::<Vec<_>>();
+        tensor3(
+            values,
+            [indices.len(), 1, 1],
+            &targets[indices[0]].target_rgb.device(),
+        )
+    }
+
+    fn pixel_xy_values(image_size: usize) -> Vec<f32> {
+        let mut values = Vec::with_capacity(image_size * image_size * 2);
+        for y in 0..image_size {
+            for x in 0..image_size {
+                values.push(x as f32);
+                values.push(y as f32);
+            }
+        }
+        values
+    }
+
     fn adapter_cache_metrics(
         base: &NpaModel,
+        params: &BurnBaseParams,
         train_adapters: &[BurnAdapterParams],
         holdout_adapters: &[BurnAdapterParams],
         train_targets: &[BurnTargetExample],
         holdout_targets: &[BurnTargetExample],
-    ) -> serde_json::Value {
+    ) -> AutomataResult<serde_json::Value> {
         let rank = train_adapters
             .first()
             .or_else(|| holdout_adapters.first())
@@ -760,15 +2018,24 @@ mod imp {
         let total_adapter_parameters = parameters_per_adapter * total_adapters;
         let train_target_points = train_targets
             .iter()
-            .map(|target| target.positions.shape().dims::<2>()[0])
+            .map(|target| target.target_points)
             .sum::<usize>();
         let holdout_target_points = holdout_targets
             .iter()
-            .map(|target| target.positions.shape().dims::<2>()[0])
+            .map(|target| target.target_points)
             .sum::<usize>();
-        json!({
+        let train_render_pixels = train_targets
+            .iter()
+            .map(|target| target.target_density.shape().dims::<2>()[0])
+            .sum::<usize>();
+        let holdout_render_pixels = holdout_targets
+            .iter()
+            .map(|target| target.target_density.shape().dims::<2>()[0])
+            .sum::<usize>();
+        Ok(json!({
             "representation": "resident_gpu_tensor_set_per_sample",
-            "readback_policy": "end_of_phase_only",
+            "readback_policy": "report_interval_scalars_and_end_of_phase_artifacts_only",
+            "non_report_step_loss_readbacks": false,
             "adapter_tensors_per_sample": 6,
             "rank": rank,
             "parameters_per_adapter": parameters_per_adapter,
@@ -780,8 +2047,75 @@ mod imp {
             "estimated_adapter_tensor_count": total_adapters * 6,
             "train_target_points": train_target_points,
             "holdout_target_points": holdout_target_points,
-            "estimated_target_cache_bytes_f32": (train_target_points + holdout_target_points) * 5 * std::mem::size_of::<f32>(),
-        })
+            "train_render_pixels": train_render_pixels,
+            "holdout_render_pixels": holdout_render_pixels,
+            "estimated_target_render_cache_bytes_f32": (train_render_pixels + holdout_render_pixels) * 4 * std::mem::size_of::<f32>(),
+            "base_norms": base_norm_metrics(params)?,
+            "train_adapter_norms": adapter_norm_metrics(train_adapters)?,
+            "holdout_adapter_norms": adapter_norm_metrics(holdout_adapters)?,
+        }))
+    }
+
+    fn base_norm_metrics(params: &BurnBaseParams) -> AutomataResult<serde_json::Value> {
+        let w1 = tensor_l2_norm(&params.w1.clone().inner())?;
+        let b1 = tensor_l2_norm(&params.b1.clone().inner())?;
+        let w2 = tensor_l2_norm(&params.w2.clone().inner())?;
+        let b2 = tensor_l2_norm(&params.b2.clone().inner())?;
+        Ok(json!({
+            "w1": w1,
+            "b1": b1,
+            "w2": w2,
+            "b2": b2,
+            "total": finite_scalar("Burn direct base norm", (w1 * w1 + b1 * b1 + w2 * w2 + b2 * b2).sqrt())?,
+        }))
+    }
+
+    fn adapter_norm_metrics(adapters: &[BurnAdapterParams]) -> AutomataResult<serde_json::Value> {
+        if adapters.is_empty() {
+            return Ok(json!({
+                "examples": 0,
+                "mean": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+            }));
+        }
+        let mut sum = 0.0_f32;
+        let mut min = f32::INFINITY;
+        let mut max = 0.0_f32;
+        for adapter in adapters {
+            let norm = adapter_l2_norm(adapter)?;
+            sum += norm;
+            min = min.min(norm);
+            max = max.max(norm);
+        }
+        Ok(json!({
+            "examples": adapters.len(),
+            "mean": finite_scalar("Burn direct mean adapter norm", sum / adapters.len() as f32)?,
+            "min": finite_scalar("Burn direct min adapter norm", min)?,
+            "max": finite_scalar("Burn direct max adapter norm", max)?,
+        }))
+    }
+
+    fn adapter_l2_norm(adapter: &BurnAdapterParams) -> AutomataResult<f32> {
+        let tensors = [
+            adapter.w1_down.clone().inner(),
+            adapter.w1_up.clone().inner(),
+            adapter.w2_down.clone().inner(),
+            adapter.w2_up.clone().inner(),
+            adapter.b1_delta.clone().inner(),
+            adapter.b2_delta.clone().inner(),
+        ];
+        finite_scalar(
+            "Burn direct adapter norm",
+            group_norm_tensor(&tensors).into_scalar(),
+        )
+    }
+
+    fn mean_updates_per_sample(steps: usize, batch_size: usize, examples: usize) -> f32 {
+        if examples == 0 {
+            return 0.0;
+        }
+        steps as f32 * batch_size.min(examples).max(1) as f32 / examples as f32
     }
 
     fn seed_tensors(
@@ -853,58 +2187,144 @@ mod imp {
         })
     }
 
+    fn loss_vector_scalars(loss: BurnLossBatchTensors) -> AutomataResult<Vec<BurnLossScalars>> {
+        let total = tensor1_vec(loss.total.inner())?;
+        let splat = tensor1_vec(loss.splat.inner())?;
+        let color = tensor1_vec(loss.color.inner())?;
+        let density = tensor1_vec(loss.density.inner())?;
+        if total.len() != splat.len() || total.len() != color.len() || total.len() != density.len()
+        {
+            return Err(AutomataError::InvalidArgument(
+                "Burn direct vector loss readback length mismatch".to_string(),
+            ));
+        }
+        total
+            .into_iter()
+            .zip(splat)
+            .zip(color)
+            .zip(density)
+            .enumerate()
+            .map(|(idx, (((total, splat), color), density))| {
+                Ok(BurnLossScalars {
+                    total: finite_scalar(&format!("Burn direct total loss[{idx}]"), total)?,
+                    splat: finite_scalar(&format!("Burn direct splat loss[{idx}]"), splat)?,
+                    color: finite_scalar(&format!("Burn direct color loss[{idx}]"), color)?,
+                    density: finite_scalar(&format!("Burn direct density loss[{idx}]"), density)?,
+                })
+            })
+            .collect()
+    }
+
     fn prepare_grad_group(
         tensors: &mut [Tensor2Inner],
         clip_norm: f32,
         normalize: bool,
-    ) -> AutomataResult<(f32, f32)> {
-        let original_norm = group_norm(tensors)?;
+        collect_metrics: bool,
+    ) -> AutomataResult<(f32, f32, Tensor1Inner)> {
+        let original_norm_tensor = group_norm_tensor(tensors);
+        let original_norm = if collect_metrics {
+            finite_scalar(
+                "Burn direct grad norm",
+                original_norm_tensor.clone().into_scalar(),
+            )?
+        } else {
+            0.0
+        };
         if normalize {
             for tensor in tensors.iter_mut() {
-                let norm = tensor_l2_norm(tensor)?;
-                if norm > 0.0 {
-                    *tensor = tensor.clone().div_scalar(norm + 1.0e-8);
-                }
+                let dims = tensor.shape().dims::<2>();
+                let norm = tensor_l2_norm_tensor(tensor).add_scalar(1.0e-8);
+                *tensor = tensor.clone().div(norm.expand(dims));
             }
         }
-        let clip_norm_source = group_norm(tensors)?;
-        let scale = if clip_norm > 0.0 && clip_norm_source > clip_norm {
-            clip_norm / clip_norm_source.max(f32::MIN_POSITIVE)
+        let clip_norm_source = if normalize {
+            group_norm_tensor(tensors)
+        } else {
+            original_norm_tensor
+        };
+        let scale_tensor = if clip_norm > 0.0 {
+            clip_norm_source
+                .clone()
+                .clamp_min(clip_norm)
+                .recip()
+                .mul_scalar(clip_norm)
+        } else {
+            clip_norm_source.zeros_like().add_scalar(1.0)
+        };
+        let scale = if collect_metrics {
+            finite_scalar("Burn direct grad scale", scale_tensor.clone().into_scalar())?
         } else {
             1.0
         };
-        Ok((original_norm, scale))
+        Ok((original_norm, scale, scale_tensor))
     }
 
-    fn group_norm(tensors: &[Tensor2Inner]) -> AutomataResult<f32> {
-        let mut total = 0.0_f32;
+    fn group_norm_tensor(tensors: &[Tensor2Inner]) -> Tensor1Inner {
+        let mut total = None::<Tensor1Inner>;
         for tensor in tensors {
-            let norm = tensor_l2_norm(tensor)?;
-            total += norm * norm;
+            let value = tensor.clone().mul(tensor.clone()).sum();
+            total = Some(match total {
+                Some(total) => total + value,
+                None => value,
+            });
         }
-        finite_scalar("Burn direct grad norm", total.sqrt())
+        total.expect("gradient group has tensors").sqrt()
+    }
+
+    fn tensor_l2_norm_tensor(tensor: &Tensor2Inner) -> Tensor1Inner {
+        tensor.clone().mul(tensor.clone()).sum().sqrt()
     }
 
     fn tensor_l2_norm(tensor: &Tensor2Inner) -> AutomataResult<f32> {
         finite_scalar(
             "Burn direct tensor norm",
-            tensor
-                .clone()
-                .mul(tensor.clone())
-                .sum()
-                .sqrt()
-                .into_scalar(),
+            tensor_l2_norm_tensor(tensor).into_scalar(),
         )
     }
 
-    fn apply_sgd_tensor(
+    fn adamw_from_sgd(cfg: SgdConfig) -> AdamWConfig {
+        AdamWConfig {
+            learning_rate: cfg.learning_rate,
+            weight_decay: cfg.weight_decay,
+            grad_clip_norm: cfg.grad_clip_norm,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1.0e-8,
+        }
+    }
+
+    fn apply_adamw_tensor(
         param: Tensor2Inner,
         grad: Tensor2Inner,
-        cfg: SgdConfig,
-        scale: f32,
+        moment: &mut Tensor2Inner,
+        velocity: &mut Tensor2Inner,
+        cfg: AdamWConfig,
+        scale: Tensor1Inner,
+        bias: AdamWBiasCorrection,
     ) -> Tensor2Inner {
-        let update = grad.mul_scalar(scale) + param.clone().mul_scalar(cfg.weight_decay);
-        param - update.mul_scalar(cfg.learning_rate)
+        let dims = param.shape().dims::<2>();
+        let grad = grad.mul(scale.expand(dims));
+        let decayed = if cfg.weight_decay > 0.0 {
+            param
+                .clone()
+                .mul_scalar(1.0 - cfg.learning_rate * cfg.weight_decay)
+        } else {
+            param.clone()
+        };
+        *moment = moment.clone().mul_scalar(cfg.beta1) + grad.clone().mul_scalar(1.0 - cfg.beta1);
+        *velocity = velocity.clone().mul_scalar(cfg.beta2)
+            + grad.clone().mul(grad).mul_scalar(1.0 - cfg.beta2);
+        let normalized_step = moment
+            .clone()
+            .div_scalar(bias.beta1.max(f32::MIN_POSITIVE))
+            .div(
+                velocity
+                    .clone()
+                    .div_scalar(bias.beta2.max(f32::MIN_POSITIVE))
+                    .sqrt()
+                    .add_scalar(cfg.epsilon),
+            );
+        decayed - normalized_step.mul_scalar(cfg.learning_rate)
     }
 
     fn tracked_tensor(values: Vec<f32>, shape: [usize; 2], device: &BurnDevice) -> Tensor2 {
@@ -915,11 +2335,21 @@ mod imp {
         Tensor::<BurnBackend, 2>::from_data(TensorData::new(values, shape), device)
     }
 
+    fn tensor3(values: Vec<f32>, shape: [usize; 3], device: &BurnDevice) -> Tensor3 {
+        Tensor::<BurnBackend, 3>::from_data(TensorData::new(values, shape), device)
+    }
+
     fn track(tensor: Tensor2Inner) -> Tensor2 {
         Tensor::<BurnBackend, 2>::from_inner(tensor).require_grad()
     }
 
     fn tensor_vec(tensor: Tensor2Inner) -> AutomataResult<Vec<f32>> {
+        tensor.into_data().to_vec::<f32>().map_err(|err| {
+            AutomataError::InvalidArgument(format!("Burn/WGPU tensor readback failed: {err}"))
+        })
+    }
+
+    fn tensor1_vec(tensor: Tensor1Inner) -> AutomataResult<Vec<f32>> {
         tensor.into_data().to_vec::<f32>().map_err(|err| {
             AutomataError::InvalidArgument(format!("Burn/WGPU tensor readback failed: {err}"))
         })
@@ -945,6 +2375,7 @@ pub(super) struct BurnWgpuDirectBasisOutput {
     pub(super) device: String,
     pub(super) metrics: serde_json::Value,
     pub(super) history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
+    pub(super) train_refine_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
     pub(super) holdout_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
     pub(super) best_train_loss: Option<f32>,
     pub(super) best_train_step: usize,
@@ -956,6 +2387,7 @@ pub(super) fn train_direct_basis_burn_wgpu(
     _train_examples: &mut [super::DirectBasisExample],
     _holdout_examples: &mut [super::DirectBasisExample],
     _train_config: super::DirectBasisTrainConfig,
+    _train_refine_config: super::DirectBasisTrainConfig,
     _holdout_config: super::DirectBasisTrainConfig,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(

@@ -109,7 +109,7 @@ impl TargetImage2d {
         self.positions.len()
     }
 
-    fn mean_position(&self) -> [f32; 2] {
+    pub fn mean_position(&self) -> [f32; 2] {
         let mut mean = [0.0_f32; 2];
         for position in &self.positions {
             mean[0] += position[0];
@@ -282,11 +282,13 @@ struct RolloutForTraining {
     particle_count: usize,
 }
 
-#[derive(Clone, Debug)]
-struct RenderedSplat2d {
-    rgb: Vec<f32>,
-    density: Vec<f32>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Target2dRenderedSplat {
+    pub rgb: Vec<f32>,
+    pub density: Vec<f32>,
 }
+
+type RenderedSplat2d = Target2dRenderedSplat;
 
 #[derive(Clone, Debug)]
 struct ParticleSplatSample {
@@ -309,6 +311,13 @@ pub fn upstream_growing_2d_hashgrid() -> HashGridConfig {
 
 pub fn upstream_growing_2d_model(seed: u64) -> NpaModel {
     NpaModel::upstream_seeded(NpaConfig::growing_2d(), seed)
+}
+
+pub fn render_target_2d_splat(
+    target: &TargetImage2d,
+    cfg: Target2dLossConfig,
+) -> AutomataResult<Target2dRenderedSplat> {
+    render_target_splat(target, cfg)
 }
 
 pub fn target_2d_loss(
@@ -1581,6 +1590,22 @@ mod tests {
         assert_eq!(grid.eps, 0.1);
         assert_eq!(grid.max_particles_per_block, 32);
         assert_eq!(preset_grid, grid);
+    }
+
+    #[test]
+    fn public_target_splat_render_matches_loss_image_shape() {
+        let target = single_point_target();
+        let cfg = Target2dLossConfig {
+            image_size: 8,
+            ..finite_difference_loss_config()
+        };
+        let render = render_target_2d_splat(&target, cfg).unwrap();
+
+        assert_eq!(render.rgb.len(), cfg.image_size * cfg.image_size * 3);
+        assert_eq!(render.density.len(), cfg.image_size * cfg.image_size);
+        assert!(render.rgb.iter().all(|value| value.is_finite()));
+        assert!(render.density.iter().all(|value| value.is_finite()));
+        assert!(render.density.iter().copied().sum::<f32>() > 0.0);
     }
 
     #[test]

@@ -16,7 +16,7 @@ categories = ["science", "simulation", "computer-vision"]
 default = ["cli", "backend_ndarray", "backend_wgpu"]
 backend_ndarray = ["burn/ndarray"]
 backend_wgpu = ["burn/wgpu", "burn/webgpu", "burn/fusion", "burn/autodiff"]
-cli = ["dep:base64", "dep:clap", "dep:image", "dep:ureq"]
+cli = ["dep:base64", "dep:clap", "dep:image", "dep:toml", "dep:ureq"]
 dino = ["dep:burn_dino", "backend_ndarray"]
 gpu_wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
 import = []
@@ -37,6 +37,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+toml = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 zip.workspace = true
