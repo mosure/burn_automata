@@ -11,7 +11,7 @@
 \maketitle
 
 \begin{abstract}
-We evaluate a 2D Neural Particle Automata (NPA) training stage intended to support conditional generation of particle dynamics from images. The evaluated system learns a shared NPA base and directly optimized per-sample LoRA adapters over a 10k OmniSVG thumbnail slice. This is an intermediate representation for a future conditional hypernetwork, not yet an end-to-end image-to-LoRA model. On a 9k/1k train/holdout split, the shared-base plus stored-adapter system reduces sampled target-image rollout loss by 44.4\% on train examples and 44.5\% on holdout examples. A broader oracle comparison estimates the gap to independently overfit 2D NPAs and provides the calibration target for the next image-conditioned LoRA generator stage.
+We evaluate a 2D Neural Particle Automata (NPA) training stage intended to support conditional generation of particle dynamics from images. The evaluated system learns a shared NPA base and directly optimized per-sample LoRA adapters over a 10k OmniSVG thumbnail slice. This is an intermediate representation for a future conditional hypernetwork, not yet an end-to-end image-to-LoRA model. On a 9k/1k train/holdout split, the shared-base plus stored-adapter system reduces sampled target-image rollout loss by 44.4\% on train examples and 44.5\% on holdout examples. However, this artifact is a low-count pilot rather than a quality-ready comparison: it used 64 rollout particles, 8 rollout steps, and as few as 190 target samples, while current quality gates require at least 2048 rollout particles and 2048 target samples. The oracle comparison therefore calibrates the pilot only; it does not establish paper-quality parity with independently overfit 2D NPAs.
 \end{abstract}
 
 \section{Introduction}
@@ -33,12 +33,12 @@ with rank \(r=16\) and alpha \(\alpha=16.0\).
 This paper evaluates the basis stage only: \(\theta_0\) and one stored adapter per sample are optimized directly from image loss. The image encoder and rectified-flow hypernetwork are described as the next stage, not claimed as validated here.
 
 \section{Training Protocol}
-The evaluated artifact is the 10k Burn/WGPU direct-basis run recorded in the companion validation summary. It contains 9000 train adapters and 1000 holdout adapters, each rank 16 with alpha 16.0. Training used 600 shared-base plus adapter steps, followed by 300 train-adapter refinement steps and 300 holdout-adapter steps. Rollouts used 64 particles and 8 objective steps.
+The evaluated artifact is the 10k Burn/WGPU direct-basis run recorded in the companion validation summary. It contains 9000 train adapters and 1000 holdout adapters, each rank 16 with alpha 16.0. Training used 600 shared-base plus adapter steps, followed by 300 train-adapter refinement steps and 300 holdout-adapter steps. Rollouts used 64 particles and 8 objective steps, and the stored target sampling audit found as few as 190 target samples.
 
 The dataset is a 10k OmniSVG thumbnail slice split into 9000 train samples and 1000 holdout samples. Each sample owns a persistent LoRA adapter, while the base NPA weights are shared during the joint stage. Holdout adapters are optimized against the frozen final shared base to test whether the learned basis supports unseen targets. The target objective combines splat reconstruction, color, density, displacement regularization, overflow regularization, and bound regularization. The report configuration used image-size 64, splat weight 2.000, color weight 5.000, and density weight 1.000.
 
 \section{Oracle Validation Protocol}
-To calibrate adapter quality, selected train and holdout samples are compared against independently overfit 2D NPA oracle models trained from scratch on the same target objective. The oracle is not a hypernetwork and does not share weights across samples; it estimates the per-sample quality ceiling under the current NPA architecture and training recipe. The broader validation uses 8 train and 8 holdout oracle fits for 2048 epochs each.
+To calibrate adapter quality, selected train and holdout samples are compared against independently overfit 2D NPA oracle models trained from scratch on the same target objective. The oracle is not a hypernetwork and does not share weights across samples; it estimates the per-sample quality ceiling under the current NPA architecture and training recipe. The broader validation uses 8 train and 8 holdout oracle fits for 2048 epochs each, but these oracle fits also use the low-count 64-particle objective and are not a substitute for 2048-particle validation.
 
 \section{Results}
 \begin{table}[h]
@@ -67,6 +67,21 @@ holdout & 8 & 7.243 & 6.676 & 1.075 & 1.126 \\
 \caption{Comparison against independently overfit 2D NPA oracle models. Oracle checkpoints were persisted for this validation, so selected oracle rollouts are rendered in Figure~\ref{fig:rollouts}.}
 \end{table}
 
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrl}
+\toprule
+gate & required & observed & status \\
+\midrule
+rollout particles & 2048 & 64 & fail \\
+target samples & 2048 & 190 min & fail \\
+oracle examples per split & 8 & 8 & pass \\
+direct-basis oracle max ratio & 1.20x & 1.141 train / 1.126 holdout & pass \\
+\bottomrule
+\end{tabular}
+\caption{Quality gate audit for the 10k pilot. Despite acceptable low-count oracle ratios, the rollout and target-sample scale is below the current quality threshold, so the artifact status is \texttt{quality\_particle\_count\_too\_low}.}
+\end{table}
+
 \begin{figure}[p]
 \centering
 \includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{figures/rollout\_grid.png}
@@ -75,12 +90,12 @@ holdout & 8 & 7.243 & 6.676 & 1.075 & 1.126 \\
 \end{figure}
 
 \section{Interpretation}
-The train and holdout curves are close, indicating that the shared basis is not simply memorizing train-only dynamics. The oracle ratios measure how far the shared-base plus adapter representation remains from single-sample overfit NPAs. Ratios near one would indicate parity with a fully overfit oracle; larger ratios indicate remaining adapter/base expressivity or optimization gap. In this run, train and holdout oracle ratios are similar: 1.079 on train and 1.075 on holdout. That supports the shared-basis hypothesis, but does not prove image-conditioned generalization.
+The train and holdout curves are close, indicating that the shared basis is not simply memorizing train-only dynamics at this pilot scale. The oracle ratios measure how far the shared-base plus adapter representation remains from single-sample overfit NPAs under the same low-count objective. Ratios near one would indicate parity with a fully overfit oracle; larger ratios indicate remaining adapter/base expressivity or optimization gap. In this run, train and holdout oracle ratios are similar: 1.079 on train and 1.075 on holdout. This is evidence that the shared-basis direction is worth scaling, but it does not establish quality-ready shared-basis parity because the rollout and target-sampling scale are far below the 2048-particle / 2048-target-sample gate. It also does not prove image-conditioned generalization.
 
 \section{Reproducibility Artifacts}
-The companion Markdown report, JSON summary, LaTeX source, and rollout figures are generated by \path|scripts/render_hyper2d_direct_basis_paper.py| from the 10k training report and the 8x8 oracle-validation report. The generated rollout grid in Figure~\ref{fig:rollouts} selects high-ratio train and holdout cases, making the visualization intentionally stress the samples where the shared-basis representation is furthest from oracle parity.
+The companion Markdown report and JSON summary are audited by the Burn-first \path|report-hyper2d| CLI from the 10k training report and the 8x8 oracle-validation report. The generated rollout grid in Figure~\ref{fig:rollouts} selects high-ratio train and holdout cases from the low-count persisted oracle set, making the visualization intentionally stress the samples where the shared-basis representation is furthest from oracle parity.
 
 \section{Limitations and Next Experiment}
-This report does not validate generalized image-to-LoRA inference. The missing experiment is to train a DINO-family image-condition encoder and rectified-flow LoRA generator over the stored adapter bank, then evaluate generated adapters against direct adapters and oracle overfits on the same train/holdout samples and rollout stability panels. Future validation should use oracle reports with persisted checkpoints to render oracle dynamics directly beside generated and direct adapters.
+This report does not validate generalized image-to-LoRA inference, and it should not be used as a paper-quality comparison against single-sample 2D oracles. The immediate correction is to rerun direct-basis training and oracle validation with at least 2048 rollout particles, at least 2048 target samples, and persisted oracle checkpoints. Only after that quality-scale adapter bank is validated should the next stage train a DINO-family image-condition encoder and rectified-flow LoRA generator, then evaluate generated adapters against direct adapters and oracle overfits on the same train/holdout samples and rollout stability panels.
 
 \end{document}

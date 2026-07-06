@@ -1,0 +1,8 @@
+{
+  "captures": [
+    {"label":"lizard_wgpu_viewer_gaussian","path":"docs/hyper_npa_figures/lizard_wgpu_gaussian_4096_frame16.png","particles":4096,"frames_or_steps":16,"width":384,"height":384,"lit_pixels":15896,"occupancy":0.10780165,"bbox_width":153,"bbox_height":178,"max_delta":211},
+    {"label":"lizard_wgpu_viewer_gaussian","path":"docs/hyper_npa_figures/lizard_wgpu_gaussian_4096_frame64.png","particles":4096,"frames_or_steps":64,"width":384,"height":384,"lit_pixels":26585,"occupancy":0.18029107,"bbox_width":242,"bbox_height":287,"max_delta":181},
+    {"label":"lizard_wgpu_viewer_gaussian","path":"docs/hyper_npa_figures/lizard_wgpu_gaussian_4096_frame128.png","particles":4096,"frames_or_steps":128,"width":384,"height":384,"lit_pixels":25979,"occupancy":0.17618138,"bbox_width":236,"bbox_height":280,"max_delta":200},
+    {"label":"wgpu_gaussian_readback","path":"docs/hyper_npa_figures/wgpu_gaussian_readback_4096_steps4.png","particles":4096,"frames_or_steps":4,"width":384,"height":384,"lit_pixels":8467,"occupancy":0.05742052,"bbox_width":101,"bbox_height":106,"max_delta":211}
+  ]
+}

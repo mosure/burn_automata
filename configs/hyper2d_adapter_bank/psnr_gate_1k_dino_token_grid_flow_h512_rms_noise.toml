@@ -6,6 +6,15 @@ adapter_bank = "artifacts/hyper2d_omnisvg_10k_burn_wgpu_adamw_batch64_600_300_30
 oracle_report = "artifacts/hyper2d_omnisvg_10k_quality_2048_oracle_zero/report.json"
 hyper = "artifacts/hyper2d_adapter_bank_omnisvg_1k_dino_token_grid_flow_h512_rms_noise/hyper_2d.json"
 
+[condition]
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 518
+dino_batch_size = 4
+dino_cache_write_interval_batches = 16
+feature_cache = "artifacts/hyper2d_adapter_bank_omnisvg_1k_dino_token_grid_flow_h512_rms_noise/dino_features.json"
+token_grid_width = 8
+token_grid_height = 8
+
 [output]
 output = "artifacts/hyper2d_adapter_bank_omnisvg_1k_dino_token_grid_flow_h512_rms_noise/psnr_gate_report.json"
 generated_dir = "artifacts/hyper2d_adapter_bank_omnisvg_1k_dino_token_grid_flow_h512_rms_noise/psnr_gate_generated"

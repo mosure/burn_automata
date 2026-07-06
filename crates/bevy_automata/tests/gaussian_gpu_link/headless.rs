@@ -115,7 +115,7 @@ fn viewer_bridge_renders_compact_headless_capture() -> Result<(), Box<dyn std::e
 fn viewer_lizard_catalog_4096_gpu_path_advances_and_renders()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = bevy_test_guard();
-    if !Path::new(LIZARD_MODEL_PATH).exists() {
+    if existing_workspace_path(LIZARD_MODEL_PATH).is_none() {
         eprintln!(
             "skipping imported 2D viewer coverage; missing {}",
             LIZARD_MODEL_PATH

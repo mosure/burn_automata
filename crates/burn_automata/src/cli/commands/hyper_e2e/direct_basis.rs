@@ -27,6 +27,7 @@ const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 160;
 struct DirectBasisExample {
     source: super::sources::Hyper2dScratchSource,
     split: Hyper2dE2eSplit,
+    bank_split_index: Option<usize>,
     target: TargetImage2d,
     adapter: NpaLowRankAdapter,
     last_train_loss: Option<f32>,
@@ -135,7 +136,7 @@ struct DirectBasisAdapterBankLoadManifest {
     entries: Vec<DirectBasisAdapterBankLoadEntry>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct DirectBasisAdapterBankLoadEntry {
     slug: String,
     split: String,
@@ -152,6 +153,12 @@ struct DirectBasisAdapterBankLoadEntry {
     #[serde(default)]
     last_train_loss: Option<f32>,
 }
+
+type DirectBasisAdapterBankIndexedEntry = (usize, DirectBasisAdapterBankLoadEntry);
+type DirectBasisAdapterBankSplitEntries = (
+    Vec<DirectBasisAdapterBankIndexedEntry>,
+    Vec<DirectBasisAdapterBankIndexedEntry>,
+);
 
 #[derive(Serialize)]
 struct DirectBasisOracleValidationReport {
@@ -1543,7 +1550,24 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     let hashgrid = base_manifest.hashgrid.clone();
     let base = base_manifest.clone().into_model();
     base.validate()?;
-    let examples = load_direct_basis_examples_from_adapter_bank(
+    let bank = load_direct_basis_adapter_bank(&adapter_bank)?;
+    let bank_base_model = bank.base_model.clone();
+    let bank_adapter_rank = bank.adapter_rank;
+    let bank_adapter_alpha = bank.adapter_alpha;
+    let (train_entries, holdout_entries) = split_direct_basis_adapter_bank_entries(bank.entries)?;
+    let total_train_examples = train_entries.len();
+    let total_holdout_examples = holdout_entries.len();
+    let selected_train_entries = select_direct_basis_adapter_bank_oracle_entries(
+        &train_entries,
+        oracle_train_examples,
+        oracle_seed,
+    );
+    let selected_holdout_entries = select_direct_basis_adapter_bank_oracle_entries(
+        &holdout_entries,
+        oracle_holdout_examples,
+        oracle_seed ^ 0x90_1d_2d,
+    );
+    let train_examples = load_direct_basis_examples_from_adapter_bank_entries(
         &adapter_bank,
         &base,
         DirectBasisTargetConfig {
@@ -1551,11 +1575,19 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
             points: target_points,
             image_size: target_image_size,
         },
+        selected_train_entries,
     )?;
-    let (train_examples, holdout_examples): (Vec<_>, Vec<_>) = examples
-        .into_iter()
-        .partition(|example| example.split == Hyper2dE2eSplit::Train);
-    if train_examples.is_empty() {
+    let holdout_examples = load_direct_basis_examples_from_adapter_bank_entries(
+        &adapter_bank,
+        &base,
+        DirectBasisTargetConfig {
+            threshold: target_threshold,
+            points: target_points,
+            image_size: target_image_size,
+        },
+        selected_holdout_entries,
+    )?;
+    if total_train_examples == 0 {
         return Err(std::io::Error::other(
             "validate-hyper2d-direct-basis-oracles requires at least one train example",
         )
@@ -1608,23 +1640,22 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         oracle_config,
         Some(&oracle_model_dir),
     )?;
-    let bank = load_direct_basis_adapter_bank(&adapter_bank)?;
     let report = DirectBasisOracleValidationReport {
         preset,
         shared_base: shared_base.display().to_string(),
         adapter_bank: adapter_bank.display().to_string(),
         report_output: report_output.display().to_string(),
-        adapter_bank_base_model: bank.base_model,
-        adapter_rank: bank.adapter_rank,
-        adapter_alpha: bank.adapter_alpha,
+        adapter_bank_base_model: bank_base_model,
+        adapter_rank: bank_adapter_rank,
+        adapter_alpha: bank_adapter_alpha,
         npa_config: base.config.clone(),
         hashgrid,
         target_loss_config: loss_config,
         target_threshold,
         target_points_fallback: target_points,
         target_image_size,
-        train_examples: train_examples.len(),
-        holdout_examples: holdout_examples.len(),
+        train_examples: total_train_examples,
+        holdout_examples: total_holdout_examples,
         rollout_particles,
         rollout_steps,
         update_prob,
@@ -2711,6 +2742,7 @@ fn load_direct_basis_examples(
         examples.push(DirectBasisExample {
             source: source.clone(),
             split: *split,
+            bank_split_index: None,
             target,
             adapter,
             last_train_loss: None,
@@ -2719,18 +2751,47 @@ fn load_direct_basis_examples(
     Ok(examples)
 }
 
-fn load_direct_basis_examples_from_adapter_bank(
+fn split_direct_basis_adapter_bank_entries(
+    entries: Vec<DirectBasisAdapterBankLoadEntry>,
+) -> Result<DirectBasisAdapterBankSplitEntries, Box<dyn std::error::Error>> {
+    let mut train_entries = Vec::new();
+    let mut holdout_entries = Vec::new();
+    for entry in entries {
+        match parse_direct_basis_split(&entry.split)? {
+            Hyper2dE2eSplit::Train => train_entries.push((train_entries.len(), entry)),
+            Hyper2dE2eSplit::Holdout => holdout_entries.push((holdout_entries.len(), entry)),
+        }
+    }
+    if train_entries.is_empty() && holdout_entries.is_empty() {
+        return Err(std::io::Error::other("adapter bank has no train or holdout entries").into());
+    }
+    Ok((train_entries, holdout_entries))
+}
+
+fn select_direct_basis_adapter_bank_oracle_entries(
+    entries: &[DirectBasisAdapterBankIndexedEntry],
+    requested_examples: usize,
+    seed: u64,
+) -> Vec<DirectBasisAdapterBankIndexedEntry> {
+    eval_indices(entries.len(), requested_examples, seed)
+        .into_iter()
+        .map(|idx| entries[idx].clone())
+        .collect()
+}
+
+fn load_direct_basis_examples_from_adapter_bank_entries(
     adapter_bank_path: &Path,
     base: &NpaModel,
     target_config: DirectBasisTargetConfig,
+    entries: Vec<DirectBasisAdapterBankIndexedEntry>,
 ) -> Result<Vec<DirectBasisExample>, Box<dyn std::error::Error>> {
-    let bank = load_direct_basis_adapter_bank(adapter_bank_path)?;
-    if bank.entries.is_empty() {
-        return Err(std::io::Error::other("adapter bank has no entries").into());
+    if entries.is_empty() {
+        return Ok(Vec::new());
     }
     let anchor = adapter_bank_path.parent().unwrap_or_else(|| Path::new(""));
-    let mut examples = Vec::with_capacity(bank.entries.len());
-    for entry in bank.entries {
+    let mut examples = Vec::with_capacity(entries.len());
+    let mut metadata_mismatches = DirectBasisAdapterBankReloadMismatchSummary::default();
+    for (bank_split_index, entry) in entries {
         let split = parse_direct_basis_split(&entry.split)?;
         let condition_path = resolve_direct_basis_artifact_path(anchor, &entry.condition);
         let adapter_path = resolve_direct_basis_artifact_path(anchor, &entry.adapter_output);
@@ -2752,34 +2813,78 @@ fn load_direct_basis_examples_from_adapter_bank(
             update_prob: None,
         };
         if entry.target_source_width > 0 && entry.target_source_width != target.source_width {
-            eprintln!(
-                "warning: adapter-bank source width {} for {} differs from reloaded target width {}",
-                entry.target_source_width, source.slug, target.source_width
+            metadata_mismatches.record(
+                "source_width",
+                &source.slug,
+                entry.target_source_width,
+                target.source_width,
             );
         }
         if entry.target_source_height > 0 && entry.target_source_height != target.source_height {
-            eprintln!(
-                "warning: adapter-bank source height {} for {} differs from reloaded target height {}",
-                entry.target_source_height, source.slug, target.source_height
+            metadata_mismatches.record(
+                "source_height",
+                &source.slug,
+                entry.target_source_height,
+                target.source_height,
             );
         }
         if entry.target_points > 0 && entry.target_points != target.point_count() {
-            eprintln!(
-                "warning: adapter-bank target points {} for {} differs from reloaded target points {}",
+            metadata_mismatches.record(
+                "target_points",
+                &source.slug,
                 entry.target_points,
-                source.slug,
-                target.point_count()
+                target.point_count(),
             );
         }
         examples.push(DirectBasisExample {
             source,
             split,
+            bank_split_index: Some(bank_split_index),
             target,
             adapter: adapter_manifest.adapter,
             last_train_loss: entry.last_train_loss,
         });
     }
+    metadata_mismatches.emit();
     Ok(examples)
+}
+
+#[derive(Default)]
+struct DirectBasisAdapterBankReloadMismatchSummary {
+    source_width: usize,
+    source_height: usize,
+    target_points: usize,
+    examples: Vec<String>,
+}
+
+impl DirectBasisAdapterBankReloadMismatchSummary {
+    fn record(&mut self, field: &'static str, slug: &str, stored: usize, reloaded: usize) {
+        match field {
+            "source_width" => self.source_width += 1,
+            "source_height" => self.source_height += 1,
+            "target_points" => self.target_points += 1,
+            _ => {}
+        }
+        if self.examples.len() < 6 {
+            self.examples
+                .push(format!("{slug}:{field} {stored}->{reloaded}"));
+        }
+    }
+
+    fn emit(&self) {
+        let total = self.source_width + self.source_height + self.target_points;
+        if total == 0 {
+            return;
+        }
+        eprintln!(
+            "warning: adapter-bank metadata differs from reloaded validation targets \
+             (source_width={}, source_height={}, target_points={}, examples=[{}])",
+            self.source_width,
+            self.source_height,
+            self.target_points,
+            self.examples.join(", ")
+        );
+    }
 }
 
 fn load_direct_basis_adapter_bank(
@@ -3437,6 +3542,7 @@ mod tests {
                 update_prob: None,
             },
             split: Hyper2dE2eSplit::Train,
+            bank_split_index: None,
             target: TargetImage2d {
                 source_width: 1,
                 source_height: 1,

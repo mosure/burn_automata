@@ -127,9 +127,9 @@ fn viewer_model_and_particle_config_transitions_are_stable()
         (None, AutomataPreset::PointMnist, 512, 0.55, false, 2),
         (None, AutomataPreset::Growing2d, 1024, 0.2, false, 2),
     ];
-    if Path::new(LIZARD_MODEL_PATH).exists() {
+    if let Some(path) = existing_workspace_path(LIZARD_MODEL_PATH) {
         transitions.push((
-            Some(LIZARD_MODEL_PATH),
+            Some(path.display().to_string()),
             AutomataPreset::Growing2d,
             512,
             0.2,
@@ -137,9 +137,9 @@ fn viewer_model_and_particle_config_transitions_are_stable()
             2,
         ));
     }
-    if Path::new(POLKA_MODEL_PATH).exists() {
+    if let Some(path) = existing_workspace_path(POLKA_MODEL_PATH) {
         transitions.push((
-            Some(POLKA_MODEL_PATH),
+            Some(path.display().to_string()),
             AutomataPreset::Texture2d,
             512,
             1.0,
@@ -152,7 +152,7 @@ fn viewer_model_and_particle_config_transitions_are_stable()
         {
             let world = apps.main.world_mut();
             let mut settings = world.resource_mut::<AutomataSettings>();
-            settings.model_path = model_path.map(str::to_string);
+            settings.model_path = model_path;
             settings.preset = preset;
             settings.particle_count = particles;
             settings.seed_scale = seed_scale;

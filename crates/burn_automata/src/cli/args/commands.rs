@@ -1819,11 +1819,13 @@ pub(crate) enum Command {
     #[command(name = "build-exact-adapter-bank", alias = "exact-oracle-adapter-bank")]
     BuildExactAdapterBank {
         #[arg(long)]
-        base_model: PathBuf,
+        config: Option<PathBuf>,
         #[arg(long)]
-        source_adapter_bank: PathBuf,
+        base_model: Option<PathBuf>,
         #[arg(long)]
-        oracle_report: PathBuf,
+        source_adapter_bank: Option<PathBuf>,
+        #[arg(long)]
+        oracle_report: Option<PathBuf>,
         #[arg(long, default_value = "artifacts/exact_adapter_bank")]
         output_dir: PathBuf,
         #[arg(long)]

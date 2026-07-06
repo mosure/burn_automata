@@ -105,6 +105,16 @@ pub struct HyperNpa2dFlowConfig {
     pub sample_steps: usize,
     pub source_scale: f32,
     pub sample_seed: u64,
+    #[serde(default)]
+    pub hidden_activation: HyperNpa2dFlowActivation,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HyperNpa2dFlowActivation {
+    #[default]
+    Relu,
+    LeakyRelu,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -405,7 +415,7 @@ impl HyperNpa2d {
             for (i, value) in input.iter().enumerate() {
                 sum += flow.weights.w1[base + i] as f64 * *value as f64;
             }
-            *hidden_value = (sum as f32).max(0.0);
+            *hidden_value = activate_flow_hidden(flow.config.hidden_activation, sum as f32);
         }
         let mut output = vec![0.0; output_dims];
         for (o, output_value) in output.iter_mut().enumerate() {
@@ -741,8 +751,11 @@ fn seeded_flow_source(
     for value in condition_input {
         value.to_bits().hash(&mut hasher);
     }
+    if source_scale == 0.0 {
+        return vec![0.0; output_dims];
+    }
     let mut rng = StdRng::seed_from_u64(hasher.finish());
-    let scale = source_scale.abs().max(1.0e-6);
+    let scale = source_scale.abs();
     (0..output_dims)
         .map(|_| rng.random_range(-scale..=scale))
         .collect()
@@ -764,9 +777,9 @@ fn validate_flow_head(model: &HyperNpa2d, flow: &HyperNpa2dFlow) -> AutomataResu
             flow.config.hidden_dims, flow.config.sample_steps
         )));
     }
-    if !flow.config.source_scale.is_finite() || flow.config.source_scale <= 0.0 {
+    if !flow.config.source_scale.is_finite() || flow.config.source_scale < 0.0 {
         return Err(AutomataError::InvalidModel(format!(
-            "hyper flow source_scale must be positive and finite, got {}",
+            "hyper flow source_scale must be finite and non-negative, got {}",
             flow.config.source_scale
         )));
     }
@@ -800,6 +813,19 @@ fn validate_flow_head(model: &HyperNpa2d, flow: &HyperNpa2dFlow) -> AutomataResu
     ensure_finite("hyper flow w2", &flow.weights.w2)?;
     ensure_finite("hyper flow b2", &flow.weights.b2)?;
     Ok(())
+}
+
+fn activate_flow_hidden(activation: HyperNpa2dFlowActivation, value: f32) -> f32 {
+    match activation {
+        HyperNpa2dFlowActivation::Relu => value.max(0.0),
+        HyperNpa2dFlowActivation::LeakyRelu => {
+            if value >= 0.0 {
+                value
+            } else {
+                value * 0.01
+            }
+        }
+    }
 }
 
 fn ensure_finite(name: &str, values: &[f32]) -> AutomataResult<()> {
@@ -910,6 +936,7 @@ mod tests {
                     sample_steps: 2,
                     source_scale: 0.01,
                     sample_seed: 7,
+                    hidden_activation: HyperNpa2dFlowActivation::Relu,
                 },
                 weights: HyperNpa2dFlowWeights {
                     w1: vec![0.0; 2 * (condition_feature_dims + 1 + output_dims)],

@@ -299,6 +299,23 @@ fn summarize_direct_basis(
     let oracle_block = oracle_report
         .and_then(|report| report.get("oracle_validation").or(Some(report)))
         .or_else(|| report.get("oracle_validation"));
+    let oracle_quality_report =
+        oracle_report.filter(|report| report.get("oracle_validation").is_some());
+    let rollout_particles = oracle_quality_report
+        .and_then(|report| path_usize(report, &["rollout_particles"]))
+        .or_else(|| path_usize(report, &["rollout_particles"]));
+    let rollout_steps = oracle_quality_report
+        .and_then(|report| path_usize(report, &["rollout_steps"]))
+        .or_else(|| path_usize(report, &["rollout_steps"]));
+    let min_target_points = oracle_quality_report
+        .and_then(|report| {
+            path_usize(report, &["target_points_fallback"])
+                .or_else(|| path_usize(report, &["target_points"]))
+        })
+        .or_else(|| min_adapter_target_points(report));
+    let target_loss_image_size = oracle_quality_report
+        .and_then(|report| path_usize(report, &["target_loss_config", "image_size"]))
+        .or_else(|| path_usize(report, &["target_loss_config", "image_size"]));
     let direct = DirectBasisReportSummary {
         backend: path_string(report, &["gpu_training", "backend"])
             .or_else(|| path_string(report, &["training_device"])),
@@ -318,10 +335,10 @@ fn summarize_direct_basis(
             path_f64(report, &["initial_holdout_loss", "mean_total_loss"]),
             path_f64(report, &["final_holdout_loss", "mean_total_loss"]),
         ),
-        rollout_particles: path_usize(report, &["rollout_particles"]),
-        rollout_steps: path_usize(report, &["rollout_steps"]),
-        min_target_points: min_adapter_target_points(report),
-        target_loss_image_size: path_usize(report, &["target_loss_config", "image_size"]),
+        rollout_particles,
+        rollout_steps,
+        min_target_points,
+        target_loss_image_size,
         oracle_train: oracle_block.and_then(|block| oracle_split_summary(block, "train_summary")),
         oracle_holdout: oracle_block
             .and_then(|block| oracle_split_summary(block, "holdout_summary")),
@@ -1812,12 +1829,12 @@ mod tests {
             "adapter_alpha": 16.0,
             "train_examples": 9000,
             "holdout_examples": 1000,
-            "rollout_particles": 2048,
-            "rollout_steps": 32,
-            "target_loss_config": {"image_size": 128},
+            "rollout_particles": 64,
+            "rollout_steps": 8,
+            "target_loss_config": {"image_size": 64},
             "adapters": [
-                {"target_points": 2048},
-                {"target_points": 4096}
+                {"target_points": 256},
+                {"target_points": 512}
             ],
             "initial_train_loss": {"mean_total_loss": 12.0},
             "final_train_loss": {"mean_total_loss": 6.0},
@@ -1827,6 +1844,10 @@ mod tests {
             ]
         });
         let oracle_report = json!({
+            "rollout_particles": 2048,
+            "rollout_steps": 32,
+            "target_points_fallback": 2048,
+            "target_loss_config": {"image_size": 128},
             "oracle_validation": {
                 "train_summary": {
                     "examples": 8,
@@ -1869,7 +1890,9 @@ mod tests {
         assert!(!summary.hypernet_generalization_validated);
         let direct = summary.direct_basis.unwrap();
         assert_eq!(direct.rollout_particles, Some(2048));
+        assert_eq!(direct.rollout_steps, Some(32));
         assert_eq!(direct.min_target_points, Some(2048));
+        assert_eq!(direct.target_loss_image_size, Some(128));
         assert_eq!(direct.train_loss_reduction_fraction, Some(0.5));
         let throughput = direct.particle_steps_per_sec.unwrap();
         assert_eq!(throughput.samples, 2);

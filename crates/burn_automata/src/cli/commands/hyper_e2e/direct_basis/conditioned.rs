@@ -1,11 +1,12 @@
 use crate::cli::commands::hyper_support::{
-    attach_condition_features, load_condition_image_2d, save_hyper_2d, write_pretty_json,
+    attach_condition_features, load_condition_image_2d, load_hyper_2d, save_hyper_2d,
+    write_pretty_json,
 };
 use crate::cli::prelude::*;
 
 use super::super::sources::Hyper2dScratchSource;
 use super::super::{
-    DinoConditionFeatureCacheConfig, Hyper2dE2eSplit, build_condition_feature_cache,
+    DinoConditionFeatureCacheConfig, build_condition_feature_cache,
     default_dino_cache_write_interval_batches, default_dino_feature_batch_size,
 };
 use super::{
@@ -14,320 +15,9 @@ use super::{
     parse_direct_basis_split, resolve_direct_basis_artifact_path,
 };
 
-#[derive(Clone)]
-struct AdapterBankConditionedExample {
-    source: Hyper2dScratchSource,
-    split: Hyper2dE2eSplit,
-    condition: ConditionImage2d,
-    target_vector: Vec<f32>,
-    target_has_bias_correction: bool,
-    target_source_width: usize,
-    target_source_height: usize,
-    target_points: usize,
-    last_train_loss: Option<f32>,
-}
+mod types;
 
-#[derive(Clone, Copy)]
-struct AdapterBankRolloutEvalConfig {
-    target: DirectBasisTargetConfig,
-    rollout: EvalConfig,
-    loss: Target2dLossConfig,
-    requested_examples_per_split: usize,
-}
-
-#[derive(Clone, Copy)]
-struct AdapterBankTrainConfig {
-    objective: AdapterBankTrainingObjective,
-    steps: usize,
-    report_interval: usize,
-    example_batch_size: usize,
-    loss_eval_batch_size: usize,
-    system_memory_budget_gb: Option<f32>,
-    seed: u64,
-    optimizer: AdamWConfig,
-    flow: AdapterBankFlowTrainConfig,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AdapterBankTrainingObjective {
-    StaticVectorMse,
-    RectifiedFlow,
-}
-
-#[derive(Clone, Copy)]
-struct AdapterBankFlowTrainConfig {
-    hidden_dims: usize,
-    sample_steps: usize,
-    source_scale: f32,
-    sample_seed: u64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankExperimentConfig {
-    preset: Option<String>,
-    input: AdapterBankInputExperimentConfig,
-    output: AdapterBankOutputExperimentConfig,
-    condition: AdapterBankConditionExperimentConfig,
-    training: AdapterBankTrainingExperimentConfig,
-    eval: AdapterBankEvalExperimentConfig,
-    target: AdapterBankTargetExperimentConfig,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankInputExperimentConfig {
-    shared_base: Option<PathBuf>,
-    adapter_bank: Option<PathBuf>,
-    source_limit: Option<usize>,
-    train_limit: Option<usize>,
-    holdout_limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankOutputExperimentConfig {
-    output_dir: Option<PathBuf>,
-    report_output: Option<PathBuf>,
-    hyper_output: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankConditionExperimentConfig {
-    encoder: Option<String>,
-    dino_model: Option<PathBuf>,
-    dino_image_size: Option<usize>,
-    dino_batch_size: Option<usize>,
-    dino_cache_write_interval_batches: Option<usize>,
-    feature_cache: Option<PathBuf>,
-    token_grid_width: Option<usize>,
-    token_grid_height: Option<usize>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankTrainingExperimentConfig {
-    backend: Option<String>,
-    objective: Option<String>,
-    hidden: Option<usize>,
-    output_scale: Option<f32>,
-    linear_output: Option<bool>,
-    canonicalize_adapters: Option<bool>,
-    flow_hidden: Option<usize>,
-    flow_sample_steps: Option<usize>,
-    flow_source_scale: Option<f32>,
-    flow_sample_seed: Option<u64>,
-    loss_eval_batch_size: Option<usize>,
-    system_memory_budget_gb: Option<f32>,
-    seed: Option<u64>,
-    steps: Option<usize>,
-    report_interval: Option<usize>,
-    example_batch_size: Option<usize>,
-    learning_rate: Option<f32>,
-    weight_decay: Option<f32>,
-    grad_clip_norm: Option<f32>,
-    adam_beta1: Option<f32>,
-    adam_beta2: Option<f32>,
-    adam_epsilon: Option<f32>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankEvalExperimentConfig {
-    vector_examples: Option<usize>,
-    rollout_examples: Option<usize>,
-    particles: Option<usize>,
-    steps: Option<usize>,
-    update_prob: Option<f32>,
-    seed: Option<u64>,
-    seed_scale: Option<f32>,
-    seed_mode: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct AdapterBankTargetExperimentConfig {
-    points: Option<usize>,
-    image_size: Option<usize>,
-    threshold: Option<f32>,
-    loss_image_size: Option<usize>,
-    splat_sigma: Option<f32>,
-    splat_loss_weight: Option<f32>,
-    color_loss_weight: Option<f32>,
-    density_loss_weight: Option<f32>,
-    displacement_regularizer_weight: Option<f32>,
-    overflow_regularizer_weight: Option<f32>,
-    bound_regularizer_weight: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct AdapterBankConditionedTrainingReport {
-    experiment_config: Option<String>,
-    preset: AutomataPreset,
-    shared_base: String,
-    adapter_bank: String,
-    adapter_bank_base_model: String,
-    output_dir: String,
-    report_output: String,
-    hyper_output: String,
-    backend: Hyper2dAdapterBankBackendArg,
-    npa_config: NpaConfig,
-    hashgrid: burn_automata_kernels::HashGridConfig,
-    hyper_config: HyperNpa2dConfig,
-    generator_architecture: &'static str,
-    generator_objective: &'static str,
-    adapter_rank: usize,
-    adapter_alpha: f32,
-    adapter_parameter_count: usize,
-    condition_encoder: String,
-    train_examples: usize,
-    holdout_examples: usize,
-    source_limit: usize,
-    train_limit: usize,
-    holdout_limit: usize,
-    target_stats: AdapterBankTargetVectorStats,
-    requested_training: AdapterBankTrainingSettingsReport,
-    adapter_target_canonicalization: &'static str,
-    memory: Vec<AdapterBankMemorySnapshot>,
-    training: AdapterBankTrainingPhaseReport,
-    train_vector_metrics: AdapterBankVectorMetricsReport,
-    holdout_vector_metrics: Option<AdapterBankVectorMetricsReport>,
-    rollout_particles: usize,
-    rollout_steps: usize,
-    target_points: usize,
-    target_loss_config: Target2dLossConfig,
-    rollout_eval: AdapterBankRolloutEvalReport,
-}
-
-#[derive(Serialize)]
-struct AdapterBankTrainingSettingsReport {
-    objective: &'static str,
-    steps: usize,
-    report_interval: usize,
-    example_batch_size: usize,
-    loss_eval_batch_size: usize,
-    system_memory_budget_gb: Option<f32>,
-    seed: u64,
-    optimizer: AdamWConfig,
-    flow: Option<AdapterBankFlowTrainingSettingsReport>,
-}
-
-#[derive(Serialize)]
-struct AdapterBankFlowTrainingSettingsReport {
-    hidden_dims: usize,
-    sample_steps: usize,
-    source_scale: f32,
-    sample_seed: u64,
-}
-
-#[derive(Clone, Serialize)]
-struct AdapterBankTrainingPhaseReport {
-    backend: String,
-    device: String,
-    selection_metric: String,
-    initial_loss: f32,
-    initial_validation_loss: Option<f32>,
-    final_loss: f32,
-    final_validation_loss: Option<f32>,
-    best_loss: f32,
-    best_validation_loss: Option<f32>,
-    best_step: usize,
-    history: Vec<AdapterBankTrainingHistoryEntry>,
-    memory: Vec<AdapterBankMemorySnapshot>,
-    elapsed_ms: f64,
-}
-
-#[derive(Clone, Serialize)]
-struct AdapterBankTrainingHistoryEntry {
-    step: usize,
-    loss: f32,
-    grad_norm: f32,
-    grad_scale: f32,
-    examples_seen: usize,
-    adapter_values_per_sec: f64,
-    validation_loss: Option<f32>,
-    memory: AdapterBankMemorySnapshot,
-    elapsed_ms: f64,
-}
-
-#[derive(Clone, Serialize)]
-struct AdapterBankMemorySnapshot {
-    label: String,
-    rss_bytes: Option<u64>,
-    peak_rss_bytes: Option<u64>,
-    swap_bytes: Option<u64>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct AdapterBankTargetVectorStats {
-    examples: usize,
-    parameters_per_adapter: usize,
-    mean_rms: f32,
-    mean_abs: f32,
-    max_abs: f32,
-    output_scale: f32,
-    target_values_outside_output_scale_fraction: f32,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct AdapterBankVectorMetricsReport {
-    examples: usize,
-    parameters_per_adapter: usize,
-    mse: f32,
-    rmse: f32,
-    normalized_rmse_to_target_rms: Option<f32>,
-    mean_abs_error: f32,
-    max_abs_error: f32,
-    target_rms: f32,
-    prediction_rms: f32,
-    target_max_abs: f32,
-    prediction_max_abs: f32,
-    mean_cosine_similarity: f32,
-    prediction_values_near_output_scale_fraction: f32,
-    target_values_outside_output_scale_fraction: f32,
-}
-
-#[derive(Serialize)]
-struct AdapterBankRolloutEvalReport {
-    requested_examples_per_split: usize,
-    train_summary: Option<AdapterBankRolloutSummary>,
-    holdout_summary: Option<AdapterBankRolloutSummary>,
-    entries: Vec<AdapterBankRolloutEntry>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct AdapterBankRolloutSummary {
-    examples: usize,
-    mean_zero_loss: f32,
-    mean_static_loss: f32,
-    mean_hyper_loss: f32,
-    mean_gap_to_static: f32,
-    mean_ratio_to_static: f32,
-    max_ratio_to_static: f32,
-    mean_gap_to_zero: f32,
-    mean_ratio_to_zero: f32,
-    max_ratio_to_zero: f32,
-}
-
-#[derive(Serialize)]
-struct AdapterBankRolloutEntry {
-    slug: String,
-    split: &'static str,
-    condition: String,
-    target_source_width: usize,
-    target_source_height: usize,
-    target_points: usize,
-    zero_adapter_loss: Target2dLossReport,
-    static_adapter_loss: Target2dLossReport,
-    hyper_adapter_loss: Target2dLossReport,
-    hyper_gap_to_static: f32,
-    hyper_ratio_to_static: f32,
-    hyper_gap_to_zero: f32,
-    hyper_ratio_to_zero: f32,
-    adapter_vector_mse: f32,
-    adapter_vector_cosine_similarity: f32,
-}
+use types::*;
 
 pub(crate) fn run_train_hyper_2d_adapter_bank(
     command: Command,
@@ -402,6 +92,8 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
     let AdapterBankInputExperimentConfig {
         shared_base: config_shared_base,
         adapter_bank: config_adapter_bank,
+        initial_hyper: config_initial_hyper,
+        psnr_gate_report: config_psnr_gate_report,
         source_limit: config_source_limit,
         train_limit: config_train_limit,
         holdout_limit: config_holdout_limit,
@@ -432,6 +124,12 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
         flow_sample_steps: config_flow_sample_steps,
         flow_source_scale: config_flow_source_scale,
         flow_sample_seed: config_flow_sample_seed,
+        flow_hidden_activation: config_flow_hidden_activation,
+        flow_init: config_flow_init,
+        flow_loss: config_flow_loss,
+        flow_hard_sample_weight: config_flow_hard_sample_weight,
+        flow_hard_sample_psnr_threshold_db: config_flow_hard_sample_psnr_threshold_db,
+        diagnostic_vector_examples: config_diagnostic_vector_examples,
         loss_eval_batch_size: config_loss_eval_batch_size,
         system_memory_budget_gb: config_system_memory_budget_gb,
         seed: config_hyper_seed,
@@ -523,6 +221,33 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
     let canonicalize_adapters = config_canonicalize_adapters.unwrap_or(false);
     let flow_hidden = config_flow_hidden.unwrap_or(hyper_hidden);
     let flow_sample_steps = config_flow_sample_steps.unwrap_or(16);
+    let flow_hidden_activation = parse_adapter_bank_flow_hidden_activation(
+        config_flow_hidden_activation.as_deref().unwrap_or("relu"),
+    )?;
+    let flow_init = parse_adapter_bank_flow_init(config_flow_init.as_deref().unwrap_or("random"))?;
+    let flow_loss =
+        parse_adapter_bank_flow_loss(config_flow_loss.as_deref().unwrap_or("velocity-mse"))?;
+    let flow_hard_sample_weight = config_flow_hard_sample_weight.unwrap_or(1.0);
+    let flow_hard_sample_psnr_threshold_db =
+        config_flow_hard_sample_psnr_threshold_db.unwrap_or(26.0);
+    if !flow_hard_sample_weight.is_finite() || flow_hard_sample_weight <= 0.0 {
+        return Err(std::io::Error::other(
+            "training.flow_hard_sample_weight must be finite and positive",
+        )
+        .into());
+    }
+    if !flow_hard_sample_psnr_threshold_db.is_finite() {
+        return Err(std::io::Error::other(
+            "training.flow_hard_sample_psnr_threshold_db must be finite",
+        )
+        .into());
+    }
+    if config_initial_hyper.is_some() && flow_init != AdapterBankFlowInit::FromHyper {
+        return Err(std::io::Error::other(
+            "input.initial_hyper is only valid with training.flow_init = \"from-hyper\"",
+        )
+        .into());
+    }
     let hyper_seed = config_hyper_seed.unwrap_or(hyper_seed);
     let flow_sample_seed = config_flow_sample_seed.unwrap_or(hyper_seed ^ 0x9e37_79b9_7f4a_7c15);
     let steps = config_steps.unwrap_or(steps);
@@ -537,6 +262,8 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
     let adam_beta2 = config_adam_beta2.unwrap_or(adam_beta2);
     let adam_epsilon = config_adam_epsilon.unwrap_or(adam_epsilon);
     let vector_eval_examples = config_vector_eval_examples.unwrap_or(vector_eval_examples);
+    let diagnostic_vector_examples =
+        config_diagnostic_vector_examples.unwrap_or_else(|| vector_eval_examples.clamp(1, 16));
     let rollout_eval_examples = config_rollout_eval_examples.unwrap_or(rollout_eval_examples);
     let rollout_particles = config_rollout_particles.unwrap_or(rollout_particles);
     let rollout_steps = config_rollout_steps.unwrap_or(rollout_steps);
@@ -613,12 +340,18 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
             cache_path: condition_feature_cache.as_deref(),
         },
     )?;
-    let examples = load_conditioned_adapter_bank_examples(
+    let mut examples = load_conditioned_adapter_bank_examples(
         &adapter_bank,
         &base_manifest,
         selected_entries,
         Some(&condition_features),
         canonicalize_adapters,
+    )?;
+    let sample_weights = apply_psnr_sample_weights(
+        &mut examples,
+        config_psnr_gate_report.as_deref(),
+        flow_hard_sample_weight,
+        flow_hard_sample_psnr_threshold_db,
     )?;
     let memory = vec![check_process_memory_budget(
         "adapter-bank examples loaded",
@@ -668,11 +401,33 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
         output_scale,
     };
     let mut hyper = HyperNpa2d::seeded(base_model.config.clone(), hyper_config, hyper_seed)?;
+    let initial_hyper_report = config_initial_hyper
+        .as_ref()
+        .map(|path| path.display().to_string());
+    if flow_init == AdapterBankFlowInit::FromHyper {
+        let initial_hyper_path = config_initial_hyper.as_ref().ok_or_else(|| {
+            std::io::Error::other(
+                "training.flow_init = \"from-hyper\" requires input.initial_hyper",
+            )
+        })?;
+        load_adapter_bank_initial_flow(
+            &mut hyper,
+            initial_hyper_path,
+            crate::HyperNpa2dFlowConfig {
+                hidden_dims: flow_hidden,
+                sample_steps: flow_sample_steps,
+                source_scale: flow_source_scale,
+                sample_seed: flow_sample_seed,
+                hidden_activation: flow_hidden_activation,
+            },
+        )?;
+    }
     let train_config = AdapterBankTrainConfig {
         objective,
         steps,
         report_interval,
         example_batch_size,
+        diagnostic_vector_examples,
         loss_eval_batch_size,
         system_memory_budget_gb,
         seed: hyper_seed,
@@ -689,6 +444,10 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
             sample_steps: flow_sample_steps,
             source_scale: flow_source_scale,
             sample_seed: flow_sample_seed,
+            hidden_activation: flow_hidden_activation,
+            init: flow_init,
+            loss: flow_loss,
+            sample_weights,
         },
     };
     validate_training_config(train_config)?;
@@ -798,6 +557,7 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
             steps,
             report_interval,
             example_batch_size,
+            diagnostic_vector_examples,
             loss_eval_batch_size,
             system_memory_budget_gb,
             seed: hyper_seed,
@@ -808,6 +568,11 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
                     sample_steps: flow_sample_steps,
                     source_scale: flow_source_scale,
                     sample_seed: flow_sample_seed,
+                    hidden_activation: flow_hidden_activation,
+                    init: flow_init.label(),
+                    loss: flow_loss.label(),
+                    sample_weights,
+                    initial_hyper: initial_hyper_report,
                 },
             ),
         },
@@ -931,9 +696,61 @@ fn load_conditioned_adapter_bank_examples(
             target_source_height: entry.target_source_height,
             target_points: entry.target_points,
             last_train_loss: entry.last_train_loss,
+            sample_weight: 1.0,
         });
     }
     Ok(examples)
+}
+
+#[derive(Deserialize)]
+struct AdapterBankPsnrGateReportLoad {
+    entries: Vec<AdapterBankPsnrGateEntryLoad>,
+}
+
+#[derive(Deserialize)]
+struct AdapterBankPsnrGateEntryLoad {
+    slug: String,
+    kind: String,
+    render_rgb_psnr_db: f32,
+}
+
+fn apply_psnr_sample_weights(
+    examples: &mut [AdapterBankConditionedExample],
+    psnr_gate_report: Option<&Path>,
+    hard_weight: f32,
+    psnr_threshold_db: f32,
+) -> Result<AdapterBankSampleWeights, Box<dyn std::error::Error>> {
+    if hard_weight <= 1.0 && psnr_gate_report.is_none() {
+        return Ok(AdapterBankSampleWeights::default());
+    }
+    let report_path = psnr_gate_report.ok_or_else(|| {
+        std::io::Error::other(
+            "training.flow_hard_sample_weight > 1 requires input.psnr_gate_report",
+        )
+    })?;
+    let text = std::fs::read_to_string(report_path)?;
+    let report: AdapterBankPsnrGateReportLoad = serde_json::from_str(&text)?;
+    let hard_slugs = report
+        .entries
+        .into_iter()
+        .filter(|entry| entry.kind == "hyper" && entry.render_rgb_psnr_db < psnr_threshold_db)
+        .map(|entry| entry.slug)
+        .collect::<std::collections::HashSet<_>>();
+    let mut hard_examples = 0usize;
+    for example in examples {
+        if hard_slugs.contains(&example.source.slug) {
+            example.sample_weight = hard_weight;
+            hard_examples += 1;
+        } else {
+            example.sample_weight = 1.0;
+        }
+    }
+    Ok(AdapterBankSampleWeights {
+        enabled: true,
+        hard_weight,
+        psnr_threshold_db,
+        hard_examples,
+    })
 }
 
 fn condition_for_adapter_bank_example(
@@ -1140,6 +957,9 @@ fn train_adapter_bank_cpu(
                     config.system_memory_budget_gb,
                 )?,
                 elapsed_ms: step_elapsed.as_secs_f64() * 1000.0,
+                train_vector_metrics: None,
+                validation_vector_metrics: None,
+                flow_optimizer: None,
             });
         }
     }
@@ -1161,6 +981,7 @@ fn train_adapter_bank_cpu(
         history,
         memory: vec![capture_process_memory("cpu adapter-bank training complete")],
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        vector_selection: None,
     })
 }
 
@@ -1180,6 +1001,16 @@ fn train_adapter_bank_linear_solve(
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     let initial_loss = hyper_adapter_regression_loss(hyper, &adapter_examples)?;
+    if config.objective == AdapterBankTrainingObjective::RectifiedFlow {
+        return train_adapter_bank_flow_linear_solve(
+            hyper,
+            examples,
+            &adapter_examples,
+            config,
+            initial_loss,
+            started,
+        );
+    }
     let input_dims = hyper.config.condition_feature_dims;
     let hidden_dims = hyper.config.hidden_dims;
     let output_dims = hyper.adapter_parameter_count();
@@ -1315,12 +1146,140 @@ fn train_adapter_bank_linear_solve(
                 config.system_memory_budget_gb,
             )?,
             elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+            train_vector_metrics: None,
+            validation_vector_metrics: None,
+            flow_optimizer: None,
         }],
         memory: vec![capture_process_memory(
             "linear-solve adapter-bank training complete",
         )],
         elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+        vector_selection: None,
     })
+}
+
+fn train_adapter_bank_flow_linear_solve(
+    hyper: &mut HyperNpa2d,
+    examples: &[AdapterBankConditionedExample],
+    adapter_examples: &[HyperAdapterExample2d],
+    config: AdapterBankTrainConfig,
+    initial_loss: f32,
+    started: Instant,
+) -> Result<AdapterBankTrainingPhaseReport, Box<dyn std::error::Error>> {
+    let output_dims = hyper.adapter_parameter_count();
+    let hidden_dims = config.flow.hidden_dims;
+    let weights = linear_solve_rectified_flow_condition_weights(hyper, examples, hidden_dims)?;
+    hyper.set_flow(crate::HyperNpa2dFlow {
+        config: crate::HyperNpa2dFlowConfig {
+            hidden_dims,
+            sample_steps: config.flow.sample_steps,
+            source_scale: config.flow.source_scale,
+            sample_seed: config.flow.sample_seed,
+            hidden_activation: config.flow.hidden_activation,
+        },
+        weights,
+    })?;
+    let final_loss = hyper_adapter_regression_loss(hyper, adapter_examples)?;
+    let elapsed = started.elapsed();
+    Ok(AdapterBankTrainingPhaseReport {
+        backend: "linear_solve_rectified_flow_condition_interpolator".to_string(),
+        device: "host-f64-solve".to_string(),
+        selection_metric: "train_adapter_vector_mse".to_string(),
+        initial_loss,
+        initial_validation_loss: None,
+        final_loss,
+        final_validation_loss: None,
+        best_loss: final_loss,
+        best_validation_loss: None,
+        best_step: config.steps,
+        history: vec![AdapterBankTrainingHistoryEntry {
+            step: config.steps,
+            loss: final_loss,
+            grad_norm: 0.0,
+            grad_scale: 1.0,
+            examples_seen: examples.len(),
+            adapter_values_per_sec: (examples.len() * output_dims) as f64
+                / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
+            validation_loss: None,
+            memory: check_process_memory_budget(
+                "linear-solve rectified-flow adapter-bank training complete",
+                config.system_memory_budget_gb,
+            )?,
+            elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+            train_vector_metrics: None,
+            validation_vector_metrics: None,
+            flow_optimizer: None,
+        }],
+        memory: vec![capture_process_memory(
+            "linear-solve rectified-flow adapter-bank training complete",
+        )],
+        elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+        vector_selection: None,
+    })
+}
+
+fn linear_solve_rectified_flow_condition_weights(
+    hyper: &HyperNpa2d,
+    examples: &[AdapterBankConditionedExample],
+    hidden_dims: usize,
+) -> Result<crate::HyperNpa2dFlowWeights, Box<dyn std::error::Error>> {
+    let input_dims = hyper.config.condition_feature_dims;
+    let output_dims = hyper.adapter_parameter_count();
+    let rows = examples.len();
+    if hidden_dims < rows {
+        return Err(std::io::Error::other(format!(
+            "linear-solve rectified-flow backend requires flow_hidden >= rows ({rows}), got {hidden_dims}"
+        ))
+        .into());
+    }
+    let condition_cols = input_dims + 1;
+    let flow_input_dims = input_dims
+        .checked_add(1)
+        .and_then(|dims| dims.checked_add(output_dims))
+        .ok_or_else(|| std::io::Error::other("linear-solve flow input dimensions overflow"))?;
+    let mut inputs = vec![0.0_f64; rows * condition_cols];
+    for (row, example) in examples.iter().enumerate() {
+        let input = hyper.condition_input_vector(&example.condition)?;
+        if input.len() != input_dims || example.target_vector.len() != output_dims {
+            return Err(std::io::Error::other("linear-solve flow tensor shape mismatch").into());
+        }
+        let input_base = row * condition_cols;
+        for (idx, value) in input.iter().copied().enumerate() {
+            inputs[input_base + idx] = f64::from(value);
+        }
+        inputs[input_base + input_dims] = 1.0;
+    }
+
+    let hidden_margin = 16.0_f64;
+    let mut hidden_targets = vec![-hidden_margin; rows * rows];
+    for row in 0..rows {
+        hidden_targets[row * rows + row] = hidden_margin;
+    }
+    let gram = gram_matrix(&inputs, rows, condition_cols);
+    let inverse = invert_with_jitter(&gram, rows)?;
+    let temp = matmul(&inverse, rows, rows, &hidden_targets, rows, rows);
+    let coeff = matmul_transpose_left(&inputs, rows, condition_cols, &temp, rows, rows);
+
+    let mut weights = crate::HyperNpa2dFlowWeights {
+        w1: vec![0.0; hidden_dims * flow_input_dims],
+        b1: vec![0.0; hidden_dims],
+        w2: vec![0.0; output_dims * hidden_dims],
+        b2: vec![0.0; output_dims],
+    };
+    for hidden in 0..rows {
+        let flow_base = hidden * flow_input_dims;
+        for input in 0..input_dims {
+            weights.w1[flow_base + input] = coeff[input * rows + hidden] as f32;
+        }
+        weights.b1[hidden] = coeff[input_dims * rows + hidden] as f32;
+    }
+    for output in 0..output_dims {
+        for (row, example) in examples.iter().enumerate() {
+            let value = example.target_vector[output] as f64 / hidden_margin;
+            weights.w2[output * hidden_dims + row] = value as f32;
+        }
+    }
+    Ok(weights)
 }
 
 fn gram_matrix(values: &[f64], rows: usize, cols: usize) -> Vec<f64> {
@@ -1448,6 +1407,61 @@ fn invert_square(mut matrix: Vec<f64>, size: usize) -> Option<Vec<f64>> {
     Some(inverse)
 }
 
+fn load_adapter_bank_initial_flow(
+    hyper: &mut HyperNpa2d,
+    path: &Path,
+    flow_config: crate::HyperNpa2dFlowConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let loaded = load_hyper_2d(path)?;
+    if loaded.npa_config != hyper.npa_config {
+        return Err(std::io::Error::other(format!(
+            "input.initial_hyper {} NPA config does not match the current shared base",
+            path.display()
+        ))
+        .into());
+    }
+    if loaded.config.condition_encoder != hyper.config.condition_encoder
+        || loaded.config.condition_feature_dims != hyper.config.condition_feature_dims
+        || loaded.config.condition_token_grid_width != hyper.config.condition_token_grid_width
+        || loaded.config.condition_token_grid_height != hyper.config.condition_token_grid_height
+    {
+        return Err(std::io::Error::other(format!(
+            "input.initial_hyper {} condition config does not match the current run",
+            path.display()
+        ))
+        .into());
+    }
+    if loaded.adapter_parameter_count() != hyper.adapter_parameter_count() {
+        return Err(std::io::Error::other(format!(
+            "input.initial_hyper {} adapter parameter count {} does not match current count {}",
+            path.display(),
+            loaded.adapter_parameter_count(),
+            hyper.adapter_parameter_count()
+        ))
+        .into());
+    }
+    let flow = loaded.flow.ok_or_else(|| {
+        std::io::Error::other(format!(
+            "input.initial_hyper {} does not contain a flow head",
+            path.display()
+        ))
+    })?;
+    if flow.config.hidden_dims != flow_config.hidden_dims {
+        return Err(std::io::Error::other(format!(
+            "input.initial_hyper {} flow hidden dims {} do not match requested {}",
+            path.display(),
+            flow.config.hidden_dims,
+            flow_config.hidden_dims
+        ))
+        .into());
+    }
+    hyper.set_flow(crate::HyperNpa2dFlow {
+        config: flow_config,
+        weights: flow.weights,
+    })?;
+    Ok(())
+}
+
 #[cfg(feature = "backend_wgpu")]
 fn train_adapter_bank_burn_wgpu(
     hyper: &mut HyperNpa2d,
@@ -1537,6 +1551,7 @@ fn evaluate_rollout_examples(
         let static_example = super::DirectBasisExample {
             source: example.source.clone(),
             split: example.split,
+            bank_split_index: None,
             target: target.clone(),
             adapter: target_adapter_from_vector(hyper, example)?,
             last_train_loss: example.last_train_loss,
@@ -1544,6 +1559,7 @@ fn evaluate_rollout_examples(
         let zero_example = super::DirectBasisExample {
             source: example.source.clone(),
             split: example.split,
+            bank_split_index: None,
             target: target.clone(),
             adapter: zero_adapter_for_hyper(hyper)?,
             last_train_loss: None,
@@ -1552,6 +1568,7 @@ fn evaluate_rollout_examples(
         let hyper_example = super::DirectBasisExample {
             source: example.source.clone(),
             split: example.split,
+            bank_split_index: None,
             target,
             adapter: predicted_adapter,
             last_train_loss: None,
@@ -1792,10 +1809,25 @@ fn validate_training_config(
     ) && (config.flow.hidden_dims == 0
         || config.flow.sample_steps == 0
         || !config.flow.source_scale.is_finite()
-        || config.flow.source_scale <= 0.0)
+        || config.flow.source_scale < 0.0)
     {
         return Err(std::io::Error::other(
-            "rectified-flow training requires flow_hidden, flow_sample_steps, and positive finite flow_source_scale",
+            "rectified-flow training requires flow_hidden, flow_sample_steps, and finite non-negative flow_source_scale",
+        )
+        .into());
+    }
+    if config.flow.loss == AdapterBankFlowLoss::SampledAdapterMse && config.flow.source_scale != 0.0
+    {
+        return Err(std::io::Error::other(
+            "sampled-adapter flow loss currently requires flow_source_scale = 0.0",
+        )
+        .into());
+    }
+    if config.flow.sample_weights.enabled
+        && config.flow.loss != AdapterBankFlowLoss::SampledAdapterMse
+    {
+        return Err(std::io::Error::other(
+            "flow hard-sample weighting currently requires flow_loss = \"sampled-adapter-mse\"",
         )
         .into());
     }
@@ -1837,6 +1869,25 @@ impl AdapterBankTrainingObjective {
     }
 }
 
+impl AdapterBankFlowInit {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Random => "random",
+            Self::LinearSolveConditionWarmstart => "linear-solve-condition-warmstart",
+            Self::FromHyper => "from-hyper",
+        }
+    }
+}
+
+impl AdapterBankFlowLoss {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::VelocityMse => "velocity-mse",
+            Self::SampledAdapterMse => "sampled-adapter-mse",
+        }
+    }
+}
+
 fn parse_adapter_bank_training_objective(
     value: &str,
 ) -> Result<AdapterBankTrainingObjective, Box<dyn std::error::Error>> {
@@ -1847,6 +1898,55 @@ fn parse_adapter_bank_training_objective(
         }
         other => Err(std::io::Error::other(format!(
             "unknown training.objective {other:?}; expected static-vector-mse or rectified-flow"
+        ))
+        .into()),
+    }
+}
+
+fn parse_adapter_bank_flow_init(
+    value: &str,
+) -> Result<AdapterBankFlowInit, Box<dyn std::error::Error>> {
+    match value {
+        "random" | "seeded-random" => Ok(AdapterBankFlowInit::Random),
+        "linear-solve-condition-warmstart"
+        | "linear-solve"
+        | "condition-interpolator"
+        | "linear-solve-condition" => Ok(AdapterBankFlowInit::LinearSolveConditionWarmstart),
+        "from-hyper" | "hyper" | "checkpoint" | "resume" => Ok(AdapterBankFlowInit::FromHyper),
+        other => Err(std::io::Error::other(format!(
+            "unknown training.flow_init {other:?}; expected random, linear-solve-condition-warmstart, or from-hyper"
+        ))
+        .into()),
+    }
+}
+
+fn parse_adapter_bank_flow_loss(
+    value: &str,
+) -> Result<AdapterBankFlowLoss, Box<dyn std::error::Error>> {
+    match value {
+        "velocity-mse" | "velocity" | "rectified-flow-velocity" => {
+            Ok(AdapterBankFlowLoss::VelocityMse)
+        }
+        "sampled-adapter-mse"
+        | "sampled-adapter"
+        | "sampled"
+        | "final-adapter"
+        | "inference-adapter-mse" => Ok(AdapterBankFlowLoss::SampledAdapterMse),
+        other => Err(std::io::Error::other(format!(
+            "unknown training.flow_loss {other:?}; expected velocity-mse or sampled-adapter-mse"
+        ))
+        .into()),
+    }
+}
+
+fn parse_adapter_bank_flow_hidden_activation(
+    value: &str,
+) -> Result<HyperNpa2dFlowActivation, Box<dyn std::error::Error>> {
+    match value {
+        "relu" => Ok(HyperNpa2dFlowActivation::Relu),
+        "leaky-relu" | "leaky_relu" | "leaky" => Ok(HyperNpa2dFlowActivation::LeakyRelu),
+        other => Err(std::io::Error::other(format!(
+            "unknown training.flow_hidden_activation {other:?}; expected relu or leaky-relu"
         ))
         .into()),
     }
@@ -1869,6 +1969,41 @@ fn sample_indices(examples_len: usize, batch_size: usize, rng: &mut StdRng) -> V
         indices.insert(rng.random_range(0..examples_len));
     }
     indices.into_iter().collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_rectified_flow_training_row(
+    features: &[f32],
+    target: &[f32],
+    condition_dims: usize,
+    output_dims: usize,
+    idx: usize,
+    source_scale: f32,
+    flow_sample_seed: u64,
+    sample_seed: u64,
+    input_values: &mut Vec<f32>,
+    velocity_values: &mut Vec<f32>,
+) {
+    let feature_start = idx * condition_dims;
+    let target_start = idx * output_dims;
+    let condition = &features[feature_start..feature_start + condition_dims];
+    let target = &target[target_start..target_start + output_dims];
+    let mut rng = StdRng::seed_from_u64(
+        flow_sample_seed ^ sample_seed ^ ((idx as u64 + 1).wrapping_mul(0xd1b5_4a32_d192_ed03)),
+    );
+    let t = rng.random_range(0.0..=1.0);
+    input_values.extend_from_slice(condition);
+    input_values.push(t);
+    for &target_value in target {
+        let source = if source_scale == 0.0 {
+            0.0
+        } else {
+            rng.random_range(-source_scale..=source_scale)
+        };
+        let state = source.mul_add(1.0 - t, target_value * t);
+        input_values.push(state);
+        velocity_values.push(target_value - source);
+    }
 }
 
 fn condition_encoder_label(encoder: ConditionEncoder2d) -> &'static str {
@@ -1909,6 +2044,7 @@ mod burn_wgpu;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::commands::hyper_e2e::Hyper2dE2eSplit;
 
     #[test]
     fn adapter_bank_config_accepts_nested_toml() {
@@ -1930,6 +2066,9 @@ mod tests {
             flow_hidden = 128
             flow_sample_steps = 8
             flow_source_scale = 0.25
+            flow_hidden_activation = "leaky-relu"
+            flow_init = "linear-solve-condition-warmstart"
+            diagnostic_vector_examples = 16
             loss_eval_batch_size = 128
             system_memory_budget_gb = 12.5
 
@@ -1955,6 +2094,15 @@ mod tests {
         assert_eq!(config.training.flow_hidden, Some(128));
         assert_eq!(config.training.flow_sample_steps, Some(8));
         assert_eq!(config.training.flow_source_scale, Some(0.25));
+        assert_eq!(
+            config.training.flow_hidden_activation.as_deref(),
+            Some("leaky-relu")
+        );
+        assert_eq!(
+            config.training.flow_init.as_deref(),
+            Some("linear-solve-condition-warmstart")
+        );
+        assert_eq!(config.training.diagnostic_vector_examples, Some(16));
         assert_eq!(config.training.loss_eval_batch_size, Some(128));
         assert_eq!(config.training.system_memory_budget_gb, Some(12.5));
         assert_eq!(config.condition.dino_batch_size, Some(4));
@@ -1962,6 +2110,264 @@ mod tests {
         assert_eq!(config.condition.token_grid_width, Some(8));
         assert_eq!(config.condition.token_grid_height, Some(8));
         assert_eq!(config.eval.seed_mode.as_deref(), Some("uniform-circle"));
+    }
+
+    #[test]
+    fn bundled_exact_oracle_dino_flow_configs_parse() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for file_name in [
+            "exact_oracle_10k8x8_dino_token_grid_linear_solve_overfit_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_overfit_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_overfit_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e3_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e4_refine_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e5_refine2_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine2_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_refine_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_margin_refine_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_floor_refine_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_warmstart_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_linear_solve_overfit_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_near_zero_source_overfit_train_all.toml",
+            "exact_oracle_10k8x8_dino_token_grid_flow_split_smoke.toml",
+        ] {
+            let path = repo_root
+                .join("configs/hyper2d_adapter_bank")
+                .join(file_name);
+            let config = load_adapter_bank_experiment_config(Some(&path)).unwrap();
+
+            assert_eq!(config.preset.as_deref(), Some("growing-2d"));
+            assert_eq!(
+                config.condition.encoder.as_deref(),
+                Some("dino-vits-token-grid")
+            );
+            assert_eq!(config.condition.token_grid_width, Some(8));
+            assert_eq!(config.condition.token_grid_height, Some(8));
+            assert_eq!(config.eval.particles, Some(2048));
+            assert_eq!(config.target.points, Some(2048));
+            if file_name
+                == "exact_oracle_10k8x8_dino_token_grid_linear_solve_overfit_train_all.toml"
+            {
+                assert_eq!(config.training.backend.as_deref(), Some("linear-solve"));
+                assert!(config.training.objective.is_none());
+            } else if file_name.contains("flow_linear_solve") {
+                assert_eq!(config.training.backend.as_deref(), Some("linear-solve"));
+                assert_eq!(config.training.objective.as_deref(), Some("rectified-flow"));
+                assert_eq!(config.training.flow_source_scale, Some(0.0));
+            } else {
+                assert_eq!(config.training.backend.as_deref(), Some("burn-wgpu"));
+                assert_eq!(config.training.objective.as_deref(), Some("rectified-flow"));
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_overfit_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e3_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e4_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e5_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_margin_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_floor_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_warmstart_train_all.toml"
+                {
+                    assert_eq!(config.training.flow_source_scale, Some(0.0));
+                }
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_overfit_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e3_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e4_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e5_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_margin_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_floor_refine_train_all.toml"
+                {
+                    assert_eq!(
+                        config.training.flow_hidden_activation.as_deref(),
+                        Some("leaky-relu")
+                    );
+                }
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e4_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_lr2e5_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_margin_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_floor_refine_train_all.toml"
+                {
+                    assert!(config.input.initial_hyper.is_some());
+                    assert_eq!(config.training.flow_init.as_deref(), Some("from-hyper"));
+                }
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_refine2_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_margin_refine_train_all.toml"
+                    || file_name
+                        == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_floor_refine_train_all.toml"
+                {
+                    assert_eq!(
+                        config.training.flow_loss.as_deref(),
+                        Some("sampled-adapter-mse")
+                    );
+                }
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_refine_train_all.toml"
+                {
+                    assert!(config.input.psnr_gate_report.is_some());
+                    assert_eq!(config.training.flow_hard_sample_weight, Some(8.0));
+                    assert_eq!(
+                        config.training.flow_hard_sample_psnr_threshold_db,
+                        Some(26.0)
+                    );
+                }
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_margin_refine_train_all.toml"
+                {
+                    assert!(config.input.psnr_gate_report.is_some());
+                    assert_eq!(config.training.flow_hard_sample_weight, Some(6.0));
+                    assert_eq!(
+                        config.training.flow_hard_sample_psnr_threshold_db,
+                        Some(26.5)
+                    );
+                }
+                if file_name
+                    == "exact_oracle_10k8x8_dino_token_grid_flow_zero_source_h384_sampled_weighted_floor_refine_train_all.toml"
+                {
+                    assert!(config.input.psnr_gate_report.is_some());
+                    assert_eq!(config.training.flow_hard_sample_weight, Some(12.0));
+                    assert_eq!(
+                        config.training.flow_hard_sample_psnr_threshold_db,
+                        Some(26.0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flow_init_parser_accepts_warmstart_aliases() {
+        assert_eq!(
+            parse_adapter_bank_flow_init("random").unwrap(),
+            AdapterBankFlowInit::Random
+        );
+        assert_eq!(
+            parse_adapter_bank_flow_init("linear-solve").unwrap(),
+            AdapterBankFlowInit::LinearSolveConditionWarmstart
+        );
+        assert_eq!(
+            parse_adapter_bank_flow_init("from-hyper").unwrap(),
+            AdapterBankFlowInit::FromHyper
+        );
+        assert!(parse_adapter_bank_flow_init("elementwise-mean").is_err());
+    }
+
+    #[test]
+    fn flow_loss_parser_accepts_sampled_adapter() {
+        assert_eq!(
+            parse_adapter_bank_flow_loss("velocity-mse").unwrap(),
+            AdapterBankFlowLoss::VelocityMse
+        );
+        assert_eq!(
+            parse_adapter_bank_flow_loss("sampled-adapter-mse").unwrap(),
+            AdapterBankFlowLoss::SampledAdapterMse
+        );
+        assert!(parse_adapter_bank_flow_loss("image").is_err());
+    }
+
+    #[test]
+    fn flow_hidden_activation_parser_accepts_leaky_relu() {
+        assert_eq!(
+            parse_adapter_bank_flow_hidden_activation("relu").unwrap(),
+            HyperNpa2dFlowActivation::Relu
+        );
+        assert_eq!(
+            parse_adapter_bank_flow_hidden_activation("leaky-relu").unwrap(),
+            HyperNpa2dFlowActivation::LeakyRelu
+        );
+        assert!(parse_adapter_bank_flow_hidden_activation("gelu").is_err());
+    }
+
+    #[test]
+    fn zero_source_rectified_flow_row_matches_target_velocity() {
+        let features = vec![0.25, -0.5];
+        let target = vec![1.0, -2.0, 0.5];
+        let mut input = Vec::new();
+        let mut velocity = Vec::new();
+        append_rectified_flow_training_row(
+            &features,
+            &target,
+            2,
+            3,
+            0,
+            0.0,
+            17,
+            29,
+            &mut input,
+            &mut velocity,
+        );
+        assert_eq!(&input[..2], &features);
+        let t = input[2];
+        assert!((0.0..=1.0).contains(&t));
+        assert_eq!(velocity, target);
+        for (state, target_value) in input[3..].iter().zip(target) {
+            assert!((*state - target_value * t).abs() <= f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn noisy_rectified_flow_row_is_bounded_and_consistent() {
+        let features = vec![0.25, -0.5];
+        let target = vec![1.0, -2.0, 0.5];
+        let mut input = Vec::new();
+        let mut velocity = Vec::new();
+        append_rectified_flow_training_row(
+            &features,
+            &target,
+            2,
+            3,
+            0,
+            0.125,
+            17,
+            29,
+            &mut input,
+            &mut velocity,
+        );
+        let t = input[2];
+        for ((state, target_value), velocity_value) in input[3..].iter().zip(target).zip(velocity) {
+            let source = target_value - velocity_value;
+            assert!(source.abs() <= 0.125);
+            let expected_state = source.mul_add(1.0 - t, target_value * t);
+            assert!((*state - expected_state).abs() <= 1.0e-6);
+        }
     }
 
     #[test]
@@ -1984,6 +2390,7 @@ mod tests {
             target_source_height: 1,
             target_points: 1,
             last_train_loss: None,
+            sample_weight: 1.0,
         };
         let stats = target_vector_stats(&[example], 0.0).unwrap();
         assert!(stats.output_scale > 0.5);

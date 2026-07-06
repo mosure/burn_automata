@@ -27,6 +27,7 @@ output_scale = 0.0
 canonicalize_adapters = true
 flow_hidden = 512
 flow_sample_steps = 16
+diagnostic_vector_examples = 16
 loss_eval_batch_size = 128
 system_memory_budget_gb = 16.0
 seed = 51

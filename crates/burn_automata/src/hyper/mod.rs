@@ -19,8 +19,8 @@ pub use condition::{
     condition_feature_dims_for_token_grid,
 };
 pub use hypernet::{
-    HyperNpa2d, HyperNpa2dConfig, HyperNpa2dFlow, HyperNpa2dFlowConfig, HyperNpa2dFlowWeights,
-    HyperNpa2dOutputActivation, HyperNpa2dPreciseWeights, HyperNpa2dWeights,
+    HyperNpa2d, HyperNpa2dConfig, HyperNpa2dFlow, HyperNpa2dFlowActivation, HyperNpa2dFlowConfig,
+    HyperNpa2dFlowWeights, HyperNpa2dOutputActivation, HyperNpa2dPreciseWeights, HyperNpa2dWeights,
 };
 pub use inference::{ConditionedNpa2d, generate_conditioned_npa_2d};
 pub use prior::{ParticlePrior2d, ParticlePriorConfig};

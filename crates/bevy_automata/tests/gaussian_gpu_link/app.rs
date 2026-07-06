@@ -1,5 +1,8 @@
 use super::{
-    bench::BenchViewport, capture::RenderCapture, fixtures::LIZARD_MODEL_PATH, prelude::*,
+    bench::BenchViewport,
+    capture::RenderCapture,
+    fixtures::{LIZARD_MODEL_PATH, existing_workspace_path},
+    prelude::*,
 };
 
 pub(crate) fn headless_automata_viewer(particles: usize) -> SubApps {
@@ -20,8 +23,8 @@ pub(crate) fn headless_automata_viewer(particles: usize) -> SubApps {
         render_opacity: 1.0,
         ..Default::default()
     };
-    if Path::new(LIZARD_MODEL_PATH).exists() {
-        settings.model_path = Some(LIZARD_MODEL_PATH.to_string());
+    if let Some(path) = existing_workspace_path(LIZARD_MODEL_PATH) {
+        settings.model_path = Some(path.display().to_string());
     }
 
     let mut app = App::new();

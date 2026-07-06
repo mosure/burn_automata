@@ -46,18 +46,20 @@ pub(super) fn evaluate_direct_basis_oracles(
     };
     let mut entries = Vec::with_capacity(train_indices.len() + holdout_indices.len());
     for &idx in &train_indices {
+        let seed_index = train_examples[idx].bank_split_index.unwrap_or(idx);
         entries.push(evaluate_direct_basis_oracle_entry(
             context,
             &train_examples[idx],
-            idx,
+            seed_index,
             oracle_config.seed,
         )?);
     }
     for &idx in &holdout_indices {
+        let seed_index = holdout_examples[idx].bank_split_index.unwrap_or(idx);
         entries.push(evaluate_direct_basis_oracle_entry(
             context,
             &holdout_examples[idx],
-            idx,
+            seed_index,
             oracle_config.seed ^ 0x90_1d_2d,
         )?);
     }

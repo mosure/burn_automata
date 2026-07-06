@@ -1,0 +1,44 @@
+preset = "growing-2d"
+
+[input]
+shared_base = "artifacts/hyper2d_omnisvg_smoke_rank132_particles512_quality_train/shared_base.bpk"
+adapter_bank = "artifacts/hyper2d_omnisvg_smoke_rank132_particles512_quality_train/adapter_bank.json"
+
+[output]
+report_output = "artifacts/hyper2d_omnisvg_smoke_rank132_particles512_quality_train_oracle_2048_smoke/report.json"
+
+[rollout]
+particles = 2048
+steps = 32
+update_prob = 0.5
+seed = 42
+seed_scale = 0.5
+seed_mode = "uniform-circle"
+
+[target]
+points = 2048
+threshold = 0.05
+loss_image_size = 128
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+per_parameter_grad_normalization = true
+
+[oracle]
+train_examples = 1
+holdout_examples = 1
+epochs = 32
+repetitions = 1
+report_interval = 16
+batch_size = 1
+pool_size = 256
+learning_rate = 5.0e-4
+weight_decay = 0.0
+grad_clip_norm = 1.0
+seed = 42

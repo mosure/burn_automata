@@ -6,6 +6,8 @@ mod bridge;
 mod common;
 #[path = "gaussian_gpu_link/headless.rs"]
 mod headless;
+#[path = "gaussian_gpu_link/paper.rs"]
+mod paper;
 #[path = "gaussian_gpu_link/pipeline.rs"]
 mod pipeline;
 #[path = "gaussian_gpu_link/transitions.rs"]

@@ -1,5 +1,14 @@
 {
   "artifact": "artifacts/hyper2d_omnisvg_10k_burn_wgpu_adamw_batch64_600_300_300_eval1000_oracle2x2",
+  "oracle_report": "artifacts/hyper2d_omnisvg_10k_validation_oracle8x8_persisted/report.json",
+  "quality_status": "quality_particle_count_too_low",
+  "quality_ready": false,
+  "quality_gates": {
+    "direct_oracle_ready_max_ratio": 1.2,
+    "min_quality_rollout_particles": 2048,
+    "min_quality_target_points": 2048,
+    "min_quality_oracle_examples_per_split": 8
+  },
   "train_examples": 9000,
   "holdout_examples": 1000,
   "adapter_rank": 16,
@@ -17,6 +26,7 @@
   "best_train_step": 900,
   "rollout_particles": 64,
   "rollout_steps": 8,
+  "min_target_points": 190,
   "eval_examples": 1000,
   "gpu_backend": "burn_wgpu_autodiff_dense_direct_basis",
   "target_loss_config": {
@@ -33,6 +43,7 @@
     "bound_regularizer_weight": 100.0
   },
   "hypernet_generalization_validated": false,
+  "quality_scale_validated": false,
   "evaluated_system": "shared NPA base plus directly optimized stored per-sample LoRA adapters",
   "intended_conditional_system": "image encoder features -> rectified-flow LoRA generator -> shared-base NPA rollout",
   "figures": {
@@ -146,6 +157,7 @@
   },
   "oracle_rollout_renders_available": true,
   "oracle_validation": {
+    "quality_scale_validated": false,
     "train_examples": 8,
     "holdout_examples": 8,
     "epochs": 2048,

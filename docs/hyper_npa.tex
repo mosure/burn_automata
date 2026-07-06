@@ -1,253 +1,214 @@
 \documentclass[10pt]{article}
 
-\usepackage[margin=1in]{geometry}
+\usepackage[margin=0.82in]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{graphicx}
-\usepackage{hyperref}
+\usepackage[hypertexnames=false]{hyperref}
 \usepackage{enumitem}
 \usepackage{xcolor}
+\usepackage{array}
+\usepackage{float}
 
-\title{Hyper-NCA / Hyper-NPA: Conditioned Generative Neural Cellular and Particle Automata}
+\graphicspath{{docs/}{./}}
+
+\title{HyperNPA: Image-Conditioned Neural Particle Automata via Shared Dynamics and Generated Adapters}
 \author{burn\_automata Research Notes}
-\date{\today}
+\date{July 6, 2026}
 
 \newcommand{\npa}{\mathrm{NPA}}
 \newcommand{\hypernpa}{\mathrm{HyperNPA}}
 \newcommand{\cond}{\mathcal{C}}
-\newcommand{\chunks}{\mathcal{G}}
-\newcommand{\thetachunk}{\theta_c}
-\newcommand{\state}{\mathbf{x}}
-\newcommand{\feat}{\mathbf{s}}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Neural cellular automata (NCA) and neural particle automata (NPA) provide compact local-update models for morphogenesis, texture growth, and particle-based scene representation, but most trained systems remain target-specific. We propose Hyper-NCA/NPA, a conditional hypernetwork framework that generates chunk-local automata from 2D or 3D scene conditions. A geometry-aware condition encoder, such as VGGT/VGGT-$\Omega$-style world features or dense DINOv3 image features, is routed into overlapping spatial chunks. Each chunk receives a sparse volume or image mask prior, a particle/state initialization prior, and generated NPA parameters or low-rank adapters. The generated automata define a hyper-rectified-flow transport field that evolves particles from sparse priors toward target geometry, features, or renderings. We outline an architecture, losses, training schedule, test-time-training strategy, validation matrix, and codebase roadmap for turning a fixed-checkpoint NPA implementation into a generalizable conditioned generative automata system.
+Neural Particle Automata (NPA) can compactly encode local particle dynamics, but target-specific training does not by itself produce a general image-to-dynamics model. We study a staged HyperNPA pipeline: an image condition is encoded with DINO ViT-S token-grid features, a rectified-flow generator emits a LoRA adapter vector, and the adapter modulates a shared NPA base. This revision replaces earlier low-particle and sparse visual evidence with 2048-particle oracle comparisons over 16 OmniSVG validation targets and high-particle rollout panels.
+
+The strongest current result is an overfit control, not a broad generalization result. Direct exact LoRA adapters reproduce persisted per-sample oracle NPA models at 99 dB render PSNR. A deterministic zero-source DINO-token-grid rectified-flow control overfits the same 16-sample adapter bank with adapter-vector normalized RMSE \(1.18\times10^{-7}\), cosine 1.0, and 2048-particle render PSNR mean/min of 30.44/27.31 dB against the oracle baseline. The WGPU-trained rectified-flow model on the same target fails badly, with vector normalized RMSE 1.112, cosine 0.151, and render PSNR mean/min of 9.10/0.53 dB. Thus the representation and validation path can express high-quality adapters, but the current WGPU flow optimizer/objective has not yet learned them, and generalized DINO/flow HyperNPA quality is not established.
 \end{abstract}
 
-\section{Introduction}
+\section{Scope and Claims}
 
-Target-specific NCA and NPA models are attractive because they compress behavior into local update rules. They are also awkward for general scene generation: each new image, object, or 3D scene often requires a new optimization run. The central question is whether a model can infer the automata itself from a condition. Given an image, multi-view set, point map, or geometry-foundation-model latent, can a hypernetwork produce local automata that initialize, grow, render, and adapt?
+This paper is a status report for the local \texttt{burn\_automata} HyperNPA experiments. It separates four objects that were previously conflated:
 
-This paper stub proposes Hyper-NCA/NPA. The system consumes a condition $\cond$, builds a chunk graph $\chunks$, predicts sparse initialization priors, generates chunk-local automata parameters $\thetachunk$, rolls out the resulting local dynamics, and optionally applies test-time training (TTT). The intended implementation target is the \texttt{burn\_automata} workspace, which already contains deterministic SPH perception, BPK import/export, WGPU rollout, and gaussian-buffer rendering validation.
+\begin{enumerate}[leftmargin=*]
+  \item an independently overfit per-sample oracle NPA;
+  \item a stored direct LoRA adapter materialized on a shared NPA base;
+  \item a deterministic DINO-conditioned rectified-flow control that exactly constructs adapter vectors;
+  \item a WGPU-trained DINO-conditioned rectified-flow hypernetwork.
+\end{enumerate}
 
-\section{Related Work}
+Only the first three currently pass the narrow 16-sample overfit validation. The fourth is the model class we ultimately care about, and it currently fails. No result in this document should be read as proof of broad 1k/10k generalized image-to-NPA quality.
 
-\paragraph{Neural particle automata.}
-Self-organising NPA uses SPH-like perception, local particle state, and a small MLP update rule to grow particle systems from seeded states. The reference implementation motivates particle-density and scale normalization, but does not enforce rotational equivariance in the update rule.
+\section{Architecture}
 
-\paragraph{Geometry foundation models.}
-VGGT predicts cameras, depth, point maps, and point tracks from one or more views. VGGT-$\Omega$ extends this line toward stronger static and dynamic feed-forward 3D reconstruction. These systems are natural condition providers for 3D Hyper-NPA because they expose geometry-aware dense features rather than only RGB pixels.
-
-\paragraph{Dense self-supervised image features.}
-DINOv3-style dense visual features are useful as 2D condition tokens and as perceptual or correspondence losses. In the proposed framework, they provide image-space chunk tokens and render-space supervision.
-
-\paragraph{Hypernetworks and generated weights.}
-Hyper-NPA treats an automata checkpoint as the output of a generator. The generated object may be full weights, low-rank adapters, FiLM parameters, or coefficients over a learned weight basis.
-
-\section{Method}
-
-\subsection{Overview}
-
-The proposed dataflow is:
+The intended 2D HyperNPA pipeline is:
 \[
-\cond \rightarrow \text{ConditionProvider} \rightarrow \text{ChunkPlanner} \rightarrow
-\text{PriorHead} \rightarrow \text{HyperGenerator} \rightarrow \text{NPA Rollout} \rightarrow
-\text{Losses/TTT}.
+\text{image} \rightarrow \text{DINO token grid} \rightarrow
+\text{rectified-flow LoRA generator} \rightarrow
+\text{shared-base NPA rollout}.
 \]
 
-\subsection{Condition Field}
-
-A condition provider maps external encoders into an internal field:
+The shared base is a 2D growing NPA. For each sample, an adapter supplies low-rank deltas to the NPA MLP layers:
 \[
-\cond = \{(\mathbf{p}_i, \mathbf{f}_i, \sigma_i, k_i)\}_{i=1}^{N},
+\Delta W_\ell = \frac{\alpha}{r} A_\ell B_\ell.
 \]
-where $\mathbf{p}_i$ is a 2D/3D token position, $\mathbf{f}_i$ is a feature vector, $\sigma_i$ is confidence or scale, and $k_i$ describes token type. Providers may wrap image encoders, VGGT-style point maps, sparse voxels, gaussian clouds, text prompts, masks, or control trajectories.
+The current exact-oracle experiments use rank \(r=132\), \(\alpha=132\), and 45,172 adapter parameters per sample. The condition encoder stores an 8-by-8 DINO ViT-S token-grid descriptor. The flow generator is trained or constructed to map the condition to an adapter vector.
 
-\subsection{Chunk Graph}
+\paragraph{Rectified-flow adapter generator.}
+The desired learned generator receives condition features, timestep \(t\), and a noisy adapter state \(z_t\), then predicts adapter velocity. The sampled adapter is integrated over fixed steps. The control model in this paper sets source noise to zero and constructs a condition interpolator in closed form; it proves the inference path and adapter representation can express the targets. It does not prove that gradient training finds the solution.
 
-The chunk planner builds an overlapping graph $\chunks=(V,E)$. Each chunk $c \in V$ owns bounds, halo bounds, routed condition tokens, and a particle budget. Edges encode overlap or halo exchange. The first implementation can use uniform chunks with overlap; later versions can split adaptively based on occupancy or feature variance.
+\section{Validation Protocol}
 
-\subsection{Sparse Prior}
+The current paper-quality gate uses:
 
-For each chunk, a prior head predicts:
 \begin{itemize}[leftmargin=*]
-  \item sparse occupancy logits;
-  \item particle count and seed positions;
-  \item initial particle state vectors;
-  \item optional gaussian color, opacity, scale, and rotation;
-  \item uncertainty weights for TTT and masked losses.
+  \item 2048 rollout particles;
+  \item 32 rollout steps;
+  \item 128-by-128 Gaussian raster metrics;
+  \item render sigma 1.0 px;
+  \item update probability 0.5;
+  \item seed 42 and uniform-circle initialization;
+  \item direct, generated, and oracle BPKs materialized for the same samples.
 \end{itemize}
 
-\subsection{Generated Automata}
-
-Let $h_c$ be the pooled condition embedding for chunk $c$. A hypernetwork emits automata parameters:
-\[
-\thetachunk = H_\phi(h_c).
-\]
-The recommended first variant is a shared base NPA plus generated low-rank adapters:
-\[
-W_{\ell,c} = W_{\ell,0} + A_{\ell,c}B_{\ell,c},
-\]
-where $A_{\ell,c}, B_{\ell,c}$ are generated from $h_c$ or from a compact coefficient vector.
-
-\subsection{Hyper-Rectified Flow}
-
-Given source particles $\state_0$, target representation $\state_1$, and interpolation time $t$, define:
-\[
-\state_t = (1-t)\state_0 + t\state_1.
-\]
-The generated NPA predicts a velocity/update field:
-\[
-v_{\theta_c}(\state_t,\feat_t) = \npa_{\theta_c}(\mathrm{perception}(\state_t,\feat_t)).
-\]
-The flow objective is:
-\[
-\mathcal{L}_{flow} =
-\sum_c \left\| v_{\theta_c}(\state_t,\feat_t) -
-\mathrm{stopgrad}(\state_1-\state_0) \right\|_{\rho_c},
-\]
-where $\rho_c$ applies occupancy, visibility, and confidence masks. Multi-step variants add rollout and rendering losses.
-
-\section{Training}
-
-\subsection{Stage 0: Checkpoint Distillation}
-
-Train Hyper-NPA to reproduce existing BPK checkpoints or rollouts. This validates the generated-weight schema before adding external foundation-model conditions.
-
-\subsection{Stage 1: 2D Conditional Automata}
-
-Input dense image features and masks. Generate 2D chunk priors and adapters. Validate against imported NPA rollouts, held-out textures, and image reconstruction.
-
-\subsection{Stage 2: 3D Sparse Volume Automata}
-
-Input multi-view or world-latent geometry features. Generate 3D sparse particle/gaussian priors and adapters. Validate with point-map losses and held-out-view gaussian renders.
-
-\subsection{Stage 3: Flow and Multi-Step Rollout}
-
-Train one-step flow first, then unroll the generated automata. Add stochastic update masks, chunk dropout, overlap consistency, and particle-density regularization.
-
-\subsection{Stage 4: Test-Time Training}
-
-At inference time, adapt only chunk embeddings, low-rank coefficients, sparse prior logits, or rollout schedule scalars. Freeze the global condition encoder and most hypernetwork weights. Stop by validation-view loss, delta norm, or iteration budget.
-
-\section{Losses}
-
-\begin{align}
-\mathcal{L} =
-& \lambda_f \mathcal{L}_{flow}
-+ \lambda_r \mathcal{L}_{render}
-+ \lambda_g \mathcal{L}_{geom}
-+ \lambda_b \mathcal{L}_{boundary} \nonumber \\
-& + \lambda_d \mathcal{L}_{density}
-+ \lambda_a \mathcal{L}_{adapter}
-+ \lambda_t \mathcal{L}_{ttt}.
-\end{align}
-
-Geometry losses include Chamfer/F-score, depth reprojection, normal consistency, and occupancy losses. Rendering losses include RGB, alpha, perceptual, and feature-space consistency. Automata losses include density regularization, state entropy floors, scale/particle-thinning consistency, and chunk-boundary consistency.
+The PSNR metric compares generated rollouts to persisted per-sample oracle NPA rollouts, not to the original image thumbnails. Direct exact adapters are expected to reach 99 dB because they are constructed from the same oracle model weights; this is a materialization sanity check. HyperNPA adapters are compared against the same oracle rollouts.
 
 \section{Experiments}
 
-\subsection{Experiment 1: BPK Reproduction}
+\subsection{Experiment Matrix}
 
-\textbf{Goal.} Generate a single-chunk NPA matching an existing checkpoint.
-
-\textbf{Metrics.} Rollout PSNR, max particle/state error, generated parameter size.
-
-\textbf{Status.} Placeholder for imported lizard/polka checkpoints.
-
-\subsection{Experiment 2: Chunked 2D Textures}
-
-\textbf{Goal.} Generate overlapping tile automata from image features.
-
-\textbf{Metrics.} PSNR, SSIM, LPIPS, boundary error, WGPU ms/step.
-
-\begin{figure}[h]
+\begin{table}[H]
 \centering
-\fbox{\rule{0pt}{1.4in}\rule{0.85\linewidth}{0pt}}
-\caption{Placeholder: input image, chunk masks, generated rollout, and boundary-error heatmap.}
-\end{figure}
-
-\subsection{Experiment 3: Sparse 3D Gaussian Growth}
-
-\textbf{Goal.} Generate a sparse 3D particle/gaussian prior and 3D NPA adapters from geometry features.
-
-\textbf{Metrics.} Held-out render PSNR, Chamfer distance, depth error, nonblank headless render rate, particle count, WGPU ms/step.
-
-\begin{table}[h]
-\centering
-\begin{tabular}{lrrrr}
+\scriptsize
+\begin{tabular}{p{0.21\linewidth}rrrp{0.13\linewidth}p{0.25\linewidth}}
 \toprule
-Method & Particles & PSNR & Chamfer & ms/step \\
+run & examples & particles & steps & adapter target & status \\
 \midrule
-Prior only & -- & -- & -- & -- \\
-Hyper-NPA, one-step & -- & -- & -- & -- \\
-Hyper-NPA, rollout & -- & -- & -- & -- \\
-Hyper-NPA + TTT & -- & -- & -- & -- \\
+10k shared-base pilot & 9000/1000 & 64 & 8 & direct LoRA bank & useful representation pilot, not quality-scale \\
+1k summary-token generator & 900/100 & 2048 eval & 32 & low-count adapter bank & fails vector quality, train/holdout NRMSE 0.979/1.016 \\
+exact direct LoRA baseline & 16 train & 2048 & 32 & oracle NPA weights & passes materialization baseline at 99 dB \\
+DINO-flow zero-source control & 16 train & 2048 & 32 & exact rank-132 bank & passes narrow overfit gate, not generalized \\
+DINO-flow WGPU training & 16 train & 2048 & 32 & exact rank-132 bank & fails adapter vector and rollout gates \\
 \bottomrule
 \end{tabular}
-\caption{Placeholder 3D reconstruction and rollout metrics.}
+\caption{Current HyperNPA evidence. The key new result is the exact-oracle DINO-flow control and the matching WGPU failure on the same 16 high-particle samples.}
+\label{tab:matrix}
 \end{table}
 
-\subsection{Experiment 4: TTT Adaptation}
+\subsection{Exact-Oracle DINO-Flow Results}
 
-\textbf{Goal.} Improve a generated chunk graph at test time with self-supervised render/geometry losses.
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+system & examples & vector NRMSE & cosine & mean PSNR & min PSNR & pass \\
+\midrule
+direct exact LoRA vs oracle & 16 & 0.0 & 1.000 & 99.00 & 99.00 & yes \\
+DINO-flow zero-source control vs oracle & 16 & \(1.18{\times}10^{-7}\) & 1.000 & 30.44 & 27.31 & yes \\
+DINO-flow WGPU trained vs oracle & 16 & 1.112 & 0.151 & 9.10 & 0.53 & no \\
+\bottomrule
+\end{tabular}
+\caption{2048-particle, 32-step render-PSNR gate against persisted per-sample oracle NPA models. The threshold is 26 dB. Direct exact LoRA is a sanity baseline; the zero-source control proves expressivity and sampling; the WGPU model is the current training failure.}
+\label{tab:exact-results}
+\end{table}
 
-\textbf{Metrics.} Observed-view loss, held-out-view loss, adapter norm, runtime, stability.
+The zero-source control has final adapter-vector MSE \(3.81\times10^{-17}\), RMSE \(6.17\times10^{-9}\), and max absolute adapter error \(2.38\times10^{-7}\). Its rollout loss over the internal four-example train rollout check is close to the static direct adapter: mean hyper/static ratio 0.997 and max ratio 1.001. The WGPU-trained flow model, by contrast, ends with loss \(3.41\times10^{-3}\), vector normalized RMSE 1.112, and rollout hyper/static ratio 12.08. This isolates the current bottleneck to flow optimization/training, not DINO feature availability or adapter materialization.
 
-\section{Implementation Roadmap}
+\subsection{Per-Sample Oracle PSNR}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\begin{tabular}{lrlr}
+\toprule
+sample & HyperNPA PSNR & sample & HyperNPA PSNR \\
+\midrule
+00009725 & 27.31 & 00006072 & 29.91 \\
+00001643 & 27.91 & 00005000 & 30.28 \\
+00005840 & 28.29 & 00007095 & 30.48 \\
+00005598 & 28.71 & 00005512 & 31.37 \\
+00000371 & 28.83 & 00009530 & 31.99 \\
+00002120 & 28.89 & 00003130 & 33.22 \\
+00006450 & 29.24 & 00005081 & 33.71 \\
+00006500 & 29.47 & 00009750 & 37.44 \\
+\bottomrule
+\end{tabular}
+\caption{All 16 DINO-flow zero-source control samples, sorted by render RGB PSNR against the oracle NPA. Every sample clears the 26 dB gate at 2048 particles. Direct exact LoRA is 99 dB for every row.}
+\label{tab:per-sample}
+\end{table}
+
+\begin{figure}[p]
+\centering
+\includegraphics[height=0.88\textheight,keepaspectratio]{hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_panel_a.png}
+\caption{Worst-to-middle 2048-particle exact-oracle samples. Columns show condition thumbnail, DINO-flow zero-source HyperNPA adapter, direct exact LoRA adapter, and oracle NPA target. Labels report render PSNR against the oracle. These are dense 2048-particle rollout rasterizations at 32 steps, not sparse thumbnails.}
+\label{fig:exact-dino-flow-a}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[height=0.88\textheight,keepaspectratio]{hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_panel_b.png}
+\caption{Middle-to-best 2048-particle exact-oracle samples. The direct and oracle columns coincide by construction; the HyperNPA control is close enough to pass the 26 dB gate but still visibly operates as a particle-field dynamics model rather than an image renderer.}
+\label{fig:exact-dino-flow-b}
+\end{figure}
+
+\subsection{Historical Pilot Results}
+
+The older 10k OmniSVG shared-base run remains useful only as a representation pilot. It used 64 rollout particles and 8 rollout steps, with 9000 train and 1000 holdout adapters. Its sampled low-count oracle comparison had train/holdout mean ratios 1.079/1.075 and max ratios 1.141/1.126. Those numbers suggest that a shared base plus per-sample adapters is plausible, but they do not meet the current high-particle evidence standard.
+
+The older 1k summary-token condition-to-LoRA generator also remains a negative baseline. It covered 900 train and 100 holdout examples, but vector normalized RMSE was 0.979 on train and 1.016 on holdout, with mean cosine 0.194 and 0.053. This failure motivated the DINO token-grid and rectified-flow path.
+
+\section{Renderer Evidence}
+
+The 16-sample panels above are high-particle rollout rasterizations generated from BPK rollouts. The repo also contains a separate actual WGPU viewer and Bevy Gaussian-splatting renderer smoke reference. It is not a HyperNPA generated result, but it verifies that high-particle NPA inference can feed the renderer path.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{hyper_npa_figures/lizard_wgpu_gaussian_4096_rollout.png}
+\caption{Actual WGPU viewer plus Bevy Gaussian-splatting reference: imported lizard NPA, 4096 particles, frames 16/64/128. This validates the renderer path but is not evidence of generated HyperNPA quality.}
+\label{fig:lizard-renderer}
+\end{figure}
+
+\section{Interpretation}
+
+The main conclusion changed from the earlier paper draft. We can now say:
+
+\begin{itemize}[leftmargin=*]
+  \item The exact adapter representation is sufficient to materialize oracle NPAs.
+  \item DINO token-grid conditions are available and can key an exact condition-to-adapter interpolator on a 16-sample slice.
+  \item The rectified-flow sampling path can emit adapter vectors with near-zero error when constructed correctly.
+  \item The current WGPU-trained rectified-flow model does not learn the same mapping.
+  \item Therefore the remaining bottleneck is the learned flow objective/optimizer/architecture, not the PSNR gate, DINO cache plumbing, or adapter application path.
+\end{itemize}
+
+This is a meaningful course correction: the project now has a clean overfit target and a high-particle oracle gate. It still lacks proof of broad 1k/10k generalization from image condition to DINO to rectified-flow LoRA to NPA.
+
+\section{Next Work}
 
 \begin{enumerate}[leftmargin=*]
-  \item Add condition field and chunk graph schemas.
-  \item Add generated adapter manifest (\texttt{.bpkh}) beside realized \texttt{.bpk}.
-  \item Add a tiny Burn hypernetwork that emits LoRA adapters.
-  \item Train against current imported 2D BPK rollouts.
-  \item Add WGPU per-chunk parameter buffers and active chunk masks.
-  \item Add sparse 3D prior and gaussian render validation.
-  \item Add TTT loop over adapter coefficients and prior logits.
-  \item Add Bevy UI for condition source, chunk graph, rollout metrics, and TTT iterations.
+  \item Replace the WGPU rectified-flow objective with a formulation that can match the zero-source control on the 16-sample exact bank.
+  \item Add holdout exact-oracle samples and require a split gate, not train-only overfit.
+  \item Scale the exact bank from 16 to 128 and 1k samples while keeping the 2048-particle PSNR gate.
+  \item Reintroduce nonzero flow source noise only after deterministic zero-source training passes.
+  \item Generate WGPU/Bevy Gaussian screenshots for direct, HyperNPA, and oracle models once the generated models are visually meaningful under the same high-particle rollout settings.
+  \item Move from exact interpolator controls to a real DINO-conditioned flow network with validation-set model selection.
 \end{enumerate}
-
-\section{Discussion}
-
-Hyper-NPA trades a single monolithic scene model for many local generated automata. The hypothesis is that locality makes generation and adaptation cheaper, while foundation-model features supply the missing global context. The main technical risks are chunk-boundary artifacts, dense-neighborhood throughput, generated-weight instability, and TTT overfitting. The current \texttt{burn\_automata} validation stack provides a useful base: deterministic CPU oracle, WGPU parity, imported-model PSNR checks, and headless gaussian render tests.
-
-\paragraph{Implemented mesh baselines.}
-The current 3D artifacts are explicit baselines, not solved Hyper-NPA models. \texttt{uv\_torus\_growth\_3d.bpk} and \texttt{teapot\_growth\_3d.bpk} both use \texttt{position\_features=false}, compact growth seeds, and no target residual/color seed state; validation evaluates them with the app-facing seed \texttt{0x51a7\_3d}. Both artifacts now carry guarded \texttt{render-refined-rust:...conditionless-local...} lineage. The latest torus refresh selected no better checkpoint and remains hidden from the Bevy app catalog because it fails coverage/depth and torus tube-angle support; the teapot is also hidden at the current 1024-particle interactive scale because it fails strict target coverage and rendered density despite passing the older catalog-sanity threshold. Both still fail the strict rendered density/mesh acceptance gate. Legacy \texttt{uv\_torus\_3d.bpk}, \texttt{uv\_torus\_morphogen\_3d.bpk}, and \texttt{teapot\_morphogen\_3d.bpk} artifacts are retired from the catalog asset set and should be regenerated only as diagnostics. The explicit projection baseline remains available for mesh-target sanity checks, rollout-local teacher distillation remains available for testing rollout-row training plumbing, and rollout-position-field remains available for position-field rollout rows. The \texttt{ablate-local-3d} command is the strict conditionless-local experiment: it uses \texttt{position\_features=false}, random-ball seeds, no target residual/color state, refreshed local rollout rows, and mesh rollout validation. Current torus and teapot reports fail the strict geometry/color/opacity gates, showing that the one-step mesh-projection proxy is not enough for fully local 3D morphogenesis. The \texttt{render-loss-3d} command provides a CPU multi-view orthographic Gaussian-splat oracle over relative alpha density, density-gated color, and depth moments, and \texttt{train-render3d} provides a proxy training scaffold against that oracle. Native differentiable or WGPU training through the full rollout remains future work. These artifacts and ablations are validation baselines for the proposed \texttt{PriorInitializer} and \texttt{RenderLossHarness}; fully general 3D lizard-like NPA still needs a learned condition/initializer and differentiable or proxy rendered/geometry rollout losses rather than baked projection-state channels or hand-authored position fields.
 
 \section{Limitations}
 
-This proposal does not solve rotational equivariance, differentiable Bevy rendering, or large-scale dense particle throughput by itself. The initial implementation should favor exactness and measurable validation over architectural breadth.
+The passing result is train-only and has 16 samples. It does not establish holdout generalization, 1k/10k behavior, or visual parity with image-space targets. The direct exact LoRA baseline is intentionally trivial because it materializes oracle weights. The DINO-flow zero-source model is also a control, because it is constructed by a host-side solve. The WGPU-learned model remains the decisive failing path. Finally, the current paper panels are dense particle rollout visualizations; polished image-like output still requires better target training, rendering losses, or downstream Gaussian rendering.
 
 \section{Conclusion}
 
-Hyper-NCA/NPA is a path toward generalizable conditioned automata: conditions produce sparse priors and local update rules; rollout remains local and GPU-resident; TTT adapts compact generated parameters to new scenes. The proposed roadmap turns existing fixed-checkpoint NPA infrastructure into an experimental platform for generic, generative, and conditioned particle automata.
+HyperNPA remains a plausible route to image-conditioned particle automata, but the evidence is now narrower and cleaner. The repo has a high-particle oracle gate, an exact adapter baseline, a DINO-conditioned rectified-flow control that passes 26 dB on 16 samples, and a matched WGPU training failure. The next paper-worthy claim requires turning that control into a learned WGPU model and then proving holdout and scale behavior under the same 2048-particle oracle comparison.
 
 \begin{thebibliography}{9}
-
 \bibitem{npa}
 Self-Organising Neural Particle Automata.
 \url{https://selforg-npa.github.io/}
-
-\bibitem{vggt}
-J. Wang, M. Chen, N. Karaev, A. Vedaldi, C. Rupprecht, and D. Novotny.
-VGGT: Visual Geometry Grounded Transformer.
-\url{https://arxiv.org/abs/2503.11651}
-
-\bibitem{vggtomega}
-VGGT-$\Omega$: improving feed-forward reconstruction for static and dynamic scenes.
-\url{https://vggt-omega.github.io/}
-
-\bibitem{dinov3}
-DINOv3: Self-supervised learning for vision at unprecedented scale.
-\url{https://arxiv.org/abs/2508.10104}
-
-\bibitem{ttt3d}
-VGG-T$^3$: test-time training for scalable 3D reconstruction.
-\url{https://research.nvidia.com/labs/dvl/projects/vgg-ttt/}
-
 \end{thebibliography}
 
 \end{document}

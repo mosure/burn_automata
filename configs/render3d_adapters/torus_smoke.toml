@@ -1,0 +1,66 @@
+[shared_base]
+output = "artifacts/render3d_adapter_suite_torus_smoke/shared_base.bpk"
+cycles = 1
+seed = 5904189
+
+[targets]
+target_set = "many"
+targets = ["torus"]
+holdout_targets = []
+auto_holdout_stride = 0
+auto_holdout_offset = 0
+
+[output]
+output_dir = "artifacts/render3d_adapter_suite_torus_smoke"
+report_output = "artifacts/render3d_adapter_suite_torus_smoke/report.json"
+adapter_bank_output = "artifacts/render3d_adapter_suite_torus_smoke/adapter_bank.json"
+
+[training]
+skip_shared_base_eval = true
+rounds = 1
+supervised_steps_per_round = 1
+particles = 64
+rollout_steps = 8
+gradient_particles = 16
+gradient_mode = "analytic"
+finite_diff_eps = 1.0e-3
+motion_gain = 0.35
+perception_position_gain = 0.05
+max_update_norm = 1.0
+trajectory_supervision = true
+backend = "direct-rollout"
+
+[objective]
+direct_output_gradient_rms_cap = 1.0
+direct_line_search = false
+direct_line_search_scales = [1.0]
+direct_material_output_only = false
+
+[optimizer]
+learning_rate = 5.0e-4
+grad_clip_norm = 1.0
+
+[adapter]
+rank = 4
+alpha = 4.0
+seed = 11381043
+
+[seed]
+selection_seed = 5353789
+extra_selection_seeds = [42, 99]
+direct_selection_seed_training = false
+
+[render]
+image_size = 24
+target_samples = 256
+sigma = 2.5
+min_sigma = 0.75
+max_sigma = 5.0
+gaussian_decode_mode = "fixed-sh0"
+opacity_logit_bias = 0.0
+density_weight = 1.0
+color_weight = 1.0
+depth_weight = 1.0
+
+[validation]
+fail_on_validation = false

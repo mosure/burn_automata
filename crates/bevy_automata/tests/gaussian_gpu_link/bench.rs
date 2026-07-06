@@ -160,9 +160,8 @@ pub(crate) fn configure_viewer_pipeline_bench(
     let world = apps.main.world_mut();
     {
         let mut settings = world.resource_mut::<AutomataSettings>();
-        settings.model_path = Path::new(TORUS_GROWTH_MODEL_PATH)
-            .exists()
-            .then(|| TORUS_GROWTH_MODEL_PATH.to_string());
+        settings.model_path =
+            existing_workspace_path(TORUS_GROWTH_MODEL_PATH).map(|path| path.display().to_string());
         settings.preset = AutomataPreset::Growing3dGs;
         settings.particle_count = config.particles;
         settings.steps_per_frame = config.steps_per_frame;

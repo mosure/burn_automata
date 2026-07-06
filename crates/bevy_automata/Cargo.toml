@@ -56,6 +56,9 @@ getrandom.workspace = true
 getrandom_03.workspace = true
 serde.workspace = true
 
+[dev-dependencies]
+image.workspace = true
+
 [lib]
 path = "src/lib.rs"
 

@@ -14,6 +14,19 @@ pub(crate) fn bevy_test_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+pub(crate) fn workspace_root_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+pub(crate) fn workspace_path(path: &str) -> std::path::PathBuf {
+    workspace_root_dir().join(path)
+}
+
+pub(crate) fn existing_workspace_path(path: &str) -> Option<std::path::PathBuf> {
+    let path = workspace_path(path);
+    path.exists().then_some(path)
+}
+
 pub(crate) fn visible_test_cloud_3d(count: usize) -> PlanarGaussian3d {
     let side = (count as f32).cbrt().ceil().max(1.0) as usize;
     let mut gaussians = Vec::with_capacity(count);
@@ -49,8 +62,8 @@ pub(crate) fn visible_test_cloud_3d(count: usize) -> PlanarGaussian3d {
 
 pub(crate) fn lizard_or_seeded_model()
 -> Result<(NpaModel, HashGridConfig, f32), Box<dyn std::error::Error>> {
-    if Path::new(LIZARD_MODEL_PATH).exists() {
-        let manifest = load_manifest(LIZARD_MODEL_PATH)?;
+    if let Some(path) = existing_workspace_path(LIZARD_MODEL_PATH) {
+        let manifest = load_manifest(path)?;
         let hashgrid = manifest.hashgrid.clone();
         return Ok((manifest.into_model(), hashgrid, 0.2));
     }

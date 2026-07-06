@@ -14,16 +14,21 @@ RUSTC_BIN="${RUSTC:-/home/mosure/.rustup/toolchains/nightly-x86_64-unknown-linux
 cmd=(
   timeout --foreground "$TIMEOUT_VALUE"
   env "RUSTC=$RUSTC_BIN"
-  "$CARGO_BIN" run --release -p burn_automata --features cli,backend_wgpu
+  "$CARGO_BIN" run --release -p burn_automata --features cli
   --bin burn_automata -- train-hyper2d-direct-basis "$@"
 )
 
-if command -v systemd-run >/dev/null 2>&1; then
+if command -v systemd-run >/dev/null 2>&1 \
+  && systemd-run --user --scope --quiet true >/dev/null 2>&1; then
   exec systemd-run --user --scope \
     -p "MemoryMax=$MEMORY_MAX" \
     -p "MemorySwapMax=0" \
     "${cmd[@]}"
 fi
 
-echo "warning: systemd-run not found; running with timeout only and no process memory cgroup" >&2
+if command -v prlimit >/dev/null 2>&1; then
+  exec prlimit --as="$MEMORY_MAX" -- "${cmd[@]}"
+fi
+
+echo "warning: prlimit not found; running with timeout only and no process memory cap" >&2
 exec "${cmd[@]}"

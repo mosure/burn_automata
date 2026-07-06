@@ -1,11 +1,15 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::cli::commands::hyper_support::{
-    load_condition_image_2d, load_hyper_2d, write_pretty_json,
+    attach_condition_features, load_condition_image_2d, load_hyper_2d, write_pretty_json,
 };
 use crate::cli::prelude::*;
 
-use super::super::sources::sanitize_slug;
+use super::super::sources::{Hyper2dScratchSource, sanitize_slug};
+use super::super::{
+    DinoConditionFeatureCacheConfig, build_condition_feature_cache,
+    default_dino_cache_write_interval_batches, default_dino_feature_batch_size,
+};
 use super::{
     config_value_enum, load_direct_basis_adapter_bank, resolve_direct_basis_artifact_path,
 };
@@ -25,6 +29,7 @@ struct PsnrGateOracleValidationLoad {
 struct PsnrGateExperimentConfig {
     preset: Option<String>,
     input: PsnrGateInputExperimentConfig,
+    condition: PsnrGateConditionExperimentConfig,
     output: PsnrGateOutputExperimentConfig,
     eval: PsnrGateEvalExperimentConfig,
     gate: PsnrGateThresholdExperimentConfig,
@@ -37,6 +42,18 @@ struct PsnrGateInputExperimentConfig {
     adapter_bank: Option<PathBuf>,
     oracle_report: Option<PathBuf>,
     hyper: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateConditionExperimentConfig {
+    dino_model: Option<PathBuf>,
+    dino_image_size: Option<usize>,
+    dino_batch_size: Option<usize>,
+    dino_cache_write_interval_batches: Option<usize>,
+    feature_cache: Option<PathBuf>,
+    token_grid_width: Option<usize>,
+    token_grid_height: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -81,7 +98,7 @@ struct Hyper2dPsnrGateReport {
     base_model: String,
     adapter_bank: String,
     oracle_report: String,
-    hyper: String,
+    hyper: Option<String>,
     output: String,
     generated_dir: String,
     adapter_bank_base_model: String,
@@ -163,6 +180,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     let PsnrGateExperimentConfig {
         preset: config_preset,
         input: config_input,
+        condition: config_condition,
         output: config_output,
         eval: config_eval,
         gate: config_gate,
@@ -173,6 +191,15 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         oracle_report: config_oracle_report,
         hyper: config_hyper,
     } = config_input;
+    let PsnrGateConditionExperimentConfig {
+        dino_model: config_dino_model,
+        dino_image_size: config_dino_image_size,
+        dino_batch_size: config_dino_batch_size,
+        dino_cache_write_interval_batches: config_dino_cache_write_interval_batches,
+        feature_cache: config_condition_feature_cache,
+        token_grid_width: config_condition_token_grid_width,
+        token_grid_height: config_condition_token_grid_height,
+    } = config_condition;
     let PsnrGateOutputExperimentConfig {
         output: config_output_path,
         generated_dir: config_generated_dir,
@@ -209,9 +236,11 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
             "validate-hyper2d-psnr-gate requires --oracle-report or input.oracle_report",
         )
     })?;
-    let hyper = config_hyper.or(hyper).ok_or_else(|| {
-        std::io::Error::other("validate-hyper2d-psnr-gate requires --hyper or input.hyper")
-    })?;
+    let hyper = config_hyper.or(hyper);
+    let dino_image_size = config_dino_image_size.unwrap_or(518);
+    let dino_batch_size = config_dino_batch_size.unwrap_or_else(default_dino_feature_batch_size);
+    let dino_cache_write_interval_batches = config_dino_cache_write_interval_batches
+        .unwrap_or(default_dino_cache_write_interval_batches());
     let output = config_output_path.unwrap_or(output);
     let generated_dir = config_generated_dir.unwrap_or(generated_dir);
     let limit = config_limit.unwrap_or(limit);
@@ -258,8 +287,10 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         );
     }
     let base = base_manifest.clone().into_model();
-    let hyper_model = load_hyper_2d(&hyper)?;
-    if hyper_model.npa_config != base.config {
+    let hyper_model = hyper.as_ref().map(|path| load_hyper_2d(path)).transpose()?;
+    if let Some(hyper_model) = &hyper_model
+        && hyper_model.npa_config != base.config
+    {
         return Err(std::io::Error::other(
             "hyper checkpoint NPA config must match base model config",
         )
@@ -269,8 +300,9 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     if bank.entries.is_empty() {
         return Err(std::io::Error::other("adapter bank has no entries").into());
     }
-    if bank.adapter_rank != hyper_model.config.adapter_rank
-        || (bank.adapter_alpha - hyper_model.config.adapter_alpha).abs() > f32::EPSILON
+    if let Some(hyper_model) = &hyper_model
+        && (bank.adapter_rank != hyper_model.config.adapter_rank
+            || (bank.adapter_alpha - hyper_model.config.adapter_alpha).abs() > f32::EPSILON)
     {
         return Err(std::io::Error::other(format!(
             "adapter bank rank/alpha ({}/{}) does not match hyper checkpoint ({}/{})",
@@ -309,6 +341,39 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     if selected_entries.is_empty() {
         return Err(std::io::Error::other("no adapter-bank entries selected").into());
     }
+    let condition_features = if let Some(hyper_model) = &hyper_model
+        && requires_dino_condition_features(hyper_model.config.condition_encoder)
+    {
+        let selected_sources = selected_entries
+            .iter()
+            .map(|entry| Hyper2dScratchSource {
+                slug: entry.slug.clone(),
+                title: entry.title.clone(),
+                group: entry.group.clone(),
+                condition_path: resolve_direct_basis_artifact_path(bank_anchor, &entry.condition),
+                particles: None,
+                seed_scale: None,
+                update_prob: None,
+            })
+            .collect::<Vec<_>>();
+        Some(build_condition_feature_cache(
+            &selected_sources,
+            hyper_model.config.condition_encoder,
+            DinoConditionFeatureCacheConfig {
+                model: config_dino_model.as_ref(),
+                image_size: dino_image_size,
+                batch_size: dino_batch_size,
+                cache_write_interval_batches: dino_cache_write_interval_batches,
+                token_grid_width: config_condition_token_grid_width
+                    .unwrap_or(hyper_model.config.condition_token_grid_width),
+                token_grid_height: config_condition_token_grid_height
+                    .unwrap_or(hyper_model.config.condition_token_grid_height),
+                cache_path: config_condition_feature_cache.as_deref(),
+            },
+        )?)
+    } else {
+        None
+    };
 
     let mut report_entries = Vec::with_capacity(selected_entries.len() * steps.len() * 2);
     for bank_entry in selected_entries {
@@ -359,15 +424,24 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         crate::import::save_manifest(&direct_model_path, &direct_manifest)?;
         let direct_model = direct_manifest.into_model();
 
-        let condition = load_condition_image_2d(&condition_path)?;
-        let hyper_adapter = hyper_model.predict_adapter(&condition)?;
-        let hyper_materialized = hyper_adapter.apply_to_model(&base)?;
-        let hyper_manifest = BpkModelManifest::from_model(
-            &hyper_materialized,
-            base_manifest.hashgrid.clone(),
-            Some(format!("hyper2d-psnr-gate:{}", bank_entry.slug)),
-        );
-        crate::import::save_manifest(&hyper_model_path, &hyper_manifest)?;
+        let hyper_materialized = if let Some(hyper_model) = &hyper_model {
+            let condition = attach_condition_features(
+                load_condition_image_2d(&condition_path)?,
+                &condition_path,
+                condition_features.as_ref(),
+            )?;
+            let hyper_adapter = hyper_model.predict_adapter(&condition)?;
+            let hyper_materialized = hyper_adapter.apply_to_model(&base)?;
+            let hyper_manifest = BpkModelManifest::from_model(
+                &hyper_materialized,
+                base_manifest.hashgrid.clone(),
+                Some(format!("hyper2d-psnr-gate:{}", bank_entry.slug)),
+            );
+            crate::import::save_manifest(&hyper_model_path, &hyper_manifest)?;
+            Some(hyper_materialized)
+        } else {
+            None
+        };
 
         let target_manifest = crate::import::load_manifest(&oracle_model_path)?;
         if target_manifest.config != base_manifest.config {
@@ -411,30 +485,32 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
                 direct_metrics,
             );
 
-            let hyper_metrics = evaluate_gate_model(
-                &hyper_materialized,
-                &target_model,
-                &base_manifest.hashgrid,
-                particles,
-                rollout_steps,
-                update_prob,
-                seed,
-                seed_scale,
-                seed_mode,
-                image_size,
-                render_sigma_px,
-            )?;
-            push_gate_entry(
-                &mut report_entries,
-                bank_entry,
-                oracle_entry,
-                "hyper",
-                &hyper_model_path,
-                &oracle_model_path,
-                rollout_steps,
-                min_render_rgb_psnr_db,
-                hyper_metrics,
-            );
+            if let Some(hyper_materialized) = &hyper_materialized {
+                let hyper_metrics = evaluate_gate_model(
+                    hyper_materialized,
+                    &target_model,
+                    &base_manifest.hashgrid,
+                    particles,
+                    rollout_steps,
+                    update_prob,
+                    seed,
+                    seed_scale,
+                    seed_mode,
+                    image_size,
+                    render_sigma_px,
+                )?;
+                push_gate_entry(
+                    &mut report_entries,
+                    bank_entry,
+                    oracle_entry,
+                    "hyper",
+                    &hyper_model_path,
+                    &oracle_model_path,
+                    rollout_steps,
+                    min_render_rgb_psnr_db,
+                    hyper_metrics,
+                );
+            }
         }
     }
 
@@ -445,7 +521,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         base_model: base_model.display().to_string(),
         adapter_bank: adapter_bank.display().to_string(),
         oracle_report: oracle_report.display().to_string(),
-        hyper: hyper.display().to_string(),
+        hyper: hyper.as_ref().map(|path| path.display().to_string()),
         output: output.display().to_string(),
         generated_dir: generated_dir.display().to_string(),
         adapter_bank_base_model: bank.base_model,
@@ -483,6 +559,15 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         .into());
     }
     Ok(())
+}
+
+fn requires_dino_condition_features(encoder: ConditionEncoder2d) -> bool {
+    matches!(
+        encoder,
+        ConditionEncoder2d::DinoVitsClsPatchMean
+            | ConditionEncoder2d::DinoVitsPatchStats
+            | ConditionEncoder2d::DinoVitsTokenGrid
+    )
 }
 
 fn load_psnr_gate_experiment_config(
@@ -621,7 +706,13 @@ fn summarize_gate_entries(
 }
 
 fn selected_entries_len(entries: &[Hyper2dPsnrGateEntry], step_count: usize) -> usize {
-    let divisor = step_count.saturating_mul(2).max(1);
+    let kinds = entries
+        .iter()
+        .map(|entry| entry.kind)
+        .collect::<BTreeSet<_>>()
+        .len()
+        .max(1);
+    let divisor = step_count.saturating_mul(kinds).max(1);
     entries.len() / divisor
 }
 
@@ -643,9 +734,144 @@ mod tests {
         assert!(config.input.adapter_bank.is_some());
         assert!(config.input.oracle_report.is_some());
         assert!(config.input.hyper.is_some());
+        assert!(config.condition.dino_model.is_some());
+        assert_eq!(config.condition.dino_image_size, Some(518));
+        assert_eq!(config.condition.dino_batch_size, Some(4));
+        assert_eq!(config.condition.token_grid_width, Some(8));
+        assert_eq!(config.condition.token_grid_height, Some(8));
         assert_eq!(config.eval.particles, Some(2048));
         assert_eq!(config.eval.steps.as_deref(), Some(&[32, 64][..]));
         assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
         assert_eq!(config.gate.fail_on_threshold, Some(true));
+
+        let direct_only_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_direct.toml");
+        let direct_only = load_psnr_gate_experiment_config(Some(&direct_only_path)).unwrap();
+        assert!(direct_only.input.base_model.is_some());
+        assert!(direct_only.input.adapter_bank.is_some());
+        assert!(direct_only.input.oracle_report.is_some());
+        assert!(direct_only.input.hyper.is_none());
+        assert_eq!(direct_only.eval.particles, Some(2048));
+        assert_eq!(direct_only.eval.steps.as_deref(), Some(&[32][..]));
+        assert_eq!(direct_only.gate.fail_on_threshold, Some(false));
+
+        let dino_flow_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_overfit.toml");
+        let dino_flow = load_psnr_gate_experiment_config(Some(&dino_flow_path)).unwrap();
+        assert!(dino_flow.input.base_model.is_some());
+        assert!(dino_flow.input.adapter_bank.is_some());
+        assert!(dino_flow.input.oracle_report.is_some());
+        assert!(dino_flow.input.hyper.is_some());
+        assert!(dino_flow.condition.feature_cache.is_some());
+        assert_eq!(dino_flow.condition.token_grid_width, Some(8));
+        assert_eq!(dino_flow.condition.token_grid_height, Some(8));
+        assert_eq!(dino_flow.eval.particles, Some(2048));
+        assert_eq!(dino_flow.eval.steps.as_deref(), Some(&[32][..]));
+        assert_eq!(dino_flow.gate.fail_on_threshold, Some(false));
+
+        let dino_flow_linear_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_linear_solve_overfit.toml");
+        let dino_flow_linear =
+            load_psnr_gate_experiment_config(Some(&dino_flow_linear_path)).unwrap();
+        assert!(dino_flow_linear.input.hyper.is_some());
+        assert!(dino_flow_linear.condition.feature_cache.is_some());
+        assert_eq!(dino_flow_linear.condition.token_grid_width, Some(8));
+        assert_eq!(dino_flow_linear.condition.token_grid_height, Some(8));
+        assert_eq!(dino_flow_linear.eval.particles, Some(2048));
+        assert_eq!(dino_flow_linear.eval.steps.as_deref(), Some(&[32][..]));
+        assert_eq!(dino_flow_linear.gate.fail_on_threshold, Some(false));
+
+        let dino_flow_warmstart_path = repo_root.join("configs/hyper2d_adapter_bank").join(
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_warmstart.toml",
+        );
+        let dino_flow_warmstart =
+            load_psnr_gate_experiment_config(Some(&dino_flow_warmstart_path)).unwrap();
+        assert!(dino_flow_warmstart.input.hyper.is_some());
+        assert!(dino_flow_warmstart.condition.feature_cache.is_some());
+        assert_eq!(dino_flow_warmstart.condition.token_grid_width, Some(8));
+        assert_eq!(dino_flow_warmstart.condition.token_grid_height, Some(8));
+        assert_eq!(dino_flow_warmstart.eval.particles, Some(2048));
+        assert_eq!(dino_flow_warmstart.eval.steps.as_deref(), Some(&[32][..]));
+        assert_eq!(dino_flow_warmstart.gate.fail_on_threshold, Some(false));
+
+        for file_name in [
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_overfit.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_lr2e3.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_lr2e4_refine.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_lr2e5_refine2.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_refine.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_refine2.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_refine.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_margin_refine.toml",
+            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_floor_refine.toml",
+        ] {
+            let path = repo_root
+                .join("configs/hyper2d_adapter_bank")
+                .join(file_name);
+            let config = load_psnr_gate_experiment_config(Some(&path)).unwrap();
+            assert!(config.input.hyper.is_some());
+            assert!(config.condition.feature_cache.is_some());
+            assert_eq!(config.condition.token_grid_width, Some(8));
+            assert_eq!(config.condition.token_grid_height, Some(8));
+            assert_eq!(config.eval.particles, Some(2048));
+            assert_eq!(config.eval.steps.as_deref(), Some(&[32][..]));
+            assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
+            assert_eq!(config.gate.fail_on_threshold, Some(false));
+        }
+    }
+
+    #[test]
+    fn selected_entries_len_supports_direct_only_reports() {
+        let mut entries = Vec::new();
+        for slug in ["a", "b"] {
+            for step in [32, 64] {
+                entries.push(Hyper2dPsnrGateEntry {
+                    slug: slug.to_string(),
+                    split: "train".to_string(),
+                    oracle_split: "train".to_string(),
+                    condition: format!("{slug}.png"),
+                    oracle_condition: format!("{slug}.png"),
+                    kind: "direct",
+                    model: format!("{slug}.bpk"),
+                    target_model: format!("{slug}_oracle.bpk"),
+                    rollout_steps: step,
+                    render_rgb_psnr_db: 99.0,
+                    passed: true,
+                    metrics: test_metrics(step),
+                });
+            }
+        }
+
+        assert_eq!(selected_entries_len(&entries, 2), 2);
+    }
+
+    fn test_metrics(rollout_steps: usize) -> CliHyper2dDynamicsMetricsReport {
+        CliHyper2dDynamicsMetricsReport {
+            particle_count: 2048,
+            rollout_steps,
+            update_prob: 0.5,
+            seed: 42,
+            seed_scale: 0.5,
+            seed_mode: ParticleSeed::UniformCircle,
+            image_size: 128,
+            render_sigma_px: 1.0,
+            position_mse: 0.0,
+            position_psnr_db: 99.0,
+            state_mse: 0.0,
+            state_psnr_db: 99.0,
+            tail_rgb_mse: 0.0,
+            tail_rgb_psnr_db: 99.0,
+            render_rgb_mse: 0.0,
+            render_rgb_psnr_db: 99.0,
+            render_density_mse: 0.0,
+            render_density_psnr_db: 99.0,
+            mean_dx_mse: 0.0,
+            mean_dx_mae: 0.0,
+            target_final_mean_dx: 0.0,
+            generated_final_mean_dx: 0.0,
+        }
     }
 }

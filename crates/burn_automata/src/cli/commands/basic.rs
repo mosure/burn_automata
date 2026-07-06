@@ -478,10 +478,42 @@ struct ExactAdapterBankOutput {
     entries: Vec<ExactAdapterBankEntry>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExactAdapterBankExperimentConfig {
+    input: ExactAdapterBankInputConfig,
+    output: ExactAdapterBankOutputConfig,
+    adapter: ExactAdapterBankAdapterConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExactAdapterBankInputConfig {
+    base_model: Option<PathBuf>,
+    source_adapter_bank: Option<PathBuf>,
+    oracle_report: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExactAdapterBankOutputConfig {
+    output_dir: Option<PathBuf>,
+    adapter_bank_output: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExactAdapterBankAdapterConfig {
+    rank: Option<usize>,
+    alpha: Option<f32>,
+    force_split: Option<String>,
+}
+
 pub(crate) fn run_build_exact_adapter_bank(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Command::BuildExactAdapterBank {
+        config,
         base_model,
         source_adapter_bank,
         oracle_report,
@@ -494,6 +526,48 @@ pub(crate) fn run_build_exact_adapter_bank(
     else {
         unreachable!("run_build_exact_adapter_bank called with the wrong command variant");
     };
+
+    let experiment_config = load_exact_adapter_bank_experiment_config(config.as_deref())?;
+    let ExactAdapterBankExperimentConfig {
+        input: config_input,
+        output: config_output,
+        adapter: config_adapter,
+    } = experiment_config;
+    let ExactAdapterBankInputConfig {
+        base_model: config_base_model,
+        source_adapter_bank: config_source_adapter_bank,
+        oracle_report: config_oracle_report,
+    } = config_input;
+    let ExactAdapterBankOutputConfig {
+        output_dir: config_output_dir,
+        adapter_bank_output: config_adapter_bank_output,
+    } = config_output;
+    let ExactAdapterBankAdapterConfig {
+        rank: config_rank,
+        alpha: config_alpha,
+        force_split: config_force_split,
+    } = config_adapter;
+
+    let base_model = config_base_model.or(base_model).ok_or_else(|| {
+        std::io::Error::other("build-exact-adapter-bank requires --base-model or input.base_model")
+    })?;
+    let source_adapter_bank = config_source_adapter_bank
+        .or(source_adapter_bank)
+        .ok_or_else(|| {
+            std::io::Error::other(
+                "build-exact-adapter-bank requires --source-adapter-bank or input.source_adapter_bank",
+            )
+        })?;
+    let oracle_report = config_oracle_report.or(oracle_report).ok_or_else(|| {
+        std::io::Error::other(
+            "build-exact-adapter-bank requires --oracle-report or input.oracle_report",
+        )
+    })?;
+    let output_dir = config_output_dir.unwrap_or(output_dir);
+    let adapter_bank_output = config_adapter_bank_output.or(adapter_bank_output);
+    let rank = config_rank.or(rank);
+    let alpha = config_alpha.or(alpha);
+    let force_split = config_force_split.or(force_split);
 
     let base_manifest = crate::import::load_manifest(&base_model)?;
     let base = base_manifest.clone().into_model();
@@ -578,6 +652,22 @@ pub(crate) fn run_build_exact_adapter_bank(
     Ok(())
 }
 
+fn load_exact_adapter_bank_experiment_config(
+    path: Option<&Path>,
+) -> Result<ExactAdapterBankExperimentConfig, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(ExactAdapterBankExperimentConfig::default());
+    };
+    let text = std::fs::read_to_string(path)?;
+    toml::from_str(&text).map_err(|err| {
+        std::io::Error::other(format!(
+            "failed to parse exact adapter-bank config {}: {err}",
+            path.display()
+        ))
+        .into()
+    })
+}
+
 fn exact_oracle_models_by_slug(
     oracle_report: &Path,
 ) -> Result<HashMap<String, PathBuf>, Box<dyn std::error::Error>> {
@@ -625,4 +715,40 @@ pub(crate) fn run_manifest(command: Command) -> Result<(), Box<dyn std::error::E
     println!("wrote {}", output.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_exact_adapter_bank_config_parses() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact.toml");
+        let train_all_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact_train_all.toml");
+
+        let config = load_exact_adapter_bank_experiment_config(Some(&path)).unwrap();
+        let train_all_config =
+            load_exact_adapter_bank_experiment_config(Some(&train_all_path)).unwrap();
+
+        assert!(config.input.base_model.is_some());
+        assert!(config.input.source_adapter_bank.is_some());
+        assert!(config.input.oracle_report.is_some());
+        assert_eq!(config.adapter.rank, Some(132));
+        assert_eq!(config.adapter.alpha, Some(132.0));
+        assert_eq!(
+            config.output.output_dir.as_deref(),
+            Some(Path::new(
+                "artifacts/hyper2d_exact_oracle_bank_10k8x8_2048_rank132_bias_exact"
+            ))
+        );
+        assert_eq!(
+            train_all_config.adapter.force_split.as_deref(),
+            Some("train")
+        );
+    }
 }
