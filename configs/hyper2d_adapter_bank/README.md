@@ -84,6 +84,7 @@ direct stored LoRAs at quality scale.
 | `omnisvg_20_dino_token_grid_flow_smoke.toml` | Small WGPU smoke for the DINO token-grid rectified-flow objective. |
 | `omnisvg_1k_dino_token_grid_flow_h512.toml` | 1k DINO 8x8 token-grid rectified-flow experiment with 2048-particle rollout validation. |
 | `omnisvg_1k_dino_token_grid_flow_h512_rms_noise.toml` | Same 1k flow experiment in a separate output directory after the flow source-noise default was corrected to adapter-RMS scale. |
+| `omnisvg_1k_dino_token_grid_flow_h512_sampled_refine.toml` | 1k sampled-adapter refinement initialized from the RMS-noise flow checkpoint. Uses zero-source sampled-adapter loss to align training with the inference sampler. |
 | `omnisvg_3_dino_full_tokens_flow_smoke.toml` | Tiny structural smoke that stores CLS plus all 37x37 ViT-S patch tokens for each image. |
 | `build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact_train_all.toml` | Build a train-only exact oracle bank for clean overfit checks before generalization claims. |
 | `exact_oracle_10k8x8_dino_token_grid_linear_solve_overfit_train_all.toml` | DINO 8x8 token-grid linear-solve control proving the condition features can exactly memorize the clean train-only exact rank-132 bank. |
@@ -117,6 +118,9 @@ direct stored LoRAs at quality scale.
 | `psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_floor_refine.toml` | PSNR gate for the final targeted floor refinement checkpoint. |
 | `psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_warmstart.toml` | PSNR gate for the WGPU zero-source warm-start diagnostic checkpoint. |
 | `psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml` | Quality-scale render-PSNR gate comparing direct stored LoRAs and generated HyperNPA LoRAs against oracle 2D rollouts. |
+| `psnr_gate_1k_dino_token_grid_flow_h512_rms_noise_oracle8x8.toml` | Oracle-backed 16-row PSNR gate for the existing 1k RMS-noise flow checkpoint. Selection is constrained to rows with persisted oracle models. |
+| `psnr_gate_1k_dino_token_grid_flow_h512_sampled_refine_oracle8x8.toml` | Oracle-backed 16-row PSNR gate for the 1k sampled-adapter refinement checkpoint. |
+| `psnr_gate_10k_dino_canonical_h1024_valselect_oracle8x8.toml` | Oracle-backed 16-row PSNR gate for the existing 10k canonical-DINO checkpoint. |
 
 Latest exact-oracle DINO-flow status:
 
@@ -151,6 +155,25 @@ Latest exact-oracle DINO-flow status:
   `min=26.04 dB`, 0/16 below 26 dB) with generated-vector
   `nRMSE=1.49e-5`. This is still a train-only exact-oracle overfit result, not
   broad 1k/10k HyperNPA generalization.
+- Generalized 1k/10k PSNR validation must use oracle-backed selection. The
+  persisted 10k `oracle8x8` report contains 16 quality oracle models spread
+  across the 10k bank; only one of those rows is inside the old 1k train slice,
+  so 1k validation is mostly out-of-slice generalization while 10k validation
+  covers all 16 rows in-slice.
+- Oracle-backed generalized validation is currently not close to parity. On the
+  16 persisted `oracle8x8` rows at 2048 particles:
+  - the existing 1k RMS-noise DINO token-grid flow checkpoint reaches
+    `mean=19.58 dB`, `min=18.39 dB`, 16/16 below 26 dB;
+  - the 1k sampled-adapter refinement reaches `mean=19.75 dB`,
+    `min=18.84 dB`, 16/16 below 26 dB;
+  - the existing 10k canonical-DINO checkpoint reaches `mean=19.41 dB`,
+    `min=18.24 dB`, 16/16 below 26 dB.
+- The broad 10k adapter-bank targets are themselves below oracle quality on the
+  same rows: direct stored LoRAs reach only `mean=15.42 dB`, `min=10.69 dB`.
+  This means broad HyperNPA quality cannot be proven by training to the current
+  10k adapter bank; the next required dataset step is expanding the exact/oracle
+  adapter bank with high-quality per-sample NPA oracles, then training the
+  conditioned flow against that target distribution.
 - Broad DINO/flow HyperNPA quality is therefore still not established. The
   architecture and sampling path are proven by linear-solve/warm-start controls,
   and WGPU optimization now moves the real PSNR gate, but the remaining gap is a

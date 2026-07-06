@@ -2274,6 +2274,36 @@ mod tests {
     }
 
     #[test]
+    fn bundled_omnisvg_sampled_flow_configs_parse() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("omnisvg_1k_dino_token_grid_flow_h512_sampled_refine.toml");
+        let config = load_adapter_bank_experiment_config(Some(&path)).unwrap();
+
+        assert_eq!(config.preset.as_deref(), Some("growing-2d"));
+        assert!(config.input.initial_hyper.is_some());
+        assert_eq!(config.input.train_limit, Some(900));
+        assert_eq!(config.input.holdout_limit, Some(100));
+        assert_eq!(
+            config.condition.encoder.as_deref(),
+            Some("dino-vits-token-grid")
+        );
+        assert_eq!(config.condition.token_grid_width, Some(8));
+        assert_eq!(config.condition.token_grid_height, Some(8));
+        assert_eq!(config.training.backend.as_deref(), Some("burn-wgpu"));
+        assert_eq!(config.training.objective.as_deref(), Some("rectified-flow"));
+        assert_eq!(config.training.flow_init.as_deref(), Some("from-hyper"));
+        assert_eq!(
+            config.training.flow_loss.as_deref(),
+            Some("sampled-adapter-mse")
+        );
+        assert_eq!(config.training.flow_source_scale, Some(0.0));
+        assert_eq!(config.eval.particles, Some(2048));
+        assert_eq!(config.target.points, Some(2048));
+    }
+
+    #[test]
     fn flow_init_parser_accepts_warmstart_aliases() {
         assert_eq!(
             parse_adapter_bank_flow_init("random").unwrap(),

@@ -11,7 +11,8 @@ use super::super::{
     default_dino_cache_write_interval_batches, default_dino_feature_batch_size,
 };
 use super::{
-    config_value_enum, load_direct_basis_adapter_bank, resolve_direct_basis_artifact_path,
+    DirectBasisAdapterBankLoadEntry, config_value_enum, load_direct_basis_adapter_bank,
+    resolve_direct_basis_artifact_path,
 };
 
 #[derive(Deserialize)]
@@ -329,17 +330,23 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         *oracle_slug_counts.entry(entry.slug.clone()).or_default() += 1;
     }
     let bank_anchor = adapter_bank.parent().unwrap_or_else(|| Path::new(""));
-    let selected_entries = bank
+    let oracle_backed_entries = bank
         .entries
         .iter()
-        .take(if limit == 0 {
-            bank.entries.len()
-        } else {
-            limit.min(bank.entries.len())
+        .filter(|entry| {
+            oracle_entry_for_bank_entry(entry, &oracle_by_key, &oracle_by_slug, &oracle_slug_counts)
+                .is_some()
         })
         .collect::<Vec<_>>();
+    let selected_entries = oracle_backed_entries
+        .into_iter()
+        .take(if limit == 0 { usize::MAX } else { limit })
+        .collect::<Vec<_>>();
     if selected_entries.is_empty() {
-        return Err(std::io::Error::other("no adapter-bank entries selected").into());
+        return Err(std::io::Error::other(
+            "no adapter-bank entries with oracle-model coverage selected",
+        )
+        .into());
     }
     let condition_features = if let Some(hyper_model) = &hyper_model
         && requires_dino_condition_features(hyper_model.config.condition_encoder)
@@ -377,19 +384,12 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
 
     let mut report_entries = Vec::with_capacity(selected_entries.len() * steps.len() * 2);
     for bank_entry in selected_entries {
-        let oracle_entry = oracle_by_key
-            .get(&oracle_key(&bank_entry.split, &bank_entry.slug))
-            .copied()
-            .or_else(|| {
-                if oracle_slug_counts
-                    .get(&bank_entry.slug)
-                    .is_some_and(|count| *count == 1)
-                {
-                    oracle_by_slug.get(&bank_entry.slug).copied()
-                } else {
-                    None
-                }
-            });
+        let oracle_entry = oracle_entry_for_bank_entry(
+            bank_entry,
+            &oracle_by_key,
+            &oracle_by_slug,
+            &oracle_slug_counts,
+        );
         let Some(oracle_entry) = oracle_entry else {
             return Err(std::io::Error::other(format!(
                 "oracle report has no entry for {}:{}",
@@ -604,6 +604,27 @@ fn oracle_key(split: &str, slug: &str) -> String {
     format!("{split}\0{slug}")
 }
 
+fn oracle_entry_for_bank_entry<'a>(
+    bank_entry: &DirectBasisAdapterBankLoadEntry,
+    oracle_by_key: &HashMap<String, &'a PsnrGateOracleEntryLoad>,
+    oracle_by_slug: &HashMap<String, &'a PsnrGateOracleEntryLoad>,
+    oracle_slug_counts: &HashMap<String, usize>,
+) -> Option<&'a PsnrGateOracleEntryLoad> {
+    oracle_by_key
+        .get(&oracle_key(&bank_entry.split, &bank_entry.slug))
+        .copied()
+        .or_else(|| {
+            if oracle_slug_counts
+                .get(&bank_entry.slug)
+                .is_some_and(|count| *count == 1)
+            {
+                oracle_by_slug.get(&bank_entry.slug).copied()
+            } else {
+                None
+            }
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evaluate_gate_model(
     generated_model: &NpaModel,
@@ -743,6 +764,32 @@ mod tests {
         assert_eq!(config.eval.steps.as_deref(), Some(&[32, 64][..]));
         assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
         assert_eq!(config.gate.fail_on_threshold, Some(true));
+
+        for file_name in [
+            "psnr_gate_1k_dino_token_grid_flow_h512_rms_noise_oracle8x8.toml",
+            "psnr_gate_1k_dino_token_grid_flow_h512_sampled_refine_oracle8x8.toml",
+            "psnr_gate_10k_dino_canonical_h1024_valselect_oracle8x8.toml",
+        ] {
+            let path = repo_root
+                .join("configs/hyper2d_adapter_bank")
+                .join(file_name);
+            let config = load_psnr_gate_experiment_config(Some(&path)).unwrap();
+            assert_eq!(config.preset.as_deref(), Some("growing-2d"));
+            assert!(config.input.base_model.is_some());
+            assert!(config.input.adapter_bank.is_some());
+            assert!(config.input.oracle_report.is_some());
+            assert!(config.input.hyper.is_some());
+            assert!(config.condition.feature_cache.is_some());
+            if file_name.contains("token_grid") {
+                assert_eq!(config.condition.token_grid_width, Some(8));
+                assert_eq!(config.condition.token_grid_height, Some(8));
+            }
+            assert_eq!(config.eval.limit, Some(16));
+            assert_eq!(config.eval.particles, Some(2048));
+            assert_eq!(config.eval.steps.as_deref(), Some(&[32][..]));
+            assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
+            assert_eq!(config.gate.fail_on_threshold, Some(false));
+        }
 
         let direct_only_path = repo_root
             .join("configs/hyper2d_adapter_bank")
