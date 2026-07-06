@@ -907,12 +907,14 @@ pub(crate) enum Command {
         alias = "validate-hyper-2d-direct-basis-oracles"
     )]
     ValidateHyper2dDirectBasisOracles {
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long, default_value = "growing-2d")]
         preset: PresetArg,
         #[arg(long)]
-        shared_base: PathBuf,
+        shared_base: Option<PathBuf>,
         #[arg(long)]
-        adapter_bank: PathBuf,
+        adapter_bank: Option<PathBuf>,
         #[arg(
             long,
             default_value = "artifacts/hyper2d_direct_basis_oracles/report.json"
@@ -982,16 +984,18 @@ pub(crate) enum Command {
         alias = "validate-hyper-2d-psnr-gate"
     )]
     ValidateHyper2dPsnrGate {
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long, default_value = "growing-2d")]
         preset: PresetArg,
         #[arg(long)]
-        base_model: PathBuf,
+        base_model: Option<PathBuf>,
         #[arg(long)]
-        adapter_bank: PathBuf,
+        adapter_bank: Option<PathBuf>,
         #[arg(long)]
-        oracle_report: PathBuf,
+        oracle_report: Option<PathBuf>,
         #[arg(long)]
-        hyper: PathBuf,
+        hyper: Option<PathBuf>,
         #[arg(long, default_value = "artifacts/hyper2d_psnr_gate/report.json")]
         output: PathBuf,
         #[arg(long, default_value = "artifacts/hyper2d_psnr_gate/generated")]
@@ -1025,6 +1029,8 @@ pub(crate) enum Command {
         report: PathBuf,
         #[arg(long)]
         oracle_report: Option<PathBuf>,
+        #[arg(long)]
+        psnr_report: Option<PathBuf>,
         #[arg(long, default_value = "artifacts/hyper2d_report")]
         output_dir: PathBuf,
         #[arg(long)]

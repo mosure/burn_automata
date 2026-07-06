@@ -261,6 +261,31 @@ struct DirectBasisExperimentConfig {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+struct DirectBasisOracleValidationExperimentConfig {
+    preset: Option<String>,
+    input: DirectBasisOracleValidationInputConfig,
+    output: DirectBasisOracleValidationOutputConfig,
+    rollout: DirectBasisRolloutExperimentConfig,
+    target: DirectBasisTargetExperimentConfig,
+    optimizer: DirectBasisOptimizerExperimentConfig,
+    oracle: DirectBasisOracleExperimentConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisOracleValidationInputConfig {
+    shared_base: Option<PathBuf>,
+    adapter_bank: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisOracleValidationOutputConfig {
+    report_output: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct DirectBasisSourceExperimentConfig {
     target_images: Option<Vec<PathBuf>>,
     target_image_dirs: Option<Vec<PathBuf>>,
@@ -425,6 +450,22 @@ fn load_direct_basis_experiment_config(
     toml::from_str(&text).map_err(|err| {
         std::io::Error::other(format!(
             "failed to parse direct-basis experiment config {}: {err}",
+            path.display()
+        ))
+        .into()
+    })
+}
+
+fn load_direct_basis_oracle_validation_experiment_config(
+    path: Option<&Path>,
+) -> Result<DirectBasisOracleValidationExperimentConfig, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(DirectBasisOracleValidationExperimentConfig::default());
+    };
+    let text = std::fs::read_to_string(path)?;
+    toml::from_str(&text).map_err(|err| {
+        std::io::Error::other(format!(
+            "failed to parse direct-basis oracle validation config {}: {err}",
             path.display()
         ))
         .into()
@@ -1291,6 +1332,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Command::ValidateHyper2dDirectBasisOracles {
+        config,
         preset,
         shared_base,
         adapter_bank,
@@ -1330,6 +1372,119 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
             "run_validate_hyper_2d_direct_basis_oracles called with the wrong command variant"
         );
     };
+
+    let experiment_config =
+        load_direct_basis_oracle_validation_experiment_config(config.as_deref())?;
+    let DirectBasisOracleValidationExperimentConfig {
+        preset: config_preset,
+        input: config_input,
+        output: config_output,
+        rollout: config_rollout,
+        target: config_target,
+        optimizer: config_optimizer,
+        oracle: config_oracle,
+    } = experiment_config;
+    let DirectBasisOracleValidationInputConfig {
+        shared_base: config_shared_base,
+        adapter_bank: config_adapter_bank,
+    } = config_input;
+    let DirectBasisOracleValidationOutputConfig {
+        report_output: config_report_output,
+    } = config_output;
+    let DirectBasisRolloutExperimentConfig {
+        particles: config_rollout_particles,
+        steps: config_rollout_steps,
+        update_prob: config_update_prob,
+        seed: config_eval_seed,
+        base_seed: _,
+        seed_scale: config_seed_scale,
+        seed_mode: config_seed_mode,
+    } = config_rollout;
+    let DirectBasisTargetExperimentConfig {
+        points: config_target_points,
+        image_size: config_target_image_size,
+        threshold: config_target_threshold,
+        loss_image_size: config_target_loss_image_size,
+        splat_sigma: config_target_splat_sigma,
+        splat_loss_weight: config_target_splat_loss_weight,
+        color_loss_weight: config_target_color_loss_weight,
+        density_loss_weight: config_target_density_loss_weight,
+        displacement_regularizer_weight: config_target_displacement_regularizer_weight,
+        overflow_regularizer_weight: config_target_overflow_regularizer_weight,
+        bound_regularizer_weight: config_target_bound_regularizer_weight,
+    } = config_target;
+    let DirectBasisOptimizerExperimentConfig {
+        per_parameter_grad_normalization: config_per_parameter_grad_normalization,
+        base_learning_rate: _,
+        base_weight_decay: _,
+        base_grad_clip_norm: _,
+        adapter_learning_rate: _,
+        adapter_weight_decay: _,
+        adapter_grad_clip_norm: _,
+        adapter_l2: _,
+    } = config_optimizer;
+    let DirectBasisOracleExperimentConfig {
+        train_examples: config_oracle_train_examples,
+        holdout_examples: config_oracle_holdout_examples,
+        epochs: config_oracle_epochs,
+        repetitions: config_oracle_repetitions,
+        report_interval: config_oracle_report_interval,
+        batch_size: config_oracle_batch_size,
+        pool_size: config_oracle_pool_size,
+        learning_rate: config_oracle_learning_rate,
+        weight_decay: config_oracle_weight_decay,
+        grad_clip_norm: config_oracle_grad_clip_norm,
+        seed: config_oracle_seed,
+    } = config_oracle;
+
+    let preset = config_value_enum("preset", config_preset, preset)?;
+    let shared_base = config_shared_base.or(shared_base).ok_or_else(|| {
+        std::io::Error::other(
+            "validate-hyper2d-direct-basis-oracles requires --shared-base or input.shared_base",
+        )
+    })?;
+    let adapter_bank = config_adapter_bank.or(adapter_bank).ok_or_else(|| {
+        std::io::Error::other(
+            "validate-hyper2d-direct-basis-oracles requires --adapter-bank or input.adapter_bank",
+        )
+    })?;
+    let report_output = config_report_output.unwrap_or(report_output);
+    let rollout_particles = config_rollout_particles.unwrap_or(rollout_particles);
+    let rollout_steps = config_rollout_steps.unwrap_or(rollout_steps);
+    let update_prob = config_update_prob.unwrap_or(update_prob);
+    let eval_seed = config_eval_seed.unwrap_or(eval_seed);
+    let seed_scale = config_seed_scale.or(seed_scale);
+    let seed_mode = config_value_enum("rollout.seed_mode", config_seed_mode, seed_mode)?;
+    let per_parameter_grad_normalization =
+        config_per_parameter_grad_normalization.unwrap_or(per_parameter_grad_normalization);
+    let target_points = config_target_points.unwrap_or(target_points);
+    let target_image_size = config_target_image_size.or(target_image_size);
+    let target_threshold = config_target_threshold.unwrap_or(target_threshold);
+    let target_loss_image_size = config_target_loss_image_size.unwrap_or(target_loss_image_size);
+    let target_splat_sigma = config_target_splat_sigma.unwrap_or(target_splat_sigma);
+    let target_splat_loss_weight =
+        config_target_splat_loss_weight.unwrap_or(target_splat_loss_weight);
+    let target_color_loss_weight =
+        config_target_color_loss_weight.unwrap_or(target_color_loss_weight);
+    let target_density_loss_weight =
+        config_target_density_loss_weight.unwrap_or(target_density_loss_weight);
+    let target_displacement_regularizer_weight = config_target_displacement_regularizer_weight
+        .unwrap_or(target_displacement_regularizer_weight);
+    let target_overflow_regularizer_weight =
+        config_target_overflow_regularizer_weight.unwrap_or(target_overflow_regularizer_weight);
+    let target_bound_regularizer_weight =
+        config_target_bound_regularizer_weight.unwrap_or(target_bound_regularizer_weight);
+    let oracle_train_examples = config_oracle_train_examples.unwrap_or(oracle_train_examples);
+    let oracle_holdout_examples = config_oracle_holdout_examples.unwrap_or(oracle_holdout_examples);
+    let oracle_epochs = config_oracle_epochs.unwrap_or(oracle_epochs);
+    let oracle_repetitions = config_oracle_repetitions.unwrap_or(oracle_repetitions);
+    let oracle_report_interval = config_oracle_report_interval.unwrap_or(oracle_report_interval);
+    let oracle_batch_size = config_oracle_batch_size.unwrap_or(oracle_batch_size);
+    let oracle_pool_size = config_oracle_pool_size.unwrap_or(oracle_pool_size);
+    let oracle_learning_rate = config_oracle_learning_rate.unwrap_or(oracle_learning_rate);
+    let oracle_weight_decay = config_oracle_weight_decay.unwrap_or(oracle_weight_decay);
+    let oracle_grad_clip_norm = config_oracle_grad_clip_norm.unwrap_or(oracle_grad_clip_norm);
+    let oracle_seed = config_oracle_seed.unwrap_or(oracle_seed);
 
     let preset: AutomataPreset = preset.into();
     if preset != AutomataPreset::Growing2d {
@@ -3210,8 +3365,17 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            toml::from_str::<DirectBasisExperimentConfig>(&text)
-                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("oracle_validate_"))
+            {
+                toml::from_str::<DirectBasisOracleValidationExperimentConfig>(&text)
+                    .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            } else {
+                toml::from_str::<DirectBasisExperimentConfig>(&text)
+                    .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            }
         }
     }
 

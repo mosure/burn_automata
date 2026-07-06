@@ -6,7 +6,9 @@ use crate::cli::commands::hyper_support::{
 use crate::cli::prelude::*;
 
 use super::super::sources::sanitize_slug;
-use super::{load_direct_basis_adapter_bank, resolve_direct_basis_artifact_path};
+use super::{
+    config_value_enum, load_direct_basis_adapter_bank, resolve_direct_basis_artifact_path,
+};
 
 #[derive(Deserialize)]
 struct PsnrGateOracleReportLoad {
@@ -16,6 +18,53 @@ struct PsnrGateOracleReportLoad {
 #[derive(Deserialize)]
 struct PsnrGateOracleValidationLoad {
     entries: Vec<PsnrGateOracleEntryLoad>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateExperimentConfig {
+    preset: Option<String>,
+    input: PsnrGateInputExperimentConfig,
+    output: PsnrGateOutputExperimentConfig,
+    eval: PsnrGateEvalExperimentConfig,
+    gate: PsnrGateThresholdExperimentConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateInputExperimentConfig {
+    base_model: Option<PathBuf>,
+    adapter_bank: Option<PathBuf>,
+    oracle_report: Option<PathBuf>,
+    hyper: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateOutputExperimentConfig {
+    output: Option<PathBuf>,
+    generated_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateEvalExperimentConfig {
+    limit: Option<usize>,
+    particles: Option<usize>,
+    steps: Option<Vec<usize>>,
+    update_prob: Option<f32>,
+    seed: Option<u64>,
+    seed_scale: Option<f32>,
+    seed_mode: Option<String>,
+    image_size: Option<usize>,
+    render_sigma_px: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateThresholdExperimentConfig {
+    min_render_rgb_psnr_db: Option<f32>,
+    fail_on_threshold: Option<bool>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -86,6 +135,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Command::ValidateHyper2dPsnrGate {
+        config,
         preset,
         base_model,
         adapter_bank,
@@ -108,6 +158,73 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     else {
         unreachable!("run_validate_hyper_2d_psnr_gate called with the wrong command variant");
     };
+
+    let experiment_config = load_psnr_gate_experiment_config(config.as_deref())?;
+    let PsnrGateExperimentConfig {
+        preset: config_preset,
+        input: config_input,
+        output: config_output,
+        eval: config_eval,
+        gate: config_gate,
+    } = experiment_config;
+    let PsnrGateInputExperimentConfig {
+        base_model: config_base_model,
+        adapter_bank: config_adapter_bank,
+        oracle_report: config_oracle_report,
+        hyper: config_hyper,
+    } = config_input;
+    let PsnrGateOutputExperimentConfig {
+        output: config_output_path,
+        generated_dir: config_generated_dir,
+    } = config_output;
+    let PsnrGateEvalExperimentConfig {
+        limit: config_limit,
+        particles: config_particles,
+        steps: config_steps,
+        update_prob: config_update_prob,
+        seed: config_seed,
+        seed_scale: config_seed_scale,
+        seed_mode: config_seed_mode,
+        image_size: config_image_size,
+        render_sigma_px: config_render_sigma_px,
+    } = config_eval;
+    let PsnrGateThresholdExperimentConfig {
+        min_render_rgb_psnr_db: config_min_render_rgb_psnr_db,
+        fail_on_threshold: config_fail_on_threshold,
+    } = config_gate;
+
+    let preset = config_value_enum("preset", config_preset, preset)?;
+    let base_model = config_base_model.or(base_model).ok_or_else(|| {
+        std::io::Error::other(
+            "validate-hyper2d-psnr-gate requires --base-model or input.base_model",
+        )
+    })?;
+    let adapter_bank = config_adapter_bank.or(adapter_bank).ok_or_else(|| {
+        std::io::Error::other(
+            "validate-hyper2d-psnr-gate requires --adapter-bank or input.adapter_bank",
+        )
+    })?;
+    let oracle_report = config_oracle_report.or(oracle_report).ok_or_else(|| {
+        std::io::Error::other(
+            "validate-hyper2d-psnr-gate requires --oracle-report or input.oracle_report",
+        )
+    })?;
+    let hyper = config_hyper.or(hyper).ok_or_else(|| {
+        std::io::Error::other("validate-hyper2d-psnr-gate requires --hyper or input.hyper")
+    })?;
+    let output = config_output_path.unwrap_or(output);
+    let generated_dir = config_generated_dir.unwrap_or(generated_dir);
+    let limit = config_limit.unwrap_or(limit);
+    let particles = config_particles.unwrap_or(particles);
+    let steps = config_steps.unwrap_or(steps);
+    let update_prob = config_update_prob.unwrap_or(update_prob);
+    let seed = config_seed.unwrap_or(seed);
+    let seed_scale = config_seed_scale.or(seed_scale);
+    let seed_mode = config_value_enum("eval.seed_mode", config_seed_mode, seed_mode)?;
+    let image_size = config_image_size.unwrap_or(image_size);
+    let render_sigma_px = config_render_sigma_px.unwrap_or(render_sigma_px);
+    let min_render_rgb_psnr_db = config_min_render_rgb_psnr_db.unwrap_or(min_render_rgb_psnr_db);
+    let fail_on_threshold = config_fail_on_threshold.unwrap_or(fail_on_threshold);
 
     if particles == 0 {
         return Err(std::io::Error::other("--particles must be greater than zero").into());
@@ -368,6 +485,22 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     Ok(())
 }
 
+fn load_psnr_gate_experiment_config(
+    path: Option<&Path>,
+) -> Result<PsnrGateExperimentConfig, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(PsnrGateExperimentConfig::default());
+    };
+    let text = std::fs::read_to_string(path)?;
+    toml::from_str(&text).map_err(|err| {
+        std::io::Error::other(format!(
+            "failed to parse Hyper2D PSNR gate config {}: {err}",
+            path.display()
+        ))
+        .into()
+    })
+}
+
 fn load_oracle_entries(
     oracle_report: &Path,
 ) -> Result<Vec<PsnrGateOracleEntryLoad>, Box<dyn std::error::Error>> {
@@ -490,4 +623,29 @@ fn summarize_gate_entries(
 fn selected_entries_len(entries: &[Hyper2dPsnrGateEntry], step_count: usize) -> usize {
     let divisor = step_count.saturating_mul(2).max(1);
     entries.len() / divisor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_psnr_gate_config_parses() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml");
+
+        let config = load_psnr_gate_experiment_config(Some(&path)).unwrap();
+
+        assert_eq!(config.preset.as_deref(), Some("growing-2d"));
+        assert!(config.input.base_model.is_some());
+        assert!(config.input.adapter_bank.is_some());
+        assert!(config.input.oracle_report.is_some());
+        assert!(config.input.hyper.is_some());
+        assert_eq!(config.eval.particles, Some(2048));
+        assert_eq!(config.eval.steps.as_deref(), Some(&[32, 64][..]));
+        assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
+        assert_eq!(config.gate.fail_on_threshold, Some(true));
+    }
 }

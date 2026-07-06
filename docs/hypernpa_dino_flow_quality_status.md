@@ -80,6 +80,10 @@ non-identifiability even after canonicalization, so vector MSE is a weak proxy
 for image/dynamics quality.
 - The current low-count rollout validation is useful as a smoke check but is
 not paper-quality evidence.
+- HyperNPA readiness now requires an oracle-render PSNR validation report, not
+  only adapter-vector and rollout-loss summaries. `report-hyper2d` will return
+  `needs_psnr_oracle_validation` for otherwise-close conditioned runs when
+  `--psnr-report` is omitted.
 
 ## Implemented Course Correction
 
@@ -184,7 +188,9 @@ Do not claim broad generalized HyperNPA quality until these are complete:
 1. Fix the direct shared-base plus per-sample LoRA quality target so stored
    LoRAs beat the zero-adapter baseline at quality scale. `report-hyper2d` now
    blocks direct-basis readiness unless shared-vs-zero max ratio is `<= 1.00x`
-   on both train and holdout oracle splits.
+   on both train and holdout oracle splits. Use
+   `configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048.toml` to
+   produce the quality-scale oracle report.
 2. Add image/dynamics-loss fine-tuning or guidance for the conditioned flow so
    selection is based on rollout quality, not only factorized adapter-vector MSE.
    `report-hyper2d` now also blocks conditioning readiness unless generated
@@ -194,7 +200,10 @@ Do not claim broad generalized HyperNPA quality until these are complete:
    gaps.
 4. Validate generated adapters against direct stored LoRAs and 2D overfit
    oracles at quality scale: at least 2048 rollout particles and 2048 target
-   samples.
+   samples. Use `validate-hyper2d-psnr-gate --config` and pass its JSON output
+   back into `report-hyper2d --psnr-report`; the current readiness threshold is
+   minimum render RGB PSNR of 26.0 dB for direct and generated HyperNPA
+   trajectories.
 5. Replace JSON full-token caches with a compact binary/sharded cache before
    broad 37x37 full-token training; full-token JSON is acceptable for the tiny
    smoke only.

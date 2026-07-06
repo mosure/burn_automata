@@ -2,7 +2,8 @@ use std::fmt::Write as _;
 
 use super::{
     AdapterBankConditioningSummary, AdapterRolloutSplitSummary, AdapterVectorMetricSummary,
-    DirectBasisReportSummary, Hyper2dValidationSummary, ThroughputSummary,
+    DirectBasisReportSummary, Hyper2dValidationSummary, PsnrKindStepSummary, PsnrValidationSummary,
+    ThroughputSummary,
 };
 
 pub(super) fn latex_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
@@ -25,6 +26,9 @@ pub(super) fn latex_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> S
     if let Some(adapter) = &summary.adapter_bank_conditioning {
         write_adapter_bank_table(&mut text, adapter);
     }
+    if let Some(psnr) = &summary.oracle_dynamics_psnr {
+        write_psnr_table(&mut text, psnr);
+    }
     write_list_section(&mut text, "Interpretation", &summary.interpretation);
     write_list_section(&mut text, "Next Steps", &summary.next_steps);
     writeln!(text, "\\end{{document}}").unwrap();
@@ -36,6 +40,7 @@ fn write_summary_table(text: &mut String, summary: &Hyper2dValidationSummary) {
     begin_table(text);
     row(text, "Report kind", summary.report_kind.label());
     row_path(text, "Source report", &summary.source_report);
+    row_path_opt(text, "PSNR report", summary.psnr_report.as_deref());
     row_path_opt(text, "Experiment", summary.experiment_config.as_deref());
     row(text, "Preset", &display_opt_str(summary.preset.as_deref()));
     row(
@@ -112,6 +117,14 @@ fn write_gate_table(text: &mut String, summary: &Hyper2dValidationSummary) {
     );
     row(
         text,
+        "Oracle render RGB PSNR",
+        &format!(
+            "at least {:.1} dB",
+            summary.quality_gates.oracle_render_rgb_psnr_ready_db
+        ),
+    );
+    row(
+        text,
         "Quality rollout particles",
         &format!(
             "at least {}",
@@ -134,6 +147,38 @@ fn write_gate_table(text: &mut String, summary: &Hyper2dValidationSummary) {
             summary.quality_gates.min_quality_oracle_examples_per_split
         ),
     );
+    end_table(text);
+}
+
+fn write_psnr_table(text: &mut String, psnr: &PsnrValidationSummary) {
+    writeln!(text, "\\section{{Oracle Dynamics PSNR}}").unwrap();
+    begin_table(text);
+    row(text, "Particles", &display_opt_usize(psnr.particle_count));
+    row(
+        text,
+        "Rollout steps",
+        &display_usize_list(&psnr.rollout_steps),
+    );
+    row(
+        text,
+        "Threshold",
+        &format!("{} dB", display_opt_f64(psnr.min_render_rgb_psnr_db)),
+    );
+    row(text, "Direct passed", &display_opt_bool(psnr.direct_passed));
+    row(text, "Hyper passed", &display_opt_bool(psnr.hyper_passed));
+    row(
+        text,
+        "Direct min render RGB PSNR",
+        &display_opt_f64(psnr.direct_min_render_rgb_psnr_db),
+    );
+    row(
+        text,
+        "Hyper min render RGB PSNR",
+        &display_opt_f64(psnr.hyper_min_render_rgb_psnr_db),
+    );
+    for item in &psnr.summaries {
+        row(text, &psnr_row_label(item), &psnr_row_summary(item));
+    }
     end_table(text);
 }
 
@@ -471,6 +516,42 @@ fn display_opt_percent(value: Option<f64>) -> String {
     value.map_or_else(
         || "n/a".to_string(),
         |value| format!("{:.2}%", value * 100.0),
+    )
+}
+
+fn display_opt_bool(value: Option<bool>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+}
+
+fn display_usize_list(values: &[usize]) -> String {
+    if values.is_empty() {
+        "n/a".to_string()
+    } else {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn psnr_row_label(metrics: &PsnrKindStepSummary) -> String {
+    format!(
+        "PSNR {} step {}",
+        metrics.kind,
+        display_opt_usize(metrics.rollout_steps)
+    )
+}
+
+fn psnr_row_summary(metrics: &PsnrKindStepSummary) -> String {
+    format!(
+        "examples={}, mean={}, median={}, min={}, max={}, passed={}",
+        display_opt_usize(metrics.examples),
+        display_opt_f64(metrics.mean_render_rgb_psnr_db),
+        display_opt_f64(metrics.median_render_rgb_psnr_db),
+        display_opt_f64(metrics.min_render_rgb_psnr_db),
+        display_opt_f64(metrics.max_render_rgb_psnr_db),
+        display_opt_bool(metrics.passed)
     )
 }
 

@@ -47,6 +47,7 @@ Summarize a direct-basis report with the Rust reporting command. It writes
 ```sh
 cargo run -p burn_automata --features cli -- report-hyper2d \
   --report artifacts/hyper2d_direct_basis/report.json \
+  --oracle-report artifacts/hyper2d_direct_basis_oracles/report.json \
   --output-dir artifacts/hyper2d_direct_basis/report_summary
 ```
 
@@ -56,6 +57,14 @@ ratios pass the direct-basis gate. Paper-quality reports also require at least
 reported as not quality-ready even if their oracle ratio is close. Fresh oracle
 validation also records a zero-adapter baseline; stored LoRAs must beat that
 baseline on train and holdout before direct-basis readiness can pass.
+
+Oracle validation is also TOML-configurable:
+
+```sh
+cargo run --release -p burn_automata --features cli --bin burn_automata -- \
+  validate-hyper2d-direct-basis-oracles \
+  --config configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048.toml
+```
 
 Latest diagnostic: `omnisvg_1k_p64_refine_lr1e4.toml` completed with full train
 adapter coverage (`min_updates=4`, zero missing) and refine coverage
@@ -83,3 +92,6 @@ the gates required before removing the legacy upstream-Python training backend.
 | `omnisvg_10k_pilot.toml` | 10k rank-16, 64-particle pilot; not paper-quality. |
 | `omnisvg_10k_quality_2048.toml` | 10k quality-scale validation recipe with 2048 rollout particles and 2048 target samples; direct training disabled on the dense path. |
 | `omnisvg_10k_rank32_particles128.toml` | Higher-capacity rank-32, 128-particle/12-step pilot for expressivity and throughput comparison; not paper-quality. |
+| `omnisvg_10k_rank64_particles128.toml` | Rank-64 version of the 128-particle expressivity pilot. |
+| `omnisvg_10k_rank132_particles128.toml` | Rank-132 expressivity pilot matching exact-oracle adapter capacity; batch size is lower because adapter state is much larger. |
+| `oracle_validate_10k_quality_2048.toml` | Quality-scale oracle plus zero-adapter validation for the current 10k rank-16 bank; run before training more conditioned HyperNPA models against that bank. |

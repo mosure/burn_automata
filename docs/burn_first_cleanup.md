@@ -33,9 +33,11 @@ it still provides parity checks, historical imports, or rich paper rendering.
    representative catalog targets and OmniSVG thumbnails.
 2. `train-hyper2d-direct-basis` Burn/WGPU produces a shared base and persistent
    per-sample LoRA bank whose oracle-validation ratios are within the documented
-   `report-hyper2d` gate.
+   `report-hyper2d` gate and whose stored adapters beat the zero-adapter
+   baseline at quality scale.
 3. `train-hyper2d-adapter-bank` Burn/WGPU reports generated LoRA vector metrics
-   and rollout-vs-static-adapter metrics that pass `report-hyper2d`.
+   and rollout-vs-static-adapter metrics that pass `report-hyper2d`, with an
+   attached `validate-hyper2d-psnr-gate` report against oracle rollouts.
 4. CI or local validation includes Rust tests for config parsing, report
    interpretation, adapter persistence, and GPU backend selection.
 
@@ -53,10 +55,17 @@ or CI run should fail if the summarized artifact is below threshold.
 | Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout adapter-vector mean cosine must be `>= 0.80`. |
 | Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout rollout max ratio to static LoRA must be `<= 1.15x`. |
 | Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout rollout max ratio to zero adapter must be `<= 1.00x`. |
+| Condition image to LoRA generator | `conditioning_quality_ready` | Oracle render RGB PSNR from `validate-hyper2d-psnr-gate` must be `>= 26.0 dB`. |
 
 Reports also summarize available throughput history: direct-basis reports expose
 particle-steps/sec when present, and adapter-bank reports expose
 adapter-values/sec when present.
+
+The direct-basis oracle validator and PSNR gate both accept TOML configs, so
+quality runs can be bundled and reproduced without long CLI argument lists:
+`configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048.toml` and
+`configs/hyper2d_adapter_bank/psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml`
+are the current reference validation recipes.
 
 ## Current Experimental Reading
 

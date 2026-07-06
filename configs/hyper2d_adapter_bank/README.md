@@ -33,13 +33,25 @@ reports:
 ```bash
 cargo run -p burn_automata --features cli -- report-hyper2d \
   --report artifacts/hyper2d_adapter_bank/report.json \
+  --psnr-report artifacts/hyper2d_adapter_bank/psnr_gate_report.json \
   --output-dir artifacts/hyper2d_adapter_bank/report_summary
 ```
 
 Add `--require-quality-ready` to fail the command unless generated LoRAs pass the
 adapter-vector and rollout gates. Paper-quality reports also require at least
 2048 rollout particles and 2048 target samples; lower-count pilot reports are
-blocked by the quality-scale gate.
+blocked by the quality-scale gate. HyperNPA readiness also requires a PSNR gate
+report from `validate-hyper2d-psnr-gate`; otherwise the reporter returns
+`needs_psnr_oracle_validation` even when the adapter-vector and rollout summaries
+are close.
+
+The PSNR gate is TOML-configurable:
+
+```bash
+cargo run --release -p burn_automata --features cli --bin burn_automata -- \
+  validate-hyper2d-psnr-gate \
+  --config configs/hyper2d_adapter_bank/psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml
+```
 
 The summary distinguishes close rollout ratios from true adapter-vector
 prediction quality, so weak condition-to-LoRA generalization is visible even when
@@ -69,6 +81,7 @@ direct stored LoRAs at quality scale.
 | `omnisvg_10k_dino_patch_stats_h1024_valselect.toml` | 10k DINO patch-stat condition run with the same memory-safe WGPU trainer. DINO extraction uses batch 1 to avoid current WGPU DINO buffer allocation failures. |
 | `omnisvg_10k_from_direct_basis.toml` | 10k summary-token scale-up against the current direct-basis adapter bank. |
 | `omnisvg_10k_quality_2048_from_direct_basis.toml` | 10k quality-scale condition-to-LoRA run against a 2048-particle direct-basis bank. |
+| `psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml` | Quality-scale render-PSNR gate comparing direct stored LoRAs and generated HyperNPA LoRAs against oracle 2D rollouts. |
 
 The DINO condition path is compiled behind the Rust `dino` feature. Run DINO
 experiments with:
@@ -103,4 +116,6 @@ against the conditioned rectified-flow generator. The gate remains the same:
 generated LoRAs must close both adapter-vector metrics and rollout loss ratios
 versus direct stored LoRAs before claiming HyperNPA generalization. Generated
 LoRAs must also beat the zero-adapter rollout baseline; beating a malformed
-stored-LoRA target is not sufficient.
+stored-LoRA target is not sufficient. The final readiness check is the
+`validate-hyper2d-psnr-gate` render comparison against 2D oracle trajectories at
+quality particle counts.

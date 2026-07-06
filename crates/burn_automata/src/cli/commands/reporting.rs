@@ -13,6 +13,7 @@ const ADAPTER_VECTOR_READY_MAX_NRMSE: f64 = 0.35;
 const ADAPTER_VECTOR_READY_MIN_COSINE: f64 = 0.80;
 const ADAPTER_ROLLOUT_READY_MAX_RATIO: f64 = 1.15;
 const ADAPTER_ROLLOUT_ZERO_READY_MAX_RATIO: f64 = 1.0;
+const ORACLE_RENDER_RGB_PSNR_READY_DB: f64 = 26.0;
 const MIN_QUALITY_ROLLOUT_PARTICLES: usize = 2048;
 const MIN_QUALITY_TARGET_POINTS: usize = 2048;
 const MIN_QUALITY_ORACLE_EXAMPLES_PER_SPLIT: usize = 8;
@@ -24,6 +25,7 @@ pub(crate) fn run_report_hyper_2d(command: Command) -> Result<(), Box<dyn std::e
     let Command::ReportHyper2d {
         report,
         oracle_report,
+        psnr_report,
         output_dir,
         summary_output,
         markdown_output,
@@ -39,11 +41,17 @@ pub(crate) fn run_report_hyper_2d(command: Command) -> Result<(), Box<dyn std::e
         .as_ref()
         .map(|path| read_json_value(path))
         .transpose()?;
+    let psnr_value = psnr_report
+        .as_ref()
+        .map(|path| read_json_value(path))
+        .transpose()?;
     let summary = summarize_hyper2d_report(
         &report,
         &report_value,
         oracle_report.as_deref(),
         oracle_value.as_ref(),
+        psnr_report.as_deref(),
+        psnr_value.as_ref(),
     )?;
 
     let summary_output =
@@ -87,6 +95,7 @@ struct Hyper2dValidationSummary {
     report_kind: Hyper2dReportKind,
     source_report: String,
     oracle_report: Option<String>,
+    psnr_report: Option<String>,
     experiment_config: Option<String>,
     preset: Option<String>,
     output_dir: Option<String>,
@@ -98,6 +107,7 @@ struct Hyper2dValidationSummary {
     quality_ready: bool,
     quality_gates: QualityGateSummary,
     hypernet_generalization_validated: bool,
+    oracle_dynamics_psnr: Option<PsnrValidationSummary>,
     direct_basis: Option<DirectBasisReportSummary>,
     adapter_bank_conditioning: Option<AdapterBankConditioningSummary>,
     interpretation: Vec<String>,
@@ -112,6 +122,7 @@ struct QualityGateSummary {
     adapter_vector_ready_min_cosine: f64,
     adapter_rollout_ready_max_ratio: f64,
     adapter_rollout_zero_ready_max_ratio: f64,
+    oracle_render_rgb_psnr_ready_db: f64,
     min_quality_rollout_particles: usize,
     min_quality_target_points: usize,
     min_quality_oracle_examples_per_split: usize,
@@ -217,14 +228,47 @@ struct AdapterRolloutSplitSummary {
     max_ratio_to_zero: Option<f64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct PsnrValidationSummary {
+    particle_count: Option<usize>,
+    rollout_steps: Vec<usize>,
+    min_render_rgb_psnr_db: Option<f64>,
+    direct_passed: Option<bool>,
+    hyper_passed: Option<bool>,
+    all_passed: Option<bool>,
+    direct_min_render_rgb_psnr_db: Option<f64>,
+    hyper_min_render_rgb_psnr_db: Option<f64>,
+    summaries: Vec<PsnrKindStepSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PsnrKindStepSummary {
+    kind: String,
+    rollout_steps: Option<usize>,
+    examples: Option<usize>,
+    mean_render_rgb_psnr_db: Option<f64>,
+    median_render_rgb_psnr_db: Option<f64>,
+    min_render_rgb_psnr_db: Option<f64>,
+    max_render_rgb_psnr_db: Option<f64>,
+    below_threshold: Option<usize>,
+    passed: Option<bool>,
+}
+
 fn summarize_hyper2d_report(
     report_path: &Path,
     report: &Value,
     oracle_path: Option<&Path>,
     oracle_report: Option<&Value>,
+    psnr_path: Option<&Path>,
+    psnr_report: Option<&Value>,
 ) -> Result<Hyper2dValidationSummary, Box<dyn std::error::Error>> {
     if report.get("train_vector_metrics").is_some() && report.get("hyper_output").is_some() {
-        return Ok(summarize_adapter_bank_conditioning(report_path, report));
+        return Ok(summarize_adapter_bank_conditioning(
+            report_path,
+            report,
+            psnr_path,
+            psnr_report,
+        ));
     }
     if report.get("adapter_bank_output").is_some() || report.get("gpu_training").is_some() {
         return Ok(summarize_direct_basis(
@@ -232,6 +276,8 @@ fn summarize_hyper2d_report(
             report,
             oracle_path,
             oracle_report,
+            psnr_path,
+            psnr_report,
         ));
     }
 
@@ -246,7 +292,10 @@ fn summarize_direct_basis(
     report: &Value,
     oracle_path: Option<&Path>,
     oracle_report: Option<&Value>,
+    psnr_path: Option<&Path>,
+    psnr_report: Option<&Value>,
 ) -> Hyper2dValidationSummary {
+    let psnr = psnr_report.and_then(psnr_validation_summary);
     let oracle_block = oracle_report
         .and_then(|report| report.get("oracle_validation").or(Some(report)))
         .or_else(|| report.get("oracle_validation"));
@@ -348,11 +397,25 @@ fn summarize_direct_basis(
             direct.min_target_points,
         ));
     }
+    if let Some(psnr) = &psnr {
+        if psnr.direct_passed == Some(true) {
+            interpretation.push(format!(
+                "Direct stored LoRA dynamics pass the {:.1} dB render-RGB PSNR oracle gate.",
+                ORACLE_RENDER_RGB_PSNR_READY_DB
+            ));
+        } else {
+            interpretation.push(format!(
+                "Direct stored LoRA dynamics do not pass the {:.1} dB render-RGB PSNR oracle gate.",
+                ORACLE_RENDER_RGB_PSNR_READY_DB
+            ));
+        }
+    }
 
     Hyper2dValidationSummary {
         report_kind: Hyper2dReportKind::DirectBasis,
         source_report: report_path.display().to_string(),
         oracle_report: oracle_path.map(|path| path.display().to_string()),
+        psnr_report: psnr_path.map(|path| path.display().to_string()),
         experiment_config: path_string(report, &["experiment_config"]),
         preset: path_string(report, &["preset"]),
         output_dir: path_string(report, &["output_dir"]),
@@ -364,6 +427,7 @@ fn summarize_direct_basis(
         quality_ready: oracle_ready && quality_scale_ready,
         quality_gates: quality_gate_summary(),
         hypernet_generalization_validated: false,
+        oracle_dynamics_psnr: psnr,
         direct_basis: Some(direct),
         adapter_bank_conditioning: None,
         interpretation,
@@ -378,7 +442,10 @@ fn summarize_direct_basis(
 fn summarize_adapter_bank_conditioning(
     report_path: &Path,
     report: &Value,
+    psnr_path: Option<&Path>,
+    psnr_report: Option<&Value>,
 ) -> Hyper2dValidationSummary {
+    let psnr = psnr_report.and_then(psnr_validation_summary);
     let adapter = AdapterBankConditioningSummary {
         backend: path_string(report, &["backend"]),
         training_backend: path_string(report, &["training", "backend"]),
@@ -446,6 +513,20 @@ fn summarize_adapter_bank_conditioning(
         .generator_objective
         .as_deref()
         .is_some_and(|objective| objective.contains("rectified-flow"));
+    let model_quality_ready = dino_ready
+        && flow_ready
+        && broad_example_ready
+        && rollout_example_ready
+        && vector_ready
+        && rollout_ready
+        && rollout_zero_ready
+        && quality_scale_ready;
+    let psnr_present = psnr.is_some();
+    let psnr_ready = psnr.as_ref().is_some_and(|summary| {
+        summary.all_passed.unwrap_or(false)
+            && summary.direct_passed.unwrap_or(false)
+            && summary.hyper_passed.unwrap_or(false)
+    });
     let quality_status = if !dino_ready {
         "conditioning_not_dino"
     } else if !flow_ready {
@@ -456,7 +537,11 @@ fn summarize_adapter_bank_conditioning(
         "insufficient_conditioning_rollout_examples"
     } else if vector_ready && rollout_ready && !rollout_zero_ready {
         "conditioning_zero_baseline_gap"
-    } else if vector_ready && rollout_ready && rollout_zero_ready && quality_scale_ready {
+    } else if model_quality_ready && !psnr_present {
+        "needs_psnr_oracle_validation"
+    } else if model_quality_ready && !psnr_ready {
+        "psnr_oracle_gap"
+    } else if model_quality_ready {
         "conditioning_quality_ready"
     } else if vector_ready && rollout_ready && rollout_zero_ready {
         "quality_particle_count_too_low"
@@ -521,15 +606,26 @@ fn summarize_adapter_bank_conditioning(
             adapter.target_points,
         ));
     }
+    if model_quality_ready && !psnr_present {
+        interpretation.push(format!(
+            "No generated-vs-oracle PSNR report was provided; HyperNPA generalization requires render-RGB PSNR >= {:.1} dB.",
+            ORACLE_RENDER_RGB_PSNR_READY_DB
+        ));
+    } else if psnr.is_some() {
+        if psnr_ready {
+            interpretation.push(format!(
+                "Direct and generated HyperNPA rollouts pass the {:.1} dB render-RGB PSNR oracle gate.",
+                ORACLE_RENDER_RGB_PSNR_READY_DB
+            ));
+        } else {
+            interpretation.push(format!(
+                "Direct and generated HyperNPA rollouts do not both pass the {:.1} dB render-RGB PSNR oracle gate.",
+                ORACLE_RENDER_RGB_PSNR_READY_DB
+            ));
+        }
+    }
 
-    let quality_ready = dino_ready
-        && flow_ready
-        && broad_example_ready
-        && rollout_example_ready
-        && vector_ready
-        && rollout_ready
-        && rollout_zero_ready
-        && quality_scale_ready;
+    let quality_ready = model_quality_ready && psnr_ready;
     let mut next_steps = Vec::new();
     if !dino_ready {
         next_steps.push(
@@ -558,6 +654,11 @@ fn summarize_adapter_bank_conditioning(
                 .to_string(),
         );
     }
+    if !psnr_ready {
+        next_steps.push(format!(
+            "Run validate-hyper2d-psnr-gate against generated, direct, and oracle rollouts and require direct and generated render-RGB PSNR >= {ORACLE_RENDER_RGB_PSNR_READY_DB:.1} dB."
+        ));
+    }
     next_steps.extend([
         format!("Rerun adapter-bank rollout evaluation with at least {MIN_QUALITY_ROLLOUT_PARTICLES} particles and {MIN_QUALITY_TARGET_POINTS} target samples before comparing generated LoRAs in the paper."),
         "If vector metrics remain poor, train a stronger adapter decoder or a two-stage residual/flow head before scaling dataset size.".to_string(),
@@ -568,6 +669,7 @@ fn summarize_adapter_bank_conditioning(
         report_kind: Hyper2dReportKind::AdapterBankConditioning,
         source_report: report_path.display().to_string(),
         oracle_report: None,
+        psnr_report: psnr_path.map(|path| path.display().to_string()),
         experiment_config: path_string(report, &["experiment_config"]),
         preset: path_string(report, &["preset"]),
         output_dir: path_string(report, &["output_dir"]),
@@ -579,6 +681,7 @@ fn summarize_adapter_bank_conditioning(
         quality_ready,
         quality_gates: quality_gate_summary(),
         hypernet_generalization_validated: quality_ready,
+        oracle_dynamics_psnr: psnr,
         direct_basis: None,
         adapter_bank_conditioning: Some(adapter),
         interpretation,
@@ -594,6 +697,7 @@ fn quality_gate_summary() -> QualityGateSummary {
         adapter_vector_ready_min_cosine: ADAPTER_VECTOR_READY_MIN_COSINE,
         adapter_rollout_ready_max_ratio: ADAPTER_ROLLOUT_READY_MAX_RATIO,
         adapter_rollout_zero_ready_max_ratio: ADAPTER_ROLLOUT_ZERO_READY_MAX_RATIO,
+        oracle_render_rgb_psnr_ready_db: ORACLE_RENDER_RGB_PSNR_READY_DB,
         min_quality_rollout_particles: MIN_QUALITY_ROLLOUT_PARTICLES,
         min_quality_target_points: MIN_QUALITY_TARGET_POINTS,
         min_quality_oracle_examples_per_split: MIN_QUALITY_ORACLE_EXAMPLES_PER_SPLIT,
@@ -684,6 +788,70 @@ fn adapter_rollout_summary(root: &Value, path: &[&str]) -> Option<AdapterRollout
         max_ratio_to_static: path_f64(split, &["max_ratio_to_static"]),
         mean_ratio_to_zero: path_f64(split, &["mean_ratio_to_zero"]),
         max_ratio_to_zero: path_f64(split, &["max_ratio_to_zero"]),
+    })
+}
+
+fn psnr_validation_summary(root: &Value) -> Option<PsnrValidationSummary> {
+    let summaries = root
+        .get("summaries")?
+        .as_array()?
+        .iter()
+        .map(|entry| PsnrKindStepSummary {
+            kind: path_string(entry, &["kind"]).unwrap_or_else(|| "unknown".to_string()),
+            rollout_steps: path_usize(entry, &["rollout_steps"]),
+            examples: path_usize(entry, &["examples"]),
+            mean_render_rgb_psnr_db: path_f64(entry, &["mean_render_rgb_psnr_db"]),
+            median_render_rgb_psnr_db: path_f64(entry, &["median_render_rgb_psnr_db"]),
+            min_render_rgb_psnr_db: path_f64(entry, &["min_render_rgb_psnr_db"]),
+            max_render_rgb_psnr_db: path_f64(entry, &["max_render_rgb_psnr_db"]),
+            below_threshold: path_usize(entry, &["below_threshold"]),
+            passed: path_value(entry, &["passed"]).and_then(Value::as_bool),
+        })
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        return None;
+    }
+    let direct = summaries
+        .iter()
+        .filter(|summary| summary.kind == "direct")
+        .collect::<Vec<_>>();
+    let hyper = summaries
+        .iter()
+        .filter(|summary| summary.kind == "hyper")
+        .collect::<Vec<_>>();
+    let direct_passed =
+        (!direct.is_empty()).then(|| direct.iter().all(|summary| summary.passed.unwrap_or(false)));
+    let hyper_passed =
+        (!hyper.is_empty()).then(|| hyper.iter().all(|summary| summary.passed.unwrap_or(false)));
+    let direct_min_render_rgb_psnr_db = direct
+        .iter()
+        .filter_map(|summary| summary.min_render_rgb_psnr_db)
+        .min_by(f64::total_cmp);
+    let hyper_min_render_rgb_psnr_db = hyper
+        .iter()
+        .filter_map(|summary| summary.min_render_rgb_psnr_db)
+        .min_by(f64::total_cmp);
+    let rollout_steps = root
+        .get("rollout_steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|step| usize::try_from(step).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(PsnrValidationSummary {
+        particle_count: path_usize(root, &["particle_count"]),
+        rollout_steps,
+        min_render_rgb_psnr_db: path_f64(root, &["min_render_rgb_psnr_db"]),
+        direct_passed,
+        hyper_passed,
+        all_passed: path_value(root, &["passed"]).and_then(Value::as_bool),
+        direct_min_render_rgb_psnr_db,
+        hyper_min_render_rgb_psnr_db,
+        summaries,
     })
 }
 
@@ -814,6 +982,12 @@ fn markdown_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
     writeln!(text, "| Source report | `{}` |", summary.source_report).unwrap();
     writeln!(
         text,
+        "| PSNR report | {} |",
+        display_opt_str(summary.psnr_report.as_deref())
+    )
+    .unwrap();
+    writeln!(
+        text,
         "| Experiment | {} |",
         display_opt_str(summary.experiment_config.as_deref())
     )
@@ -884,6 +1058,12 @@ fn markdown_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
         text,
         "| Adapter rollout max ratio to zero adapter | <= {:.2}x |",
         summary.quality_gates.adapter_rollout_zero_ready_max_ratio
+    )
+    .unwrap();
+    writeln!(
+        text,
+        "| Oracle render RGB PSNR | >= {:.1} dB |",
+        summary.quality_gates.oracle_render_rgb_psnr_ready_db
     )
     .unwrap();
     writeln!(
@@ -1139,6 +1319,59 @@ fn markdown_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
         );
     }
 
+    if let Some(psnr) = &summary.oracle_dynamics_psnr {
+        writeln!(text).unwrap();
+        writeln!(text, "## Oracle Dynamics PSNR").unwrap();
+        writeln!(text).unwrap();
+        writeln!(text, "| Metric | Value |").unwrap();
+        writeln!(text, "| --- | --- |").unwrap();
+        writeln!(
+            text,
+            "| Particles | {} |",
+            display_opt_usize(psnr.particle_count)
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Rollout steps | {} |",
+            display_usize_list(&psnr.rollout_steps)
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Threshold | {} dB |",
+            display_opt_f64(psnr.min_render_rgb_psnr_db)
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Direct passed | {} |",
+            display_opt_bool(psnr.direct_passed)
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Hyper passed | {} |",
+            display_opt_bool(psnr.hyper_passed)
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Direct min render RGB PSNR | {} |",
+            display_opt_f64(psnr.direct_min_render_rgb_psnr_db)
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Hyper min render RGB PSNR | {} |",
+            display_opt_f64(psnr.hyper_min_render_rgb_psnr_db)
+        )
+        .unwrap();
+        for item in &psnr.summaries {
+            write_psnr_row(&mut text, item);
+        }
+    }
+
     writeln!(text).unwrap();
     writeln!(text, "## Interpretation").unwrap();
     writeln!(text).unwrap();
@@ -1213,10 +1446,44 @@ fn write_throughput_row(text: &mut String, label: &str, metrics: Option<Throughp
     .unwrap();
 }
 
+fn write_psnr_row(text: &mut String, metrics: &PsnrKindStepSummary) {
+    writeln!(
+        text,
+        "| PSNR {} step {} | examples={} mean={} median={} min={} max={} passed={} |",
+        metrics.kind,
+        display_opt_usize(metrics.rollout_steps),
+        display_opt_usize(metrics.examples),
+        display_opt_f64(metrics.mean_render_rgb_psnr_db),
+        display_opt_f64(metrics.median_render_rgb_psnr_db),
+        display_opt_f64(metrics.min_render_rgb_psnr_db),
+        display_opt_f64(metrics.max_render_rgb_psnr_db),
+        display_opt_bool(metrics.passed)
+    )
+    .unwrap();
+}
+
 fn display_opt_str(value: Option<&str>) -> String {
     value
         .map(|value| format!("`{value}`"))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn display_opt_bool(value: Option<bool>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn display_usize_list(values: &[usize]) -> String {
+    if values.is_empty() {
+        "n/a".to_string()
+    } else {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn display_opt_usize(value: Option<usize>) -> String {
@@ -1239,7 +1506,7 @@ fn display_opt_percent(value: Option<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -1312,7 +1579,8 @@ mod tests {
         });
 
         let summary =
-            summarize_hyper2d_report(Path::new("report.json"), &report, None, None).unwrap();
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None, None, None)
+                .unwrap();
 
         assert_eq!(
             summary.report_kind,
@@ -1386,7 +1654,8 @@ mod tests {
         });
 
         let summary =
-            summarize_hyper2d_report(Path::new("report.json"), &report, None, None).unwrap();
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None, None, None)
+                .unwrap();
 
         assert_eq!(
             summary.report_kind,
@@ -1401,6 +1670,133 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("zero-adapter baseline"))
         );
+    }
+
+    #[test]
+    fn adapter_bank_summary_requires_psnr_for_generalization_claim() {
+        let report = psnr_ready_adapter_bank_report();
+
+        let summary =
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None, None, None)
+                .unwrap();
+
+        assert_eq!(
+            summary.report_kind,
+            Hyper2dReportKind::AdapterBankConditioning
+        );
+        assert_eq!(summary.quality_status, "needs_psnr_oracle_validation");
+        assert!(!summary.quality_ready);
+        assert!(!summary.hypernet_generalization_validated);
+        assert!(
+            summary
+                .interpretation
+                .iter()
+                .any(|item| item.contains("PSNR"))
+        );
+    }
+
+    #[test]
+    fn adapter_bank_summary_accepts_passing_psnr_gate() {
+        let report = psnr_ready_adapter_bank_report();
+        let psnr = json!({
+            "particle_count": 2048,
+            "rollout_steps": [32, 64],
+            "min_render_rgb_psnr_db": 26.0,
+            "passed": true,
+            "summaries": [
+                {
+                    "kind": "direct",
+                    "rollout_steps": 32,
+                    "examples": 8,
+                    "mean_render_rgb_psnr_db": 30.0,
+                    "median_render_rgb_psnr_db": 30.0,
+                    "min_render_rgb_psnr_db": 28.0,
+                    "max_render_rgb_psnr_db": 32.0,
+                    "below_threshold": 0,
+                    "passed": true
+                },
+                {
+                    "kind": "hyper",
+                    "rollout_steps": 32,
+                    "examples": 8,
+                    "mean_render_rgb_psnr_db": 29.0,
+                    "median_render_rgb_psnr_db": 29.0,
+                    "min_render_rgb_psnr_db": 27.0,
+                    "max_render_rgb_psnr_db": 31.0,
+                    "below_threshold": 0,
+                    "passed": true
+                }
+            ]
+        });
+
+        let summary = summarize_hyper2d_report(
+            Path::new("report.json"),
+            &report,
+            None,
+            None,
+            Some(Path::new("psnr.json")),
+            Some(&psnr),
+        )
+        .unwrap();
+
+        assert_eq!(summary.quality_status, "conditioning_quality_ready");
+        assert!(summary.quality_ready);
+        assert!(summary.hypernet_generalization_validated);
+        let psnr = summary.oracle_dynamics_psnr.unwrap();
+        assert_eq!(psnr.hyper_passed, Some(true));
+        assert_eq!(psnr.hyper_min_render_rgb_psnr_db, Some(27.0));
+    }
+
+    #[test]
+    fn adapter_bank_summary_rejects_psnr_gate_when_direct_oracle_fails() {
+        let report = psnr_ready_adapter_bank_report();
+        let psnr = json!({
+            "particle_count": 2048,
+            "rollout_steps": [32],
+            "min_render_rgb_psnr_db": 26.0,
+            "passed": false,
+            "summaries": [
+                {
+                    "kind": "direct",
+                    "rollout_steps": 32,
+                    "examples": 8,
+                    "mean_render_rgb_psnr_db": 25.0,
+                    "median_render_rgb_psnr_db": 25.0,
+                    "min_render_rgb_psnr_db": 24.0,
+                    "max_render_rgb_psnr_db": 25.5,
+                    "below_threshold": 8,
+                    "passed": false
+                },
+                {
+                    "kind": "hyper",
+                    "rollout_steps": 32,
+                    "examples": 8,
+                    "mean_render_rgb_psnr_db": 29.0,
+                    "median_render_rgb_psnr_db": 29.0,
+                    "min_render_rgb_psnr_db": 27.0,
+                    "max_render_rgb_psnr_db": 31.0,
+                    "below_threshold": 0,
+                    "passed": true
+                }
+            ]
+        });
+
+        let summary = summarize_hyper2d_report(
+            Path::new("report.json"),
+            &report,
+            None,
+            None,
+            Some(Path::new("psnr.json")),
+            Some(&psnr),
+        )
+        .unwrap();
+
+        assert_eq!(summary.quality_status, "psnr_oracle_gap");
+        assert!(!summary.quality_ready);
+        assert!(!summary.hypernet_generalization_validated);
+        let psnr = summary.oracle_dynamics_psnr.unwrap();
+        assert_eq!(psnr.direct_passed, Some(false));
+        assert_eq!(psnr.hyper_passed, Some(true));
     }
 
     #[test]
@@ -1462,6 +1858,8 @@ mod tests {
             &report,
             Some(Path::new("oracle.json")),
             Some(&oracle_report),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1510,7 +1908,8 @@ mod tests {
         });
 
         let summary =
-            summarize_hyper2d_report(Path::new("report.json"), &report, None, None).unwrap();
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None, None, None)
+                .unwrap();
 
         assert_eq!(summary.report_kind, Hyper2dReportKind::DirectBasis);
         assert_eq!(summary.quality_status, "quality_particle_count_too_low");
@@ -1554,7 +1953,8 @@ mod tests {
         });
 
         let summary =
-            summarize_hyper2d_report(Path::new("report.json"), &report, None, None).unwrap();
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None, None, None)
+                .unwrap();
 
         assert_eq!(summary.report_kind, Hyper2dReportKind::DirectBasis);
         assert_eq!(summary.quality_status, "direct_basis_zero_baseline_gap");
@@ -1565,5 +1965,58 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("zero-adapter baseline"))
         );
+    }
+
+    fn psnr_ready_adapter_bank_report() -> Value {
+        json!({
+            "experiment_config": "configs/hyper2d_adapter_bank/quality.toml",
+            "preset": "Growing2d",
+            "output_dir": "artifacts/hyper2d_adapter_bank",
+            "shared_base": "shared_base.bpk",
+            "adapter_bank": "adapter_bank.json",
+            "hyper_output": "hyper_2d.json",
+            "backend": "BurnWgpu",
+            "condition_encoder": "dino-vits-token-grid-8x8-v1",
+            "generator_objective": "rectified-flow-lora-vector",
+            "adapter_rank": 16,
+            "adapter_alpha": 16.0,
+            "adapter_parameter_count": 5586,
+            "train_examples": 900,
+            "holdout_examples": 100,
+            "rollout_particles": 2048,
+            "target_points": 2048,
+            "train_vector_metrics": {
+                "examples": 512,
+                "normalized_rmse_to_target_rms": 0.20,
+                "mean_cosine_similarity": 0.90
+            },
+            "holdout_vector_metrics": {
+                "examples": 100,
+                "normalized_rmse_to_target_rms": 0.22,
+                "mean_cosine_similarity": 0.88
+            },
+            "rollout_eval": {
+                "train_summary": {
+                    "examples": 8,
+                    "mean_zero_loss": 8.0,
+                    "mean_static_loss": 6.0,
+                    "mean_hyper_loss": 5.8,
+                    "mean_ratio_to_static": 0.97,
+                    "max_ratio_to_static": 1.04,
+                    "mean_ratio_to_zero": 0.73,
+                    "max_ratio_to_zero": 0.82
+                },
+                "holdout_summary": {
+                    "examples": 8,
+                    "mean_zero_loss": 9.0,
+                    "mean_static_loss": 6.5,
+                    "mean_hyper_loss": 6.1,
+                    "mean_ratio_to_static": 0.94,
+                    "max_ratio_to_static": 1.08,
+                    "mean_ratio_to_zero": 0.68,
+                    "max_ratio_to_zero": 0.86
+                }
+            }
+        })
     }
 }
