@@ -105,6 +105,10 @@ pub struct NpaLowRankAdapter {
     pub w2_up: Vec<f32>,
     pub b1_delta: Vec<f32>,
     pub b2_delta: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub b1_delta_correction: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub b2_delta_correction: Vec<f32>,
 }
 
 impl NpaLowRankAdapter {
@@ -119,6 +123,8 @@ impl NpaLowRankAdapter {
             w2_up: vec![0.0; config.update_dims() * rank],
             b1_delta: vec![0.0; config.hidden_dims],
             b2_delta: vec![0.0; config.update_dims()],
+            b1_delta_correction: Vec::new(),
+            b2_delta_correction: Vec::new(),
         }
     }
 
@@ -137,6 +143,15 @@ impl NpaLowRankAdapter {
         adapter
     }
 
+    pub fn seeded_zero_delta(config: &NpaConfig, rank: usize, alpha: f32, seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut adapter = Self::zeros(config, rank, alpha);
+        for value in adapter.w1_down.iter_mut().chain(adapter.w2_down.iter_mut()) {
+            *value = rng.random_range(-0.01..0.01);
+        }
+        adapter
+    }
+
     pub fn parameter_count(&self) -> usize {
         self.w1_down.len()
             + self.w1_up.len()
@@ -144,16 +159,35 @@ impl NpaLowRankAdapter {
             + self.w2_up.len()
             + self.b1_delta.len()
             + self.b2_delta.len()
+            + self.b1_delta_correction.len()
+            + self.b2_delta_correction.len()
     }
 
     pub fn parameter_count_for_config(config: &NpaConfig, rank: usize) -> usize {
+        Self::parameter_count_for_config_with_bias_correction(config, rank, false)
+    }
+
+    pub fn parameter_count_for_config_with_bias_correction(
+        config: &NpaConfig,
+        rank: usize,
+        include_bias_correction: bool,
+    ) -> usize {
         let rank = rank.max(1);
-        rank * config.perception_dims()
+        let base_count = rank * config.perception_dims()
             + config.hidden_dims * rank
             + rank * config.hidden_dims
             + config.update_dims() * rank
             + config.hidden_dims
-            + config.update_dims()
+            + config.update_dims();
+        if include_bias_correction {
+            base_count + config.hidden_dims + config.update_dims()
+        } else {
+            base_count
+        }
+    }
+
+    pub fn has_bias_correction(&self) -> bool {
+        !self.b1_delta_correction.is_empty() || !self.b2_delta_correction.is_empty()
     }
 
     pub fn to_parameter_vector(&self) -> Vec<f32> {
@@ -164,7 +198,30 @@ impl NpaLowRankAdapter {
         values.extend_from_slice(&self.w2_up);
         values.extend_from_slice(&self.b1_delta);
         values.extend_from_slice(&self.b2_delta);
+        values.extend_from_slice(&self.b1_delta_correction);
+        values.extend_from_slice(&self.b2_delta_correction);
         values
+    }
+
+    pub fn canonicalized(&self, config: &NpaConfig) -> AutomataResult<Self> {
+        self.validate(config)?;
+        let mut canonical = self.clone();
+        canonicalize_low_rank_factors(
+            &mut canonical.w1_up,
+            &mut canonical.w1_down,
+            config.hidden_dims,
+            config.perception_dims(),
+            canonical.rank,
+        );
+        canonicalize_low_rank_factors(
+            &mut canonical.w2_up,
+            &mut canonical.w2_down,
+            config.update_dims(),
+            config.hidden_dims,
+            canonical.rank,
+        );
+        canonical.validate(config)?;
+        Ok(canonical)
     }
 
     pub fn from_parameter_vector(
@@ -173,8 +230,22 @@ impl NpaLowRankAdapter {
         alpha: f32,
         values: Vec<f32>,
     ) -> AutomataResult<Self> {
+        Self::from_parameter_vector_with_bias_correction(config, rank, alpha, values, false)
+    }
+
+    pub fn from_parameter_vector_with_bias_correction(
+        config: &NpaConfig,
+        rank: usize,
+        alpha: f32,
+        values: Vec<f32>,
+        include_bias_correction: bool,
+    ) -> AutomataResult<Self> {
         let rank = rank.max(1);
-        let expected = Self::parameter_count_for_config(config, rank);
+        let expected = Self::parameter_count_for_config_with_bias_correction(
+            config,
+            rank,
+            include_bias_correction,
+        );
         if values.len() != expected {
             return Err(AutomataError::InvalidModel(format!(
                 "adapter parameter vector len {} != {expected}",
@@ -211,6 +282,16 @@ impl NpaLowRankAdapter {
             w2_up: take(output_dims * rank),
             b1_delta: take(hidden_dims),
             b2_delta: take(output_dims),
+            b1_delta_correction: if include_bias_correction {
+                take(hidden_dims)
+            } else {
+                Vec::new()
+            },
+            b2_delta_correction: if include_bias_correction {
+                take(output_dims)
+            } else {
+                Vec::new()
+            },
         };
         adapter.validate(config)?;
         Ok(adapter)
@@ -254,39 +335,65 @@ impl NpaLowRankAdapter {
         let mut adapter = Self::zeros(&base.config, rank, alpha);
         for idx in 0..input_dims {
             adapter.w1_down[idx * input_dims + idx] = 1.0;
+            if rank >= input_dims * 2 {
+                adapter.w1_down[(input_dims + idx) * input_dims + idx] = 1.0;
+            }
         }
         for row in 0..hidden_dims {
             let matrix_base = row * input_dims;
             let adapter_base = row * rank;
             for col in 0..input_dims {
-                let delta =
-                    target.weights.w1[matrix_base + col] - base.weights.w1[matrix_base + col];
-                adapter.w1_up[adapter_base + col] = delta / scale;
+                let base_value = base.weights.w1[matrix_base + col];
+                let target_value = target.weights.w1[matrix_base + col];
+                if rank >= input_dims * 2 {
+                    let (primary, correction) =
+                        reconstructing_delta_pair(base_value, target_value, scale);
+                    adapter.w1_up[adapter_base + col] = primary;
+                    adapter.w1_up[adapter_base + input_dims + col] = correction;
+                } else {
+                    adapter.w1_up[adapter_base + col] =
+                        reconstructing_delta(base_value, target_value, scale);
+                }
             }
         }
         for row in 0..output_dims {
             adapter.w2_up[row * rank + row] = 1.0;
+            if rank >= output_dims * 2 {
+                adapter.w2_up[row * rank + output_dims + row] = 1.0;
+            }
             let matrix_base = row * hidden_dims;
             let adapter_base = row * hidden_dims;
             for col in 0..hidden_dims {
-                let delta =
-                    target.weights.w2[matrix_base + col] - base.weights.w2[matrix_base + col];
-                adapter.w2_down[adapter_base + col] = delta / scale;
+                let base_value = base.weights.w2[matrix_base + col];
+                let target_value = target.weights.w2[matrix_base + col];
+                if rank >= output_dims * 2 {
+                    let (primary, correction) =
+                        reconstructing_delta_pair(base_value, target_value, scale);
+                    adapter.w2_down[adapter_base + col] = primary;
+                    adapter.w2_down[(output_dims + row) * hidden_dims + col] = correction;
+                } else {
+                    adapter.w2_down[adapter_base + col] =
+                        reconstructing_delta(base_value, target_value, scale);
+                }
             }
         }
-        for (delta, (target_value, base_value)) in adapter
+        adapter.b1_delta_correction = vec![0.0; hidden_dims];
+        for ((delta, correction), (target_value, base_value)) in adapter
             .b1_delta
             .iter_mut()
+            .zip(adapter.b1_delta_correction.iter_mut())
             .zip(target.weights.b1.iter().zip(base.weights.b1.iter()))
         {
-            *delta = target_value - base_value;
+            (*delta, *correction) = reconstructing_delta_pair(*base_value, *target_value, 1.0);
         }
-        for (delta, (target_value, base_value)) in adapter
+        adapter.b2_delta_correction = vec![0.0; output_dims];
+        for ((delta, correction), (target_value, base_value)) in adapter
             .b2_delta
             .iter_mut()
+            .zip(adapter.b2_delta_correction.iter_mut())
             .zip(target.weights.b2.iter().zip(base.weights.b2.iter()))
         {
-            *delta = target_value - base_value;
+            (*delta, *correction) = reconstructing_delta_pair(*base_value, *target_value, 1.0);
         }
         adapter.validate(&base.config)?;
         Ok(adapter)
@@ -314,6 +421,25 @@ impl NpaLowRankAdapter {
         ];
         for (name, expected_len, actual_len) in expected {
             if actual_len != expected_len {
+                return Err(AutomataError::InvalidModel(format!(
+                    "{name} len {actual_len} != {expected_len}"
+                )));
+            }
+        }
+        let optional = [
+            (
+                "b1_delta_correction",
+                config.hidden_dims,
+                self.b1_delta_correction.len(),
+            ),
+            (
+                "b2_delta_correction",
+                update_dims,
+                self.b2_delta_correction.len(),
+            ),
+        ];
+        for (name, expected_len, actual_len) in optional {
+            if actual_len != 0 && actual_len != expected_len {
                 return Err(AutomataError::InvalidModel(format!(
                     "{name} len {actual_len} != {expected_len}"
                 )));
@@ -350,11 +476,21 @@ impl NpaLowRankAdapter {
             &self.w2_down,
             scale,
         );
-        for (value, delta) in adapted.b1.iter_mut().zip(&self.b1_delta) {
-            *value += delta;
+        for (idx, (value, delta)) in adapted.b1.iter_mut().zip(&self.b1_delta).enumerate() {
+            let correction = self
+                .b1_delta_correction
+                .get(idx)
+                .copied()
+                .unwrap_or_default();
+            *value = (*value as f64 + *delta as f64 + correction as f64) as f32;
         }
-        for (value, delta) in adapted.b2.iter_mut().zip(&self.b2_delta) {
-            *value += delta;
+        for (idx, (value, delta)) in adapted.b2.iter_mut().zip(&self.b2_delta).enumerate() {
+            let correction = self
+                .b2_delta_correction
+                .get(idx)
+                .copied()
+                .unwrap_or_default();
+            *value = (*value as f64 + *delta as f64 + correction as f64) as f32;
         }
         Ok(adapted)
     }
@@ -378,13 +514,206 @@ fn add_low_rank_delta(
 ) {
     for row in 0..rows {
         for col in 0..cols {
-            let mut delta = 0.0_f32;
+            let mut delta = 0.0_f64;
             for r in 0..rank {
-                delta += up[row * rank + r] * down[r * cols + col];
+                delta += up[row * rank + r] as f64 * down[r * cols + col] as f64;
             }
-            matrix[row * cols + col] += scale * delta;
+            matrix[row * cols + col] =
+                (matrix[row * cols + col] as f64 + scale as f64 * delta) as f32;
         }
     }
+}
+
+fn canonicalize_low_rank_factors(
+    up: &mut Vec<f32>,
+    down: &mut Vec<f32>,
+    rows: usize,
+    cols: usize,
+    rank: usize,
+) {
+    let mut components = (0..rank)
+        .map(|component| {
+            let up_norm = column_norm(up, rows, rank, component);
+            let down_norm = row_norm(down, cols, component);
+            (component, up_norm * down_norm)
+        })
+        .collect::<Vec<_>>();
+    components.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let source_up = up.clone();
+    let source_down = down.clone();
+    let mut canonical_up = vec![0.0; source_up.len()];
+    let mut canonical_down = vec![0.0; source_down.len()];
+    for (dst, (src, _)) in components.into_iter().enumerate() {
+        let up_norm = column_norm(&source_up, rows, rank, src);
+        let down_norm = row_norm(&source_down, cols, src);
+        let balance = if up_norm > f32::MIN_POSITIVE && down_norm > f32::MIN_POSITIVE {
+            (up_norm / down_norm).sqrt()
+        } else {
+            1.0
+        };
+        let mut sign = 1.0;
+        let mut anchor = 0.0_f32;
+        for row in 0..rows {
+            let value = source_up[row * rank + src] / balance;
+            if value.abs() > anchor.abs() {
+                anchor = value;
+            }
+        }
+        if anchor < 0.0 {
+            sign = -1.0;
+        }
+        for row in 0..rows {
+            canonical_up[row * rank + dst] = sign * source_up[row * rank + src] / balance;
+        }
+        for col in 0..cols {
+            canonical_down[dst * cols + col] = sign * source_down[src * cols + col] * balance;
+        }
+    }
+    *up = canonical_up;
+    *down = canonical_down;
+}
+
+fn column_norm(values: &[f32], rows: usize, stride: usize, col: usize) -> f32 {
+    let sum = (0..rows)
+        .map(|row| {
+            let value = values[row * stride + col];
+            value * value
+        })
+        .sum::<f32>();
+    sum.sqrt()
+}
+
+fn row_norm(values: &[f32], cols: usize, row: usize) -> f32 {
+    let base = row * cols;
+    values[base..base + cols]
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+}
+
+fn reconstructing_delta(base: f32, target: f32, scale: f32) -> f32 {
+    let estimate = ((target as f64 - base as f64) / scale as f64) as f32;
+    let mut best = estimate;
+    let mut best_error = reconstruction_error(base, target, scale, best);
+    if best_error == 0.0 {
+        return best;
+    }
+
+    let mut lower = estimate;
+    let mut upper = estimate;
+    for _ in 0..32 {
+        lower = next_f32(lower, false);
+        let lower_error = reconstruction_error(base, target, scale, lower);
+        if lower_error == 0.0 {
+            return lower;
+        }
+        if lower_error < best_error {
+            best = lower;
+            best_error = lower_error;
+        }
+
+        upper = next_f32(upper, true);
+        let upper_error = reconstruction_error(base, target, scale, upper);
+        if upper_error == 0.0 {
+            return upper;
+        }
+        if upper_error < best_error {
+            best = upper;
+            best_error = upper_error;
+        }
+    }
+    best
+}
+
+fn reconstructing_delta_pair(base: f32, target: f32, scale: f32) -> (f32, f32) {
+    let desired = (target as f64 - base as f64) / scale as f64;
+    let primary = desired as f32;
+    let correction_estimate = (desired - primary as f64) as f32;
+    let mut best_correction = correction_estimate;
+    let mut best_error = reconstruction_error_pair(base, target, scale, primary, best_correction);
+    if best_error == 0.0 {
+        return (primary, best_correction);
+    }
+
+    let mut lower = correction_estimate;
+    let mut upper = correction_estimate;
+    for _ in 0..32 {
+        lower = next_f32(lower, false);
+        let lower_error = reconstruction_error_pair(base, target, scale, primary, lower);
+        if lower_error == 0.0 {
+            return (primary, lower);
+        }
+        if lower_error < best_error {
+            best_correction = lower;
+            best_error = lower_error;
+        }
+
+        upper = next_f32(upper, true);
+        let upper_error = reconstruction_error_pair(base, target, scale, primary, upper);
+        if upper_error == 0.0 {
+            return (primary, upper);
+        }
+        if upper_error < best_error {
+            best_correction = upper;
+            best_error = upper_error;
+        }
+    }
+    (primary, best_correction)
+}
+
+fn reconstruction_error(base: f32, target: f32, scale: f32, delta: f32) -> f32 {
+    ((base as f64 + scale as f64 * delta as f64) as f32 - target).abs()
+}
+
+fn reconstruction_error_pair(
+    base: f32,
+    target: f32,
+    scale: f32,
+    primary: f32,
+    correction: f32,
+) -> f32 {
+    ((base as f64 + scale as f64 * (primary as f64 + correction as f64)) as f32 - target).abs()
+}
+
+fn next_f32(value: f32, toward_positive: bool) -> f32 {
+    if value.is_nan() {
+        return value;
+    }
+    if value == 0.0 {
+        return if toward_positive {
+            f32::from_bits(1)
+        } else {
+            f32::from_bits(0x8000_0001)
+        };
+    }
+    if value == f32::INFINITY {
+        return if toward_positive {
+            f32::INFINITY
+        } else {
+            f32::from_bits(f32::INFINITY.to_bits() - 1)
+        };
+    }
+    if value == f32::NEG_INFINITY {
+        return if toward_positive {
+            f32::from_bits(f32::NEG_INFINITY.to_bits() - 1)
+        } else {
+            f32::NEG_INFINITY
+        };
+    }
+    let bits = value.to_bits();
+    let next_bits = if (value > 0.0) == toward_positive {
+        bits + 1
+    } else {
+        bits - 1
+    };
+    f32::from_bits(next_bits)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -688,6 +1017,23 @@ mod tests {
     }
 
     #[test]
+    fn seeded_zero_delta_adapter_preserves_base_model() {
+        let base = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 42);
+        let adapter = NpaLowRankAdapter::seeded_zero_delta(&base.config, 4, 4.0, 99);
+
+        let adapted = adapter.apply_to_model(&base).unwrap();
+
+        assert_eq!(adapted.weights.w1, base.weights.w1);
+        assert_eq!(adapted.weights.b1, base.weights.b1);
+        assert_eq!(adapted.weights.w2, base.weights.w2);
+        assert_eq!(adapted.weights.b2, base.weights.b2);
+        assert!(adapter.w1_down.iter().any(|value| *value != 0.0));
+        assert!(adapter.w2_down.iter().any(|value| *value != 0.0));
+        assert!(adapter.w1_up.iter().all(|value| *value == 0.0));
+        assert!(adapter.w2_up.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
     fn low_rank_adapter_rejects_mismatched_dimensions() {
         let config = NpaConfig::for_preset(AutomataPreset::Growing3dGs).0;
         let mut adapter = NpaLowRankAdapter::zeros(&config, 2, 1.0);
@@ -716,44 +1062,73 @@ mod tests {
     }
 
     #[test]
+    fn low_rank_adapter_canonicalization_preserves_materialized_weights() {
+        let config = NpaConfig {
+            state_dims: 3,
+            hidden_dims: 5,
+            ..NpaConfig::growing_2d()
+        };
+        let base = NpaModel::seeded(config.clone(), 7);
+        let adapter = NpaLowRankAdapter::seeded(&config, 4, 4.0, 29);
+        let before = adapter.apply_to_model(&base).unwrap();
+        let canonical = adapter.canonicalized(&config).unwrap();
+        let after = canonical.apply_to_model(&base).unwrap();
+
+        assert_eq!(before.config, after.config);
+        assert_vec_close("w1", &before.weights.w1, &after.weights.w1, 1.0e-6);
+        assert_vec_close("w2", &before.weights.w2, &after.weights.w2, 1.0e-6);
+        assert_eq!(before.weights.b1, after.weights.b1);
+        assert_eq!(before.weights.b2, after.weights.b2);
+    }
+
+    #[test]
     fn exact_low_rank_adapter_reconstructs_target_weights() {
         let config = NpaConfig {
             state_dims: 2,
             hidden_dims: 4,
             ..NpaConfig::growing_2d()
         };
-        let base = NpaModel {
+        let mut base = NpaModel {
             weights: NpaWeights::seeded(&config, 1),
             config: config.clone(),
         };
-        let target = NpaModel {
+        let mut target = NpaModel {
             weights: NpaWeights::seeded(&config, 2),
             config: config.clone(),
         };
-        let rank = config.perception_dims().max(config.update_dims());
+        base.weights.b1[0] = 0.12125003;
+        target.weights.b1[0] = 0.029944953;
+        let rank = config.perception_dims().max(config.update_dims()) * 2;
         let adapter =
             NpaLowRankAdapter::exact_model_delta(&base, &target, rank, rank as f32).unwrap();
+        assert!(adapter.has_bias_correction());
         let reconstructed = adapter.apply_to_model(&base).unwrap();
 
         assert_eq!(reconstructed.config, target.config);
-        for (actual, expected) in reconstructed
-            .weights
-            .w1
-            .iter()
-            .chain(reconstructed.weights.b1.iter())
-            .chain(reconstructed.weights.w2.iter())
-            .chain(reconstructed.weights.b2.iter())
-            .zip(
-                target
-                    .weights
-                    .w1
-                    .iter()
-                    .chain(target.weights.b1.iter())
-                    .chain(target.weights.w2.iter())
-                    .chain(target.weights.b2.iter()),
-            )
-        {
-            assert!((actual - expected).abs() <= 1.0e-6);
+        assert_weight_bits_eq("w1", &reconstructed.weights.w1, &target.weights.w1);
+        assert_weight_bits_eq("b1", &reconstructed.weights.b1, &target.weights.b1);
+        assert_weight_bits_eq("w2", &reconstructed.weights.w2, &target.weights.w2);
+        assert_weight_bits_eq("b2", &reconstructed.weights.b2, &target.weights.b2);
+    }
+
+    fn assert_vec_close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            let diff = (*actual - *expected).abs();
+            assert!(
+                diff <= tolerance,
+                "{label}[{idx}] actual={actual} expected={expected} diff={diff}"
+            );
+        }
+    }
+
+    fn assert_weight_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
+        for (idx, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "{label}[{idx}] actual={actual} expected={expected}"
+            );
         }
     }
 }

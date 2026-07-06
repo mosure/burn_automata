@@ -11,9 +11,17 @@ use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
 
 mod burn_wgpu;
+mod conditioned;
 mod oracle;
+mod psnr_gate;
+
+pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
+pub(crate) use psnr_gate::run_validate_hyper_2d_psnr_gate;
 
 use oracle::evaluate_direct_basis_oracles;
+
+const DEFAULT_WGPU_VRAM_BUDGET_GB: f32 = 64.0;
+const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 48;
 
 #[derive(Clone)]
 struct DirectBasisExample {
@@ -29,6 +37,7 @@ struct DirectBasisTrainConfig {
     steps: usize,
     report_interval: usize,
     example_batch_size: usize,
+    tbptt_chunk_steps: usize,
     rollout_particles: usize,
     rollout_steps: usize,
     update_prob: f32,
@@ -44,7 +53,14 @@ struct DirectBasisTrainConfig {
     adapter_l2_weight: f32,
     update_base: bool,
     eval_examples: usize,
+    eval_interval: usize,
+    eval_batch_size: usize,
     eval_seed: u64,
+    system_memory_budget_gb: Option<f32>,
+    gpu_memory_budget_gb: Option<f32>,
+    max_dense_train_particles: usize,
+    max_dense_chunk_floats: usize,
+    max_splat_chunk_floats: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,6 +79,29 @@ struct DirectBasisPhaseReport {
     history: Vec<CliHyper2dDirectBasisHistoryEntry>,
     best_loss: Option<f32>,
     best_step: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DirectBasisWgpuMemoryPreflightReport {
+    training_requested: bool,
+    train_examples: usize,
+    holdout_examples: usize,
+    max_training_particles: usize,
+    max_dense_train_particles: usize,
+    max_phase_batch_size: usize,
+    rollout_steps: usize,
+    tbptt_chunk_steps: usize,
+    target_pixels: usize,
+    estimated_graph_bytes: u64,
+    estimated_target_cache_bytes: u64,
+    estimated_peak_bytes: u64,
+    memory_budget_bytes: Option<u64>,
+    estimated_vram_bytes: u64,
+    gpu_memory_budget_bytes: Option<u64>,
+    vram_estimate_multiplier: u64,
+    dense_train_particle_cap_passed: bool,
+    memory_budget_passed: bool,
+    gpu_memory_budget_passed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -275,6 +314,12 @@ struct DirectBasisTrainingExperimentConfig {
     steps: Option<usize>,
     report_interval: Option<usize>,
     example_batch_size: Option<usize>,
+    tbptt_chunk_steps: Option<usize>,
+    system_memory_budget_gb: Option<f32>,
+    gpu_memory_budget_gb: Option<f32>,
+    eval_interval: Option<usize>,
+    eval_batch_size: Option<usize>,
+    max_dense_train_particles: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -285,6 +330,8 @@ struct DirectBasisGpuExperimentConfig {
     upstream_root: Option<PathBuf>,
     device: Option<String>,
     payload_output: Option<PathBuf>,
+    max_dense_chunk_floats: Option<usize>,
+    max_splat_chunk_floats: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -460,6 +507,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         steps,
         report_interval,
         example_batch_size,
+        tbptt_chunk_steps,
         rollout_particles,
         rollout_steps,
         update_prob,
@@ -497,7 +545,14 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         holdout_adapter_weight_decay,
         holdout_adapter_grad_clip_norm,
         eval_examples,
+        eval_interval,
+        eval_batch_size,
         eval_seed,
+        system_memory_budget_gb,
+        gpu_memory_budget_gb,
+        max_dense_train_particles,
+        max_dense_chunk_floats,
+        max_splat_chunk_floats,
         oracle_train_examples,
         oracle_holdout_examples,
         oracle_epochs,
@@ -576,6 +631,12 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         steps: config_steps,
         report_interval: config_report_interval,
         example_batch_size: config_example_batch_size,
+        tbptt_chunk_steps: config_tbptt_chunk_steps,
+        system_memory_budget_gb: config_system_memory_budget_gb,
+        gpu_memory_budget_gb: config_gpu_memory_budget_gb,
+        eval_interval: config_eval_interval,
+        eval_batch_size: config_eval_batch_size,
+        max_dense_train_particles: config_max_dense_train_particles,
     } = config_training;
     let DirectBasisGpuExperimentConfig {
         backend: config_gpu_backend,
@@ -583,6 +644,8 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         upstream_root: config_gpu_upstream_root,
         device: config_gpu_device,
         payload_output: config_gpu_payload_output,
+        max_dense_chunk_floats: config_max_dense_chunk_floats,
+        max_splat_chunk_floats: config_max_splat_chunk_floats,
     } = config_gpu;
     let DirectBasisAdapterExperimentConfig {
         rank: config_adapter_rank,
@@ -697,6 +760,17 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let steps = config_steps.unwrap_or(steps);
     let report_interval = config_report_interval.unwrap_or(report_interval);
     let example_batch_size = config_example_batch_size.unwrap_or(example_batch_size);
+    let tbptt_chunk_steps = config_tbptt_chunk_steps.unwrap_or(tbptt_chunk_steps);
+    let system_memory_budget_gb = config_system_memory_budget_gb
+        .or(system_memory_budget_gb)
+        .or(Some(24.0));
+    let gpu_memory_budget_gb = config_gpu_memory_budget_gb
+        .or(gpu_memory_budget_gb)
+        .or(Some(DEFAULT_WGPU_VRAM_BUDGET_GB));
+    let max_dense_train_particles =
+        config_max_dense_train_particles.unwrap_or(max_dense_train_particles);
+    let max_dense_chunk_floats = config_max_dense_chunk_floats.unwrap_or(max_dense_chunk_floats);
+    let max_splat_chunk_floats = config_max_splat_chunk_floats.unwrap_or(max_splat_chunk_floats);
     let rollout_particles = config_rollout_particles.unwrap_or(rollout_particles);
     let rollout_steps = config_rollout_steps.unwrap_or(rollout_steps);
     let update_prob = config_update_prob.unwrap_or(update_prob);
@@ -750,6 +824,10 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let holdout_adapter_grad_clip_norm =
         config_holdout_adapter_grad_clip_norm.or(holdout_adapter_grad_clip_norm);
     let eval_examples = config_eval_examples.unwrap_or(eval_examples);
+    let eval_interval = config_eval_interval
+        .or(eval_interval)
+        .unwrap_or(report_interval);
+    let eval_batch_size = config_eval_batch_size.unwrap_or(eval_batch_size);
     let eval_seed = config_eval_seed.unwrap_or(eval_seed);
     let oracle_train_examples = config_oracle_train_examples.unwrap_or(oracle_train_examples);
     let oracle_holdout_examples = config_oracle_holdout_examples.unwrap_or(oracle_holdout_examples);
@@ -777,6 +855,13 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         rollout_particles,
         rollout_steps,
         update_prob,
+        tbptt_chunk_steps,
+        eval_batch_size,
+        system_memory_budget_gb,
+        gpu_memory_budget_gb,
+        max_dense_train_particles,
+        max_dense_chunk_floats,
+        max_splat_chunk_floats,
         base_learning_rate,
         adapter_learning_rate,
         train_adapter_refine_learning_rate,
@@ -907,6 +992,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
             steps,
             report_interval,
             example_batch_size,
+            tbptt_chunk_steps,
             rollout_particles,
             rollout_steps,
             update_prob,
@@ -928,7 +1014,14 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
             train_adapter_refine_steps,
             train_adapter_refine_batch_size,
             eval_examples,
+            eval_interval,
+            eval_batch_size,
             eval_seed,
+            system_memory_budget_gb,
+            gpu_memory_budget_gb,
+            max_dense_train_particles,
+            max_dense_chunk_floats,
+            max_splat_chunk_floats,
             oracle_config,
         };
         return match gpu_backend {
@@ -964,6 +1057,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         steps,
         report_interval,
         example_batch_size,
+        tbptt_chunk_steps,
         rollout_particles,
         rollout_steps,
         update_prob,
@@ -979,7 +1073,14 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         adapter_l2_weight: adapter_l2,
         update_base: true,
         eval_examples,
+        eval_interval,
+        eval_batch_size,
         eval_seed,
+        system_memory_budget_gb,
+        gpu_memory_budget_gb,
+        max_dense_train_particles,
+        max_dense_chunk_floats,
+        max_splat_chunk_floats,
     };
     let initial_train_loss = evaluate_direct_basis_examples(
         &base,
@@ -1130,6 +1231,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         steps,
         report_interval,
         example_batch_size: normalized_example_batch_size(example_batch_size, train_examples.len()),
+        tbptt_chunk_steps,
         rollout_particles,
         rollout_steps,
         update_prob,
@@ -1153,6 +1255,13 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
             holdout_examples.len().max(1),
         ),
         eval_examples,
+        eval_interval,
+        eval_batch_size,
+        system_memory_budget_gb,
+        gpu_memory_budget_gb,
+        max_dense_train_particles,
+        max_dense_chunk_floats,
+        max_splat_chunk_floats,
         initial_train_loss,
         final_train_loss,
         initial_holdout_loss,
@@ -1260,6 +1369,13 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         rollout_particles,
         rollout_steps,
         update_prob,
+        tbptt_chunk_steps: 1,
+        eval_batch_size: 1,
+        system_memory_budget_gb: Some(24.0),
+        gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
+        max_dense_train_particles: 1024,
+        max_dense_chunk_floats: 4 * 1024 * 1024,
+        max_splat_chunk_floats: 4 * 1024 * 1024,
         base_learning_rate: 0.0,
         adapter_learning_rate: 0.0,
         train_adapter_refine_learning_rate: None,
@@ -1294,6 +1410,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         steps: 0,
         report_interval: 1,
         example_batch_size: 1,
+        tbptt_chunk_steps: 1,
         rollout_particles,
         rollout_steps,
         update_prob,
@@ -1317,7 +1434,14 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         adapter_l2_weight: 0.0,
         update_base: false,
         eval_examples: 0,
+        eval_interval: 0,
+        eval_batch_size: 1,
         eval_seed,
+        system_memory_budget_gb: Some(24.0),
+        gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
+        max_dense_train_particles: 1024,
+        max_dense_chunk_floats: 4 * 1024 * 1024,
+        max_splat_chunk_floats: 4 * 1024 * 1024,
     };
     let oracle_model_dir = report_output.with_file_name("oracle_models");
     let oracle_validation = evaluate_direct_basis_oracles(
@@ -1407,6 +1531,7 @@ struct GpuDirectBasisRunRequest<'a> {
     steps: usize,
     report_interval: usize,
     example_batch_size: usize,
+    tbptt_chunk_steps: usize,
     rollout_particles: usize,
     rollout_steps: usize,
     update_prob: f32,
@@ -1428,8 +1553,211 @@ struct GpuDirectBasisRunRequest<'a> {
     train_adapter_refine_steps: usize,
     train_adapter_refine_batch_size: usize,
     eval_examples: usize,
+    eval_interval: usize,
+    eval_batch_size: usize,
     eval_seed: u64,
+    system_memory_budget_gb: Option<f32>,
+    gpu_memory_budget_gb: Option<f32>,
+    max_dense_train_particles: usize,
+    max_dense_chunk_floats: usize,
+    max_splat_chunk_floats: usize,
     oracle_config: DirectBasisOracleConfig,
+}
+
+fn validate_direct_basis_burn_wgpu_preflight(
+    train_examples: &[DirectBasisExample],
+    holdout_examples: &[DirectBasisExample],
+    base_config: &NpaConfig,
+    train_config: DirectBasisTrainConfig,
+    train_refine_config: DirectBasisTrainConfig,
+    holdout_config: DirectBasisTrainConfig,
+) -> Result<DirectBasisWgpuMemoryPreflightReport, Box<dyn std::error::Error>> {
+    let training_requested = train_config.steps > 0
+        || train_refine_config.steps > 0
+        || (!holdout_examples.is_empty() && holdout_config.steps > 0);
+    let max_training_particles = [
+        (train_config.steps > 0)
+            .then(|| direct_basis_max_particles(train_examples, train_config.rollout_particles)),
+        (train_refine_config.steps > 0).then(|| {
+            direct_basis_max_particles(train_examples, train_refine_config.rollout_particles)
+        }),
+        (holdout_config.steps > 0).then(|| {
+            direct_basis_max_particles(holdout_examples, holdout_config.rollout_particles)
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(train_config.rollout_particles);
+    let max_phase_batch_size = [
+        (train_config.steps > 0).then(|| {
+            normalized_example_batch_size(train_config.example_batch_size, train_examples.len())
+        }),
+        (train_refine_config.steps > 0).then(|| {
+            normalized_example_batch_size(
+                train_refine_config.example_batch_size,
+                train_examples.len(),
+            )
+        }),
+        (holdout_config.steps > 0).then(|| {
+            normalized_example_batch_size(
+                holdout_config.example_batch_size,
+                holdout_examples.len().max(1),
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
+    let target_pixels = train_config
+        .loss_config
+        .image_size
+        .saturating_mul(train_config.loss_config.image_size);
+    let estimated_graph_bytes = estimate_direct_basis_wgpu_graph_bytes(
+        max_phase_batch_size,
+        max_training_particles,
+        base_config.state_dims,
+        target_pixels,
+        train_config.rollout_steps,
+        train_config.tbptt_chunk_steps,
+    );
+    let estimated_target_cache_bytes = estimate_direct_basis_target_cache_bytes(
+        train_examples.len().saturating_add(holdout_examples.len()),
+        target_pixels,
+    );
+    let estimated_peak_bytes = estimated_graph_bytes.saturating_add(estimated_target_cache_bytes);
+    let memory_budget_bytes = train_config
+        .system_memory_budget_gb
+        .map(memory_budget_gb_to_bytes);
+    let estimated_vram_bytes =
+        estimate_direct_basis_wgpu_vram_bytes(estimated_graph_bytes, estimated_target_cache_bytes);
+    let gpu_memory_budget_bytes = train_config
+        .gpu_memory_budget_gb
+        .map(memory_budget_gb_to_bytes);
+    let dense_train_particle_cap_passed =
+        !training_requested || max_training_particles <= train_config.max_dense_train_particles;
+    let memory_budget_passed = !training_requested
+        || memory_budget_bytes
+            .map(|budget| estimated_peak_bytes <= budget)
+            .unwrap_or(true);
+    let gpu_memory_budget_passed = !training_requested
+        || gpu_memory_budget_bytes
+            .map(|budget| estimated_vram_bytes <= budget)
+            .unwrap_or(true);
+    let report = DirectBasisWgpuMemoryPreflightReport {
+        training_requested,
+        train_examples: train_examples.len(),
+        holdout_examples: holdout_examples.len(),
+        max_training_particles,
+        max_dense_train_particles: train_config.max_dense_train_particles,
+        max_phase_batch_size,
+        rollout_steps: train_config.rollout_steps,
+        tbptt_chunk_steps: train_config
+            .tbptt_chunk_steps
+            .min(train_config.rollout_steps)
+            .max(1),
+        target_pixels,
+        estimated_graph_bytes,
+        estimated_target_cache_bytes,
+        estimated_peak_bytes,
+        memory_budget_bytes,
+        estimated_vram_bytes,
+        gpu_memory_budget_bytes,
+        vram_estimate_multiplier: WGPU_VRAM_ESTIMATE_MULTIPLIER,
+        dense_train_particle_cap_passed,
+        memory_budget_passed,
+        gpu_memory_budget_passed,
+    };
+    if !report.dense_train_particle_cap_passed {
+        return Err(std::io::Error::other(format!(
+            "Burn/WGPU direct-basis dense training is capped at {} particles; requested {}. \
+Use staged lower-particle training or a fused/tiled backward backend. 2048-particle runs are validation-only on this path.",
+            report.max_dense_train_particles, report.max_training_particles
+        ))
+        .into());
+    }
+    if !report.memory_budget_passed {
+        return Err(std::io::Error::other(format!(
+            "Burn/WGPU direct-basis preflight estimated {:.2} GiB peak system memory, above the configured {:.2} GiB budget. \
+Reduce example_batch_size, rollout_particles, tbptt_chunk_steps, or target loss image size.",
+            bytes_to_gib(report.estimated_peak_bytes),
+            bytes_to_gib(report.memory_budget_bytes.unwrap_or(0))
+        ))
+        .into());
+    }
+    if !report.gpu_memory_budget_passed {
+        return Err(std::io::Error::other(format!(
+            "Burn/WGPU direct-basis preflight estimated {:.2} GiB peak VRAM, above the configured {:.2} GiB GPU budget. \
+Reduce example_batch_size, rollout_particles, tbptt_chunk_steps, or target loss image size. \
+This guard is intentionally conservative because dense Burn/WGPU autodiff can retain backend tensors across TBPTT chunks.",
+            bytes_to_gib(report.estimated_vram_bytes),
+            bytes_to_gib(report.gpu_memory_budget_bytes.unwrap_or(0))
+        ))
+        .into());
+    }
+    Ok(report)
+}
+
+fn direct_basis_max_particles(examples: &[DirectBasisExample], fallback: usize) -> usize {
+    examples
+        .iter()
+        .map(|example| example.source.particles.unwrap_or(fallback))
+        .max()
+        .unwrap_or(fallback)
+}
+
+fn estimate_direct_basis_wgpu_graph_bytes(
+    batch_size: usize,
+    particles: usize,
+    state_dims: usize,
+    target_pixels: usize,
+    rollout_steps: usize,
+    tbptt_chunk_steps: usize,
+) -> u64 {
+    let batch = batch_size.max(1) as u128;
+    let particles = particles.max(1) as u128;
+    let state_dims = state_dims.max(1) as u128;
+    let pixels = target_pixels.max(1) as u128;
+    let tbptt = tbptt_chunk_steps.max(1).min(rollout_steps.max(1)) as u128;
+    let dense_graph_bytes = batch
+        .saturating_mul(particles)
+        .saturating_mul(particles)
+        .saturating_mul(state_dims)
+        .saturating_mul(tbptt)
+        .saturating_mul(std::mem::size_of::<f32>() as u128)
+        .saturating_mul(6);
+    let splat_graph_bytes = batch
+        .saturating_mul(pixels)
+        .saturating_mul(particles)
+        .saturating_mul(std::mem::size_of::<f32>() as u128)
+        .saturating_mul(8);
+    dense_graph_bytes
+        .saturating_add(splat_graph_bytes)
+        .min(u64::MAX as u128) as u64
+}
+
+fn estimate_direct_basis_target_cache_bytes(target_count: usize, target_pixels: usize) -> u64 {
+    let pixels = target_pixels.max(1) as u128;
+    (target_count.max(1) as u128)
+        .saturating_mul(pixels)
+        .saturating_mul(5)
+        .saturating_mul(std::mem::size_of::<f32>() as u128)
+        .min(u64::MAX as u128) as u64
+}
+
+fn estimate_direct_basis_wgpu_vram_bytes(graph_bytes: u64, target_cache_bytes: u64) -> u64 {
+    graph_bytes
+        .saturating_mul(WGPU_VRAM_ESTIMATE_MULTIPLIER)
+        .saturating_add(target_cache_bytes.saturating_mul(2))
+}
+
+fn memory_budget_gb_to_bytes(gb: f32) -> u64 {
+    (gb as f64 * 1024.0 * 1024.0 * 1024.0).round() as u64
+}
+
+fn bytes_to_gib(bytes: u64) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0 / 1024.0
 }
 
 fn run_burn_wgpu_direct_basis(
@@ -1463,6 +1791,7 @@ fn run_burn_wgpu_direct_basis(
         steps: request.steps,
         report_interval: request.report_interval,
         example_batch_size: request.example_batch_size,
+        tbptt_chunk_steps: request.tbptt_chunk_steps,
         rollout_particles: request.rollout_particles,
         rollout_steps: request.rollout_steps,
         update_prob: request.update_prob,
@@ -1478,24 +1807,15 @@ fn run_burn_wgpu_direct_basis(
         adapter_l2_weight: request.adapter_l2,
         update_base: true,
         eval_examples: request.eval_examples,
+        eval_interval: request.eval_interval,
+        eval_batch_size: request.eval_batch_size,
         eval_seed: request.eval_seed,
+        system_memory_budget_gb: request.system_memory_budget_gb,
+        gpu_memory_budget_gb: request.gpu_memory_budget_gb,
+        max_dense_train_particles: request.max_dense_train_particles,
+        max_dense_chunk_floats: request.max_dense_chunk_floats,
+        max_splat_chunk_floats: request.max_splat_chunk_floats,
     };
-    let initial_train_loss = evaluate_direct_basis_examples(
-        &base,
-        &train_examples,
-        &request.hashgrid,
-        train_config,
-        request.eval_examples,
-        request.eval_seed,
-    )?;
-    let initial_holdout_loss = evaluate_direct_basis_examples(
-        &base,
-        &holdout_examples,
-        &request.hashgrid,
-        train_config,
-        request.eval_examples,
-        request.eval_seed ^ 0x90_1d_2d,
-    )?;
     let train_refine_batch_size = if request.train_adapter_refine_batch_size == 0 {
         request.example_batch_size
     } else {
@@ -1519,7 +1839,47 @@ fn run_burn_wgpu_direct_basis(
         eval_seed: request.eval_seed ^ 0x90_1d_2d,
         ..train_config
     };
-    let burn_report = burn_wgpu::train_direct_basis_burn_wgpu(
+    let memory_preflight = validate_direct_basis_burn_wgpu_preflight(
+        &train_examples,
+        &holdout_examples,
+        &base.config,
+        train_config,
+        train_refine_config,
+        holdout_config,
+    )?;
+    println!(
+        "burn-wgpu direct-basis preflight particles={} batch={} tbptt={} estimated_system_peak_gib={:.2} system_budget_gib={} estimated_vram_gib={:.2} gpu_budget_gib={}",
+        memory_preflight.max_training_particles,
+        memory_preflight.max_phase_batch_size,
+        memory_preflight.tbptt_chunk_steps,
+        bytes_to_gib(memory_preflight.estimated_peak_bytes),
+        memory_preflight
+            .memory_budget_bytes
+            .map(|bytes| format!("{:.2}", bytes_to_gib(bytes)))
+            .unwrap_or_else(|| "unbounded".to_string()),
+        bytes_to_gib(memory_preflight.estimated_vram_bytes),
+        memory_preflight
+            .gpu_memory_budget_bytes
+            .map(|bytes| format!("{:.2}", bytes_to_gib(bytes)))
+            .unwrap_or_else(|| "unbounded".to_string())
+    );
+    let initial_train_loss = evaluate_direct_basis_examples(
+        &base,
+        &train_examples,
+        &request.hashgrid,
+        train_config,
+        request.eval_examples,
+        request.eval_seed,
+    )?;
+    let initial_holdout_loss = evaluate_direct_basis_examples(
+        &base,
+        &holdout_examples,
+        &request.hashgrid,
+        train_config,
+        request.eval_examples,
+        request.eval_seed ^ 0x90_1d_2d,
+    )?;
+    let mut burn_report = burn_wgpu::train_direct_basis_burn_wgpu(
         &mut base,
         &mut train_examples,
         &mut holdout_examples,
@@ -1527,6 +1887,12 @@ fn run_burn_wgpu_direct_basis(
         train_refine_config,
         holdout_config,
     )?;
+    if let Some(metrics) = burn_report.metrics.as_object_mut() {
+        metrics.insert(
+            "memory_preflight".to_string(),
+            serde_json::to_value(&memory_preflight)?,
+        );
+    }
     let final_train_loss = evaluate_direct_basis_examples(
         &base,
         &train_examples,
@@ -1635,6 +2001,7 @@ fn run_burn_wgpu_direct_basis(
             request.example_batch_size,
             train_examples.len(),
         ),
+        tbptt_chunk_steps: request.tbptt_chunk_steps,
         rollout_particles: request.rollout_particles,
         rollout_steps: request.rollout_steps,
         update_prob: request.update_prob,
@@ -1658,6 +2025,13 @@ fn run_burn_wgpu_direct_basis(
             holdout_examples.len().max(1),
         ),
         eval_examples: request.eval_examples,
+        eval_interval: request.eval_interval,
+        eval_batch_size: request.eval_batch_size,
+        system_memory_budget_gb: request.system_memory_budget_gb,
+        gpu_memory_budget_gb: request.gpu_memory_budget_gb,
+        max_dense_train_particles: request.max_dense_train_particles,
+        max_dense_chunk_floats: request.max_dense_chunk_floats,
+        max_splat_chunk_floats: request.max_splat_chunk_floats,
         initial_train_loss,
         final_train_loss,
         initial_holdout_loss,
@@ -1881,6 +2255,7 @@ fn run_python_gpu_direct_basis(
         steps: request.steps,
         report_interval: request.report_interval,
         example_batch_size: request.example_batch_size,
+        tbptt_chunk_steps: request.tbptt_chunk_steps,
         rollout_particles: request.rollout_particles,
         rollout_steps: request.rollout_steps,
         update_prob: request.update_prob,
@@ -1902,6 +2277,13 @@ fn run_python_gpu_direct_basis(
         holdout_adapter_steps: request.holdout_adapter_steps,
         holdout_adapter_batch_size: request.holdout_adapter_batch_size,
         eval_examples: request.eval_examples,
+        eval_interval: request.eval_interval,
+        eval_batch_size: request.eval_batch_size,
+        system_memory_budget_gb: request.system_memory_budget_gb,
+        gpu_memory_budget_gb: request.gpu_memory_budget_gb,
+        max_dense_train_particles: request.max_dense_train_particles,
+        max_dense_chunk_floats: request.max_dense_chunk_floats,
+        max_splat_chunk_floats: request.max_splat_chunk_floats,
         initial_train_loss: payload.initial_train_loss,
         final_train_loss: payload.final_train_loss,
         initial_holdout_loss: payload.initial_holdout_loss,
@@ -2020,6 +2402,13 @@ struct DirectBasisArgCheck {
     rollout_particles: usize,
     rollout_steps: usize,
     update_prob: f32,
+    tbptt_chunk_steps: usize,
+    eval_batch_size: usize,
+    system_memory_budget_gb: Option<f32>,
+    gpu_memory_budget_gb: Option<f32>,
+    max_dense_train_particles: usize,
+    max_dense_chunk_floats: usize,
+    max_splat_chunk_floats: usize,
     base_learning_rate: f32,
     adapter_learning_rate: f32,
     train_adapter_refine_learning_rate: Option<f32>,
@@ -2040,6 +2429,37 @@ fn validate_direct_basis_args(
     if config.rollout_particles == 0 || config.rollout_steps == 0 {
         return Err(std::io::Error::other(
             "rollout particles and rollout steps must be greater than zero",
+        )
+        .into());
+    }
+    if config.tbptt_chunk_steps == 0 {
+        return Err(std::io::Error::other("TBPTT chunk steps must be greater than zero").into());
+    }
+    if config.eval_batch_size == 0 {
+        return Err(std::io::Error::other("eval batch size must be greater than zero").into());
+    }
+    if let Some(budget_gb) = config.system_memory_budget_gb
+        && (!budget_gb.is_finite() || budget_gb <= 0.0)
+    {
+        return Err(std::io::Error::other(
+            "system memory budget must be finite and greater than zero",
+        )
+        .into());
+    }
+    if let Some(budget_gb) = config.gpu_memory_budget_gb
+        && (!budget_gb.is_finite() || budget_gb <= 0.0)
+    {
+        return Err(std::io::Error::other(
+            "GPU memory budget must be finite and greater than zero",
+        )
+        .into());
+    }
+    if config.max_dense_train_particles == 0
+        || config.max_dense_chunk_floats == 0
+        || config.max_splat_chunk_floats == 0
+    {
+        return Err(std::io::Error::other(
+            "dense training particle and chunk-float caps must be greater than zero",
         )
         .into());
     }
@@ -2127,7 +2547,7 @@ fn load_direct_basis_examples(
             target_config.points,
             target_config.image_size,
         )?;
-        let adapter = NpaLowRankAdapter::seeded(
+        let adapter = NpaLowRankAdapter::seeded_zero_delta(
             npa_config,
             adapter_rank,
             adapter_alpha,
@@ -2549,6 +2969,13 @@ mod tests {
             rollout_particles: 0,
             rollout_steps: 1,
             update_prob: 0.5,
+            tbptt_chunk_steps: 1,
+            eval_batch_size: 1,
+            system_memory_budget_gb: Some(24.0),
+            gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
+            max_dense_train_particles: 1024,
+            max_dense_chunk_floats: 4 * 1024 * 1024,
+            max_splat_chunk_floats: 4 * 1024 * 1024,
             base_learning_rate: 1.0e-4,
             adapter_learning_rate: 1.0e-3,
             train_adapter_refine_learning_rate: None,
@@ -2559,6 +2986,94 @@ mod tests {
         .to_string();
 
         assert!(err.contains("rollout particles"));
+    }
+
+    #[test]
+    fn burn_wgpu_preflight_rejects_2048_particle_dense_training() {
+        let base_config = NpaConfig::growing_2d();
+        let train_example = test_direct_basis_example(2048, &base_config);
+        let config = test_direct_basis_train_config(1, 2048);
+        let err = validate_direct_basis_burn_wgpu_preflight(
+            &[train_example],
+            &[],
+            &base_config,
+            config,
+            DirectBasisTrainConfig { steps: 0, ..config },
+            DirectBasisTrainConfig { steps: 0, ..config },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("capped at 1024 particles"));
+    }
+
+    #[test]
+    fn burn_wgpu_preflight_accepts_staged_512_particle_training() {
+        let base_config = NpaConfig::growing_2d();
+        let train_example = test_direct_basis_example(512, &base_config);
+        let config = test_direct_basis_train_config(1, 512);
+        let report = validate_direct_basis_burn_wgpu_preflight(
+            &[train_example],
+            &[],
+            &base_config,
+            config,
+            DirectBasisTrainConfig { steps: 0, ..config },
+            DirectBasisTrainConfig { steps: 0, ..config },
+        )
+        .unwrap();
+
+        assert!(report.dense_train_particle_cap_passed);
+        assert!(report.memory_budget_passed);
+        assert!(report.gpu_memory_budget_passed);
+        assert_eq!(report.max_training_particles, 512);
+    }
+
+    #[test]
+    fn burn_wgpu_preflight_rejects_unsafe_512_particle_batch_vram() {
+        let base_config = NpaConfig::growing_2d();
+        let train_examples = (0..4)
+            .map(|_| test_direct_basis_example(512, &base_config))
+            .collect::<Vec<_>>();
+        let config = DirectBasisTrainConfig {
+            example_batch_size: 4,
+            ..test_direct_basis_train_config(1, 512)
+        };
+        let err = validate_direct_basis_burn_wgpu_preflight(
+            &train_examples,
+            &[],
+            &base_config,
+            config,
+            DirectBasisTrainConfig { steps: 0, ..config },
+            DirectBasisTrainConfig { steps: 0, ..config },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("peak VRAM"));
+    }
+
+    #[test]
+    fn burn_wgpu_preflight_allows_2048_particle_validation_only() {
+        let base_config = NpaConfig::growing_2d();
+        let train_example = test_direct_basis_example(2048, &base_config);
+        let config = DirectBasisTrainConfig {
+            steps: 0,
+            ..test_direct_basis_train_config(1, 2048)
+        };
+        let report = validate_direct_basis_burn_wgpu_preflight(
+            &[train_example],
+            &[],
+            &base_config,
+            config,
+            config,
+            config,
+        )
+        .unwrap();
+
+        assert!(!report.training_requested);
+        assert!(report.dense_train_particle_cap_passed);
+        assert!(report.memory_budget_passed);
+        assert!(report.gpu_memory_budget_passed);
     }
 
     #[test]
@@ -2627,6 +3142,24 @@ mod tests {
         ));
         assert!(matches!(
             config_value_enum(
+                "gpu.backend",
+                Some("legacy-upstream-python".to_string()),
+                Hyper2dDirectBasisGpuBackendArg::BurnWgpu,
+            )
+            .unwrap(),
+            Hyper2dDirectBasisGpuBackendArg::UpstreamPython
+        ));
+        assert!(matches!(
+            config_value_enum(
+                "gpu.backend",
+                Some("upstream-python".to_string()),
+                Hyper2dDirectBasisGpuBackendArg::BurnWgpu,
+            )
+            .unwrap(),
+            Hyper2dDirectBasisGpuBackendArg::UpstreamPython
+        ));
+        assert!(matches!(
+            config_value_enum(
                 "rollout.seed_mode",
                 config.rollout.seed_mode,
                 SeedModeArg::Uniform
@@ -2634,5 +3167,92 @@ mod tests {
             .unwrap(),
             SeedModeArg::UniformCircle
         ));
+    }
+
+    #[test]
+    fn bundled_direct_basis_experiment_configs_parse() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let config_dir = repo_root.join("configs/hyper2d_direct_basis");
+        for entry in std::fs::read_dir(&config_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            toml::from_str::<DirectBasisExperimentConfig>(&text)
+                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+        }
+    }
+
+    fn test_direct_basis_train_config(
+        steps: usize,
+        rollout_particles: usize,
+    ) -> DirectBasisTrainConfig {
+        DirectBasisTrainConfig {
+            steps,
+            report_interval: 1,
+            example_batch_size: 1,
+            tbptt_chunk_steps: 4,
+            rollout_particles,
+            rollout_steps: 8,
+            update_prob: 0.5,
+            seed: 42,
+            seed_scale: 0.5,
+            seed_mode: ParticleSeed::UniformCircle,
+            grid_eps: 0.125,
+            motion_scale: 1.0,
+            loss_config: Target2dLossConfig {
+                image_size: 32,
+                ..Target2dLossConfig::default()
+            },
+            per_parameter_grad_normalization: true,
+            base_sgd: SgdConfig {
+                learning_rate: 1.0e-4,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+            },
+            adapter_sgd: SgdConfig {
+                learning_rate: 1.0e-3,
+                weight_decay: 0.0,
+                grad_clip_norm: 1.0,
+            },
+            adapter_l2_weight: 0.0,
+            update_base: true,
+            eval_examples: 1,
+            eval_interval: 1,
+            eval_batch_size: 1,
+            eval_seed: 42,
+            system_memory_budget_gb: Some(24.0),
+            gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
+            max_dense_train_particles: 1024,
+            max_dense_chunk_floats: 4 * 1024 * 1024,
+            max_splat_chunk_floats: 4 * 1024 * 1024,
+        }
+    }
+
+    fn test_direct_basis_example(particles: usize, base_config: &NpaConfig) -> DirectBasisExample {
+        DirectBasisExample {
+            source: super::super::sources::Hyper2dScratchSource {
+                slug: format!("test-{particles}"),
+                title: None,
+                group: None,
+                condition_path: PathBuf::from("test.png"),
+                particles: Some(particles),
+                seed_scale: None,
+                update_prob: None,
+            },
+            split: Hyper2dE2eSplit::Train,
+            target: TargetImage2d {
+                source_width: 1,
+                source_height: 1,
+                positions: vec![[0.0, 0.0]],
+                colors: vec![[1.0, 1.0, 1.0]],
+                pixel_size: 1.0,
+                threshold: 0.0,
+                aabb: [-1.0, -1.0, 1.0, 1.0],
+            },
+            adapter: NpaLowRankAdapter::seeded_zero_delta(base_config, 1, 1.0, 42),
+            last_train_loss: None,
+        }
     }
 }

@@ -1,5 +1,8 @@
+#[cfg(not(feature = "backend_wgpu"))]
+use burn::backend::NdArray;
+#[cfg(feature = "backend_wgpu")]
+use burn::backend::Wgpu;
 use burn::{
-    backend::NdArray,
     module::Module,
     record::{FullPrecisionSettings, NamedMpkFileRecorder},
     tensor::Tensor,
@@ -9,6 +12,9 @@ use image::{DynamicImage, RgbImage};
 
 use crate::cli::prelude::*;
 
+#[cfg(feature = "backend_wgpu")]
+type DinoBackend = Wgpu<f32>;
+#[cfg(not(feature = "backend_wgpu"))]
 type DinoBackend = NdArray<f32>;
 
 pub(super) struct DinoVitsConditionEncoder {
@@ -44,40 +50,204 @@ impl DinoVitsConditionEncoder {
         })
     }
 
-    pub(super) fn encode(
+    pub(super) fn encode_batch(
         &self,
-        condition: &ConditionImage2d,
-    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let input = preprocess_condition(condition, &self.config, &self.device)?;
+        conditions: &[ConditionImage2d],
+        encoder: ConditionEncoder2d,
+        token_grid_width: usize,
+        token_grid_height: usize,
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        if conditions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input = preprocess_conditions(conditions, &self.config, &self.device)?;
         let output = self.model.forward(input, None);
+        let cls_dims = output.x_norm_clstoken.dims();
         let patch_dims = output.x_norm_patchtokens.dims();
+        let batch = cls_dims[0];
+        let embed_dims = cls_dims[1];
         let patch_count = patch_dims[1];
-        let embed_dims = patch_dims[2];
+        if batch != conditions.len() || patch_dims[0] != batch || patch_dims[2] != embed_dims {
+            return Err(std::io::Error::other("DINO output dimensions are inconsistent").into());
+        }
         let cls = output.x_norm_clstoken.into_data().to_vec::<f32>()?;
         let patch = output.x_norm_patchtokens.into_data().to_vec::<f32>()?;
-        if cls.len() != embed_dims || patch.len() != patch_count * embed_dims {
+        if cls.len() != batch * embed_dims || patch.len() != batch * patch_count * embed_dims {
             return Err(std::io::Error::other("DINO output dimensions are inconsistent").into());
         }
 
-        let mut features = Vec::with_capacity(embed_dims * 2);
-        features.extend_from_slice(&cls);
-        for dim in 0..embed_dims {
-            let mut sum = 0.0_f32;
-            for patch_idx in 0..patch_count {
-                sum += patch[patch_idx * embed_dims + dim];
-            }
-            features.push(sum / patch_count.max(1) as f32);
+        let mut encoded = Vec::with_capacity(batch);
+        for row in 0..batch {
+            let cls_base = row * embed_dims;
+            let patch_base = row * patch_count * embed_dims;
+            let mut features = match encoder {
+                ConditionEncoder2d::DinoVitsClsPatchMean => encode_cls_patch_mean(
+                    &cls[cls_base..cls_base + embed_dims],
+                    &patch,
+                    patch_base,
+                    patch_count,
+                    embed_dims,
+                ),
+                ConditionEncoder2d::DinoVitsPatchStats => encode_cls_patch_stats(
+                    &cls[cls_base..cls_base + embed_dims],
+                    &patch,
+                    patch_base,
+                    patch_count,
+                    embed_dims,
+                ),
+                ConditionEncoder2d::DinoVitsTokenGrid => encode_cls_patch_token_grid(
+                    &cls[cls_base..cls_base + embed_dims],
+                    &patch,
+                    patch_base,
+                    patch_count,
+                    embed_dims,
+                    token_grid_width,
+                    token_grid_height,
+                )?,
+                ConditionEncoder2d::SummaryTokens => {
+                    return Err(
+                        std::io::Error::other("summary-token encoder does not use DINO").into(),
+                    );
+                }
+            };
+            l2_normalize(&mut features);
+            encoded.push(features);
         }
-        l2_normalize(&mut features);
-        Ok(features)
+        Ok(encoded)
     }
 }
 
-fn preprocess_condition(
-    condition: &ConditionImage2d,
+fn encode_cls_patch_token_grid(
+    cls: &[f32],
+    patch: &[f32],
+    patch_base: usize,
+    patch_count: usize,
+    embed_dims: usize,
+    token_grid_width: usize,
+    token_grid_height: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let source_grid = square_patch_grid(patch_count)?;
+    let grid_width = token_grid_width.max(1);
+    let grid_height = token_grid_height.max(1);
+    let mut features = Vec::with_capacity((1 + grid_width * grid_height) * embed_dims);
+    features.extend_from_slice(cls);
+    for tile_y in 0..grid_height {
+        for tile_x in 0..grid_width {
+            let x0 = tile_x * source_grid / grid_width;
+            let mut x1 = (tile_x + 1) * source_grid / grid_width;
+            let y0 = tile_y * source_grid / grid_height;
+            let mut y1 = (tile_y + 1) * source_grid / grid_height;
+            x1 = x1.max(x0 + 1).min(source_grid);
+            y1 = y1.max(y0 + 1).min(source_grid);
+            let count = ((x1 - x0) * (y1 - y0)).max(1) as f32;
+            for dim in 0..embed_dims {
+                let mut sum = 0.0_f32;
+                for py in y0..y1 {
+                    for px in x0..x1 {
+                        let patch_idx = py * source_grid + px;
+                        sum += patch[patch_base + patch_idx * embed_dims + dim];
+                    }
+                }
+                features.push(sum / count);
+            }
+        }
+    }
+    Ok(features)
+}
+
+fn square_patch_grid(patch_count: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let grid = (patch_count as f64).sqrt().round() as usize;
+    if grid * grid != patch_count {
+        return Err(std::io::Error::other(format!(
+            "DINO patch token count {patch_count} is not a square grid"
+        ))
+        .into());
+    }
+    Ok(grid)
+}
+
+fn encode_cls_patch_mean(
+    cls: &[f32],
+    patch: &[f32],
+    patch_base: usize,
+    patch_count: usize,
+    embed_dims: usize,
+) -> Vec<f32> {
+    let mut features = Vec::with_capacity(embed_dims * 2);
+    features.extend_from_slice(cls);
+    for dim in 0..embed_dims {
+        let mut sum = 0.0_f32;
+        for patch_idx in 0..patch_count {
+            sum += patch[patch_base + patch_idx * embed_dims + dim];
+        }
+        features.push(sum / patch_count.max(1) as f32);
+    }
+    features
+}
+
+fn encode_cls_patch_stats(
+    cls: &[f32],
+    patch: &[f32],
+    patch_base: usize,
+    patch_count: usize,
+    embed_dims: usize,
+) -> Vec<f32> {
+    let mut mean = vec![0.0_f32; embed_dims];
+    let mut sq_mean = vec![0.0_f32; embed_dims];
+    let mut min = vec![f32::INFINITY; embed_dims];
+    let mut max = vec![f32::NEG_INFINITY; embed_dims];
+    for patch_idx in 0..patch_count {
+        let base = patch_base + patch_idx * embed_dims;
+        for dim in 0..embed_dims {
+            let value = patch[base + dim];
+            mean[dim] += value;
+            sq_mean[dim] += value * value;
+            min[dim] = min[dim].min(value);
+            max[dim] = max[dim].max(value);
+        }
+    }
+    let inv_count = 1.0 / patch_count.max(1) as f32;
+    let mut std = vec![0.0_f32; embed_dims];
+    for dim in 0..embed_dims {
+        mean[dim] *= inv_count;
+        sq_mean[dim] *= inv_count;
+        std[dim] = (sq_mean[dim] - mean[dim] * mean[dim]).max(0.0).sqrt();
+    }
+    let mut features = Vec::with_capacity(embed_dims * 5);
+    features.extend_from_slice(cls);
+    features.extend_from_slice(&mean);
+    features.extend_from_slice(&std);
+    features.extend_from_slice(&min);
+    features.extend_from_slice(&max);
+    features
+}
+
+fn preprocess_conditions(
+    conditions: &[ConditionImage2d],
     config: &DinoVisionTransformerConfig,
     device: &burn::tensor::Device<DinoBackend>,
 ) -> Result<Tensor<DinoBackend, 4>, Box<dyn std::error::Error>> {
+    let image_values = conditions
+        .iter()
+        .map(|condition| preprocess_condition_values(condition, config))
+        .collect::<Result<Vec<_>, _>>()?;
+    let values = image_values.into_iter().flatten().collect::<Vec<_>>();
+    let batch = conditions.len();
+    let input = Tensor::<DinoBackend, 1>::from_floats(values.as_slice(), device)
+        .reshape([
+            batch,
+            config.image_size,
+            config.image_size,
+            config.input_channels,
+        ])
+        .permute([0, 3, 1, 2]);
+    Ok(normalize(input, device))
+}
+
+fn preprocess_condition_values(
+    condition: &ConditionImage2d,
+    config: &DinoVisionTransformerConfig,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     condition.validate()?;
     let mut raw = Vec::with_capacity(condition.width * condition.height * 3);
     for pixel in 0..condition.width * condition.height {
@@ -101,17 +271,7 @@ fn preprocess_condition(
             image::imageops::FilterType::Triangle,
         )
         .to_rgb32f();
-    let samples = resized.as_flat_samples();
-    let floats = samples.as_slice();
-    let input = Tensor::<DinoBackend, 1>::from_floats(floats, device)
-        .reshape([
-            1,
-            config.image_size,
-            config.image_size,
-            config.input_channels,
-        ])
-        .permute([0, 3, 1, 2]);
-    Ok(normalize(input, device))
+    Ok(resized.as_flat_samples().as_slice().to_vec())
 }
 
 fn normalize(

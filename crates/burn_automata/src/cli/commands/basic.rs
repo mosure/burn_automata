@@ -1,4 +1,5 @@
 use crate::cli::prelude::*;
+use std::collections::HashMap;
 
 pub(crate) fn run_infer(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let Command::Infer {
@@ -417,6 +418,197 @@ pub(crate) fn run_import(command: Command) -> Result<(), Box<dyn std::error::Err
     println!("{}", serde_json::to_string_pretty(&report)?);
 
     Ok(())
+}
+
+pub(crate) fn run_materialize_adapter(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::MaterializeAdapter {
+        base_model,
+        adapter,
+        output,
+    } = command
+    else {
+        unreachable!("run_materialize_adapter called with the wrong command variant");
+    };
+
+    let base_manifest = crate::import::load_manifest(&base_model)?;
+    let adapter_manifest = crate::import::load_adapter_manifest(&adapter)?;
+    let materialized = adapter_manifest.materialize(&base_manifest)?;
+    crate::import::save_manifest(&output, &materialized)?;
+    println!(
+        "wrote {} base={} adapter={} parameters={}",
+        output.display(),
+        base_model.display(),
+        adapter.display(),
+        crate::import::parameter_count(&materialized),
+    );
+
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct ExactAdapterBankSource {
+    entries: Vec<ExactAdapterBankEntry>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ExactAdapterBankEntry {
+    slug: String,
+    split: String,
+    title: Option<String>,
+    group: Option<String>,
+    condition: String,
+    adapter_output: String,
+    #[serde(default)]
+    target_source_width: usize,
+    #[serde(default)]
+    target_source_height: usize,
+    #[serde(default)]
+    target_points: usize,
+    #[serde(default)]
+    last_train_loss: Option<f32>,
+    #[serde(default)]
+    adapter_parameter_count: usize,
+}
+
+#[derive(Serialize)]
+struct ExactAdapterBankOutput {
+    base_model: String,
+    adapter_rank: usize,
+    adapter_alpha: f32,
+    entries: Vec<ExactAdapterBankEntry>,
+}
+
+pub(crate) fn run_build_exact_adapter_bank(
+    command: Command,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Command::BuildExactAdapterBank {
+        base_model,
+        source_adapter_bank,
+        oracle_report,
+        output_dir,
+        adapter_bank_output,
+        rank,
+        alpha,
+        force_split,
+    } = command
+    else {
+        unreachable!("run_build_exact_adapter_bank called with the wrong command variant");
+    };
+
+    let base_manifest = crate::import::load_manifest(&base_model)?;
+    let base = base_manifest.clone().into_model();
+    base.validate()?;
+    let exact_rank = base.config.perception_dims().max(base.config.update_dims());
+    let rank = rank.unwrap_or(exact_rank * 2);
+    let alpha = alpha.unwrap_or(rank as f32);
+    if rank < exact_rank {
+        return Err(std::io::Error::other(format!(
+            "exact adapter rank {rank} is too small for this NPA; use rank >= {exact_rank}"
+        ))
+        .into());
+    }
+    if !alpha.is_finite() || alpha <= 0.0 {
+        return Err(std::io::Error::other("--alpha must be finite and greater than zero").into());
+    }
+
+    let source_text = std::fs::read_to_string(&source_adapter_bank)?;
+    let source_bank: ExactAdapterBankSource = serde_json::from_str(&source_text)?;
+    let oracle_models = exact_oracle_models_by_slug(&oracle_report)?;
+    let adapter_dir = output_dir.join("adapters");
+    let adapter_bank_output =
+        adapter_bank_output.unwrap_or_else(|| output_dir.join("adapter_bank.json"));
+    let mut entries = Vec::new();
+    for mut entry in source_bank.entries {
+        let Some(target_model_path) = oracle_models.get(&entry.slug) else {
+            continue;
+        };
+        let target_manifest = crate::import::load_manifest(target_model_path)?;
+        if target_manifest.hashgrid != base_manifest.hashgrid {
+            return Err(std::io::Error::other(format!(
+                "oracle model hashgrid differs for {}",
+                entry.slug
+            ))
+            .into());
+        }
+        let target = target_manifest.into_model();
+        let adapter = NpaLowRankAdapter::exact_model_delta(&base, &target, rank, alpha)?;
+        entry.adapter_parameter_count = adapter.parameter_count();
+        let adapter_output = adapter_dir.join(format!("{}.adapter.json", entry.slug));
+        let adapter_manifest = BpkAdapterManifest::from_adapter(
+            &base_manifest,
+            Some(base_model.display().to_string()),
+            adapter,
+            Some(format!(
+                "exact-oracle-delta:{}",
+                target_model_path.display()
+            )),
+        )?;
+        crate::import::save_adapter_manifest(&adapter_output, &adapter_manifest)?;
+        entry.adapter_output = adapter_output.display().to_string();
+        if let Some(force_split) = &force_split {
+            entry.split = force_split.clone();
+        }
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        return Err(std::io::Error::other(
+            "oracle report did not match any source adapter-bank entries",
+        )
+        .into());
+    }
+
+    let output = ExactAdapterBankOutput {
+        base_model: base_model.display().to_string(),
+        adapter_rank: rank,
+        adapter_alpha: alpha,
+        entries,
+    };
+    if let Some(parent) = adapter_bank_output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&adapter_bank_output, serde_json::to_string_pretty(&output)?)?;
+    println!(
+        "wrote {} entries={} rank={} alpha={}",
+        adapter_bank_output.display(),
+        output.entries.len(),
+        rank,
+        alpha
+    );
+
+    Ok(())
+}
+
+fn exact_oracle_models_by_slug(
+    oracle_report: &Path,
+) -> Result<HashMap<String, PathBuf>, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(oracle_report)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let entries = value
+        .pointer("/oracle_validation/entries")
+        .or_else(|| value.get("entries"))
+        .and_then(|entries| entries.as_array())
+        .ok_or_else(|| {
+            std::io::Error::other("oracle report must contain oracle_validation.entries or entries")
+        })?;
+    let report_parent = oracle_report.parent().unwrap_or_else(|| Path::new(""));
+    let mut models = HashMap::new();
+    for entry in entries {
+        let Some(slug) = entry.get("slug").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(path) = entry
+            .get("oracle_model_output")
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let mut path = PathBuf::from(path);
+        if path.is_relative() && !path.exists() {
+            path = report_parent.join(path);
+        }
+        models.insert(slug.to_string(), path);
+    }
+    Ok(models)
 }
 
 pub(crate) fn run_manifest(command: Command) -> Result<(), Box<dyn std::error::Error>> {

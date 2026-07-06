@@ -12,9 +12,9 @@ pub(crate) use crate::run_supervised_training_wgpu;
 pub(crate) use crate::{
     AutomataPreset, BpkAdapterManifest, BpkModelManifest, ConditionEncoder2d, ConditionImage2d,
     ConditionSummary2d, FeatureBatchConfig, GaussianDecodeMode, HyperAdapterExample2d,
-    HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, NpaConfig, NpaLowRankAdapter, NpaModel,
-    NpaWeights, ParticlePrior2d, ParticlePriorConfig, ParticleSeed, RolloutConfig,
-    RolloutSupervisionConfig, SupervisedBatch, SupervisedTarget,
+    HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, HyperNpa2dOutputActivation, NpaConfig,
+    NpaLowRankAdapter, NpaModel, NpaWeights, ParticlePrior2d, ParticlePriorConfig, ParticleSeed,
+    RolloutConfig, RolloutSupervisionConfig, SupervisedBatch, SupervisedTarget,
     condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
     feature_supervised_batch, generate_conditioned_npa_2d, hyper_adapter_regression_loss,
     hyper_adapter_regression_train_step, hyper_rectified_flow_loss,

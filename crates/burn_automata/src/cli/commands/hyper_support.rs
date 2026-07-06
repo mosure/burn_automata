@@ -232,7 +232,7 @@ pub(super) fn attach_condition_features(
     let Some(values) = features.get(path) else {
         return Ok(condition);
     };
-    Ok(condition.with_dino_vits_cls_patch_mean(values.clone())?)
+    Ok(condition.with_dino_vits_features(values.clone())?)
 }
 
 pub(super) fn split_hyper2d_examples(
@@ -547,23 +547,32 @@ fn dynamics_metrics_for_example(
     let target_tail = tail_rgb_values(&target_trace.states, target_trace.state_dims)?;
     let generated_tail = tail_rgb_values(&generated_trace.states, generated_trace.state_dims)?;
     let tail_stats = compare_unit_signal(&generated_tail, &target_tail)?;
-    let target_render = rasterize_tail_rgb_gaussian(
+    let render_cfg = Target2dLossConfig {
+        image_size: config.image_size,
+        sigma: config.sigma,
+        ..Target2dLossConfig::default()
+    };
+    let pixel_size = (render_cfg.hi - render_cfg.lo) / config.image_size as f32;
+    let target_render = crate::target2d::render_rollout_2d_splat(
         &target_trace.positions,
         &target_trace.states,
         target_trace.state_dims,
-        &base_manifest.hashgrid,
-        config.image_size,
-        config.sigma,
+        pixel_size,
+        render_cfg,
+        Some([0.0, 0.0]),
+        1.0,
     )?;
-    let generated_render = rasterize_tail_rgb_gaussian(
+    let generated_render = crate::target2d::render_rollout_2d_splat(
         &generated_trace.positions,
         &generated_trace.states,
         generated_trace.state_dims,
-        &base_manifest.hashgrid,
-        config.image_size,
-        config.sigma,
+        pixel_size,
+        render_cfg,
+        Some([0.0, 0.0]),
+        1.0,
     )?;
     let render_stats = compare_rgb_images(&generated_render.rgb, &target_render.rgb)?;
+    let density_stats = compare_dynamic_signal(&generated_render.density, &target_render.density)?;
     let (mean_dx_mse, mean_dx_mae) =
         compare_mean_dx(&generated_trace.mean_dx, &target_trace.mean_dx)?;
 
@@ -584,6 +593,8 @@ fn dynamics_metrics_for_example(
         tail_rgb_psnr_db: tail_stats.psnr_db,
         render_rgb_mse: render_stats.mse,
         render_rgb_psnr_db: render_stats.psnr_db,
+        render_density_mse: density_stats.mse,
+        render_density_psnr_db: density_stats.psnr_db,
         mean_dx_mse,
         mean_dx_mae,
         target_final_mean_dx: target_trace.mean_dx.last().copied().unwrap_or_default(),

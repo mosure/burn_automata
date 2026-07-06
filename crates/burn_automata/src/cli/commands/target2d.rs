@@ -709,6 +709,20 @@ fn adaptive_target_image_size(
             .round()
             .clamp(1.0, 2048.0) as usize;
     }
+    for _ in 0..8 {
+        let image = load_rgba_thumbnail(path, size)?;
+        let count = foreground_alpha_count(&image, threshold);
+        if count >= target_points || size >= 2048 {
+            break;
+        }
+        let next_size = ((target_points as f32 / count.max(1) as f32).sqrt() * size as f32 * 1.02)
+            .ceil()
+            .clamp((size + 1) as f32, 2048.0) as usize;
+        if next_size == size {
+            break;
+        }
+        size = next_size;
+    }
     Ok(size)
 }
 
@@ -756,4 +770,31 @@ fn write_json_report<T: Serialize>(
     }
     std::fs::write(path, serde_json::to_string_pretty(report)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use image::{Rgba, RgbaImage};
+
+    use super::*;
+
+    #[test]
+    fn adaptive_target_image_size_does_not_undershoot_requested_points() {
+        let path = std::env::temp_dir().join(format!(
+            "burn_automata_target2d_full_alpha_{}.png",
+            std::process::id()
+        ));
+        let image = RgbaImage::from_pixel(128, 128, Rgba([255, 255, 255, 255]));
+        image.save(&path).unwrap();
+
+        let size = adaptive_target_image_size(&path, 0.05, 2048).unwrap();
+        let resized = load_rgba_thumbnail(&path, size).unwrap();
+        let count = foreground_alpha_count(&resized, 0.05);
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            count >= 2048,
+            "adaptive target count {count} should meet the requested floor at size {size}"
+        );
+    }
 }

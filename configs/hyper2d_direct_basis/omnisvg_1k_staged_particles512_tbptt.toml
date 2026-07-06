@@ -1,0 +1,105 @@
+preset = "growing-2d"
+
+[source]
+source_limit = 0
+
+[source.omnisvg]
+dataset = "illustration"
+split = "train"
+cache_dir = "data/omnisvg"
+offset = 0
+limit = 1000
+page_size = 100
+download = false
+refresh = false
+token_env = "HF_TOKEN"
+
+[split]
+holdout_stride = 10
+holdout_offset = 0
+
+[output]
+output_dir = "artifacts/hyper2d_omnisvg_1k_particles512_tbptt"
+
+[training]
+device = "gpu"
+steps = 160
+report_interval = 40
+example_batch_size = 1
+tbptt_chunk_steps = 4
+eval_interval = 40
+eval_batch_size = 1
+system_memory_budget_gb = 24.0
+gpu_memory_budget_gb = 64.0
+max_dense_train_particles = 1024
+
+[gpu]
+backend = "burn-wgpu"
+device = "cuda:0"
+max_dense_chunk_floats = 4194304
+max_splat_chunk_floats = 4194304
+
+[adapter]
+rank = 16
+alpha = 16.0
+
+[rollout]
+particles = 512
+steps = 16
+update_prob = 0.5
+seed = 42
+base_seed = 42
+seed_mode = "uniform-circle"
+
+[target]
+points = 1024
+threshold = 0.05
+loss_image_size = 96
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+per_parameter_grad_normalization = true
+base_learning_rate = 5.0e-5
+base_weight_decay = 0.0
+base_grad_clip_norm = 1.0
+adapter_learning_rate = 5.0e-4
+adapter_weight_decay = 0.0
+adapter_grad_clip_norm = 1.0
+adapter_l2 = 0.0
+
+[train_refine]
+steps = 320
+batch_size = 1
+learning_rate = 5.0e-4
+weight_decay = 0.0
+grad_clip_norm = 1.0
+
+[holdout_adapter]
+steps = 160
+batch_size = 1
+learning_rate = 5.0e-4
+weight_decay = 0.0
+grad_clip_norm = 1.0
+
+[eval]
+examples = 64
+seed = 42
+
+[oracle]
+train_examples = 2
+holdout_examples = 2
+epochs = 512
+repetitions = 1
+report_interval = 128
+batch_size = 2
+pool_size = 512
+learning_rate = 5.0e-4
+weight_decay = 0.0
+grad_clip_norm = 1.0
+seed = 42

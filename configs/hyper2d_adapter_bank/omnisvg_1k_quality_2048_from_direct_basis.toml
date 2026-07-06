@@ -1,0 +1,49 @@
+preset = "growing-2d"
+
+[input]
+shared_base = "artifacts/hyper2d_omnisvg_1k_quality_2048/shared_base.bpk"
+adapter_bank = "artifacts/hyper2d_omnisvg_1k_quality_2048/adapter_bank.json"
+
+[output]
+output_dir = "artifacts/hyper2d_adapter_bank_omnisvg_1k_quality_2048_summary_tokens"
+
+[condition]
+encoder = "summary-tokens"
+token_grid_width = 4
+token_grid_height = 4
+
+[training]
+backend = "burn-wgpu"
+hidden = 512
+output_scale = 0.0
+seed = 42
+steps = 1000
+report_interval = 100
+example_batch_size = 256
+learning_rate = 1.0e-3
+weight_decay = 0.0
+grad_clip_norm = 1.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1.0e-8
+
+[eval]
+vector_examples = 1000
+rollout_examples = 8
+particles = 2048
+steps = 32
+update_prob = 0.5
+seed = 42
+seed_mode = "uniform-circle"
+
+[target]
+points = 2048
+threshold = 0.05
+loss_image_size = 128
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0

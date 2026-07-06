@@ -12,7 +12,13 @@ mod summary;
 
 use bank::adapter_suite_bank_entries;
 use config::{
-    AdapterSuiteRenderSettings, AdapterSuiteTrainingPhaseConfig, AdapterSuiteTrainingSettings,
+    AdapterSuiteExperimentConfig, AdapterSuiteInputConfig, AdapterSuiteOutputConfig,
+    AdapterSuiteRenderConfig, AdapterSuiteRenderSettings, AdapterSuiteSeedConfig,
+    AdapterSuiteSharedBaseConfig, AdapterSuiteTargetsConfig, AdapterSuiteTrainingConfig,
+    AdapterSuiteTrainingPhaseConfig, AdapterSuiteTrainingSettings, AdapterSuiteValidationConfig,
+    adapter_suite_config_value_enum, adapter_suite_config_value_enum_option,
+    adapter_suite_config_value_enum_vec, adapter_suite_override_bool_switch,
+    load_adapter_suite_experiment_config,
 };
 use contract::adapter_suite_contract;
 use evaluation::adapter_suite_shared_base_evaluations;
@@ -31,6 +37,7 @@ pub(crate) fn run_train_render_3d_adapters(
     command: Command,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Command::TrainRender3dAdapters {
+        config,
         base_model,
         shared_base_output,
         shared_base_cycles,
@@ -87,6 +94,174 @@ pub(crate) fn run_train_render_3d_adapters(
     else {
         unreachable!("run_train_render_3d_adapters called with the wrong command variant");
     };
+
+    let config = load_adapter_suite_experiment_config(config.as_deref())?;
+    let AdapterSuiteExperimentConfig {
+        input: config_input,
+        shared_base: config_shared_base,
+        targets: config_targets,
+        output: config_output,
+        training: config_training,
+        objective: config_objective,
+        optimizer: config_optimizer,
+        adapter: config_adapter,
+        seed: config_seed,
+        render: config_render,
+        validation: config_validation,
+    } = config;
+    let AdapterSuiteInputConfig {
+        base_model: config_base_model,
+    } = config_input;
+    let AdapterSuiteSharedBaseConfig {
+        output: config_shared_base_output,
+        cycles: config_shared_base_cycles,
+        seed: config_shared_base_seed,
+    } = config_shared_base;
+    let AdapterSuiteTargetsConfig {
+        target_set: config_target_set,
+        targets: config_targets,
+        holdout_targets: config_holdout_targets,
+        auto_holdout_stride: config_auto_holdout_stride,
+        auto_holdout_offset: config_auto_holdout_offset,
+    } = config_targets;
+    let AdapterSuiteOutputConfig {
+        output_dir: config_output_dir,
+        report_output: config_report_output,
+        adapter_bank_output: config_adapter_bank_output,
+    } = config_output;
+    let AdapterSuiteTrainingConfig {
+        skip_shared_base_eval: config_skip_shared_base_eval,
+        rounds: config_rounds,
+        supervised_steps_per_round: config_supervised_steps_per_round,
+        particles: config_particles,
+        rollout_steps: config_rollout_steps,
+        gradient_particles: config_gradient_particles,
+        gradient_mode: config_gradient_mode,
+        finite_diff_eps: config_finite_diff_eps,
+        motion_gain: config_motion_gain,
+        perception_position_gain: config_perception_position_gain,
+        max_update_norm: config_max_update_norm,
+        trajectory_supervision: config_trajectory_supervision,
+        backend: config_training_backend,
+    } = config_training;
+    let config::AdapterSuiteObjectiveConfig {
+        direct_output_gradient_rms_cap: config_direct_output_gradient_rms_cap,
+        direct_line_search: config_direct_line_search,
+        direct_line_search_scales: config_direct_line_search_scales,
+        direct_material_output_only: config_direct_material_output_only,
+    } = config_objective;
+    let config::AdapterSuiteOptimizerConfig {
+        learning_rate: config_learning_rate,
+        grad_clip_norm: config_grad_clip_norm,
+    } = config_optimizer;
+    let config::AdapterSuiteAdapterConfig {
+        rank: config_adapter_rank,
+        alpha: config_adapter_alpha,
+        seed: config_adapter_seed,
+    } = config_adapter;
+    let AdapterSuiteSeedConfig {
+        seed_scale: config_seed_scale,
+        seed_mode: config_seed_mode,
+        selection_seed: config_selection_seed,
+        extra_selection_seeds: config_extra_selection_seeds,
+        direct_selection_seed_training: config_direct_selection_seed_training,
+    } = config_seed;
+    let AdapterSuiteRenderConfig {
+        image_size: config_image_size,
+        target_samples: config_target_samples,
+        sigma: config_sigma,
+        min_sigma: config_min_sigma,
+        max_sigma: config_max_sigma,
+        gaussian_decode_mode: config_gaussian_decode_mode,
+        world_scale: config_world_scale,
+        opacity_logit_bias: config_render_opacity_logit_bias,
+        density_weight: config_density_weight,
+        color_weight: config_color_weight,
+        depth_weight: config_depth_weight,
+    } = config_render;
+    let AdapterSuiteValidationConfig {
+        fail_on_validation: config_fail_on_validation,
+    } = config_validation;
+
+    let base_model = config_base_model.or(base_model);
+    let shared_base_output = config_shared_base_output.or(shared_base_output);
+    let shared_base_cycles = config_shared_base_cycles.or(shared_base_cycles);
+    let shared_base_seed = config_shared_base_seed.unwrap_or(shared_base_seed);
+    let target_set =
+        adapter_suite_config_value_enum("targets.target_set", config_target_set, target_set)?;
+    let targets =
+        adapter_suite_config_value_enum_vec("targets.targets", config_targets)?.unwrap_or(targets);
+    let holdout_targets =
+        adapter_suite_config_value_enum_vec("targets.holdout_targets", config_holdout_targets)?
+            .unwrap_or(holdout_targets);
+    let auto_holdout_stride = config_auto_holdout_stride.unwrap_or(auto_holdout_stride);
+    let auto_holdout_offset = config_auto_holdout_offset.unwrap_or(auto_holdout_offset);
+    let output_dir = config_output_dir.unwrap_or(output_dir);
+    let report_output = config_report_output.unwrap_or(report_output);
+    let adapter_bank_output = config_adapter_bank_output.or(adapter_bank_output);
+    let skip_shared_base_eval = config_skip_shared_base_eval.unwrap_or(skip_shared_base_eval);
+    let rounds = config_rounds.unwrap_or(rounds);
+    let supervised_steps_per_round =
+        config_supervised_steps_per_round.unwrap_or(supervised_steps_per_round);
+    let particles = config_particles.unwrap_or(particles);
+    let rollout_steps = config_rollout_steps.unwrap_or(rollout_steps);
+    let gradient_particles = config_gradient_particles.unwrap_or(gradient_particles);
+    let gradient_mode = adapter_suite_config_value_enum(
+        "training.gradient_mode",
+        config_gradient_mode,
+        gradient_mode,
+    )?;
+    let finite_diff_eps = config_finite_diff_eps.unwrap_or(finite_diff_eps);
+    let motion_gain = config_motion_gain.unwrap_or(motion_gain);
+    let perception_position_gain =
+        config_perception_position_gain.unwrap_or(perception_position_gain);
+    let max_update_norm = config_max_update_norm.unwrap_or(max_update_norm);
+    let trajectory_supervision = config_trajectory_supervision.unwrap_or(trajectory_supervision);
+    let training_backend = adapter_suite_config_value_enum(
+        "training.backend",
+        config_training_backend,
+        training_backend,
+    )?;
+    let adapter_rank = config_adapter_rank.unwrap_or(adapter_rank);
+    let adapter_alpha = config_adapter_alpha.unwrap_or(adapter_alpha);
+    let adapter_seed = config_adapter_seed.unwrap_or(adapter_seed);
+    let learning_rate = config_learning_rate.unwrap_or(learning_rate);
+    let grad_clip_norm = config_grad_clip_norm.unwrap_or(grad_clip_norm);
+    let direct_output_gradient_rms_cap =
+        config_direct_output_gradient_rms_cap.unwrap_or(direct_output_gradient_rms_cap);
+    let direct_line_search = config_direct_line_search.unwrap_or(direct_line_search);
+    let direct_line_search_scales =
+        config_direct_line_search_scales.unwrap_or(direct_line_search_scales);
+    let direct_material_output_only =
+        config_direct_material_output_only.unwrap_or(direct_material_output_only);
+    let (direct_selection_seed_training, no_direct_selection_seed_training) =
+        adapter_suite_override_bool_switch(
+            config_direct_selection_seed_training,
+            direct_selection_seed_training,
+            no_direct_selection_seed_training,
+        );
+    let seed_scale = config_seed_scale.or(seed_scale);
+    let seed_mode =
+        adapter_suite_config_value_enum_option("seed.seed_mode", config_seed_mode, seed_mode)?;
+    let selection_seed = config_selection_seed.unwrap_or(selection_seed);
+    let extra_selection_seeds = config_extra_selection_seeds.unwrap_or(extra_selection_seeds);
+    let image_size = config_image_size.unwrap_or(image_size);
+    let target_samples = config_target_samples.unwrap_or(target_samples);
+    let sigma = config_sigma.unwrap_or(sigma);
+    let min_sigma = config_min_sigma.unwrap_or(min_sigma);
+    let max_sigma = config_max_sigma.unwrap_or(max_sigma);
+    let gaussian_decode_mode = adapter_suite_config_value_enum(
+        "render.gaussian_decode_mode",
+        config_gaussian_decode_mode,
+        gaussian_decode_mode,
+    )?;
+    let world_scale = config_world_scale.or(world_scale);
+    let render_opacity_logit_bias =
+        config_render_opacity_logit_bias.unwrap_or(render_opacity_logit_bias);
+    let density_weight = config_density_weight.unwrap_or(density_weight);
+    let color_weight = config_color_weight.unwrap_or(color_weight);
+    let depth_weight = config_depth_weight.unwrap_or(depth_weight);
+    let fail_on_validation = config_fail_on_validation.unwrap_or(fail_on_validation);
 
     if is_catalog_model_output_path(&output_dir) {
         return Err(std::io::Error::other(format!(

@@ -684,9 +684,11 @@ pub(crate) enum Command {
         steps: usize,
         #[arg(long, default_value_t = 16)]
         report_interval: usize,
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 2)]
         example_batch_size: usize,
-        #[arg(long, default_value_t = 128)]
+        #[arg(long, default_value_t = 8)]
+        tbptt_chunk_steps: usize,
+        #[arg(long, default_value_t = 1024)]
         rollout_particles: usize,
         #[arg(long, default_value_t = 32)]
         rollout_steps: usize,
@@ -760,8 +762,22 @@ pub(crate) enum Command {
         holdout_adapter_grad_clip_norm: Option<f32>,
         #[arg(long, default_value_t = 16)]
         eval_examples: usize,
+        #[arg(long)]
+        eval_interval: Option<usize>,
+        #[arg(long, default_value_t = 1)]
+        eval_batch_size: usize,
         #[arg(long, default_value_t = 42)]
         eval_seed: u64,
+        #[arg(long)]
+        system_memory_budget_gb: Option<f32>,
+        #[arg(long)]
+        gpu_memory_budget_gb: Option<f32>,
+        #[arg(long, default_value_t = 1024)]
+        max_dense_train_particles: usize,
+        #[arg(long, default_value_t = 4 * 1024 * 1024)]
+        max_dense_chunk_floats: usize,
+        #[arg(long, default_value_t = 4 * 1024 * 1024)]
+        max_splat_chunk_floats: usize,
         #[arg(long, default_value_t = 0)]
         oracle_train_examples: usize,
         #[arg(long, default_value_t = 0)]
@@ -786,6 +802,107 @@ pub(crate) enum Command {
         oracle_seed: u64,
     },
     #[command(
+        name = "train-hyper2d-adapter-bank",
+        alias = "train-hyper-2d-adapter-bank",
+        alias = "train-hyper2d-conditioned-adapters"
+    )]
+    TrainHyper2dAdapterBank {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        shared_base: Option<PathBuf>,
+        #[arg(long)]
+        adapter_bank: Option<PathBuf>,
+        #[arg(long, default_value = "artifacts/hyper2d_adapter_bank")]
+        output_dir: PathBuf,
+        #[arg(long)]
+        report_output: Option<PathBuf>,
+        #[arg(long)]
+        hyper_output: Option<PathBuf>,
+        #[arg(long, default_value_t = 0)]
+        source_limit: usize,
+        #[arg(long, default_value_t = 0)]
+        train_limit: usize,
+        #[arg(long, default_value_t = 0)]
+        holdout_limit: usize,
+        #[arg(long, default_value = "summary-tokens")]
+        condition_encoder: Hyper2dConditionEncoderArg,
+        #[arg(long)]
+        dino_model: Option<PathBuf>,
+        #[arg(long, default_value_t = 518)]
+        dino_image_size: usize,
+        #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_WIDTH)]
+        condition_token_grid_width: usize,
+        #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_HEIGHT)]
+        condition_token_grid_height: usize,
+        #[arg(long, default_value = "burn-wgpu")]
+        backend: Hyper2dAdapterBankBackendArg,
+        #[arg(long, default_value_t = 512)]
+        hyper_hidden: usize,
+        #[arg(long, default_value_t = 0.0)]
+        hyper_output_scale: f32,
+        #[arg(long, default_value_t = 42)]
+        hyper_seed: u64,
+        #[arg(long, default_value_t = 512)]
+        steps: usize,
+        #[arg(long, default_value_t = 32)]
+        report_interval: usize,
+        #[arg(long, default_value_t = 256)]
+        example_batch_size: usize,
+        #[arg(long, default_value_t = 1.0e-3)]
+        learning_rate: f32,
+        #[arg(long, default_value_t = 0.0)]
+        weight_decay: f32,
+        #[arg(long, default_value_t = 1.0)]
+        grad_clip_norm: f32,
+        #[arg(long, default_value_t = 0.9)]
+        adam_beta1: f32,
+        #[arg(long, default_value_t = 0.999)]
+        adam_beta2: f32,
+        #[arg(long, default_value_t = 1.0e-8)]
+        adam_epsilon: f32,
+        #[arg(long, default_value_t = 0)]
+        vector_eval_examples: usize,
+        #[arg(long, default_value_t = 8)]
+        rollout_eval_examples: usize,
+        #[arg(long, default_value_t = 2048)]
+        rollout_particles: usize,
+        #[arg(long, default_value_t = 32)]
+        rollout_steps: usize,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        eval_seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 4096)]
+        target_points: usize,
+        #[arg(long)]
+        target_image_size: Option<usize>,
+        #[arg(long, default_value_t = 0.05)]
+        target_threshold: f32,
+        #[arg(long, default_value_t = 128)]
+        target_loss_image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        target_splat_sigma: f32,
+        #[arg(long, default_value_t = 2.0)]
+        target_splat_loss_weight: f32,
+        #[arg(long, default_value_t = 5.0)]
+        target_color_loss_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        target_density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.01)]
+        target_displacement_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_overflow_regularizer_weight: f32,
+        #[arg(long, default_value_t = 100.0)]
+        target_bound_regularizer_weight: f32,
+    },
+    #[command(
         name = "validate-hyper2d-direct-basis-oracles",
         alias = "validate-hyper-2d-direct-basis-oracles"
     )]
@@ -801,7 +918,7 @@ pub(crate) enum Command {
             default_value = "artifacts/hyper2d_direct_basis_oracles/report.json"
         )]
         report_output: PathBuf,
-        #[arg(long, default_value_t = 128)]
+        #[arg(long, default_value_t = 2048)]
         rollout_particles: usize,
         #[arg(long, default_value_t = 32)]
         rollout_steps: usize,
@@ -859,6 +976,65 @@ pub(crate) enum Command {
         oracle_grad_clip_norm: f32,
         #[arg(long, default_value_t = 42)]
         oracle_seed: u64,
+    },
+    #[command(
+        name = "validate-hyper2d-psnr-gate",
+        alias = "validate-hyper-2d-psnr-gate"
+    )]
+    ValidateHyper2dPsnrGate {
+        #[arg(long, default_value = "growing-2d")]
+        preset: PresetArg,
+        #[arg(long)]
+        base_model: PathBuf,
+        #[arg(long)]
+        adapter_bank: PathBuf,
+        #[arg(long)]
+        oracle_report: PathBuf,
+        #[arg(long)]
+        hyper: PathBuf,
+        #[arg(long, default_value = "artifacts/hyper2d_psnr_gate/report.json")]
+        output: PathBuf,
+        #[arg(long, default_value = "artifacts/hyper2d_psnr_gate/generated")]
+        generated_dir: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        #[arg(long, default_value_t = 2048)]
+        particles: usize,
+        #[arg(long = "step", value_delimiter = ',', default_values_t = [32_usize, 64_usize])]
+        steps: Vec<usize>,
+        #[arg(long, default_value_t = 0.5)]
+        update_prob: f32,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        seed_scale: Option<f32>,
+        #[arg(long, default_value = "uniform-circle")]
+        seed_mode: SeedModeArg,
+        #[arg(long, default_value_t = 128)]
+        image_size: usize,
+        #[arg(long, default_value_t = 1.0)]
+        render_sigma_px: f32,
+        #[arg(long, default_value_t = 26.0)]
+        min_render_rgb_psnr_db: f32,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        fail_on_threshold: bool,
+    },
+    #[command(name = "report-hyper2d", alias = "report-hyper-2d")]
+    ReportHyper2d {
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long)]
+        oracle_report: Option<PathBuf>,
+        #[arg(long, default_value = "artifacts/hyper2d_report")]
+        output_dir: PathBuf,
+        #[arg(long)]
+        summary_output: Option<PathBuf>,
+        #[arg(long)]
+        markdown_output: Option<PathBuf>,
+        #[arg(long)]
+        latex_output: Option<PathBuf>,
+        #[arg(long)]
+        require_quality_ready: bool,
     },
     #[command(name = "infer-hyper2d", alias = "infer-hyper-2d")]
     InferHyper2d {
@@ -1234,6 +1410,8 @@ pub(crate) enum Command {
     },
     #[command(name = "train-render3d", alias = "train-render-3d")]
     TrainRender3d {
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long, default_value = "torus")]
         target: MeshTargetArg,
         #[arg(long)]
@@ -1390,6 +1568,8 @@ pub(crate) enum Command {
         alias = "train-render3d-lora-suite"
     )]
     TrainRender3dAdapters {
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long)]
         base_model: Option<PathBuf>,
         #[arg(long)]
@@ -1620,6 +1800,34 @@ pub(crate) enum Command {
         bvh_leaf_size: usize,
         #[arg(long, default_value = "2,2,1")]
         tile_size: String,
+    },
+    #[command(name = "materialize-adapter", alias = "materialize-lora")]
+    MaterializeAdapter {
+        #[arg(long)]
+        base_model: PathBuf,
+        #[arg(long)]
+        adapter: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    #[command(name = "build-exact-adapter-bank", alias = "exact-oracle-adapter-bank")]
+    BuildExactAdapterBank {
+        #[arg(long)]
+        base_model: PathBuf,
+        #[arg(long)]
+        source_adapter_bank: PathBuf,
+        #[arg(long)]
+        oracle_report: PathBuf,
+        #[arg(long, default_value = "artifacts/exact_adapter_bank")]
+        output_dir: PathBuf,
+        #[arg(long)]
+        adapter_bank_output: Option<PathBuf>,
+        #[arg(long)]
+        rank: Option<usize>,
+        #[arg(long)]
+        alpha: Option<f32>,
+        #[arg(long)]
+        force_split: Option<String>,
     },
     Manifest {
         #[arg(long, default_value = "growing-2d")]

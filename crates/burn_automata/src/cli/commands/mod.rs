@@ -10,6 +10,7 @@ mod hyper_support;
 mod mesh;
 mod options;
 mod render;
+mod reporting;
 mod target2d;
 mod training_bench;
 

@@ -6,7 +6,11 @@ pub const CONDITION_FEATURE_DIMS: usize = 17;
 pub const CONDITION_TOKEN_FEATURE_DIMS: usize = CONDITION_FEATURE_DIMS + 4;
 pub const DEFAULT_CONDITION_TOKEN_GRID_WIDTH: usize = 4;
 pub const DEFAULT_CONDITION_TOKEN_GRID_HEIGHT: usize = 4;
+pub const DINO_VITS_EMBED_DIMS: usize = 384;
 pub const DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS: usize = 768;
+pub const DINO_VITS_PATCH_STATS_FEATURE_DIMS: usize = DINO_VITS_EMBED_DIMS * 5;
+pub const DEFAULT_DINO_VITS_TOKEN_GRID_WIDTH: usize = 8;
+pub const DEFAULT_DINO_VITS_TOKEN_GRID_HEIGHT: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -14,6 +18,8 @@ pub enum ConditionEncoder2d {
     #[default]
     SummaryTokens,
     DinoVitsClsPatchMean,
+    DinoVitsPatchStats,
+    DinoVitsTokenGrid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,8 +28,12 @@ pub struct ConditionImage2d {
     pub height: usize,
     pub channels: usize,
     pub values: Vec<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dino_vits_cls_patch_mean: Option<Vec<f32>>,
+    #[serde(
+        default,
+        alias = "dino_vits_cls_patch_mean",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dino_vits_features: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,7 +79,7 @@ impl ConditionImage2d {
             height,
             channels,
             values,
-            dino_vits_cls_patch_mean: None,
+            dino_vits_features: None,
         };
         image.validate()?;
         Ok(image)
@@ -100,12 +110,15 @@ impl ConditionImage2d {
                 "condition image contains non-finite values".to_string(),
             ));
         }
-        if let Some(features) = &self.dino_vits_cls_patch_mean
+        if let Some(features) = &self.dino_vits_features
             && (!features.iter().all(|value| value.is_finite())
-                || features.len() != DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS)
+                || !matches!(
+                    features.len(),
+                    DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS | DINO_VITS_PATCH_STATS_FEATURE_DIMS
+                ) && !is_valid_dino_token_grid_feature_len(features.len()))
         {
             return Err(AutomataError::InvalidArgument(format!(
-                "DINO condition feature vector len {} must be {DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS} with finite values",
+                "DINO condition feature vector len {} must be {DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS}, {DINO_VITS_PATCH_STATS_FEATURE_DIMS}, or CLS plus an integer DINO token grid with finite values",
                 features.len()
             )));
         }
@@ -231,20 +244,26 @@ impl ConditionImage2d {
             ConditionEncoder2d::SummaryTokens => {
                 self.feature_vector_with_tokens(grid_width, grid_height)
             }
-            ConditionEncoder2d::DinoVitsClsPatchMean => {
-                self.dino_vits_cls_patch_mean.clone().ok_or_else(|| {
+            ConditionEncoder2d::DinoVitsClsPatchMean
+            | ConditionEncoder2d::DinoVitsPatchStats
+            | ConditionEncoder2d::DinoVitsTokenGrid => {
+                self.dino_vits_features.clone().ok_or_else(|| {
                     AutomataError::InvalidArgument(
-                        "condition is missing DINO vits cls+patch-mean features".to_string(),
+                        "condition is missing DINO vits features".to_string(),
                     )
                 })
             }
         }
     }
 
-    pub fn with_dino_vits_cls_patch_mean(mut self, features: Vec<f32>) -> AutomataResult<Self> {
-        self.dino_vits_cls_patch_mean = Some(features);
+    pub fn with_dino_vits_features(mut self, features: Vec<f32>) -> AutomataResult<Self> {
+        self.dino_vits_features = Some(features);
         self.validate()?;
         Ok(self)
+    }
+
+    pub fn with_dino_vits_cls_patch_mean(self, features: Vec<f32>) -> AutomataResult<Self> {
+        self.with_dino_vits_features(features)
     }
 
     pub fn pooled_tokens(
@@ -396,5 +415,70 @@ pub fn condition_feature_dims_for_encoder(
             condition_feature_dims_for_token_grid(grid_width, grid_height)
         }
         ConditionEncoder2d::DinoVitsClsPatchMean => Ok(DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS),
+        ConditionEncoder2d::DinoVitsPatchStats => Ok(DINO_VITS_PATCH_STATS_FEATURE_DIMS),
+        ConditionEncoder2d::DinoVitsTokenGrid => {
+            let grid_width = if grid_width == 0 {
+                DEFAULT_DINO_VITS_TOKEN_GRID_WIDTH
+            } else {
+                grid_width
+            };
+            let grid_height = if grid_height == 0 {
+                DEFAULT_DINO_VITS_TOKEN_GRID_HEIGHT
+            } else {
+                grid_height
+            };
+            let token_count = grid_width.checked_mul(grid_height).ok_or_else(|| {
+                AutomataError::InvalidArgument(format!(
+                    "DINO token grid {grid_width}x{grid_height} overflows"
+                ))
+            })?;
+            let token_dims = token_count
+                .checked_add(1)
+                .and_then(|tokens| tokens.checked_mul(DINO_VITS_EMBED_DIMS))
+                .ok_or_else(|| {
+                    AutomataError::InvalidArgument(format!(
+                        "DINO token grid {grid_width}x{grid_height} feature dims overflow"
+                    ))
+                })?;
+            Ok(token_dims)
+        }
+    }
+}
+
+fn is_valid_dino_token_grid_feature_len(len: usize) -> bool {
+    len > DINO_VITS_EMBED_DIMS
+        && len.is_multiple_of(DINO_VITS_EMBED_DIMS)
+        && (len / DINO_VITS_EMBED_DIMS).saturating_sub(1) > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dino_token_grid_dims_include_cls_token() {
+        assert_eq!(
+            condition_feature_dims_for_encoder(ConditionEncoder2d::DinoVitsTokenGrid, 8, 8)
+                .unwrap(),
+            (1 + 8 * 8) * DINO_VITS_EMBED_DIMS
+        );
+        assert_eq!(
+            condition_feature_dims_for_encoder(ConditionEncoder2d::DinoVitsTokenGrid, 37, 37)
+                .unwrap(),
+            (1 + 37 * 37) * DINO_VITS_EMBED_DIMS
+        );
+    }
+
+    #[test]
+    fn dino_token_grid_feature_vectors_validate() {
+        let dims = (1 + 2 * 3) * DINO_VITS_EMBED_DIMS;
+        let image = ConditionImage2d::from_rgb(1, 1, vec![0.0, 0.0, 0.0])
+            .unwrap()
+            .with_dino_vits_features(vec![0.25; dims])
+            .unwrap();
+        let features = image
+            .feature_vector_for_encoder(ConditionEncoder2d::DinoVitsTokenGrid, 2, 3)
+            .unwrap();
+        assert_eq!(features.len(), dims);
     }
 }

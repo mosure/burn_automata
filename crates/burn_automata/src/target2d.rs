@@ -320,6 +320,50 @@ pub fn render_target_2d_splat(
     render_target_splat(target, cfg)
 }
 
+pub fn render_rollout_2d_splat(
+    positions: &[[f32; 4]],
+    states: &[f32],
+    state_dims: usize,
+    pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+    output_scale: f32,
+) -> AutomataResult<Target2dRenderedSplat> {
+    if state_dims < 3 {
+        return Err(AutomataError::InvalidArgument(
+            "2D rollout splat rendering requires at least three state channels".to_string(),
+        ));
+    }
+    if states.len() != positions.len() * state_dims {
+        return Err(AutomataError::InvalidArgument(format!(
+            "state len {} != positions {} * state dims {}",
+            states.len(),
+            positions.len(),
+            state_dims
+        )));
+    }
+    if !pixel_size.is_finite() || pixel_size <= 0.0 {
+        return Err(AutomataError::InvalidArgument(
+            "2D rollout splat rendering requires a positive finite pixel size".to_string(),
+        ));
+    }
+    if !output_scale.is_finite() || output_scale < 0.0 {
+        return Err(AutomataError::InvalidArgument(
+            "2D rollout splat rendering requires a finite non-negative output scale".to_string(),
+        ));
+    }
+    let positions_2d = if let Some(target_mean) = center {
+        centered_batch_positions(positions, target_mean, true)
+    } else {
+        positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(states, state_dims);
+    splat_render(&positions_2d, &colors, pixel_size, cfg, output_scale)
+}
+
 pub fn target_2d_loss(
     positions: &[[f32; 4]],
     states: &[f32],

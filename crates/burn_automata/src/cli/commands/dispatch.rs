@@ -1,5 +1,6 @@
 use super::{
-    basic, bench_handlers, dynamics2d, hyper, hyper_e2e, mesh, render, target2d, training_bench,
+    basic, bench_handlers, dynamics2d, hyper, hyper_e2e, mesh, render, reporting, target2d,
+    training_bench,
 };
 use crate::cli::prelude::*;
 
@@ -15,9 +16,16 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::TrainHyper2dDirectBasis { .. } => {
             hyper_e2e::run_train_hyper_2d_direct_basis(command)
         }
+        command @ Command::TrainHyper2dAdapterBank { .. } => {
+            hyper_e2e::run_train_hyper_2d_adapter_bank(command)
+        }
         command @ Command::ValidateHyper2dDirectBasisOracles { .. } => {
             hyper_e2e::run_validate_hyper_2d_direct_basis_oracles(command)
         }
+        command @ Command::ValidateHyper2dPsnrGate { .. } => {
+            hyper_e2e::run_validate_hyper_2d_psnr_gate(command)
+        }
+        command @ Command::ReportHyper2d { .. } => reporting::run_report_hyper_2d(command),
         command @ Command::InferHyper2d { .. } => hyper::run_infer_hyper_2d(command),
         command @ Command::EvalHyper2d { .. } => hyper::run_eval_hyper_2d(command),
         command @ Command::TrainTorus3d { .. } => mesh::run_train_torus_3d(command),
@@ -39,6 +47,10 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::Bench { .. } => bench_handlers::run_bench(command),
         command @ Command::BenchTraining { .. } => training_bench::run_bench_training(command),
         command @ Command::BenchSpatial { .. } => bench_handlers::run_bench_spatial(command),
+        command @ Command::MaterializeAdapter { .. } => basic::run_materialize_adapter(command),
+        command @ Command::BuildExactAdapterBank { .. } => {
+            basic::run_build_exact_adapter_bank(command)
+        }
         command @ Command::Manifest { .. } => basic::run_manifest(command),
     }
 }

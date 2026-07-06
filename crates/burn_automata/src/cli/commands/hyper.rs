@@ -127,6 +127,8 @@ pub(crate) fn run_train_hyper_2d(command: Command) -> Result<(), Box<dyn std::er
         hidden_dims: hyper_hidden,
         adapter_rank,
         adapter_alpha,
+        adapter_bias_correction: false,
+        output_activation: HyperNpa2dOutputActivation::Tanh,
         output_scale: hyper_output_scale,
     };
     let mut hyper = if let Some(path) = &hyper_input {

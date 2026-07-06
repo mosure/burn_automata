@@ -1,3 +1,8 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +25,19 @@ pub struct HyperNpa2dConfig {
     pub hidden_dims: usize,
     pub adapter_rank: usize,
     pub adapter_alpha: f32,
+    #[serde(default)]
+    pub adapter_bias_correction: bool,
+    #[serde(default)]
+    pub output_activation: HyperNpa2dOutputActivation,
     pub output_scale: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HyperNpa2dOutputActivation {
+    #[default]
+    Tanh,
+    Linear,
 }
 
 impl Default for HyperNpa2dConfig {
@@ -40,6 +57,8 @@ impl Default for HyperNpa2dConfig {
             hidden_dims: 32,
             adapter_rank: 2,
             adapter_alpha: 2.0,
+            adapter_bias_correction: false,
+            output_activation: HyperNpa2dOutputActivation::Tanh,
             output_scale: 0.05,
         }
     }
@@ -54,12 +73,46 @@ pub struct HyperNpa2dWeights {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HyperNpa2dPreciseWeights {
+    pub w1: Vec<f64>,
+    pub b1: Vec<f64>,
+    pub w2: Vec<f64>,
+    pub b2: Vec<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HyperNpa2d {
     pub npa_config: NpaConfig,
     pub config: HyperNpa2dConfig,
     pub weights: HyperNpa2dWeights,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precise_weights: Option<HyperNpa2dPreciseWeights>,
     #[serde(default)]
     pub anchor_input: Option<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<HyperNpa2dFlow>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HyperNpa2dFlow {
+    pub config: HyperNpa2dFlowConfig,
+    pub weights: HyperNpa2dFlowWeights,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct HyperNpa2dFlowConfig {
+    pub hidden_dims: usize,
+    pub sample_steps: usize,
+    pub source_scale: f32,
+    pub sample_seed: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HyperNpa2dFlowWeights {
+    pub w1: Vec<f32>,
+    pub b1: Vec<f32>,
+    pub w2: Vec<f32>,
+    pub b2: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,8 +153,11 @@ pub(crate) struct HyperNpa2dGradients {
 impl HyperNpa2d {
     pub fn zeros(npa_config: NpaConfig, config: HyperNpa2dConfig) -> AutomataResult<Self> {
         validate_hyper_config(&npa_config, config)?;
-        let output_dims =
-            NpaLowRankAdapter::parameter_count_for_config(&npa_config, config.adapter_rank);
+        let output_dims = NpaLowRankAdapter::parameter_count_for_config_with_bias_correction(
+            &npa_config,
+            config.adapter_rank,
+            config.adapter_bias_correction,
+        );
         Ok(Self {
             npa_config,
             config,
@@ -110,7 +166,9 @@ impl HyperNpa2d {
                 config.hidden_dims,
                 output_dims,
             ),
+            precise_weights: None,
             anchor_input: None,
+            flow: None,
         })
     }
 
@@ -120,8 +178,11 @@ impl HyperNpa2d {
         seed: u64,
     ) -> AutomataResult<Self> {
         validate_hyper_config(&npa_config, config)?;
-        let output_dims =
-            NpaLowRankAdapter::parameter_count_for_config(&npa_config, config.adapter_rank);
+        let output_dims = NpaLowRankAdapter::parameter_count_for_config_with_bias_correction(
+            &npa_config,
+            config.adapter_rank,
+            config.adapter_bias_correction,
+        );
         Ok(Self {
             npa_config,
             config,
@@ -131,7 +192,9 @@ impl HyperNpa2d {
                 output_dims,
                 seed,
             ),
+            precise_weights: None,
             anchor_input: None,
+            flow: None,
         })
     }
 
@@ -163,6 +226,37 @@ impl HyperNpa2d {
         ensure_finite("hyper b1", &self.weights.b1)?;
         ensure_finite("hyper w2", &self.weights.w2)?;
         ensure_finite("hyper b2", &self.weights.b2)?;
+        if let Some(precise) = &self.precise_weights {
+            let expected = [
+                (
+                    "hyper precise w1",
+                    self.config.hidden_dims * self.config.condition_feature_dims,
+                    precise.w1.len(),
+                ),
+                (
+                    "hyper precise b1",
+                    self.config.hidden_dims,
+                    precise.b1.len(),
+                ),
+                (
+                    "hyper precise w2",
+                    output_dims * self.config.hidden_dims,
+                    precise.w2.len(),
+                ),
+                ("hyper precise b2", output_dims, precise.b2.len()),
+            ];
+            for (name, expected_len, actual_len) in expected {
+                if actual_len != expected_len {
+                    return Err(AutomataError::InvalidModel(format!(
+                        "{name} len {actual_len} != {expected_len}"
+                    )));
+                }
+            }
+            ensure_finite_f64("hyper precise w1", &precise.w1)?;
+            ensure_finite_f64("hyper precise b1", &precise.b1)?;
+            ensure_finite_f64("hyper precise w2", &precise.w2)?;
+            ensure_finite_f64("hyper precise b2", &precise.b2)?;
+        }
         if let Some(anchor_input) = &self.anchor_input {
             if anchor_input.len() != self.config.condition_feature_dims {
                 return Err(AutomataError::InvalidModel(format!(
@@ -173,11 +267,18 @@ impl HyperNpa2d {
             }
             ensure_finite("hyper anchor input", anchor_input)?;
         }
+        if let Some(flow) = &self.flow {
+            validate_flow_head(self, flow)?;
+        }
         Ok(())
     }
 
     pub fn adapter_parameter_count(&self) -> usize {
-        NpaLowRankAdapter::parameter_count_for_config(&self.npa_config, self.config.adapter_rank)
+        NpaLowRankAdapter::parameter_count_for_config_with_bias_correction(
+            &self.npa_config,
+            self.config.adapter_rank,
+            self.config.adapter_bias_correction,
+        )
     }
 
     pub fn predict_adapter(
@@ -185,16 +286,25 @@ impl HyperNpa2d {
         condition: &ConditionImage2d,
     ) -> AutomataResult<NpaLowRankAdapter> {
         let values = self.predict_adapter_vector(condition)?;
-        NpaLowRankAdapter::from_parameter_vector(
+        NpaLowRankAdapter::from_parameter_vector_with_bias_correction(
             &self.npa_config,
             self.config.adapter_rank,
             self.config.adapter_alpha,
             values,
+            self.config.adapter_bias_correction,
         )
     }
 
     pub fn predict_adapter_vector(&self, condition: &ConditionImage2d) -> AutomataResult<Vec<f32>> {
+        if self.flow.is_some() {
+            return self.predict_adapter_vector_flow(condition);
+        }
         Ok(self.forward_cache(condition)?.output)
+    }
+
+    pub fn set_flow(&mut self, flow: HyperNpa2dFlow) -> AutomataResult<()> {
+        self.flow = Some(flow);
+        self.validate()
     }
 
     pub fn set_anchor_condition(&mut self, condition: &ConditionImage2d) -> AutomataResult<()> {
@@ -249,15 +359,80 @@ impl HyperNpa2d {
         Ok(input)
     }
 
+    fn predict_adapter_vector_flow(
+        &self,
+        condition: &ConditionImage2d,
+    ) -> AutomataResult<Vec<f32>> {
+        self.validate()?;
+        let flow = self
+            .flow
+            .as_ref()
+            .ok_or_else(|| AutomataError::InvalidModel("missing HyperNPA flow head".to_string()))?;
+        let condition_input = self.condition_input(condition)?;
+        let output_dims = self.adapter_parameter_count();
+        let steps = flow.config.sample_steps.max(1);
+        let mut state = seeded_flow_source(
+            &condition_input,
+            output_dims,
+            flow.config.source_scale,
+            flow.config.sample_seed,
+        );
+        let dt = 1.0 / steps as f32;
+        for step in 0..steps {
+            let t = (step as f32 + 0.5) * dt;
+            let velocity = self.flow_velocity(flow, &condition_input, t, &state)?;
+            for (value, delta) in state.iter_mut().zip(velocity) {
+                *value += delta * dt;
+            }
+        }
+        ensure_finite("hyper flow sampled adapter", &state)?;
+        Ok(state)
+    }
+
+    fn flow_velocity(
+        &self,
+        flow: &HyperNpa2dFlow,
+        condition_input: &[f32],
+        t: f32,
+        state: &[f32],
+    ) -> AutomataResult<Vec<f32>> {
+        let input = flow_input(condition_input, t, state);
+        let output_dims = self.adapter_parameter_count();
+        let mut hidden = vec![0.0; flow.config.hidden_dims];
+        for (h, hidden_value) in hidden.iter_mut().enumerate() {
+            let mut sum = flow.weights.b1[h] as f64;
+            let base = h * input.len();
+            for (i, value) in input.iter().enumerate() {
+                sum += flow.weights.w1[base + i] as f64 * *value as f64;
+            }
+            *hidden_value = (sum as f32).max(0.0);
+        }
+        let mut output = vec![0.0; output_dims];
+        for (o, output_value) in output.iter_mut().enumerate() {
+            let mut sum = flow.weights.b2[o] as f64;
+            let base = o * flow.config.hidden_dims;
+            for (h, value) in hidden.iter().enumerate() {
+                sum += flow.weights.w2[base + h] as f64 * *value as f64;
+            }
+            *output_value = sum as f32;
+        }
+        ensure_finite("hyper flow velocity", &output)?;
+        Ok(output)
+    }
+
     fn forward_layer(&self, input: Vec<f32>) -> HyperLayerCache {
+        if let Some(precise) = &self.precise_weights {
+            return self.forward_precise_layer(input, precise);
+        }
         let mut pre_hidden = vec![0.0; self.config.hidden_dims];
         let mut hidden = vec![0.0; self.config.hidden_dims];
         for h in 0..self.config.hidden_dims {
-            let mut sum = self.weights.b1[h];
+            let mut sum = self.weights.b1[h] as f64;
             let base = h * self.config.condition_feature_dims;
             for (i, value) in input.iter().enumerate() {
-                sum += self.weights.w1[base + i] * *value;
+                sum += self.weights.w1[base + i] as f64 * *value as f64;
             }
+            let sum = sum as f32;
             pre_hidden[h] = sum;
             hidden[h] = sum.max(0.0);
         }
@@ -266,13 +441,14 @@ impl HyperNpa2d {
         let mut pre_output = vec![0.0; output_dims];
         let mut output = vec![0.0; output_dims];
         for o in 0..output_dims {
-            let mut sum = self.weights.b2[o];
+            let mut sum = self.weights.b2[o] as f64;
             let base = o * self.config.hidden_dims;
             for (h, value) in hidden.iter().enumerate() {
-                sum += self.weights.w2[base + h] * *value;
+                sum += self.weights.w2[base + h] as f64 * *value as f64;
             }
-            pre_output[o] = sum;
-            output[o] = sum.tanh() * self.config.output_scale;
+            let pre = sum as f32;
+            pre_output[o] = pre;
+            output[o] = self.activate_output(sum);
         }
 
         HyperLayerCache {
@@ -281,6 +457,55 @@ impl HyperNpa2d {
             hidden,
             pre_output,
             output,
+        }
+    }
+
+    fn forward_precise_layer(
+        &self,
+        input: Vec<f32>,
+        weights: &HyperNpa2dPreciseWeights,
+    ) -> HyperLayerCache {
+        let mut pre_hidden = vec![0.0; self.config.hidden_dims];
+        let mut hidden = vec![0.0; self.config.hidden_dims];
+        for h in 0..self.config.hidden_dims {
+            let mut sum = weights.b1[h];
+            let base = h * self.config.condition_feature_dims;
+            for (i, value) in input.iter().enumerate() {
+                sum += weights.w1[base + i] * *value as f64;
+            }
+            let sum = sum as f32;
+            pre_hidden[h] = sum;
+            hidden[h] = sum.max(0.0);
+        }
+
+        let output_dims = self.adapter_parameter_count();
+        let mut pre_output = vec![0.0; output_dims];
+        let mut output = vec![0.0; output_dims];
+        for o in 0..output_dims {
+            let mut sum = weights.b2[o];
+            let base = o * self.config.hidden_dims;
+            for (h, value) in hidden.iter().enumerate() {
+                sum += weights.w2[base + h] * *value as f64;
+            }
+            pre_output[o] = sum as f32;
+            output[o] = self.activate_output(sum);
+        }
+
+        HyperLayerCache {
+            input,
+            pre_hidden,
+            hidden,
+            pre_output,
+            output,
+        }
+    }
+
+    fn activate_output(&self, value: f64) -> f32 {
+        match self.config.output_activation {
+            HyperNpa2dOutputActivation::Tanh => {
+                (value.tanh() * self.config.output_scale as f64) as f32
+            }
+            HyperNpa2dOutputActivation::Linear => value as f32,
         }
     }
 
@@ -324,9 +549,13 @@ impl HyperNpa2d {
     ) {
         let mut hidden_grads = vec![0.0; self.config.hidden_dims];
         for (o, output_grad) in output_gradients.iter().copied().enumerate() {
-            let tanh_pre = cache.pre_output[o].tanh();
-            let d_pre_output =
-                output_grad * self.config.output_scale * (1.0 - tanh_pre * tanh_pre) * scale;
+            let d_pre_output = match self.config.output_activation {
+                HyperNpa2dOutputActivation::Tanh => {
+                    let tanh_pre = cache.pre_output[o].tanh();
+                    output_grad * self.config.output_scale * (1.0 - tanh_pre * tanh_pre) * scale
+                }
+                HyperNpa2dOutputActivation::Linear => output_grad * scale,
+            };
             grads.b2[o] += d_pre_output;
             let w2_base = o * self.config.hidden_dims;
             for (h, hidden_grad) in hidden_grads.iter_mut().enumerate() {
@@ -394,6 +623,17 @@ impl HyperNpa2dWeights {
             *value = rng.random_range(-0.02..0.02);
         }
         weights
+    }
+}
+
+impl HyperNpa2dPreciseWeights {
+    pub fn zeros(input_dims: usize, hidden_dims: usize, output_dims: usize) -> Self {
+        Self {
+            w1: vec![0.0; hidden_dims * input_dims],
+            b1: vec![0.0; hidden_dims],
+            w2: vec![0.0; output_dims * hidden_dims],
+            b2: vec![0.0; output_dims],
+        }
     }
 }
 
@@ -482,6 +722,86 @@ fn validate_hyper_config(npa_config: &NpaConfig, config: HyperNpa2dConfig) -> Au
     Ok(())
 }
 
+pub(crate) fn flow_input(condition_input: &[f32], t: f32, state: &[f32]) -> Vec<f32> {
+    let mut input = Vec::with_capacity(condition_input.len() + 1 + state.len());
+    input.extend_from_slice(condition_input);
+    input.push(t);
+    input.extend_from_slice(state);
+    input
+}
+
+fn seeded_flow_source(
+    condition_input: &[f32],
+    output_dims: usize,
+    source_scale: f32,
+    sample_seed: u64,
+) -> Vec<f32> {
+    let mut hasher = DefaultHasher::new();
+    sample_seed.hash(&mut hasher);
+    for value in condition_input {
+        value.to_bits().hash(&mut hasher);
+    }
+    let mut rng = StdRng::seed_from_u64(hasher.finish());
+    let scale = source_scale.abs().max(1.0e-6);
+    (0..output_dims)
+        .map(|_| rng.random_range(-scale..=scale))
+        .collect()
+}
+
+fn validate_flow_head(model: &HyperNpa2d, flow: &HyperNpa2dFlow) -> AutomataResult<()> {
+    let output_dims = model.adapter_parameter_count();
+    let input_dims = model
+        .config
+        .condition_feature_dims
+        .checked_add(1)
+        .and_then(|dims| dims.checked_add(output_dims))
+        .ok_or_else(|| {
+            AutomataError::InvalidModel("hyper flow input dimensions overflow".to_string())
+        })?;
+    if flow.config.hidden_dims == 0 || flow.config.sample_steps == 0 {
+        return Err(AutomataError::InvalidModel(format!(
+            "hyper flow requires hidden_dims and sample_steps > 0, got {} and {}",
+            flow.config.hidden_dims, flow.config.sample_steps
+        )));
+    }
+    if !flow.config.source_scale.is_finite() || flow.config.source_scale <= 0.0 {
+        return Err(AutomataError::InvalidModel(format!(
+            "hyper flow source_scale must be positive and finite, got {}",
+            flow.config.source_scale
+        )));
+    }
+    let expected = [
+        (
+            "hyper flow w1",
+            flow.config.hidden_dims * input_dims,
+            flow.weights.w1.len(),
+        ),
+        (
+            "hyper flow b1",
+            flow.config.hidden_dims,
+            flow.weights.b1.len(),
+        ),
+        (
+            "hyper flow w2",
+            output_dims * flow.config.hidden_dims,
+            flow.weights.w2.len(),
+        ),
+        ("hyper flow b2", output_dims, flow.weights.b2.len()),
+    ];
+    for (name, expected_len, actual_len) in expected {
+        if actual_len != expected_len {
+            return Err(AutomataError::InvalidModel(format!(
+                "{name} len {actual_len} != {expected_len}"
+            )));
+        }
+    }
+    ensure_finite("hyper flow w1", &flow.weights.w1)?;
+    ensure_finite("hyper flow b1", &flow.weights.b1)?;
+    ensure_finite("hyper flow w2", &flow.weights.w2)?;
+    ensure_finite("hyper flow b2", &flow.weights.b2)?;
+    Ok(())
+}
+
 fn ensure_finite(name: &str, values: &[f32]) -> AutomataResult<()> {
     if values.iter().all(|value| value.is_finite()) {
         return Ok(());
@@ -489,4 +809,122 @@ fn ensure_finite(name: &str, values: &[f32]) -> AutomataResult<()> {
     Err(AutomataError::InvalidArgument(format!(
         "{name} contains non-finite values"
     )))
+}
+
+fn ensure_finite_f64(name: &str, values: &[f64]) -> AutomataResult<()> {
+    if values.iter().all(|value| value.is_finite()) {
+        return Ok(());
+    }
+    Err(AutomataError::InvalidArgument(format!(
+        "{name} contains non-finite values"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn precise_linear_output_predicts_adapter_vector_exactly() {
+        let npa_config = NpaConfig {
+            state_dims: 2,
+            hidden_dims: 3,
+            ..NpaConfig::growing_2d()
+        };
+        let condition_feature_dims =
+            condition_feature_dims_for_encoder(ConditionEncoder2d::DinoVitsClsPatchMean, 0, 0)
+                .unwrap();
+        let hyper_config = HyperNpa2dConfig {
+            condition_encoder: ConditionEncoder2d::DinoVitsClsPatchMean,
+            condition_feature_dims,
+            condition_token_grid_width: 0,
+            condition_token_grid_height: 0,
+            hidden_dims: 2,
+            adapter_rank: 2,
+            adapter_alpha: 2.0,
+            adapter_bias_correction: true,
+            output_activation: HyperNpa2dOutputActivation::Linear,
+            output_scale: 1.0,
+        };
+        let output_dims = NpaLowRankAdapter::parameter_count_for_config_with_bias_correction(
+            &npa_config,
+            2,
+            true,
+        );
+        let mut hyper = HyperNpa2d::zeros(npa_config, hyper_config).unwrap();
+        hyper.weights.b2.fill(123.0);
+
+        let target = (0..output_dims)
+            .map(|idx| (idx as f32 + 1.0) * 0.0001)
+            .collect::<Vec<_>>();
+        let mut precise = HyperNpa2dPreciseWeights::zeros(
+            condition_feature_dims,
+            hyper_config.hidden_dims,
+            output_dims,
+        );
+        for (bias, target) in precise.b2.iter_mut().zip(&target) {
+            *bias = f64::from(*target);
+        }
+        hyper.precise_weights = Some(precise);
+
+        let condition = ConditionImage2d::from_luma(1, 1, vec![0.0])
+            .unwrap()
+            .with_dino_vits_features(vec![0.25; condition_feature_dims])
+            .unwrap();
+        let predicted = hyper.predict_adapter_vector(&condition).unwrap();
+        assert_eq!(predicted, target);
+
+        let adapter = hyper.predict_adapter(&condition).unwrap();
+        assert!(adapter.has_bias_correction());
+        assert_eq!(adapter.to_parameter_vector(), target);
+    }
+
+    #[test]
+    fn flow_head_predicts_adapter_vector_from_dino_token_grid() {
+        let npa_config = NpaConfig {
+            state_dims: 2,
+            hidden_dims: 3,
+            ..NpaConfig::growing_2d()
+        };
+        let condition_feature_dims =
+            condition_feature_dims_for_encoder(ConditionEncoder2d::DinoVitsTokenGrid, 2, 2)
+                .unwrap();
+        let hyper_config = HyperNpa2dConfig {
+            condition_encoder: ConditionEncoder2d::DinoVitsTokenGrid,
+            condition_feature_dims,
+            condition_token_grid_width: 2,
+            condition_token_grid_height: 2,
+            hidden_dims: 2,
+            adapter_rank: 2,
+            adapter_alpha: 2.0,
+            adapter_bias_correction: false,
+            output_activation: HyperNpa2dOutputActivation::Linear,
+            output_scale: 1.0,
+        };
+        let mut hyper = HyperNpa2d::zeros(npa_config, hyper_config).unwrap();
+        let output_dims = hyper.adapter_parameter_count();
+        hyper
+            .set_flow(HyperNpa2dFlow {
+                config: HyperNpa2dFlowConfig {
+                    hidden_dims: 2,
+                    sample_steps: 2,
+                    source_scale: 0.01,
+                    sample_seed: 7,
+                },
+                weights: HyperNpa2dFlowWeights {
+                    w1: vec![0.0; 2 * (condition_feature_dims + 1 + output_dims)],
+                    b1: vec![0.0; 2],
+                    w2: vec![0.0; output_dims * 2],
+                    b2: vec![0.0; output_dims],
+                },
+            })
+            .unwrap();
+        let condition = ConditionImage2d::from_luma(1, 1, vec![0.0])
+            .unwrap()
+            .with_dino_vits_features(vec![0.25; condition_feature_dims])
+            .unwrap();
+        let predicted = hyper.predict_adapter_vector(&condition).unwrap();
+        assert_eq!(predicted.len(), output_dims);
+        assert!(predicted.iter().all(|value| value.is_finite()));
+    }
 }

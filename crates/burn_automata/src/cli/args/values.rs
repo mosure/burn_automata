@@ -81,8 +81,23 @@ pub(crate) enum TrainingDeviceArg {
 pub(crate) enum Hyper2dDirectBasisGpuBackendArg {
     #[value(name = "burn-wgpu", alias = "burn", alias = "wgpu")]
     BurnWgpu,
-    #[value(name = "upstream-python", alias = "python", alias = "torch-cuda")]
+    #[value(
+        name = "legacy-upstream-python",
+        alias = "upstream-python",
+        alias = "python",
+        alias = "torch-cuda"
+    )]
     UpstreamPython,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum Hyper2dAdapterBankBackendArg {
+    #[value(name = "burn-wgpu", alias = "burn", alias = "wgpu", alias = "gpu")]
+    BurnWgpu,
+    #[value(name = "cpu", alias = "host")]
+    Cpu,
+    #[value(name = "linear-solve", alias = "closed-form", alias = "interpolate")]
+    LinearSolve,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
@@ -126,6 +141,18 @@ pub(crate) enum Hyper2dConditionEncoderArg {
     SummaryTokens,
     #[value(name = "dino-vits-cls-patch-mean", alias = "dino")]
     DinoVitsClsPatchMean,
+    #[value(
+        name = "dino-vits-patch-stats",
+        alias = "dino-patch-stats",
+        alias = "dino-stats"
+    )]
+    DinoVitsPatchStats,
+    #[value(
+        name = "dino-vits-token-grid",
+        alias = "dino-token-grid",
+        alias = "dino-tokens"
+    )]
+    DinoVitsTokenGrid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
@@ -397,6 +424,8 @@ impl From<Hyper2dConditionEncoderArg> for ConditionEncoder2d {
         match value {
             Hyper2dConditionEncoderArg::SummaryTokens => Self::SummaryTokens,
             Hyper2dConditionEncoderArg::DinoVitsClsPatchMean => Self::DinoVitsClsPatchMean,
+            Hyper2dConditionEncoderArg::DinoVitsPatchStats => Self::DinoVitsPatchStats,
+            Hyper2dConditionEncoderArg::DinoVitsTokenGrid => Self::DinoVitsTokenGrid,
         }
     }
 }

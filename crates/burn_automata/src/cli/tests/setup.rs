@@ -27,6 +27,53 @@ fn train_source_defaults_to_rollout_local_metadata() {
 }
 
 #[test]
+fn hyper2d_quality_facing_commands_use_safe_training_and_quality_eval_defaults() {
+    let args = CliArgs::try_parse_from(["burn_automata", "train-hyper2d-direct-basis"]).unwrap();
+    let Command::TrainHyper2dDirectBasis {
+        rollout_particles,
+        target_points,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-hyper2d-direct-basis command");
+    };
+    assert_eq!(rollout_particles, 1024);
+    assert_eq!(target_points, 4096);
+
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "validate-hyper2d-direct-basis-oracles",
+        "--shared-base",
+        "shared.bpk",
+        "--adapter-bank",
+        "adapter_bank.json",
+    ])
+    .unwrap();
+    let Command::ValidateHyper2dDirectBasisOracles {
+        rollout_particles,
+        target_points,
+        ..
+    } = args.command
+    else {
+        panic!("expected validate-hyper2d-direct-basis-oracles command");
+    };
+    assert_eq!(rollout_particles, 2048);
+    assert_eq!(target_points, 4096);
+
+    let args = CliArgs::try_parse_from(["burn_automata", "train-hyper2d-adapter-bank"]).unwrap();
+    let Command::TrainHyper2dAdapterBank {
+        rollout_particles,
+        target_points,
+        ..
+    } = args.command
+    else {
+        panic!("expected train-hyper2d-adapter-bank command");
+    };
+    assert_eq!(rollout_particles, 2048);
+    assert_eq!(target_points, 4096);
+}
+
+#[test]
 fn train_zero_update_requires_explicit_flag() {
     let seed = default_train_target_seed(AutomataPreset::Growing2d, None, true);
 

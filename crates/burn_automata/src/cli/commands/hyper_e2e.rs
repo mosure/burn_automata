@@ -23,7 +23,8 @@ mod shared_basis;
 mod sources;
 
 pub(crate) use direct_basis::{
-    run_train_hyper_2d_direct_basis, run_validate_hyper_2d_direct_basis_oracles,
+    run_train_hyper_2d_adapter_bank, run_train_hyper_2d_direct_basis,
+    run_validate_hyper_2d_direct_basis_oracles, run_validate_hyper_2d_psnr_gate,
 };
 
 #[derive(Clone, Debug)]
@@ -262,8 +263,15 @@ pub(crate) fn run_train_hyper_2d_e2e(command: Command) -> Result<(), Box<dyn std
     let condition_features = build_condition_feature_cache(
         &sources,
         condition_encoder,
-        dino_model.as_ref(),
-        dino_image_size,
+        DinoConditionFeatureCacheConfig {
+            model: dino_model.as_ref(),
+            image_size: dino_image_size,
+            batch_size: default_dino_feature_batch_size(),
+            cache_write_interval_batches: default_dino_cache_write_interval_batches(),
+            token_grid_width: condition_token_grid_width,
+            token_grid_height: condition_token_grid_height,
+            cache_path: None,
+        },
     )?;
     if adapter_rows == 0 || adapter_rollout_steps == 0 || adapter_rollouts == 0 {
         return Err(std::io::Error::other(
@@ -529,6 +537,8 @@ pub(crate) fn run_train_hyper_2d_e2e(command: Command) -> Result<(), Box<dyn std
         hidden_dims: hyper_hidden,
         adapter_rank,
         adapter_alpha,
+        adapter_bias_correction: false,
+        output_activation: HyperNpa2dOutputActivation::Tanh,
         output_scale: hyper_output_scale,
     };
     let mut hyper = HyperNpa2d::seeded(base.config.clone(), hyper_config, hyper_seed)?;
@@ -859,15 +869,36 @@ fn train_scratch_targets(
 fn build_condition_feature_cache(
     sources: &[Hyper2dScratchSource],
     encoder: ConditionEncoder2d,
-    dino_model: Option<&PathBuf>,
-    dino_image_size: usize,
+    dino: DinoConditionFeatureCacheConfig<'_>,
 ) -> Result<Hyper2dConditionFeatureCache, Box<dyn std::error::Error>> {
     match encoder {
         ConditionEncoder2d::SummaryTokens => Ok(Hyper2dConditionFeatureCache::new()),
-        ConditionEncoder2d::DinoVitsClsPatchMean => {
-            build_dino_condition_feature_cache(sources, dino_model, dino_image_size)
+        ConditionEncoder2d::DinoVitsClsPatchMean
+        | ConditionEncoder2d::DinoVitsPatchStats
+        | ConditionEncoder2d::DinoVitsTokenGrid => {
+            build_dino_condition_feature_cache(sources, encoder, dino)
         }
     }
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(super) struct DinoConditionFeatureCacheConfig<'a> {
+    pub model: Option<&'a PathBuf>,
+    pub image_size: usize,
+    pub batch_size: usize,
+    pub cache_write_interval_batches: usize,
+    pub token_grid_width: usize,
+    pub token_grid_height: usize,
+    pub cache_path: Option<&'a Path>,
+}
+
+pub(super) const fn default_dino_feature_batch_size() -> usize {
+    if cfg!(feature = "backend_wgpu") { 4 } else { 1 }
+}
+
+pub(super) const fn default_dino_cache_write_interval_batches() -> usize {
+    16
 }
 
 fn resolve_e2e_splits(
@@ -940,28 +971,121 @@ fn descriptors_for_trained(
 
 fn build_dino_condition_feature_cache(
     sources: &[Hyper2dScratchSource],
-    dino_model: Option<&PathBuf>,
-    dino_image_size: usize,
+    encoder: ConditionEncoder2d,
+    dino: DinoConditionFeatureCacheConfig<'_>,
 ) -> Result<Hyper2dConditionFeatureCache, Box<dyn std::error::Error>> {
     #[cfg(feature = "dino")]
     {
-        let model_path = dino_model.ok_or_else(|| {
+        if dino.batch_size == 0 {
+            return Err(
+                std::io::Error::other("DINO feature batch size must be greater than zero").into(),
+            );
+        }
+        if dino.cache_write_interval_batches == 0 {
+            return Err(std::io::Error::other(
+                "DINO cache write interval batches must be greater than zero",
+            )
+            .into());
+        }
+        let model_path = dino.model.ok_or_else(|| {
             std::io::Error::other("--dino-model is required for --condition-encoder dino")
         })?;
-        let encoder = dino::DinoVitsConditionEncoder::load(model_path, dino_image_size)?;
-        let mut cache = Hyper2dConditionFeatureCache::new();
+        let dino_token_grid_width =
+            normalized_dino_token_grid_width(encoder, dino.token_grid_width);
+        let dino_token_grid_height =
+            normalized_dino_token_grid_height(encoder, dino.token_grid_height);
+        let encoder_label = condition_encoder_label_with_grid(
+            encoder,
+            dino_token_grid_width,
+            dino_token_grid_height,
+        );
+        let expected_feature_dims = condition_feature_dims_for_encoder(
+            encoder,
+            dino_token_grid_width,
+            dino_token_grid_height,
+        )?;
+        let mut cache = match dino.cache_path {
+            Some(path) if path.exists() => {
+                read_dino_condition_feature_cache(path, &encoder_label, expected_feature_dims)?
+            }
+            _ => Hyper2dConditionFeatureCache::new(),
+        };
+        let mut missing = Vec::new();
         for source in sources {
             if cache.contains_key(&source.condition_path) {
                 continue;
             }
-            let condition = load_condition_image_2d(&source.condition_path)?;
-            cache.insert(source.condition_path.clone(), encoder.encode(&condition)?);
+            missing.push(source);
+        }
+        if !missing.is_empty() {
+            let dino_encoder = dino::DinoVitsConditionEncoder::load(model_path, dino.image_size)?;
+            let missing_len = missing.len();
+            for (batch_idx, batch) in missing.chunks(dino.batch_size).enumerate() {
+                let loaded = batch
+                    .iter()
+                    .map(|source| {
+                        Ok((
+                            source.condition_path.clone(),
+                            load_condition_image_2d(&source.condition_path)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+                let conditions = loaded
+                    .iter()
+                    .map(|(_, condition)| condition.clone())
+                    .collect::<Vec<_>>();
+                let features = dino_encoder.encode_batch(
+                    &conditions,
+                    encoder,
+                    dino_token_grid_width,
+                    dino_token_grid_height,
+                )?;
+                if features.len() != loaded.len() {
+                    return Err(std::io::Error::other(
+                        "DINO batch encoder returned wrong row count",
+                    )
+                    .into());
+                }
+                if let Some((_, features)) = loaded.first().zip(features.first())
+                    && features.len() != expected_feature_dims
+                {
+                    return Err(std::io::Error::other(format!(
+                        "DINO encoder returned {} features for {}; expected {}",
+                        features.len(),
+                        loaded[0].0.display(),
+                        expected_feature_dims
+                    ))
+                    .into());
+                }
+                for ((path, _), features) in loaded.into_iter().zip(features) {
+                    cache.insert(path, features);
+                }
+                let should_write_cache = (batch_idx + 1)
+                    .is_multiple_of(dino.cache_write_interval_batches)
+                    || (batch_idx + 1) * dino.batch_size >= missing_len;
+                if let Some(path) = dino.cache_path
+                    && should_write_cache
+                {
+                    write_dino_condition_feature_cache(
+                        path,
+                        model_path,
+                        dino.image_size,
+                        &encoder_label,
+                        &cache,
+                    )?;
+                }
+                eprintln!(
+                    "DINO feature cache {}/{}",
+                    ((batch_idx + 1) * dino.batch_size).min(missing_len),
+                    missing_len
+                );
+            }
         }
         Ok(cache)
     }
     #[cfg(not(feature = "dino"))]
     {
-        let _ = (sources, dino_model, dino_image_size);
+        let _ = (sources, encoder, dino);
         Err(std::io::Error::other(
             "--condition-encoder dino requires building burn_automata with --features dino",
         )
@@ -969,10 +1093,121 @@ fn build_dino_condition_feature_cache(
     }
 }
 
+#[cfg(feature = "dino")]
+#[derive(Serialize, Deserialize)]
+struct DinoConditionFeatureCacheFile {
+    encoder: String,
+    dino_model: String,
+    dino_image_size: usize,
+    entries: Vec<DinoConditionFeatureCacheEntry>,
+}
+
+#[cfg(feature = "dino")]
+#[derive(Serialize, Deserialize)]
+struct DinoConditionFeatureCacheEntry {
+    path: PathBuf,
+    features: Vec<f32>,
+}
+
+#[cfg(feature = "dino")]
+fn read_dino_condition_feature_cache(
+    path: &Path,
+    expected_encoder: &str,
+    expected_feature_dims: usize,
+) -> Result<Hyper2dConditionFeatureCache, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let file: DinoConditionFeatureCacheFile = serde_json::from_str(&text)?;
+    if file.encoder != expected_encoder {
+        return Err(std::io::Error::other(format!(
+            "DINO feature cache {} uses encoder {}; expected {}",
+            path.display(),
+            file.encoder,
+            expected_encoder
+        ))
+        .into());
+    }
+    let mut cache = Hyper2dConditionFeatureCache::new();
+    for entry in file.entries {
+        if entry.features.len() != expected_feature_dims {
+            return Err(std::io::Error::other(format!(
+                "DINO feature cache entry {} has {} features; expected {}",
+                entry.path.display(),
+                entry.features.len(),
+                expected_feature_dims
+            ))
+            .into());
+        }
+        cache.insert(entry.path, entry.features);
+    }
+    Ok(cache)
+}
+
+#[cfg(feature = "dino")]
+fn write_dino_condition_feature_cache(
+    path: &Path,
+    model_path: &Path,
+    dino_image_size: usize,
+    encoder: &str,
+    cache: &Hyper2dConditionFeatureCache,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut entries = cache
+        .iter()
+        .map(|(path, features)| DinoConditionFeatureCacheEntry {
+            path: path.clone(),
+            features: features.clone(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let file = DinoConditionFeatureCacheFile {
+        encoder: encoder.to_string(),
+        dino_model: model_path.display().to_string(),
+        dino_image_size,
+        entries,
+    };
+    write_pretty_json(path, &file)
+}
+
 fn condition_encoder_label(encoder: ConditionEncoder2d) -> &'static str {
     match encoder {
         ConditionEncoder2d::SummaryTokens => "summary-pooled-token-grid-v1",
         ConditionEncoder2d::DinoVitsClsPatchMean => "dino-vits-cls-patch-mean-v1",
+        ConditionEncoder2d::DinoVitsPatchStats => "dino-vits-patch-stats-v1",
+        ConditionEncoder2d::DinoVitsTokenGrid => "dino-vits-token-grid-v1",
+    }
+}
+
+#[allow(dead_code)]
+fn condition_encoder_label_with_grid(
+    encoder: ConditionEncoder2d,
+    token_grid_width: usize,
+    token_grid_height: usize,
+) -> String {
+    match encoder {
+        ConditionEncoder2d::DinoVitsTokenGrid => {
+            format!("dino-vits-token-grid-{token_grid_width}x{token_grid_height}-v1")
+        }
+        _ => condition_encoder_label(encoder).to_string(),
+    }
+}
+
+#[allow(dead_code)]
+fn normalized_dino_token_grid_width(encoder: ConditionEncoder2d, requested: usize) -> usize {
+    if matches!(encoder, ConditionEncoder2d::DinoVitsTokenGrid) && requested == 0 {
+        crate::DEFAULT_DINO_VITS_TOKEN_GRID_WIDTH
+    } else {
+        requested
+    }
+}
+
+#[allow(dead_code)]
+fn normalized_dino_token_grid_height(encoder: ConditionEncoder2d, requested: usize) -> usize {
+    if matches!(encoder, ConditionEncoder2d::DinoVitsTokenGrid) && requested == 0 {
+        crate::DEFAULT_DINO_VITS_TOKEN_GRID_HEIGHT
+    } else {
+        requested
     }
 }
 
