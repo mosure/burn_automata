@@ -8,7 +8,7 @@ dataset = "illustration"
 split = "train"
 cache_dir = "data/omnisvg"
 offset = 0
-limit = 10000
+limit = 1000
 page_size = 100
 download = false
 refresh = false
@@ -19,11 +19,11 @@ holdout_stride = 10
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_omnisvg_10k_burn_wgpu_adamw_batch64_600_300_300_eval1000_oracle2x2"
+output_dir = "artifacts/hyper2d_omnisvg_1k_p64_refine_lr1e4_epoch_sampler"
 
 [training]
 device = "gpu"
-steps = 600
+steps = 300
 report_interval = 100
 example_batch_size = 16
 tbptt_chunk_steps = 4
@@ -68,33 +68,33 @@ per_parameter_grad_normalization = true
 base_learning_rate = 1.0e-4
 base_weight_decay = 0.0
 base_grad_clip_norm = 1.0
-adapter_learning_rate = 1.0e-3
+adapter_learning_rate = 5.0e-4
 adapter_weight_decay = 0.0
 adapter_grad_clip_norm = 1.0
 adapter_l2 = 0.0
 
 [train_refine]
-steps = 300
+steps = 400
 batch_size = 16
-learning_rate = 1.0e-3
+learning_rate = 1.0e-4
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
 [holdout_adapter]
-steps = 300
+steps = 0
 batch_size = 16
-learning_rate = 1.0e-3
+learning_rate = 1.0e-4
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
 [eval]
-examples = 1000
+examples = 64
 seed = 42
 
 [oracle]
 train_examples = 2
 holdout_examples = 2
-epochs = 2048
+epochs = 1024
 repetitions = 1
 report_interval = 256
 batch_size = 4

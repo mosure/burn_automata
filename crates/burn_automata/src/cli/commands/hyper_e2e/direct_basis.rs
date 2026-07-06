@@ -21,7 +21,7 @@ pub(crate) use psnr_gate::run_validate_hyper_2d_psnr_gate;
 use oracle::evaluate_direct_basis_oracles;
 
 const DEFAULT_WGPU_VRAM_BUDGET_GB: f32 = 64.0;
-const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 48;
+const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 160;
 
 #[derive(Clone)]
 struct DirectBasisExample {
@@ -3008,10 +3008,16 @@ mod tests {
     }
 
     #[test]
-    fn burn_wgpu_preflight_accepts_staged_512_particle_training() {
+    fn burn_wgpu_preflight_accepts_staged_384_particle_training() {
         let base_config = NpaConfig::growing_2d();
-        let train_example = test_direct_basis_example(512, &base_config);
-        let config = test_direct_basis_train_config(1, 512);
+        let train_example = test_direct_basis_example(384, &base_config);
+        let config = DirectBasisTrainConfig {
+            loss_config: Target2dLossConfig {
+                image_size: 96,
+                ..Target2dLossConfig::default()
+            },
+            ..test_direct_basis_train_config(1, 384)
+        };
         let report = validate_direct_basis_burn_wgpu_preflight(
             &[train_example],
             &[],
@@ -3025,7 +3031,7 @@ mod tests {
         assert!(report.dense_train_particle_cap_passed);
         assert!(report.memory_budget_passed);
         assert!(report.gpu_memory_budget_passed);
-        assert_eq!(report.max_training_particles, 512);
+        assert_eq!(report.max_training_particles, 384);
     }
 
     #[test]
@@ -3040,6 +3046,31 @@ mod tests {
         };
         let err = validate_direct_basis_burn_wgpu_preflight(
             &train_examples,
+            &[],
+            &base_config,
+            config,
+            DirectBasisTrainConfig { steps: 0, ..config },
+            DirectBasisTrainConfig { steps: 0, ..config },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("peak VRAM"));
+    }
+
+    #[test]
+    fn burn_wgpu_preflight_rejects_unsafe_512_particle_refine_vram() {
+        let base_config = NpaConfig::growing_2d();
+        let train_example = test_direct_basis_example(512, &base_config);
+        let config = DirectBasisTrainConfig {
+            loss_config: Target2dLossConfig {
+                image_size: 96,
+                ..Target2dLossConfig::default()
+            },
+            ..test_direct_basis_train_config(1, 512)
+        };
+        let err = validate_direct_basis_burn_wgpu_preflight(
+            &[train_example],
             &[],
             &base_config,
             config,

@@ -21,8 +21,17 @@ preflight. Dense all-pairs autodiff training is capped at
 Training recipes also set `gpu_memory_budget_gb`; the preflight estimates the
 live WGPU autodiff graph separately from cached target tensors and rejects
 unsafe phase batches before allocation. The observed 512-particle batch-4
-dense path exhausted a 98 GB GPU, so the staged 512 recipe uses batch 1 until
-the dense backward path is fused or allocator lifetime is fixed.
+dense path exhausted a 98 GB GPU, and a full 1k 512-particle batch-1 refine run
+crossed the 64 GiB experiment budget, so the staged 384 recipe is the current
+highest full-training curriculum target until the dense backward path is fused
+or allocator lifetime is fixed.
+
+Training batches use a shuffled epoch sampler rather than independent random
+draws. Reports include per-phase adapter update coverage so 1k/10k quality
+runs can distinguish optimizer/objective failure from undersampled adapters.
+Adapter-only phases evaluate the phase-initial state for checkpoint selection;
+if refine regresses, the incoming base/adapters are preserved instead of being
+overwritten by the least-bad refine checkpoint.
 Recipes with `2048` rollout particles are validation/evaluation recipes only:
 their direct-basis training phases are set to zero, and nonzero 2048 training is
 rejected before WGPU allocation.
@@ -46,6 +55,14 @@ ratios pass the direct-basis gate. Paper-quality reports also require at least
 2048 rollout particles and 2048 target samples; lower-count pilot runs are
 reported as not quality-ready even if their oracle ratio is close.
 
+Latest diagnostic: `omnisvg_1k_p64_refine_lr1e4.toml` completed with full train
+adapter coverage (`min_updates=4`, zero missing) and refine coverage
+(`min_updates=6`, zero missing). The best checkpoint remained the base-training
+step 300 loss (`5.8024`) because lower-LR adapter-only refine still regressed.
+Low-particle oracle ratios on 2 train / 2 holdout samples were close
+(`1.05x` train, `1.07x` holdout), but this is not quality-ready because it uses
+64 rollout particles, 256 target points, and too few oracle samples.
+
 See `docs/burn_first_cleanup.md` for the current Burn-first cleanup boundary and
 the gates required before removing the legacy upstream-Python training backend.
 
@@ -54,10 +71,12 @@ the gates required before removing the legacy upstream-Python training backend.
 | Config | Purpose |
 | --- | --- |
 | `smoke_particles64_tbptt.toml` | Tiny memory-capped Burn/WGPU TBPTT training smoke for launcher/preflight/regression checks. |
-| `smoke_particles512_tbptt.toml` | Tiny 512-particle, batch-1 Burn/WGPU smoke for mid-particle preflight/TBPTT coverage. |
+| `smoke_particles512_tbptt.toml` | Tiny 512-particle, batch-1 Burn/WGPU smoke for high-VRAM preflight/TBPTT coverage; requires a 96 GiB GPU budget. |
 | `smoke_quality_2048.toml` | Bounded 2048-particle/2048-target-sample eval smoke with direct training disabled; not a quality result. |
-| `omnisvg_1k.toml` | 1k Burn/WGPU low-particle development run with explicit TBPTT and memory caps; not paper-quality. |
-| `omnisvg_1k_staged_particles512_tbptt.toml` | 1k staged mid-particle run for throughput/quality scaling before any 2048 validation. |
+| `omnisvg_1k.toml` | 1k Burn/WGPU low-particle development run with sampled report-time eval and explicit memory caps; not paper-quality. |
+| `omnisvg_1k_p64_refine_lr1e4.toml` | 1k low-particle diagnostic with epoch sampling and lower adapter-refine LR to test optimizer stability. |
+| `omnisvg_1k_staged_particles384_tbptt.toml` | 1k staged mid-particle run with lightweight report-time eval before separate 2048 validation. |
+| `omnisvg_1k_staged_particles512_tbptt.toml` | Guarded 512-particle staging recipe; expected to fail preflight under the default 64 GiB experiment budget. |
 | `omnisvg_1k_quality_2048.toml` | 1k quality-scale validation recipe with 2048 rollout particles and 2048 target samples; direct training disabled on the dense path. |
 | `omnisvg_10k_pilot.toml` | 10k rank-16, 64-particle pilot; not paper-quality. |
 | `omnisvg_10k_quality_2048.toml` | 10k quality-scale validation recipe with 2048 rollout particles and 2048 target samples; direct training disabled on the dense path. |

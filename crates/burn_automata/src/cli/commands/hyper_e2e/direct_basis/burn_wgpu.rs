@@ -1,12 +1,12 @@
 #[cfg(feature = "backend_wgpu")]
 mod imp {
-    use std::{fs, time::Instant};
+    use std::{fs, process::Command, time::Instant};
 
     use burn::{
         backend::{Autodiff, Wgpu},
         tensor::{Device, Tensor, TensorData, activation::relu},
     };
-    use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+    use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
     use serde::Serialize;
     use serde_json::json;
 
@@ -145,6 +145,24 @@ mod imp {
         budget_bytes: Option<u64>,
     }
 
+    #[derive(Clone, Serialize)]
+    struct GpuMemorySnapshot {
+        label: String,
+        used_bytes: Option<u64>,
+        total_bytes: Option<u64>,
+        budget_bytes: Option<u64>,
+    }
+
+    #[derive(Clone, Serialize)]
+    struct SampleUpdateStats {
+        examples: usize,
+        total_updates: usize,
+        min_updates: usize,
+        max_updates: usize,
+        mean_updates: f32,
+        zero_update_examples: usize,
+    }
+
     pub(crate) fn train_direct_basis_burn_wgpu(
         base: &mut NpaModel,
         train_examples: &mut [DirectBasisExample],
@@ -160,7 +178,9 @@ mod imp {
             .into());
         }
         let mut memory_snapshots = Vec::new();
+        let mut gpu_memory_snapshots = Vec::new();
         memory_snapshots.push(check_process_memory_budget("start", train_config)?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget("start", train_config)?);
         let device = BurnDevice::default();
         let mut params = BurnBaseParams::from_model(base, &device)?;
         let mut train_adapters = train_examples
@@ -169,6 +189,10 @@ mod imp {
             .collect::<AutomataResult<Vec<_>>>()?;
         let train_targets = burn_targets(train_examples, train_config, &device)?;
         memory_snapshots.push(check_process_memory_budget(
+            "after_train_tensor_cache",
+            train_config,
+        )?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget(
             "after_train_tensor_cache",
             train_config,
         )?);
@@ -184,6 +208,7 @@ mod imp {
             "after_train_phase",
             train_config,
         )?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget("after_train_phase", train_config)?);
         params.write_to_model(base)?;
         let train_refine_phase = run_phase(
             &mut params,
@@ -194,6 +219,10 @@ mod imp {
             "train-refine",
         )?;
         memory_snapshots.push(check_process_memory_budget(
+            "after_train_refine_phase",
+            train_refine_config,
+        )?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget(
             "after_train_refine_phase",
             train_refine_config,
         )?);
@@ -208,6 +237,10 @@ mod imp {
             "after_holdout_tensor_cache",
             holdout_config,
         )?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget(
+            "after_holdout_tensor_cache",
+            holdout_config,
+        )?);
         let holdout_phase = run_phase(
             &mut params,
             &mut holdout_adapters,
@@ -217,6 +250,10 @@ mod imp {
             "holdout",
         )?;
         memory_snapshots.push(check_process_memory_budget(
+            "after_holdout_phase",
+            holdout_config,
+        )?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget(
             "after_holdout_phase",
             holdout_config,
         )?);
@@ -243,7 +280,7 @@ mod imp {
             "train_final_dense_loss": train_phase.history.last().map(|entry| entry.loss),
             "train_refine_final_dense_loss": train_refine_phase.history.last().map(|entry| entry.loss),
             "holdout_final_dense_loss": holdout_phase.history.last().map(|entry| entry.loss),
-            "checkpoint_selection": "restore_best_reported_eval_loss",
+            "checkpoint_selection": "restore_best_reported_eval_loss_including_phase_initial_state",
             "optimizer": "adamw",
             "optimizer_cli_fields": "base/adapter learning_rate, weight_decay, grad_clip_norm",
             "adamw_beta1": 0.9,
@@ -261,30 +298,29 @@ mod imp {
             "system_memory_budget_gb": train_config.system_memory_budget_gb,
             "gpu_memory_budget_gb": train_config.gpu_memory_budget_gb,
             "process_memory_snapshots": memory_snapshots,
+            "gpu_memory_snapshots": gpu_memory_snapshots,
             "evaluation": "bounded_tbptt_chunked_loss_vectors_state_detach",
             "train_mean_adapter_updates_per_sample": mean_updates_per_sample(
                 train_config.steps,
                 train_config.example_batch_size,
                 train_examples.len(),
             ),
+            "train_adapter_update_coverage": train_phase.sample_updates,
             "train_refine_mean_adapter_updates_per_sample": mean_updates_per_sample(
                 train_refine_config.steps,
                 train_refine_config.example_batch_size,
                 train_examples.len(),
             ),
+            "train_refine_adapter_update_coverage": train_refine_phase.sample_updates,
             "holdout_mean_adapter_updates_per_sample": mean_updates_per_sample(
                 holdout_config.steps,
                 holdout_config.example_batch_size,
                 holdout_examples.len(),
             ),
+            "holdout_adapter_update_coverage": holdout_phase.sample_updates,
         });
-        let (best_train_loss, best_train_step) = match train_refine_phase.best_loss {
-            Some(loss) => (
-                Some(loss),
-                train_config.steps + train_refine_phase.best_step,
-            ),
-            None => (train_phase.best_loss, train_phase.best_step),
-        };
+        let (best_train_loss, best_train_step) =
+            best_training_checkpoint(train_config.steps, &train_phase, &train_refine_phase);
         Ok(BurnWgpuDirectBasisOutput {
             backend: BACKEND,
             device: "wgpu-default".to_string(),
@@ -301,6 +337,7 @@ mod imp {
         history: Vec<CliHyper2dDirectBasisHistoryEntry>,
         best_loss: Option<f32>,
         best_step: usize,
+        sample_updates: SampleUpdateStats,
     }
 
     fn run_phase(
@@ -316,14 +353,32 @@ mod imp {
                 history: Vec::new(),
                 best_loss: None,
                 best_step: 0,
+                sample_updates: sample_update_stats(&vec![0; targets.len()]),
             });
         }
         let mut rng = StdRng::seed_from_u64(config.seed);
+        let mut sampler =
+            PhaseBatchSampler::new(targets.len(), config.example_batch_size, &mut rng);
+        let mut sample_update_counts = vec![0usize; targets.len()];
         let mut history = Vec::new();
         let mut best_loss = None;
         let mut best_step = 0;
         let mut best_params = None::<BurnBaseParams>;
         let mut best_adapters = None::<Vec<BurnAdapterParams>>;
+        if config.eval_interval > 0
+            && let Some(eval_loss) = evaluate_targets(
+                params,
+                adapters,
+                targets,
+                config,
+                config.eval_examples,
+                config.eval_seed,
+            )?
+        {
+            best_loss = Some(eval_loss.mean_total_loss);
+            best_params = update_base.then(|| params.clone());
+            best_adapters = Some(adapters.to_vec());
+        }
         let mut base_optimizer = BurnBaseAdamWState::zeros_like(params);
         let mut adapter_optimizers = adapters
             .iter()
@@ -335,13 +390,16 @@ mod imp {
             let should_eval = config.eval_interval > 0
                 && (step == config.steps || step.is_multiple_of(config.eval_interval.max(1)));
             let started = Instant::now();
-            let indices = sample_indices(targets.len(), config.example_batch_size, &mut rng);
+            let indices = sampler.next_batch(&mut rng);
             let step_seed = config
                 .seed
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9));
             if indices.is_empty() {
                 return Err(std::io::Error::other("Burn direct-basis batch was empty").into());
             };
+            for &idx in &indices {
+                sample_update_counts[idx] = sample_update_counts[idx].saturating_add(1);
+            }
             let stats = train_step_tbptt(
                 params,
                 adapters,
@@ -422,6 +480,8 @@ mod imp {
                     &format!("{phase_label}:report_step:{step}"),
                     config,
                 )?;
+                let _ =
+                    check_gpu_memory_budget(&format!("{phase_label}:report_step:{step}"), config)?;
             }
         }
         if let Some(saved) = best_params {
@@ -434,7 +494,33 @@ mod imp {
             history,
             best_loss,
             best_step,
+            sample_updates: sample_update_stats(&sample_update_counts),
         })
+    }
+
+    fn best_training_checkpoint(
+        train_steps: usize,
+        train_phase: &BurnPhaseReport,
+        train_refine_phase: &BurnPhaseReport,
+    ) -> (Option<f32>, usize) {
+        let train_best = train_phase
+            .best_loss
+            .map(|loss| (loss, train_phase.best_step));
+        let refine_best = train_refine_phase
+            .best_loss
+            .map(|loss| (loss, train_steps + train_refine_phase.best_step));
+        match (train_best, refine_best) {
+            (Some(train), Some(refine)) => {
+                if refine.0 < train.0 {
+                    (Some(refine.0), refine.1)
+                } else {
+                    (Some(train.0), train.1)
+                }
+            }
+            (Some(train), None) => (Some(train.0), train.1),
+            (None, Some(refine)) => (Some(refine.0), refine.1),
+            (None, None) => (None, 0),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2829,23 +2915,83 @@ mod imp {
         Ok(())
     }
 
-    fn sample_indices(len: usize, requested: usize, rng: &mut StdRng) -> Vec<usize> {
-        let count = if requested == 0 {
-            len
-        } else {
-            requested.min(len)
-        };
-        if count.saturating_mul(4) < len {
-            let mut indices = std::collections::BTreeSet::new();
-            while indices.len() < count {
-                indices.insert(rng.random_range(0..len));
+    struct PhaseBatchSampler {
+        len: usize,
+        batch_size: usize,
+        order: Vec<usize>,
+        cursor: usize,
+    }
+
+    impl PhaseBatchSampler {
+        fn new(len: usize, requested: usize, rng: &mut StdRng) -> Self {
+            let batch_size = if requested == 0 {
+                len
+            } else {
+                requested.min(len)
+            };
+            let mut order = (0..len).collect::<Vec<_>>();
+            order.shuffle(rng);
+            Self {
+                len,
+                batch_size,
+                order,
+                cursor: 0,
             }
-            return indices.into_iter().collect();
         }
-        let mut indices = (0..len).collect::<Vec<_>>();
-        indices.shuffle(rng);
-        indices.truncate(count);
-        indices
+
+        fn next_batch(&mut self, rng: &mut StdRng) -> Vec<usize> {
+            if self.len == 0 || self.batch_size == 0 {
+                return Vec::new();
+            }
+            if self.batch_size >= self.len {
+                let mut indices = (0..self.len).collect::<Vec<_>>();
+                indices.shuffle(rng);
+                return indices;
+            }
+
+            let mut indices = Vec::with_capacity(self.batch_size);
+            while indices.len() < self.batch_size {
+                if self.cursor >= self.order.len() {
+                    self.reshuffle_excluding(rng, &indices);
+                }
+                let idx = self.order[self.cursor];
+                self.cursor += 1;
+                if !indices.contains(&idx) {
+                    indices.push(idx);
+                }
+            }
+            indices
+        }
+
+        fn reshuffle_excluding(&mut self, rng: &mut StdRng, exclude: &[usize]) {
+            self.order = (0..self.len)
+                .filter(|idx| !exclude.contains(idx))
+                .collect::<Vec<_>>();
+            self.order.shuffle(rng);
+            self.cursor = 0;
+        }
+    }
+
+    fn sample_update_stats(counts: &[usize]) -> SampleUpdateStats {
+        if counts.is_empty() {
+            return SampleUpdateStats {
+                examples: 0,
+                total_updates: 0,
+                min_updates: 0,
+                max_updates: 0,
+                mean_updates: 0.0,
+                zero_update_examples: 0,
+            };
+        }
+        let total_updates = counts.iter().sum::<usize>();
+        SampleUpdateStats {
+            examples: counts.len(),
+            total_updates,
+            min_updates: counts.iter().copied().min().unwrap_or(0),
+            max_updates: counts.iter().copied().max().unwrap_or(0),
+            mean_updates: total_updates as f32 / counts.len() as f32,
+            zero_update_examples: counts.iter().filter(|updates| **updates == 0).count(),
+        }
     }
 
     fn loss_scalars(loss: &BurnLossTensors) -> AutomataResult<BurnLossScalars> {
@@ -3093,12 +3239,133 @@ mod imp {
         })
     }
 
+    fn check_gpu_memory_budget(
+        label: &str,
+        config: DirectBasisTrainConfig,
+    ) -> Result<GpuMemorySnapshot, Box<dyn std::error::Error>> {
+        let budget_bytes = config.gpu_memory_budget_gb.map(memory_budget_gb_to_bytes);
+        let (used_bytes, total_bytes) = current_nvidia_gpu_memory_bytes();
+        let snapshot = GpuMemorySnapshot {
+            label: label.to_string(),
+            used_bytes,
+            total_bytes,
+            budget_bytes,
+        };
+        if let (Some(used_bytes), Some(budget_bytes)) = (snapshot.used_bytes, snapshot.budget_bytes)
+            && used_bytes > budget_bytes
+        {
+            return Err(std::io::Error::other(format!(
+                "Burn/WGPU direct-basis GPU memory budget exceeded at {label}: used={:.2} GiB budget={:.2} GiB",
+                bytes_to_gib(used_bytes),
+                bytes_to_gib(budget_bytes)
+            ))
+            .into());
+        }
+        Ok(snapshot)
+    }
+
+    fn current_nvidia_gpu_memory_bytes() -> (Option<u64>, Option<u64>) {
+        let output = Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .ok();
+        let Some(output) = output else {
+            return (None, None);
+        };
+        if !output.status.success() {
+            return (None, None);
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = text.lines().next() else {
+            return (None, None);
+        };
+        let mut fields = line.split(',').map(str::trim);
+        let used_mib = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let total_mib = fields.next().and_then(|value| value.parse::<u64>().ok());
+        (
+            used_mib.map(|mib| mib.saturating_mul(1024 * 1024)),
+            total_mib.map(|mib| mib.saturating_mul(1024 * 1024)),
+        )
+    }
+
     fn memory_budget_gb_to_bytes(gb: f32) -> u64 {
         (gb as f64 * 1024.0 * 1024.0 * 1024.0).round() as u64
     }
 
     fn bytes_to_gib(bytes: u64) -> f64 {
         bytes as f64 / 1024.0 / 1024.0 / 1024.0
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn phase_batch_sampler_covers_all_examples_across_epoch() {
+            let mut rng = StdRng::seed_from_u64(7);
+            let mut sampler = PhaseBatchSampler::new(10, 3, &mut rng);
+            let mut counts = [0usize; 10];
+            for _ in 0..4 {
+                let batch = sampler.next_batch(&mut rng);
+                assert_eq!(batch.len(), 3);
+                let mut sorted = batch.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(sorted.len(), batch.len());
+                for idx in batch {
+                    counts[idx] += 1;
+                }
+            }
+
+            assert!(counts.iter().all(|count| *count > 0));
+            let stats = sample_update_stats(&counts);
+            assert_eq!(stats.zero_update_examples, 0);
+            assert_eq!(stats.total_updates, 12);
+        }
+
+        #[test]
+        fn phase_batch_sampler_full_batch_returns_each_example_once() {
+            let mut rng = StdRng::seed_from_u64(11);
+            let mut sampler = PhaseBatchSampler::new(8, 0, &mut rng);
+            let mut batch = sampler.next_batch(&mut rng);
+            batch.sort_unstable();
+
+            assert_eq!(batch, (0..8).collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn best_training_checkpoint_keeps_base_when_refine_regresses() {
+            let train_phase = test_phase(Some(5.8), 300);
+            let train_refine_phase = test_phase(Some(6.1), 0);
+
+            let (loss, step) = best_training_checkpoint(300, &train_phase, &train_refine_phase);
+
+            assert_eq!(loss, Some(5.8));
+            assert_eq!(step, 300);
+        }
+
+        #[test]
+        fn best_training_checkpoint_offsets_better_refine_step() {
+            let train_phase = test_phase(Some(5.8), 300);
+            let train_refine_phase = test_phase(Some(4.9), 120);
+
+            let (loss, step) = best_training_checkpoint(300, &train_phase, &train_refine_phase);
+
+            assert_eq!(loss, Some(4.9));
+            assert_eq!(step, 420);
+        }
+
+        fn test_phase(best_loss: Option<f32>, best_step: usize) -> BurnPhaseReport {
+            BurnPhaseReport {
+                history: Vec::new(),
+                best_loss,
+                best_step,
+                sample_updates: sample_update_stats(&[]),
+            }
+        }
     }
 }
 

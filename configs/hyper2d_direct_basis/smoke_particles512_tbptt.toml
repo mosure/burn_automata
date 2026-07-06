@@ -30,7 +30,7 @@ tbptt_chunk_steps = 4
 eval_interval = 1
 eval_batch_size = 1
 system_memory_budget_gb = 12.0
-gpu_memory_budget_gb = 64.0
+gpu_memory_budget_gb = 96.0
 max_dense_train_particles = 1024
 
 [gpu]

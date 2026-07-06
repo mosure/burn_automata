@@ -19,13 +19,13 @@ holdout_stride = 10
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_omnisvg_1k_burn_wgpu_adamw_train_refine1600_holdout1e3_full_eval_oracle2x2"
+output_dir = "artifacts/hyper2d_omnisvg_1k_burn_wgpu_adamw_train_refine1600_holdout1e3_sampled_eval_oracle2x2"
 
 [training]
 device = "gpu"
 steps = 300
 report_interval = 100
-example_batch_size = 64
+example_batch_size = 16
 tbptt_chunk_steps = 4
 eval_interval = 100
 eval_batch_size = 1
@@ -75,20 +75,20 @@ adapter_l2 = 0.0
 
 [train_refine]
 steps = 1600
-batch_size = 64
+batch_size = 16
 learning_rate = 1.0e-3
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
 [holdout_adapter]
 steps = 800
-batch_size = 64
+batch_size = 16
 learning_rate = 1.0e-3
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
 [eval]
-examples = 0
+examples = 64
 seed = 42
 
 [oracle]

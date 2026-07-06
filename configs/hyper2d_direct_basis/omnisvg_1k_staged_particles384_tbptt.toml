@@ -8,7 +8,7 @@ dataset = "illustration"
 split = "train"
 cache_dir = "data/omnisvg"
 offset = 0
-limit = 10000
+limit = 1000
 page_size = 100
 download = false
 refresh = false
@@ -19,15 +19,15 @@ holdout_stride = 10
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_omnisvg_10k_burn_wgpu_adamw_batch64_600_300_300_eval1000_oracle2x2"
+output_dir = "artifacts/hyper2d_omnisvg_1k_particles384_tbptt"
 
 [training]
 device = "gpu"
-steps = 600
-report_interval = 100
-example_batch_size = 16
+steps = 160
+report_interval = 80
+example_batch_size = 1
 tbptt_chunk_steps = 4
-eval_interval = 100
+eval_interval = 80
 eval_batch_size = 1
 system_memory_budget_gb = 24.0
 gpu_memory_budget_gb = 64.0
@@ -44,17 +44,17 @@ rank = 16
 alpha = 16.0
 
 [rollout]
-particles = 64
-steps = 8
+particles = 384
+steps = 16
 update_prob = 0.5
 seed = 42
 base_seed = 42
 seed_mode = "uniform-circle"
 
 [target]
-points = 256
+points = 1024
 threshold = 0.05
-loss_image_size = 64
+loss_image_size = 96
 splat_sigma = 1.0
 splat_loss_weight = 2.0
 color_loss_weight = 5.0
@@ -65,40 +65,40 @@ bound_regularizer_weight = 100.0
 
 [optimizer]
 per_parameter_grad_normalization = true
-base_learning_rate = 1.0e-4
+base_learning_rate = 5.0e-5
 base_weight_decay = 0.0
 base_grad_clip_norm = 1.0
-adapter_learning_rate = 1.0e-3
+adapter_learning_rate = 5.0e-4
 adapter_weight_decay = 0.0
 adapter_grad_clip_norm = 1.0
 adapter_l2 = 0.0
 
 [train_refine]
-steps = 300
-batch_size = 16
-learning_rate = 1.0e-3
+steps = 320
+batch_size = 1
+learning_rate = 5.0e-4
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
 [holdout_adapter]
-steps = 300
-batch_size = 16
-learning_rate = 1.0e-3
+steps = 160
+batch_size = 1
+learning_rate = 5.0e-4
 weight_decay = 0.0
 grad_clip_norm = 1.0
 
 [eval]
-examples = 1000
+examples = 16
 seed = 42
 
 [oracle]
 train_examples = 2
 holdout_examples = 2
-epochs = 2048
+epochs = 512
 repetitions = 1
-report_interval = 256
-batch_size = 4
-pool_size = 128
+report_interval = 128
+batch_size = 2
+pool_size = 512
 learning_rate = 5.0e-4
 weight_decay = 0.0
 grad_clip_norm = 1.0
