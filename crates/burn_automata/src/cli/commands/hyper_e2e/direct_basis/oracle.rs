@@ -107,24 +107,28 @@ fn evaluate_direct_basis_oracle_entry(
         model_output_dir,
     } = context;
     let eval_seed = seed.wrapping_add(idx as u64);
-    let shared_loss = evaluate_direct_basis_example(
+    let eval = EvalConfig {
+        particle_count: example
+            .source
+            .particles
+            .unwrap_or(eval_config.rollout_particles),
+        rollout_steps: eval_config.rollout_steps,
+        update_prob: example
+            .source
+            .update_prob
+            .unwrap_or(eval_config.update_prob),
+        seed: eval_seed,
+        seed_scale: example.source.seed_scale.unwrap_or(eval_config.seed_scale),
+        seed_mode: eval_config.seed_mode,
+    };
+    let shared_loss =
+        evaluate_direct_basis_example(base, example, hashgrid, eval, eval_config.loss_config)?;
+    let zero_example = zero_adapter_example(base, example);
+    let zero_adapter_loss = evaluate_direct_basis_example(
         base,
-        example,
+        &zero_example,
         hashgrid,
-        EvalConfig {
-            particle_count: example
-                .source
-                .particles
-                .unwrap_or(eval_config.rollout_particles),
-            rollout_steps: eval_config.rollout_steps,
-            update_prob: example
-                .source
-                .update_prob
-                .unwrap_or(eval_config.update_prob),
-            seed: eval_seed,
-            seed_scale: example.source.seed_scale.unwrap_or(eval_config.seed_scale),
-            seed_mode: eval_config.seed_mode,
-        },
+        eval,
         eval_config.loss_config,
     )?;
     let mut oracle_model = NpaModel::upstream_seeded(
@@ -200,12 +204,17 @@ fn evaluate_direct_basis_oracle_entry(
     let oracle_loss = oracle_training.final_loss.total_loss;
     let loss_gap_to_oracle = shared_loss.total_loss - oracle_loss;
     let loss_ratio_to_oracle = shared_loss.total_loss / oracle_loss.max(f32::MIN_POSITIVE);
+    let loss_gap_to_zero = shared_loss.total_loss - zero_adapter_loss.total_loss;
+    let loss_ratio_to_zero =
+        shared_loss.total_loss / zero_adapter_loss.total_loss.max(f32::MIN_POSITIVE);
+    let zero_ratio_to_oracle = zero_adapter_loss.total_loss / oracle_loss.max(f32::MIN_POSITIVE);
     Ok(CliHyper2dDirectBasisOracleEntry {
         slug: example.source.slug.clone(),
         split: example.split.label(),
         condition: example.source.condition_path.display().to_string(),
         oracle_model_output,
         shared_loss,
+        zero_adapter_loss,
         oracle_initial_eval_loss: oracle_training.initial_eval_loss,
         oracle_final_loss: oracle_training.final_loss,
         oracle_best_eval_loss: oracle_training.best_eval_loss,
@@ -213,7 +222,17 @@ fn evaluate_direct_basis_oracle_entry(
         oracle_median_particle_steps_per_sec: oracle_training.median_particle_steps_per_sec,
         loss_gap_to_oracle,
         loss_ratio_to_oracle,
+        loss_gap_to_zero,
+        loss_ratio_to_zero,
+        zero_ratio_to_oracle,
     })
+}
+
+fn zero_adapter_example(base: &NpaModel, example: &DirectBasisExample) -> DirectBasisExample {
+    let mut zero = example.clone();
+    zero.adapter =
+        NpaLowRankAdapter::zeros(&base.config, example.adapter.rank, example.adapter.alpha);
+    zero
 }
 
 fn oracle_summary(
@@ -223,25 +242,40 @@ fn oracle_summary(
         return None;
     }
     let mut shared = 0.0_f32;
+    let mut zero = 0.0_f32;
     let mut oracle = 0.0_f32;
     let mut gap = 0.0_f32;
     let mut ratio = 0.0_f32;
     let mut max_ratio = 0.0_f32;
+    let mut gap_to_zero = 0.0_f32;
+    let mut ratio_to_zero = 0.0_f32;
+    let mut max_ratio_to_zero = 0.0_f32;
+    let mut zero_ratio_to_oracle = 0.0_f32;
     for entry in &entries {
         shared += entry.shared_loss.total_loss;
+        zero += entry.zero_adapter_loss.total_loss;
         oracle += entry.oracle_final_loss.total_loss;
         gap += entry.loss_gap_to_oracle;
         ratio += entry.loss_ratio_to_oracle;
         max_ratio = max_ratio.max(entry.loss_ratio_to_oracle);
+        gap_to_zero += entry.loss_gap_to_zero;
+        ratio_to_zero += entry.loss_ratio_to_zero;
+        max_ratio_to_zero = max_ratio_to_zero.max(entry.loss_ratio_to_zero);
+        zero_ratio_to_oracle += entry.zero_ratio_to_oracle;
     }
     let scale = 1.0 / entries.len() as f32;
     Some(CliHyper2dDirectBasisOracleSummary {
         examples: entries.len(),
         mean_shared_loss: shared * scale,
+        mean_zero_loss: zero * scale,
         mean_oracle_loss: oracle * scale,
         mean_gap_to_oracle: gap * scale,
         mean_ratio_to_oracle: ratio * scale,
         max_ratio_to_oracle: max_ratio,
+        mean_gap_to_zero: gap_to_zero * scale,
+        mean_ratio_to_zero: ratio_to_zero * scale,
+        max_ratio_to_zero,
+        mean_zero_ratio_to_oracle: zero_ratio_to_oracle * scale,
     })
 }
 

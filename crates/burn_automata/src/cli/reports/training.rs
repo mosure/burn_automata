@@ -514,10 +514,15 @@ pub(crate) struct CliHyper2dDirectBasisOracleReport {
 pub(crate) struct CliHyper2dDirectBasisOracleSummary {
     pub(crate) examples: usize,
     pub(crate) mean_shared_loss: f32,
+    pub(crate) mean_zero_loss: f32,
     pub(crate) mean_oracle_loss: f32,
     pub(crate) mean_gap_to_oracle: f32,
     pub(crate) mean_ratio_to_oracle: f32,
     pub(crate) max_ratio_to_oracle: f32,
+    pub(crate) mean_gap_to_zero: f32,
+    pub(crate) mean_ratio_to_zero: f32,
+    pub(crate) max_ratio_to_zero: f32,
+    pub(crate) mean_zero_ratio_to_oracle: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -527,6 +532,7 @@ pub(crate) struct CliHyper2dDirectBasisOracleEntry {
     pub(crate) condition: String,
     pub(crate) oracle_model_output: Option<String>,
     pub(crate) shared_loss: Target2dLossReport,
+    pub(crate) zero_adapter_loss: Target2dLossReport,
     pub(crate) oracle_initial_eval_loss: Target2dLossReport,
     pub(crate) oracle_final_loss: Target2dLossReport,
     pub(crate) oracle_best_eval_loss: Target2dLossReport,
@@ -534,6 +540,9 @@ pub(crate) struct CliHyper2dDirectBasisOracleEntry {
     pub(crate) oracle_median_particle_steps_per_sec: f64,
     pub(crate) loss_gap_to_oracle: f32,
     pub(crate) loss_ratio_to_oracle: f32,
+    pub(crate) loss_gap_to_zero: f32,
+    pub(crate) loss_ratio_to_zero: f32,
+    pub(crate) zero_ratio_to_oracle: f32,
 }
 
 #[derive(Clone, Serialize)]

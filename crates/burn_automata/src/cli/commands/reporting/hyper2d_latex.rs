@@ -72,6 +72,14 @@ fn write_gate_table(text: &mut String, summary: &Hyper2dValidationSummary) {
     );
     row(
         text,
+        "Direct-basis shared/zero max ratio",
+        &format!(
+            "at most {:.2}x",
+            summary.quality_gates.direct_zero_ready_max_ratio
+        ),
+    );
+    row(
+        text,
         "Adapter-vector normalized RMSE",
         &format!(
             "at most {:.2}",
@@ -92,6 +100,14 @@ fn write_gate_table(text: &mut String, summary: &Hyper2dValidationSummary) {
         &format!(
             "at most {:.2}x",
             summary.quality_gates.adapter_rollout_ready_max_ratio
+        ),
+    );
+    row(
+        text,
+        "Adapter rollout max ratio to zero adapter",
+        &format!(
+            "at most {:.2}x",
+            summary.quality_gates.adapter_rollout_zero_ready_max_ratio
         ),
     );
     row(
@@ -195,6 +211,24 @@ fn write_direct_basis_table(text: &mut String, direct: &DirectBasisReportSummary
     );
     row(
         text,
+        "Train shared/zero mean ratio",
+        &display_opt_f64(
+            direct
+                .oracle_train
+                .and_then(|split| split.mean_ratio_to_zero),
+        ),
+    );
+    row(
+        text,
+        "Train shared/zero max ratio",
+        &display_opt_f64(
+            direct
+                .oracle_train
+                .and_then(|split| split.max_ratio_to_zero),
+        ),
+    );
+    row(
+        text,
         "Holdout oracle mean ratio",
         &display_opt_f64(
             direct
@@ -209,6 +243,24 @@ fn write_direct_basis_table(text: &mut String, direct: &DirectBasisReportSummary
             direct
                 .oracle_holdout
                 .and_then(|split| split.max_ratio_to_oracle),
+        ),
+    );
+    row(
+        text,
+        "Holdout shared/zero mean ratio",
+        &display_opt_f64(
+            direct
+                .oracle_holdout
+                .and_then(|split| split.mean_ratio_to_zero),
+        ),
+    );
+    row(
+        text,
+        "Holdout shared/zero max ratio",
+        &display_opt_f64(
+            direct
+                .oracle_holdout
+                .and_then(|split| split.max_ratio_to_zero),
         ),
     );
     row(
@@ -376,9 +428,12 @@ fn rollout_summary(metrics: Option<AdapterRolloutSplitSummary>) -> String {
         || "n/a".to_string(),
         |metrics| {
             format!(
-                "mean ratio={}, max ratio={}, static loss={}, hyper loss={}",
+                "static mean ratio={}, static max ratio={}, zero mean ratio={}, zero max ratio={}, zero loss={}, static loss={}, hyper loss={}",
                 display_opt_f64(metrics.mean_ratio_to_static),
                 display_opt_f64(metrics.max_ratio_to_static),
+                display_opt_f64(metrics.mean_ratio_to_zero),
+                display_opt_f64(metrics.max_ratio_to_zero),
+                display_opt_f64(metrics.mean_zero_loss),
                 display_opt_f64(metrics.mean_static_loss),
                 display_opt_f64(metrics.mean_hyper_loss)
             )

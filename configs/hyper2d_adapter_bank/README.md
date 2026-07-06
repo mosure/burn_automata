@@ -101,4 +101,6 @@ oversized random adapters and invalid quality conclusions.
 Use the same adapter-bank reports to compare the static-regression baseline
 against the conditioned rectified-flow generator. The gate remains the same:
 generated LoRAs must close both adapter-vector metrics and rollout loss ratios
-versus direct stored LoRAs before claiming HyperNPA generalization.
+versus direct stored LoRAs before claiming HyperNPA generalization. Generated
+LoRAs must also beat the zero-adapter rollout baseline; beating a malformed
+stored-LoRA target is not sufficient.

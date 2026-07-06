@@ -48,9 +48,11 @@ or CI run should fail if the summarized artifact is below threshold.
 | Report kind | Ready status | Gate |
 | --- | --- | --- |
 | Direct-basis shared base plus stored LoRA | `direct_basis_oracle_ready` | Train and holdout oracle max ratio must be `<= 1.20x`. |
+| Direct-basis shared base plus stored LoRA | `direct_basis_oracle_ready` | Train and holdout shared-vs-zero max ratio must be `<= 1.00x`. |
 | Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout adapter-vector normalized RMSE must be `<= 0.35`. |
 | Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout adapter-vector mean cosine must be `>= 0.80`. |
 | Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout rollout max ratio to static LoRA must be `<= 1.15x`. |
+| Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout rollout max ratio to zero adapter must be `<= 1.00x`. |
 
 Reports also summarize available throughput history: direct-basis reports expose
 particle-steps/sec when present, and adapter-bank reports expose

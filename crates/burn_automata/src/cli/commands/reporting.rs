@@ -8,9 +8,11 @@ use crate::cli::prelude::*;
 mod hyper2d_latex;
 
 const DIRECT_ORACLE_READY_MAX_RATIO: f64 = 1.20;
+const DIRECT_ZERO_READY_MAX_RATIO: f64 = 1.0;
 const ADAPTER_VECTOR_READY_MAX_NRMSE: f64 = 0.35;
 const ADAPTER_VECTOR_READY_MIN_COSINE: f64 = 0.80;
 const ADAPTER_ROLLOUT_READY_MAX_RATIO: f64 = 1.15;
+const ADAPTER_ROLLOUT_ZERO_READY_MAX_RATIO: f64 = 1.0;
 const MIN_QUALITY_ROLLOUT_PARTICLES: usize = 2048;
 const MIN_QUALITY_TARGET_POINTS: usize = 2048;
 const MIN_QUALITY_ORACLE_EXAMPLES_PER_SPLIT: usize = 8;
@@ -105,9 +107,11 @@ struct Hyper2dValidationSummary {
 #[derive(Clone, Copy, Debug, Serialize)]
 struct QualityGateSummary {
     direct_oracle_ready_max_ratio: f64,
+    direct_zero_ready_max_ratio: f64,
     adapter_vector_ready_max_nrmse: f64,
     adapter_vector_ready_min_cosine: f64,
     adapter_rollout_ready_max_ratio: f64,
+    adapter_rollout_zero_ready_max_ratio: f64,
     min_quality_rollout_particles: usize,
     min_quality_target_points: usize,
     min_quality_oracle_examples_per_split: usize,
@@ -142,9 +146,13 @@ struct DirectBasisReportSummary {
 struct OracleSplitSummary {
     examples: Option<usize>,
     mean_shared_loss: Option<f64>,
+    mean_zero_loss: Option<f64>,
     mean_oracle_loss: Option<f64>,
     mean_ratio_to_oracle: Option<f64>,
     max_ratio_to_oracle: Option<f64>,
+    mean_ratio_to_zero: Option<f64>,
+    max_ratio_to_zero: Option<f64>,
+    mean_zero_ratio_to_oracle: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -200,10 +208,13 @@ struct AdapterVectorMetricSummary {
 #[derive(Clone, Copy, Debug, Serialize)]
 struct AdapterRolloutSplitSummary {
     examples: Option<usize>,
+    mean_zero_loss: Option<f64>,
     mean_static_loss: Option<f64>,
     mean_hyper_loss: Option<f64>,
     mean_ratio_to_static: Option<f64>,
     max_ratio_to_static: Option<f64>,
+    mean_ratio_to_zero: Option<f64>,
+    max_ratio_to_zero: Option<f64>,
 }
 
 fn summarize_hyper2d_report(
@@ -271,13 +282,23 @@ fn summarize_direct_basis(
     let oracle_ratio_ready = split_oracle_ratio_ready(direct.oracle_train)
         && split_oracle_ratio_ready(direct.oracle_holdout)
         && (direct.oracle_train.is_some() || direct.oracle_holdout.is_some());
+    let zero_baseline_present = split_zero_baseline_present(direct.oracle_train)
+        && split_zero_baseline_present(direct.oracle_holdout)
+        && (direct.oracle_train.is_some() || direct.oracle_holdout.is_some());
+    let zero_baseline_ready = split_zero_baseline_ready(direct.oracle_train)
+        && split_zero_baseline_ready(direct.oracle_holdout)
+        && zero_baseline_present;
     let oracle_example_ready = split_oracle_examples_ready(direct.oracle_train)
         && split_oracle_examples_ready(direct.oracle_holdout);
-    let oracle_ready = oracle_ratio_ready && oracle_example_ready;
+    let oracle_ready = oracle_ratio_ready && zero_baseline_ready && oracle_example_ready;
     let quality_scale_ready = particle_count_ready(direct.rollout_particles)
         && target_points_ready(direct.min_target_points);
     let quality_status = if oracle_ready && quality_scale_ready {
         "direct_basis_oracle_ready"
+    } else if oracle_ratio_ready && !zero_baseline_present {
+        "direct_basis_zero_baseline_missing"
+    } else if oracle_ratio_ready && !zero_baseline_ready {
+        "direct_basis_zero_baseline_gap"
     } else if oracle_ratio_ready && !oracle_example_ready {
         "insufficient_oracle_examples"
     } else if oracle_ready {
@@ -294,8 +315,18 @@ fn summarize_direct_basis(
     ];
     if oracle_ready {
         interpretation.push(format!(
-            "Sampled oracle ratios are within the {:.2}x direct-basis gate.",
+            "Sampled oracle ratios are within the {:.2}x direct-basis gate, and stored LoRAs beat the zero-adapter baseline.",
             DIRECT_ORACLE_READY_MAX_RATIO
+        ));
+    } else if oracle_ratio_ready && !zero_baseline_present {
+        interpretation.push(
+            "Oracle ratios are within threshold, but this report lacks zero-adapter baseline losses; rerun oracle validation to prove stored LoRAs beat doing nothing."
+                .to_string(),
+        );
+    } else if oracle_ratio_ready && !zero_baseline_ready {
+        interpretation.push(format!(
+            "Oracle ratios are within threshold, but stored LoRAs do not beat the zero-adapter baseline under the {:.2}x shared-vs-zero gate.",
+            DIRECT_ZERO_READY_MAX_RATIO
         ));
     } else if oracle_ratio_ready && !oracle_example_ready {
         interpretation.push(format!(
@@ -397,6 +428,8 @@ fn summarize_adapter_bank_conditioning(
         && split_vector_ready(adapter.holdout_vector_metrics);
     let rollout_ready =
         split_rollout_ready(adapter.train_rollout) && split_rollout_ready(adapter.holdout_rollout);
+    let rollout_zero_ready = split_rollout_zero_ready(adapter.train_rollout)
+        && split_rollout_zero_ready(adapter.holdout_rollout);
     let rollout_example_ready = split_rollout_examples_ready(adapter.train_rollout)
         && split_rollout_examples_ready(adapter.holdout_rollout);
     let quality_scale_ready = particle_count_ready(adapter.rollout_particles)
@@ -421,9 +454,11 @@ fn summarize_adapter_bank_conditioning(
         "insufficient_conditioning_examples"
     } else if !rollout_example_ready {
         "insufficient_conditioning_rollout_examples"
-    } else if vector_ready && rollout_ready && quality_scale_ready {
+    } else if vector_ready && rollout_ready && !rollout_zero_ready {
+        "conditioning_zero_baseline_gap"
+    } else if vector_ready && rollout_ready && rollout_zero_ready && quality_scale_ready {
         "conditioning_quality_ready"
-    } else if vector_ready && rollout_ready {
+    } else if vector_ready && rollout_ready && rollout_zero_ready {
         "quality_particle_count_too_low"
     } else if !vector_ready && rollout_ready {
         "conditioning_vector_underfit"
@@ -468,9 +503,15 @@ fn summarize_adapter_bank_conditioning(
             ADAPTER_ROLLOUT_READY_MAX_RATIO
         ));
     }
-    if vector_ready && rollout_ready {
+    if rollout_ready && !rollout_zero_ready {
+        interpretation.push(format!(
+            "Generated adapters do not beat the zero-adapter baseline under the {:.2}x rollout-vs-zero gate.",
+            ADAPTER_ROLLOUT_ZERO_READY_MAX_RATIO
+        ));
+    }
+    if vector_ready && rollout_ready && rollout_zero_ready {
         interpretation.push(
-            "Generated LoRAs are close to stored direct LoRAs under both vector and rollout gates."
+            "Generated LoRAs are close to stored direct LoRAs and beat zero adapters under vector and rollout gates."
                 .to_string(),
         );
     }
@@ -487,6 +528,7 @@ fn summarize_adapter_bank_conditioning(
         && rollout_example_ready
         && vector_ready
         && rollout_ready
+        && rollout_zero_ready
         && quality_scale_ready;
     let mut next_steps = Vec::new();
     if !dino_ready {
@@ -509,6 +551,12 @@ fn summarize_adapter_bank_conditioning(
         next_steps.push(format!(
             "Evaluate generated-vs-direct LoRA rollout quality on at least {MIN_CONDITIONING_ROLLOUT_EXAMPLES_PER_SPLIT} examples per split."
         ));
+    }
+    if !rollout_zero_ready {
+        next_steps.push(
+            "Use rollout loss or guidance so generated adapters beat the zero-adapter baseline before scaling the conditioned model."
+                .to_string(),
+        );
     }
     next_steps.extend([
         format!("Rerun adapter-bank rollout evaluation with at least {MIN_QUALITY_ROLLOUT_PARTICLES} particles and {MIN_QUALITY_TARGET_POINTS} target samples before comparing generated LoRAs in the paper."),
@@ -541,9 +589,11 @@ fn summarize_adapter_bank_conditioning(
 fn quality_gate_summary() -> QualityGateSummary {
     QualityGateSummary {
         direct_oracle_ready_max_ratio: DIRECT_ORACLE_READY_MAX_RATIO,
+        direct_zero_ready_max_ratio: DIRECT_ZERO_READY_MAX_RATIO,
         adapter_vector_ready_max_nrmse: ADAPTER_VECTOR_READY_MAX_NRMSE,
         adapter_vector_ready_min_cosine: ADAPTER_VECTOR_READY_MIN_COSINE,
         adapter_rollout_ready_max_ratio: ADAPTER_ROLLOUT_READY_MAX_RATIO,
+        adapter_rollout_zero_ready_max_ratio: ADAPTER_ROLLOUT_ZERO_READY_MAX_RATIO,
         min_quality_rollout_particles: MIN_QUALITY_ROLLOUT_PARTICLES,
         min_quality_target_points: MIN_QUALITY_TARGET_POINTS,
         min_quality_oracle_examples_per_split: MIN_QUALITY_ORACLE_EXAMPLES_PER_SPLIT,
@@ -601,9 +651,13 @@ fn oracle_split_summary(root: &Value, split: &str) -> Option<OracleSplitSummary>
     Some(OracleSplitSummary {
         examples: path_usize(split, &["examples"]),
         mean_shared_loss: path_f64(split, &["mean_shared_loss"]),
+        mean_zero_loss: path_f64(split, &["mean_zero_loss"]),
         mean_oracle_loss: path_f64(split, &["mean_oracle_loss"]),
         mean_ratio_to_oracle: path_f64(split, &["mean_ratio_to_oracle"]),
         max_ratio_to_oracle: path_f64(split, &["max_ratio_to_oracle"]),
+        mean_ratio_to_zero: path_f64(split, &["mean_ratio_to_zero"]),
+        max_ratio_to_zero: path_f64(split, &["max_ratio_to_zero"]),
+        mean_zero_ratio_to_oracle: path_f64(split, &["mean_zero_ratio_to_oracle"]),
     })
 }
 
@@ -623,10 +677,13 @@ fn adapter_rollout_summary(root: &Value, path: &[&str]) -> Option<AdapterRollout
     let split = path_value(root, path)?;
     Some(AdapterRolloutSplitSummary {
         examples: path_usize(split, &["examples"]),
+        mean_zero_loss: path_f64(split, &["mean_zero_loss"]),
         mean_static_loss: path_f64(split, &["mean_static_loss"]),
         mean_hyper_loss: path_f64(split, &["mean_hyper_loss"]),
         mean_ratio_to_static: path_f64(split, &["mean_ratio_to_static"]),
         max_ratio_to_static: path_f64(split, &["max_ratio_to_static"]),
+        mean_ratio_to_zero: path_f64(split, &["mean_ratio_to_zero"]),
+        max_ratio_to_zero: path_f64(split, &["max_ratio_to_zero"]),
     })
 }
 
@@ -674,6 +731,22 @@ fn split_oracle_examples_ready(split: Option<OracleSplitSummary>) -> bool {
         .is_some_and(|examples| examples >= MIN_QUALITY_ORACLE_EXAMPLES_PER_SPLIT)
 }
 
+fn split_zero_baseline_present(split: Option<OracleSplitSummary>) -> bool {
+    split.is_some_and(|split| {
+        split.mean_zero_loss.is_some()
+            && split
+                .max_ratio_to_zero
+                .or(split.mean_ratio_to_zero)
+                .is_some()
+    })
+}
+
+fn split_zero_baseline_ready(split: Option<OracleSplitSummary>) -> bool {
+    split
+        .and_then(|split| split.max_ratio_to_zero.or(split.mean_ratio_to_zero))
+        .is_some_and(|ratio| ratio <= DIRECT_ZERO_READY_MAX_RATIO)
+}
+
 fn split_vector_ready(split: Option<AdapterVectorMetricSummary>) -> bool {
     split.is_some_and(|split| {
         split
@@ -689,6 +762,12 @@ fn split_rollout_ready(split: Option<AdapterRolloutSplitSummary>) -> bool {
     split
         .and_then(|split| split.max_ratio_to_static.or(split.mean_ratio_to_static))
         .is_some_and(|ratio| ratio <= ADAPTER_ROLLOUT_READY_MAX_RATIO)
+}
+
+fn split_rollout_zero_ready(split: Option<AdapterRolloutSplitSummary>) -> bool {
+    split
+        .and_then(|split| split.max_ratio_to_zero.or(split.mean_ratio_to_zero))
+        .is_some_and(|ratio| ratio <= ADAPTER_ROLLOUT_ZERO_READY_MAX_RATIO)
 }
 
 fn split_rollout_examples_ready(split: Option<AdapterRolloutSplitSummary>) -> bool {
@@ -779,6 +858,12 @@ fn markdown_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
     .unwrap();
     writeln!(
         text,
+        "| Direct-basis shared/zero max ratio | <= {:.2}x |",
+        summary.quality_gates.direct_zero_ready_max_ratio
+    )
+    .unwrap();
+    writeln!(
+        text,
         "| Adapter-vector normalized RMSE | <= {:.2} |",
         summary.quality_gates.adapter_vector_ready_max_nrmse
     )
@@ -793,6 +878,12 @@ fn markdown_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
         text,
         "| Adapter rollout max ratio to static LoRA | <= {:.2}x |",
         summary.quality_gates.adapter_rollout_ready_max_ratio
+    )
+    .unwrap();
+    writeln!(
+        text,
+        "| Adapter rollout max ratio to zero adapter | <= {:.2}x |",
+        summary.quality_gates.adapter_rollout_zero_ready_max_ratio
     )
     .unwrap();
     writeln!(
@@ -898,11 +989,51 @@ fn markdown_for_hyper2d_summary(summary: &Hyper2dValidationSummary) -> String {
         .unwrap();
         writeln!(
             text,
+            "| Train shared/zero mean ratio | {} |",
+            display_opt_f64(
+                direct
+                    .oracle_train
+                    .and_then(|split| split.mean_ratio_to_zero)
+            )
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Train shared/zero max ratio | {} |",
+            display_opt_f64(
+                direct
+                    .oracle_train
+                    .and_then(|split| split.max_ratio_to_zero)
+            )
+        )
+        .unwrap();
+        writeln!(
+            text,
             "| Holdout oracle mean ratio | {} |",
             display_opt_f64(
                 direct
                     .oracle_holdout
                     .and_then(|split| split.mean_ratio_to_oracle)
+            )
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Holdout shared/zero mean ratio | {} |",
+            display_opt_f64(
+                direct
+                    .oracle_holdout
+                    .and_then(|split| split.mean_ratio_to_zero)
+            )
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "| Holdout shared/zero max ratio | {} |",
+            display_opt_f64(
+                direct
+                    .oracle_holdout
+                    .and_then(|split| split.max_ratio_to_zero)
             )
         )
         .unwrap();
@@ -1055,9 +1186,12 @@ fn write_rollout_row(text: &mut String, label: &str, metrics: Option<AdapterRoll
     };
     writeln!(
         text,
-        "| {label} | mean_ratio={} max_ratio={} static_loss={} hyper_loss={} |",
+        "| {label} | static_mean_ratio={} static_max_ratio={} zero_mean_ratio={} zero_max_ratio={} zero_loss={} static_loss={} hyper_loss={} |",
         display_opt_f64(metrics.mean_ratio_to_static),
         display_opt_f64(metrics.max_ratio_to_static),
+        display_opt_f64(metrics.mean_ratio_to_zero),
+        display_opt_f64(metrics.max_ratio_to_zero),
+        display_opt_f64(metrics.mean_zero_loss),
         display_opt_f64(metrics.mean_static_loss),
         display_opt_f64(metrics.mean_hyper_loss)
     )
@@ -1199,6 +1333,77 @@ mod tests {
     }
 
     #[test]
+    fn adapter_bank_summary_rejects_zero_baseline_gap() {
+        let report = json!({
+            "experiment_config": "configs/hyper2d_adapter_bank/flow.toml",
+            "preset": "Growing2d",
+            "output_dir": "artifacts/hyper2d_adapter_bank",
+            "shared_base": "shared_base.bpk",
+            "adapter_bank": "adapter_bank.json",
+            "hyper_output": "hyper_2d.json",
+            "backend": "BurnWgpu",
+            "condition_encoder": "dino-vits-token-grid-8x8-v1",
+            "generator_objective": "rectified-flow-lora-vector",
+            "adapter_rank": 16,
+            "adapter_alpha": 16.0,
+            "adapter_parameter_count": 5586,
+            "train_examples": 900,
+            "holdout_examples": 100,
+            "rollout_particles": 2048,
+            "target_points": 2048,
+            "train_vector_metrics": {
+                "examples": 256,
+                "normalized_rmse_to_target_rms": 0.20,
+                "mean_cosine_similarity": 0.90
+            },
+            "holdout_vector_metrics": {
+                "examples": 100,
+                "normalized_rmse_to_target_rms": 0.22,
+                "mean_cosine_similarity": 0.88
+            },
+            "rollout_eval": {
+                "train_summary": {
+                    "examples": 8,
+                    "mean_zero_loss": 5.0,
+                    "mean_static_loss": 10.0,
+                    "mean_hyper_loss": 5.5,
+                    "mean_ratio_to_static": 0.55,
+                    "max_ratio_to_static": 0.80,
+                    "mean_ratio_to_zero": 1.10,
+                    "max_ratio_to_zero": 1.20
+                },
+                "holdout_summary": {
+                    "examples": 8,
+                    "mean_zero_loss": 4.0,
+                    "mean_static_loss": 8.0,
+                    "mean_hyper_loss": 4.8,
+                    "mean_ratio_to_static": 0.60,
+                    "max_ratio_to_static": 0.90,
+                    "mean_ratio_to_zero": 1.20,
+                    "max_ratio_to_zero": 1.30
+                }
+            }
+        });
+
+        let summary =
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None).unwrap();
+
+        assert_eq!(
+            summary.report_kind,
+            Hyper2dReportKind::AdapterBankConditioning
+        );
+        assert_eq!(summary.quality_status, "conditioning_zero_baseline_gap");
+        assert!(!summary.quality_ready);
+        assert!(!summary.hypernet_generalization_validated);
+        assert!(
+            summary
+                .interpretation
+                .iter()
+                .any(|item| item.contains("zero-adapter baseline"))
+        );
+    }
+
+    #[test]
     fn direct_basis_summary_uses_external_oracle_report() {
         let report = json!({
             "experiment_config": "configs/hyper2d_direct_basis/omnisvg_10k.toml",
@@ -1230,16 +1435,24 @@ mod tests {
                 "train_summary": {
                     "examples": 8,
                     "mean_shared_loss": 7.8,
+                    "mean_zero_loss": 8.4,
                     "mean_oracle_loss": 7.2,
                     "mean_ratio_to_oracle": 1.08,
-                    "max_ratio_to_oracle": 1.14
+                    "max_ratio_to_oracle": 1.14,
+                    "mean_ratio_to_zero": 0.93,
+                    "max_ratio_to_zero": 0.98,
+                    "mean_zero_ratio_to_oracle": 1.17
                 },
                 "holdout_summary": {
                     "examples": 8,
                     "mean_shared_loss": 7.2,
+                    "mean_zero_loss": 7.9,
                     "mean_oracle_loss": 6.7,
                     "mean_ratio_to_oracle": 1.07,
-                    "max_ratio_to_oracle": 1.13
+                    "max_ratio_to_oracle": 1.13,
+                    "mean_ratio_to_zero": 0.91,
+                    "max_ratio_to_zero": 0.97,
+                    "mean_zero_ratio_to_oracle": 1.18
                 }
             }
         });
@@ -1280,12 +1493,18 @@ mod tests {
                 "train_summary": {
                     "examples": 8,
                     "mean_ratio_to_oracle": 1.02,
-                    "max_ratio_to_oracle": 1.03
+                    "max_ratio_to_oracle": 1.03,
+                    "mean_zero_loss": 8.0,
+                    "mean_ratio_to_zero": 0.90,
+                    "max_ratio_to_zero": 0.95
                 },
                 "holdout_summary": {
                     "examples": 8,
                     "mean_ratio_to_oracle": 1.04,
-                    "max_ratio_to_oracle": 1.05
+                    "max_ratio_to_oracle": 1.05,
+                    "mean_zero_loss": 8.0,
+                    "mean_ratio_to_zero": 0.91,
+                    "max_ratio_to_zero": 0.96
                 }
             }
         });
@@ -1301,6 +1520,50 @@ mod tests {
                 .interpretation
                 .iter()
                 .any(|item| item.contains("64"))
+        );
+    }
+
+    #[test]
+    fn direct_basis_summary_rejects_zero_baseline_gap() {
+        let report = json!({
+            "preset": "Growing2d",
+            "shared_base_output": "shared_base.bpk",
+            "adapter_bank_output": "adapter_bank.json",
+            "gpu_training": {"backend": "burn_wgpu_autodiff_dense_direct_basis"},
+            "rollout_particles": 2048,
+            "rollout_steps": 32,
+            "adapters": [{"target_points": 2048}],
+            "oracle_validation": {
+                "train_summary": {
+                    "examples": 8,
+                    "mean_ratio_to_oracle": 1.02,
+                    "max_ratio_to_oracle": 1.03,
+                    "mean_zero_loss": 5.0,
+                    "mean_ratio_to_zero": 1.10,
+                    "max_ratio_to_zero": 1.20
+                },
+                "holdout_summary": {
+                    "examples": 8,
+                    "mean_ratio_to_oracle": 1.04,
+                    "max_ratio_to_oracle": 1.05,
+                    "mean_zero_loss": 5.0,
+                    "mean_ratio_to_zero": 1.12,
+                    "max_ratio_to_zero": 1.18
+                }
+            }
+        });
+
+        let summary =
+            summarize_hyper2d_report(Path::new("report.json"), &report, None, None).unwrap();
+
+        assert_eq!(summary.report_kind, Hyper2dReportKind::DirectBasis);
+        assert_eq!(summary.quality_status, "direct_basis_zero_baseline_gap");
+        assert!(!summary.quality_ready);
+        assert!(
+            summary
+                .interpretation
+                .iter()
+                .any(|item| item.contains("zero-adapter baseline"))
         );
     }
 }

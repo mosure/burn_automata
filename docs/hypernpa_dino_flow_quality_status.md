@@ -182,10 +182,14 @@ distillation is currently a malformed quality target.
 Do not claim broad generalized HyperNPA quality until these are complete:
 
 1. Fix the direct shared-base plus per-sample LoRA quality target so stored
-   LoRAs beat the zero-adapter baseline at quality scale. HyperNPA should not be
-   trained to imitate adapter vectors whose rollout quality is worse than zero.
+   LoRAs beat the zero-adapter baseline at quality scale. `report-hyper2d` now
+   blocks direct-basis readiness unless shared-vs-zero max ratio is `<= 1.00x`
+   on both train and holdout oracle splits.
 2. Add image/dynamics-loss fine-tuning or guidance for the conditioned flow so
    selection is based on rollout quality, not only factorized adapter-vector MSE.
+   `report-hyper2d` now also blocks conditioning readiness unless generated
+   adapters beat the zero-adapter rollout baseline as well as matching stored
+   direct LoRAs.
 3. Scale to 10k only if the 1k quality-scale run closes the vector and rollout
    gaps.
 4. Validate generated adapters against direct stored LoRAs and 2D overfit

@@ -53,7 +53,9 @@ cargo run -p burn_automata --features cli -- report-hyper2d \
 Add `--require-quality-ready` when the run should fail unless sampled oracle
 ratios pass the direct-basis gate. Paper-quality reports also require at least
 2048 rollout particles and 2048 target samples; lower-count pilot runs are
-reported as not quality-ready even if their oracle ratio is close.
+reported as not quality-ready even if their oracle ratio is close. Fresh oracle
+validation also records a zero-adapter baseline; stored LoRAs must beat that
+baseline on train and holdout before direct-basis readiness can pass.
 
 Latest diagnostic: `omnisvg_1k_p64_refine_lr1e4.toml` completed with full train
 adapter coverage (`min_updates=4`, zero missing) and refine coverage
