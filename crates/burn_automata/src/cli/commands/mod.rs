@@ -8,6 +8,7 @@ mod hyper;
 mod hyper_e2e;
 mod hyper_support;
 mod mesh;
+mod npa2d_parity;
 mod options;
 mod render;
 mod reporting;

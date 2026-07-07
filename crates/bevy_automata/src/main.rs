@@ -15,8 +15,12 @@ fn main() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = AutomataCli::parse();
     match cli.command {
+        Some(AutomataCommand::View(args)) => {
+            bevy_automata::run_with_settings(args.into_settings()?);
+            Ok(())
+        }
         Some(AutomataCommand::Export(args)) => {
-            let report = bevy_automata::run_headless_export(args.into_config())?;
+            let report = bevy_automata::run_headless_export((*args).into_config())?;
             println!(
                 "wrote {} capture(s) to {}",
                 report.captures.len(),
@@ -43,8 +47,80 @@ struct AutomataCli {
 #[cfg(feature = "headless")]
 #[derive(Subcommand, Debug)]
 enum AutomataCommand {
+    /// Open the interactive viewer, optionally loading a BPK model.
+    View(ViewArgs),
     /// Render rollout PNGs without opening a window.
-    Export(ExportArgs),
+    Export(Box<ExportArgs>),
+}
+
+#[cfg(feature = "headless")]
+#[derive(Args, Debug)]
+struct ViewArgs {
+    #[arg(long)]
+    model: Option<PathBuf>,
+    #[arg(long, default_value_t = 4096)]
+    particles: usize,
+    #[arg(long, value_enum, default_value_t = PresetArg::Growing2d)]
+    preset: PresetArg,
+    #[arg(long, value_enum, default_value_t = SeedModeArg::UniformCircle)]
+    seed_mode: SeedModeArg,
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+    #[arg(long)]
+    seed_scale: Option<f32>,
+    #[arg(long, default_value_t = 0.5)]
+    update_prob: f32,
+    #[arg(long, default_value_t = 1.0)]
+    dt: f32,
+    #[arg(long, default_value_t = 0.5)]
+    render_scale: f32,
+    #[arg(long, default_value_t = 2.0)]
+    render_opacity: f32,
+}
+
+#[cfg(feature = "headless")]
+impl ViewArgs {
+    fn into_settings(self) -> Result<bevy_automata::AutomataSettings, Box<dyn std::error::Error>> {
+        if self.particles == 0 {
+            return Err(std::io::Error::other("--particles must be greater than zero").into());
+        }
+        if !(0.0..=1.0).contains(&self.update_prob) || !self.update_prob.is_finite() {
+            return Err(std::io::Error::other("--update-prob must be finite and in [0, 1]").into());
+        }
+        if !self.dt.is_finite() || self.dt <= 0.0 {
+            return Err(std::io::Error::other("--dt must be finite and positive").into());
+        }
+        let preset: AutomataPreset = self.preset.into();
+        let model_path = self
+            .model
+            .map(|path| {
+                if !path.is_file() {
+                    return Err(std::io::Error::other(format!(
+                        "--model does not exist or is not a file: {}",
+                        path.display()
+                    )));
+                }
+                Ok(path.display().to_string())
+            })
+            .transpose()?;
+        let mut settings = bevy_automata::AutomataSettings {
+            preset,
+            particle_count: self.particles,
+            seed_mode: self.seed_mode.into(),
+            seed: self.seed,
+            seed_scale: self
+                .seed_scale
+                .unwrap_or_else(|| burn_automata::NpaConfig::seed_scale_for_preset(preset)),
+            update_prob: self.update_prob,
+            dt: self.dt,
+            render_scale: self.render_scale,
+            render_opacity: self.render_opacity,
+            model_path,
+            ..bevy_automata::AutomataSettings::default()
+        };
+        settings.reference_seed_scale = settings.seed_scale;
+        Ok(settings)
+    }
 }
 
 #[cfg(feature = "headless")]

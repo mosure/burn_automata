@@ -5,7 +5,8 @@ use super::shared_basis::{
     sample_example_indices, zero_model_gradients,
 };
 use super::sources::{
-    OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources, sanitize_slug,
+    Hyper2dScratchSource, OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources,
+    sanitize_slug,
 };
 use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
@@ -27,6 +28,11 @@ use oracle::evaluate_direct_basis_oracles;
 
 const DEFAULT_WGPU_VRAM_BUDGET_GB: f32 = 64.0;
 const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 160;
+const TARGET2D_BURN_MAX_TRAIN_PARTICLES: usize = 2048;
+const TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD: usize = 2048;
+const TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS: usize = 1;
+const TARGET2D_BURN_DEFAULT_CHUNK_FLOATS: usize = 16_000_000;
+const TARGET2D_BURN_QUALITY_CHUNK_FLOATS: usize = 512 * 1024;
 
 #[derive(Clone)]
 struct DirectBasisExample {
@@ -45,7 +51,15 @@ struct DirectBasisTrainConfig {
     report_interval: usize,
     example_batch_size: usize,
     tbptt_chunk_steps: usize,
+    loss_on_final_chunk_only: bool,
+    use_particle_pool: bool,
+    pool_size: usize,
+    inject_seed_interval: usize,
+    brush_size: f32,
+    stopgrad_pos: bool,
+    stopgrad_state: bool,
     rollout_particles: usize,
+    rollout_step_min: usize,
     rollout_steps: usize,
     update_prob: f32,
     seed: u64,
@@ -86,6 +100,15 @@ struct DirectBasisPhaseReport {
     history: Vec<CliHyper2dDirectBasisHistoryEntry>,
     best_loss: Option<f32>,
     best_step: usize,
+}
+
+pub(crate) struct BurnTarget2dOracleTrainingOutput {
+    pub(crate) backend: String,
+    pub(crate) device: String,
+    pub(crate) metrics: serde_json::Value,
+    pub(crate) history: Vec<CliHyper2dDirectBasisHistoryEntry>,
+    pub(crate) best_train_loss: Option<f32>,
+    pub(crate) best_train_step: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -970,9 +993,12 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let loss_config = super::super::target2d::target2d_loss_config(
         target_loss_image_size,
         target_splat_sigma,
+        true,
         target_splat_loss_weight,
         target_color_loss_weight,
         target_density_loss_weight,
+        Target2dLossConfig::default().background_density_loss_weight,
+        Target2dLossConfig::default().foreground_density_loss_weight,
         target_displacement_regularizer_weight,
         target_overflow_regularizer_weight,
         target_bound_regularizer_weight,
@@ -1095,7 +1121,15 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         report_interval,
         example_batch_size,
         tbptt_chunk_steps,
+        loss_on_final_chunk_only: false,
+        use_particle_pool: false,
+        pool_size: 0,
+        inject_seed_interval: 0,
+        brush_size: 0.0,
+        stopgrad_pos: base_config.stopgrad_pos,
+        stopgrad_state: base_config.stopgrad_state,
         rollout_particles,
+        rollout_step_min: rollout_steps,
         rollout_steps,
         update_prob,
         seed,
@@ -1512,9 +1546,12 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     let loss_config = super::super::target2d::target2d_loss_config(
         target_loss_image_size,
         target_splat_sigma,
+        true,
         target_splat_loss_weight,
         target_color_loss_weight,
         target_density_loss_weight,
+        Target2dLossConfig::default().background_density_loss_weight,
+        Target2dLossConfig::default().foreground_density_loss_weight,
         target_displacement_regularizer_weight,
         target_overflow_regularizer_weight,
         target_bound_regularizer_weight,
@@ -1608,7 +1645,15 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         report_interval: 1,
         example_batch_size: 1,
         tbptt_chunk_steps: 1,
+        loss_on_final_chunk_only: false,
+        use_particle_pool: false,
+        pool_size: 0,
+        inject_seed_interval: 0,
+        brush_size: 0.0,
+        stopgrad_pos: base.config.stopgrad_pos,
+        stopgrad_state: base.config.stopgrad_state,
         rollout_particles,
+        rollout_step_min: rollout_steps,
         rollout_steps,
         update_prob,
         seed: eval_seed,
@@ -2050,7 +2095,15 @@ fn run_burn_wgpu_direct_basis(
         report_interval: request.report_interval,
         example_batch_size: request.example_batch_size,
         tbptt_chunk_steps: request.tbptt_chunk_steps,
+        loss_on_final_chunk_only: false,
+        use_particle_pool: false,
+        pool_size: 0,
+        inject_seed_interval: 0,
+        brush_size: 0.0,
+        stopgrad_pos: base.config.stopgrad_pos,
+        stopgrad_state: base.config.stopgrad_state,
         rollout_particles: request.rollout_particles,
+        rollout_step_min: request.rollout_steps,
         rollout_steps: request.rollout_steps,
         update_prob: request.update_prob,
         seed: request.seed,
@@ -2491,6 +2544,172 @@ fn load_direct_basis_examples(
         });
     }
     Ok(examples)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn train_target_2d_burn_oracle(
+    backend: DirectBasisOracleBackendArg,
+    model: &mut NpaModel,
+    hashgrid: &burn_automata_kernels::HashGridConfig,
+    target_image_path: &Path,
+    target: TargetImage2d,
+    training_config: Target2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+) -> Result<BurnTarget2dOracleTrainingOutput, Box<dyn std::error::Error>> {
+    if backend == DirectBasisOracleBackendArg::Cpu {
+        return Err(std::io::Error::other(
+            "train-target2d --training-device gpu requires --gpu-backend burn-wgpu or burn-cuda",
+        )
+        .into());
+    }
+    if training_config.particle_count > TARGET2D_BURN_MAX_TRAIN_PARTICLES {
+        return Err(std::io::Error::other(format!(
+            "Burn target2d GPU training is capped at {TARGET2D_BURN_MAX_TRAIN_PARTICLES} particles for backward safety; requested {}. Use 4096 particles for bounded eval/export.",
+            training_config.particle_count
+        ))
+        .into());
+    }
+    if training_config.step_min == 0 || training_config.step_max == 0 {
+        return Err(
+            std::io::Error::other("target2d GPU training requires non-zero rollout steps").into(),
+        );
+    }
+    if training_config.step_min > training_config.step_max {
+        return Err(std::io::Error::other(format!(
+            "target2d GPU training requires step_min <= step_max, got {} > {}",
+            training_config.step_min, training_config.step_max
+        ))
+        .into());
+    }
+
+    let slug = target_image_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(sanitize_slug)
+        .unwrap_or_else(|| "target2d".to_string());
+    let source = Hyper2dScratchSource {
+        slug,
+        title: target_image_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToOwned::to_owned),
+        group: Some("target2d".to_string()),
+        condition_path: target_image_path.to_path_buf(),
+        particles: Some(training_config.particle_count),
+        seed_scale: Some(training_config.seed_scale),
+        update_prob: Some(training_config.update_prob),
+    };
+    let adapter = NpaLowRankAdapter::zeros(&model.config, 1, 1.0);
+    let example = DirectBasisExample {
+        source,
+        split: Hyper2dE2eSplit::Train,
+        bank_split_index: None,
+        target,
+        adapter,
+        last_train_loss: None,
+    };
+    let rollout_batch_size = training_config.batch_size.max(1);
+    let mut train_examples = vec![example; rollout_batch_size];
+    let mut holdout_examples = Vec::new();
+    let training_steps = training_config
+        .epochs
+        .saturating_add(1)
+        .saturating_mul(training_config.repetitions);
+    let quality_tiled = training_config.particle_count >= TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD;
+    let tbptt_chunk_steps = if quality_tiled {
+        training_config
+            .step_max
+            .clamp(1, TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS)
+    } else {
+        training_config.step_max.max(1)
+    };
+    let chunk_floats = if quality_tiled {
+        TARGET2D_BURN_QUALITY_CHUNK_FLOATS
+    } else {
+        TARGET2D_BURN_DEFAULT_CHUNK_FLOATS
+    };
+    let train_config = DirectBasisTrainConfig {
+        steps: training_steps,
+        report_interval: training_config.report_interval.max(1),
+        example_batch_size: rollout_batch_size,
+        tbptt_chunk_steps,
+        loss_on_final_chunk_only: true,
+        use_particle_pool: true,
+        pool_size: training_config.pool_size.max(rollout_batch_size).max(1),
+        inject_seed_interval: training_config.inject_seed_interval.max(1),
+        brush_size: training_config.brush_size,
+        stopgrad_pos: model.config.stopgrad_pos,
+        stopgrad_state: model.config.stopgrad_state,
+        rollout_particles: training_config.particle_count,
+        rollout_step_min: training_config.step_min,
+        rollout_steps: training_config.step_max,
+        update_prob: training_config.update_prob,
+        seed: training_config.seed,
+        seed_scale: training_config.seed_scale,
+        seed_mode: training_config.seed_mode,
+        grid_eps: hashgrid.eps,
+        motion_scale: model.config.alpha * model.config.motion_eps(hashgrid.eps),
+        loss_config,
+        per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
+        base_sgd: SgdConfig {
+            learning_rate: training_config.optimizer.learning_rate,
+            weight_decay: training_config.optimizer.weight_decay,
+            grad_clip_norm: training_config.optimizer.grad_clip_norm,
+        },
+        adapter_sgd: SgdConfig {
+            learning_rate: 0.0,
+            weight_decay: 0.0,
+            grad_clip_norm: 0.0,
+        },
+        adapter_l2_weight: 0.0,
+        update_base: true,
+        eval_examples: 1,
+        eval_interval: training_config.report_interval.max(1),
+        eval_batch_size: 1,
+        eval_seed: training_config.seed,
+        system_memory_budget_gb: Some(24.0),
+        gpu_memory_budget_gb: Some(24.0),
+        max_dense_train_particles: TARGET2D_BURN_MAX_TRAIN_PARTICLES,
+        max_dense_chunk_floats: chunk_floats,
+        max_splat_chunk_floats: chunk_floats,
+    };
+    let no_phase_config = DirectBasisTrainConfig {
+        steps: 0,
+        update_base: false,
+        ..train_config
+    };
+    let burn_report = match backend {
+        DirectBasisOracleBackendArg::Wgpu => dense::train_direct_basis_burn_wgpu(
+            model,
+            &mut train_examples,
+            &mut holdout_examples,
+            train_config,
+            no_phase_config,
+            no_phase_config,
+        )?,
+        DirectBasisOracleBackendArg::Cuda => dense::train_direct_basis_burn_cuda(
+            model,
+            &mut train_examples,
+            &mut holdout_examples,
+            train_config,
+            no_phase_config,
+            no_phase_config,
+        )?,
+        DirectBasisOracleBackendArg::Cpu => unreachable!("CPU backend rejected above"),
+    };
+    let mut metrics = burn_report.metrics;
+    metrics["target2d_training_config"] = serde_json::to_value(&training_config)?;
+    metrics["rollout_step_min"] = serde_json::json!(training_config.step_min);
+    metrics["rollout_step_max"] = serde_json::json!(training_config.step_max);
+
+    Ok(BurnTarget2dOracleTrainingOutput {
+        backend: burn_report.backend.to_string(),
+        device: burn_report.device,
+        metrics,
+        history: burn_report.history,
+        best_train_loss: burn_report.best_train_loss,
+        best_train_step: burn_report.best_train_step,
+    })
 }
 
 fn split_direct_basis_adapter_bank_entries(
@@ -3419,27 +3638,37 @@ mod tests {
     }
 
     #[test]
-    fn bundled_direct_basis_experiment_configs_parse() {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let config_dir = repo_root.join("configs/hyper2d_direct_basis");
-        for entry in std::fs::read_dir(&config_dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("oracle_validate_"))
-            {
-                toml::from_str::<DirectBasisOracleValidationExperimentConfig>(&text)
-                    .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
-            } else {
-                toml::from_str::<DirectBasisExperimentConfig>(&text)
-                    .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
-            }
-        }
+    fn direct_basis_experiment_config_accepts_nested_toml() {
+        let config: DirectBasisExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["target.png"]
+
+            [output]
+            output_dir = "artifacts/hyper2d_direct_basis"
+
+            [training]
+            device = "gpu"
+
+            [gpu]
+            backend = "burn-wgpu"
+
+            [rollout]
+            seed_mode = "uniform-circle"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.preset.as_deref(), Some("growing-2d"));
+        assert_eq!(
+            config.source.target_images.as_deref(),
+            Some(&[PathBuf::from("target.png")][..])
+        );
+        assert_eq!(config.training.device.as_deref(), Some("gpu"));
+        assert_eq!(config.gpu.backend.as_deref(), Some("burn-wgpu"));
+        assert_eq!(config.rollout.seed_mode.as_deref(), Some("uniform-circle"));
     }
 
     #[test]
@@ -3530,7 +3759,15 @@ mod tests {
             report_interval: 1,
             example_batch_size: 1,
             tbptt_chunk_steps: 4,
+            loss_on_final_chunk_only: false,
+            use_particle_pool: false,
+            pool_size: 0,
+            inject_seed_interval: 0,
+            brush_size: 0.0,
+            stopgrad_pos: true,
+            stopgrad_state: false,
             rollout_particles,
+            rollout_step_min: 8,
             rollout_steps: 8,
             update_prob: 0.5,
             seed: 42,

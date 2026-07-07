@@ -144,27 +144,52 @@ pub(crate) enum Command {
         image_size: usize,
         #[arg(long, default_value_t = 1.0)]
         splat_sigma: f32,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        center_loss: bool,
         #[arg(long, default_value_t = 2.0)]
         splat_loss_weight: f32,
         #[arg(long, default_value_t = 5.0)]
         color_loss_weight: f32,
         #[arg(long, default_value_t = 1.0)]
         density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.0)]
+        background_density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.0)]
+        foreground_density_loss_weight: f32,
         #[arg(long, default_value_t = 0.01)]
         displacement_regularizer_weight: f32,
         #[arg(long, default_value_t = 100.0)]
         overflow_regularizer_weight: f32,
         #[arg(long, default_value_t = 100.0)]
         bound_regularizer_weight: f32,
+        #[arg(long)]
+        render_output_dir: Option<PathBuf>,
+        #[arg(long)]
+        wgpu_render_diagnostic: bool,
         #[arg(long, default_value = "/tmp/burn_automata_target2d_eval.json")]
+        output: PathBuf,
+    },
+    #[command(
+        name = "validate-npa2d-parity",
+        alias = "validate-npa-2d-parity",
+        alias = "validate-target2d-parity"
+    )]
+    ValidateNpa2dParity {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = "artifacts/npa2d_parity/report.json")]
         output: PathBuf,
     },
     #[command(name = "train-target2d", alias = "train-target-2d")]
     TrainTarget2d {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        experimental: bool,
         #[arg(long, default_value = "growing-2d")]
         preset: PresetArg,
         #[arg(long)]
-        target_image: PathBuf,
+        target_image: Option<PathBuf>,
         #[arg(
             long,
             default_value = "/tmp/burn_automata_target2d_training_report.json"
@@ -172,6 +197,8 @@ pub(crate) enum Command {
         output: PathBuf,
         #[arg(long, default_value = "cpu")]
         training_device: TrainingDeviceArg,
+        #[arg(long, default_value = "burn-wgpu")]
+        gpu_backend: DirectBasisOracleBackendArg,
         #[arg(long)]
         model_output: Option<PathBuf>,
         #[arg(long)]
@@ -234,12 +261,18 @@ pub(crate) enum Command {
         image_size: usize,
         #[arg(long, default_value_t = 1.0)]
         splat_sigma: f32,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        center_loss: bool,
         #[arg(long, default_value_t = 2.0)]
         splat_loss_weight: f32,
         #[arg(long, default_value_t = 5.0)]
         color_loss_weight: f32,
         #[arg(long, default_value_t = 1.0)]
         density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.0)]
+        background_density_loss_weight: f32,
+        #[arg(long, default_value_t = 0.0)]
+        foreground_density_loss_weight: f32,
         #[arg(long, default_value_t = 0.01)]
         displacement_regularizer_weight: f32,
         #[arg(long, default_value_t = 100.0)]

@@ -774,56 +774,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_exact_adapter_bank_config_parses() {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact.toml");
-        let train_all_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact_train_all.toml");
-        let pilot_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("build_exact_oracle_bank_10k64x16_2048_rank132_bias_exact.toml");
-        let pilot_256_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("build_exact_oracle_bank_10k256x64_2048_rank132_bias_exact.toml");
+    fn exact_adapter_bank_config_accepts_nested_toml() {
+        let config: ExactAdapterBankExperimentConfig = toml::from_str(
+            r#"
+            [input]
+            base_model = "base.bpk"
+            source_adapter_bank = "bank.json"
+            oracle_report = "oracle.json"
 
-        let config = load_exact_adapter_bank_experiment_config(Some(&path)).unwrap();
-        let train_all_config =
-            load_exact_adapter_bank_experiment_config(Some(&train_all_path)).unwrap();
-        let pilot_config = load_exact_adapter_bank_experiment_config(Some(&pilot_path)).unwrap();
-        let pilot_256_config =
-            load_exact_adapter_bank_experiment_config(Some(&pilot_256_path)).unwrap();
+            [output]
+            output_dir = "artifacts/exact_bank"
+            adapter_bank_output = "artifacts/exact_bank/adapter_bank.json"
+
+            [adapter]
+            rank = 132
+            alpha = 132.0
+            force_split = "train"
+            "#,
+        )
+        .unwrap();
 
         assert!(config.input.base_model.is_some());
         assert!(config.input.source_adapter_bank.is_some());
         assert!(config.input.oracle_report.is_some());
-        assert!(pilot_config.input.oracle_report.is_some());
-        assert!(pilot_256_config.input.oracle_report.is_some());
         assert_eq!(config.adapter.rank, Some(132));
         assert_eq!(config.adapter.alpha, Some(132.0));
-        assert_eq!(pilot_config.adapter.rank, Some(132));
-        assert_eq!(pilot_256_config.adapter.rank, Some(132));
+        assert_eq!(config.adapter.force_split.as_deref(), Some("train"));
         assert_eq!(
             config.output.output_dir.as_deref(),
-            Some(Path::new(
-                "artifacts/hyper2d_exact_oracle_bank_10k8x8_2048_rank132_bias_exact"
-            ))
-        );
-        assert!(
-            pilot_256_config
-                .output
-                .output_dir
-                .as_ref()
-                .unwrap()
-                .display()
-                .to_string()
-                .contains("10k256x64")
-        );
-        assert_eq!(
-            train_all_config.adapter.force_split.as_deref(),
-            Some("train")
+            Some(Path::new("artifacts/exact_bank"))
         );
     }
 

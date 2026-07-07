@@ -188,9 +188,10 @@ Do not claim broad generalized HyperNPA quality until these are complete:
 1. Fix the direct shared-base plus per-sample LoRA quality target so stored
    LoRAs beat the zero-adapter baseline at quality scale. `report-hyper2d` now
    blocks direct-basis readiness unless shared-vs-zero max ratio is `<= 1.00x`
-   on both train and holdout oracle splits. Use
-   `configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048.toml` to
-   produce the quality-scale oracle report.
+   on both train and holdout oracle splits. The old direct-basis oracle configs
+   have been moved out of the verified tree; recreate them under
+   `configs/sandbox/` only for diagnostics until the upstream parity gate
+   passes.
 2. Add image/dynamics-loss fine-tuning or guidance for the conditioned flow so
    selection is based on rollout quality, not only factorized adapter-vector MSE.
    `report-hyper2d` now also blocks conditioning readiness unless generated

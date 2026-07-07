@@ -360,8 +360,13 @@ impl Plugin for AutomataViewerPlugin {
 }
 
 pub fn run() {
+    run_with_settings(AutomataSettings::default());
+}
+
+pub fn run_with_settings(settings: AutomataSettings) {
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.015, 0.018, 0.022)));
+    app.insert_resource(settings);
     app.add_plugins(DefaultPlugins);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default());
     #[cfg(feature = "splatting")]

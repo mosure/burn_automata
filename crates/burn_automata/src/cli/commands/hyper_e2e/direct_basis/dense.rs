@@ -76,6 +76,8 @@ pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutTrainConfig {
     pub(in crate::cli::commands::hyper_e2e) generator_sample_steps: usize,
     pub(in crate::cli::commands::hyper_e2e) generator_output_scale: f32,
     pub(in crate::cli::commands::hyper_e2e) generator_init_scale: f32,
+    pub(in crate::cli::commands::hyper_e2e) stopgrad_pos: bool,
+    pub(in crate::cli::commands::hyper_e2e) stopgrad_state: bool,
     pub(in crate::cli::commands::hyper_e2e) system_memory_budget_gb: Option<f32>,
     pub(in crate::cli::commands::hyper_e2e) gpu_memory_budget_gb: Option<f32>,
     pub(in crate::cli::commands::hyper_e2e) max_dense_train_particles: usize,
@@ -193,7 +195,7 @@ mod $module {
         NpaWeights,
         SgdConfig,
         rollout::{seed_particles_scaled, stochastic_mask},
-        target2d::render_target_2d_splat,
+        target2d::{render_target_2d_splat, target_2d_foreground_mask},
     };
 
     type InnerBackend = $inner_backend;
@@ -206,6 +208,7 @@ mod $module {
     type Tensor1Int = Tensor<BurnBackend, 1, Int>;
     type Tensor1Inner = Tensor<InnerBackend, 1>;
     type Tensor2Inner = Tensor<InnerBackend, 2>;
+    type Tensor3Inner = Tensor<InnerBackend, 3>;
 
     const BACKEND: &str = $backend_name;
     const DEVICE_LABEL: &str = $device_label;
@@ -318,13 +321,30 @@ mod $module {
     struct BurnTargetExample {
         target_rgb: Tensor2,
         target_density: Tensor2,
+        target_foreground: Tensor2,
+        target_foreground_scale: f32,
         target_mean: Tensor2,
+        target_positions: Tensor2,
         pixel_xy: Tensor2,
         pixel_size: f32,
         target_points: usize,
         particle_count: usize,
         update_prob: f32,
         seed_scale: f32,
+    }
+
+    struct BurnPoolBatch {
+        pool_indices: Vec<usize>,
+        x: Tensor3,
+        s: Tensor3,
+    }
+
+    struct BurnHostParticlePool {
+        positions: Vec<f32>,
+        states: Vec<f32>,
+        pool_size: usize,
+        particle_count: usize,
+        state_dims: usize,
     }
 
     enum BurnE2eConditionValues {
@@ -496,6 +516,20 @@ mod $module {
         )?);
         write_adapters(holdout_examples, &holdout_adapters)?;
 
+        let particle_pool_metrics = json!({
+            "enabled": train_config.use_particle_pool,
+            "size": train_config.pool_size,
+            "inject_seed_interval": train_config.inject_seed_interval,
+            "brush_size": train_config.brush_size,
+        });
+        let checkpoint_selection_metrics = json!({
+            "mode": if train_config.use_particle_pool {
+                "restore_best_reported_geometry_score_including_phase_initial_state"
+            } else {
+                "restore_best_reported_eval_loss_including_phase_initial_state"
+            },
+            "train_best_geometry_score": train_phase.best_geometry_score,
+        });
         let metrics = json!({
             "backend": format!("{BACKEND}_e2e_rollout"),
             "device": DEVICE_LABEL,
@@ -517,7 +551,7 @@ mod $module {
             "train_final_dense_loss": train_phase.history.last().map(|entry| entry.loss),
             "train_refine_final_dense_loss": train_refine_phase.history.last().map(|entry| entry.loss),
             "holdout_final_dense_loss": holdout_phase.history.last().map(|entry| entry.loss),
-            "checkpoint_selection": "restore_best_reported_eval_loss_including_phase_initial_state",
+            "checkpoint_selection": checkpoint_selection_metrics,
             "optimizer": "adamw",
             "optimizer_cli_fields": "base/adapter learning_rate, weight_decay, grad_clip_norm",
             "adamw_beta1": 0.9,
@@ -527,6 +561,8 @@ mod $module {
             "batching": "homogeneous_particle_count_batched_rollout_perception_splat_loss",
             "training_graph": "tbptt_chunked_rollout_state_detach",
             "tbptt_chunk_steps": train_config.tbptt_chunk_steps,
+            "loss_on_final_chunk_only": train_config.loss_on_final_chunk_only,
+            "particle_pool": particle_pool_metrics,
             "eval_interval": train_config.eval_interval,
             "eval_batch_size": train_config.eval_batch_size,
             "max_dense_train_particles": train_config.max_dense_train_particles,
@@ -846,6 +882,10 @@ mod $module {
             json!(config.tbptt_chunk_steps),
         );
         metrics.insert(
+            "loss_on_final_chunk_only".to_string(),
+            json!(false),
+        );
+        metrics.insert(
             "max_dense_train_particles".to_string(),
             json!(config.max_dense_train_particles),
         );
@@ -1093,6 +1133,7 @@ mod $module {
             "steps": config.steps,
             "rollout_steps": config.rollout_steps,
             "tbptt_chunk_steps": config.tbptt_chunk_steps,
+            "loss_on_final_chunk_only": config.loss_on_final_chunk_only,
             "max_dense_chunk_floats": config.max_dense_chunk_floats,
             "max_splat_chunk_floats": config.max_splat_chunk_floats,
             "system_memory_budget_gb": config.system_memory_budget_gb,
@@ -1115,7 +1156,21 @@ mod $module {
         history: Vec<CliHyper2dDirectBasisHistoryEntry>,
         best_loss: Option<f32>,
         best_step: usize,
+        best_geometry_score: Option<f32>,
         sample_updates: SampleUpdateStats,
+    }
+
+    #[derive(Clone, Copy, Debug, Serialize)]
+    struct BurnGeometrySummary {
+        examples: usize,
+        mean_score: f32,
+        mean_foreground_iou: f32,
+        mean_target_recall: f32,
+        mean_generated_precision: f32,
+        mean_bbox_iou: f32,
+        mean_lit_pixel_ratio: f32,
+        mean_bbox_width_ratio: f32,
+        mean_bbox_area_ratio: f32,
     }
 
     fn run_phase(
@@ -1131,16 +1186,42 @@ mod $module {
                 history: Vec::new(),
                 best_loss: None,
                 best_step: 0,
+                best_geometry_score: None,
                 sample_updates: sample_update_stats(&vec![0; targets.len()]),
             });
         }
         let mut rng = StdRng::seed_from_u64(config.seed);
         let mut sampler =
             PhaseBatchSampler::new(targets.len(), config.example_batch_size, &mut rng);
+        let homogeneous_pool_particle_count = if config.use_particle_pool {
+            let particle_count = targets[0].particle_count;
+            if targets
+                .iter()
+                .any(|target| target.particle_count != particle_count)
+            {
+                return Err(std::io::Error::other(
+                    "Burn target2d particle-pool training requires homogeneous particle counts",
+                )
+                .into());
+            }
+            Some(particle_count)
+        } else {
+            None
+        };
+        let mut particle_pool = homogeneous_pool_particle_count.map(|particle_count| {
+            BurnHostParticlePool::new(
+                config.pool_size.max(config.example_batch_size).max(1),
+                particle_count,
+                16,
+                targets[0].seed_scale,
+                config,
+            )
+        });
         let mut sample_update_counts = vec![0usize; targets.len()];
         let mut history = Vec::new();
         let mut best_loss = None;
         let mut best_step = 0;
+        let mut best_geometry_score = None;
         let mut best_params = None::<BurnBaseParams>;
         let mut best_adapters = None::<Vec<BurnAdapterParams>>;
         if config.eval_interval > 0
@@ -1154,6 +1235,19 @@ mod $module {
             )?
         {
             best_loss = Some(eval_loss.mean_total_loss);
+            best_geometry_score = if config.use_particle_pool {
+                evaluate_target_geometry(
+                    params,
+                    adapters,
+                    targets,
+                    config,
+                    config.eval_examples,
+                    config.eval_seed,
+                )?
+                .map(|geometry| geometry.mean_score)
+            } else {
+                None
+            };
             best_params = update_base.then(|| params.clone());
             best_adapters = Some(adapters.to_vec());
         }
@@ -1168,28 +1262,72 @@ mod $module {
             let should_eval = config.eval_interval > 0
                 && (step == config.steps || step.is_multiple_of(config.eval_interval.max(1)));
             let started = Instant::now();
-            let indices = sampler.next_batch(&mut rng);
             let step_seed = config
                 .seed
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9));
-            if indices.is_empty() {
-                return Err(std::io::Error::other("Burn direct-basis batch was empty").into());
+            let stats = if let (Some(pool), Some(particle_count)) =
+                (particle_pool.as_mut(), homogeneous_pool_particle_count)
+            {
+                let replace_seed = step.is_multiple_of(config.inject_seed_interval.max(1));
+                let device = &targets[0].target_rgb.device();
+                let pool_batch = pool.sample_batch(
+                    &mut rng,
+                    config.example_batch_size.max(1),
+                    replace_seed,
+                    targets[0].seed_scale,
+                    config,
+                    device,
+                );
+                let indices = (0..pool_batch.pool_indices.len())
+                    .map(|local| local % targets.len())
+                    .collect::<Vec<_>>();
+                if indices.is_empty() {
+                    return Err(std::io::Error::other("Burn direct-basis pool batch was empty")
+                        .into());
+                }
+                for &idx in &indices {
+                    sample_update_counts[idx] = sample_update_counts[idx].saturating_add(1);
+                }
+                let stats = train_homogeneous_step_tbptt(
+                    params,
+                    adapters,
+                    &mut base_optimizer,
+                    &mut adapter_optimizers,
+                    targets,
+                    &indices,
+                    particle_count,
+                    config,
+                    step_seed,
+                    update_base,
+                    should_report,
+                    Some((pool_batch.x, pool_batch.s)),
+                    Some((pool, pool_batch.pool_indices)),
+                )?;
+                stats
+            } else {
+                let indices = sampler.next_batch(&mut rng);
+                if indices.is_empty() {
+                    return Err(
+                        std::io::Error::other("Burn direct-basis batch was empty").into(),
+                    );
+                };
+                for &idx in &indices {
+                    sample_update_counts[idx] = sample_update_counts[idx].saturating_add(1);
+                }
+                let stats = train_step_tbptt(
+                    params,
+                    adapters,
+                    &mut base_optimizer,
+                    &mut adapter_optimizers,
+                    targets,
+                    &indices,
+                    config,
+                    step_seed,
+                    update_base,
+                    should_report,
+                )?;
+                stats
             };
-            for &idx in &indices {
-                sample_update_counts[idx] = sample_update_counts[idx].saturating_add(1);
-            }
-            let stats = train_step_tbptt(
-                params,
-                adapters,
-                &mut base_optimizer,
-                &mut adapter_optimizers,
-                targets,
-                &indices,
-                config,
-                step_seed,
-                update_base,
-                should_report,
-            )?;
             let elapsed = started.elapsed();
             if should_report {
                 let eval_loss = if should_eval {
@@ -1205,9 +1343,30 @@ mod $module {
                     None
                 };
                 if let Some(eval_loss) = eval_loss {
-                    if best_loss.is_none_or(|best| eval_loss.mean_total_loss < best) {
+                    let geometry = if config.use_particle_pool {
+                        evaluate_target_geometry(
+                            params,
+                            adapters,
+                            targets,
+                            config,
+                            config.eval_examples,
+                            config.eval_seed + step as u64,
+                        )?
+                    } else {
+                        None
+                    };
+                    let is_better = if let Some(geometry) = geometry {
+                        best_geometry_score
+                            .is_none_or(|best| geometry.mean_score > best)
+                    } else {
+                        best_loss.is_none_or(|best| eval_loss.mean_total_loss < best)
+                    };
+                    if is_better {
                         best_loss = Some(eval_loss.mean_total_loss);
                         best_step = step;
+                        if let Some(geometry) = geometry {
+                            best_geometry_score = Some(geometry.mean_score);
+                        }
                         best_params = update_base.then(|| params.clone());
                         best_adapters = Some(adapters.to_vec());
                     }
@@ -1272,6 +1431,7 @@ mod $module {
             history,
             best_loss,
             best_step,
+            best_geometry_score,
             sample_updates: sample_update_stats(&sample_update_counts),
         })
     }
@@ -1330,6 +1490,8 @@ mod $module {
                 step_seed,
                 update_base,
                 collect_metrics,
+                None,
+                None,
             );
         }
         train_mixed_step_tbptt(
@@ -1359,14 +1521,18 @@ mod $module {
         step_seed: u64,
         update_base: bool,
         collect_metrics: bool,
+        initial_state: Option<(Tensor3, Tensor3)>,
+        pool_update: Option<(&mut BurnHostParticlePool, Vec<usize>)>,
     ) -> Result<DirectBasisStepStats, Box<dyn std::error::Error>> {
         let started = Instant::now();
         let device = &targets[indices[0]].target_rgb.device();
-        let (mut x, mut s) =
-            seed_batch_tensors(targets, indices, particle_count, config, step_seed, device);
+        let (mut x, mut s) = initial_state.unwrap_or_else(|| {
+            seed_batch_tensors(targets, indices, particle_count, config, step_seed, device)
+        });
         let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
         let chunk_steps = tbptt_chunk_steps(config);
-        let chunk_count = config.rollout_steps.div_ceil(chunk_steps).max(1);
+        let rollout_steps = sampled_training_rollout_steps(config, step_seed);
+        let chunk_count = rollout_steps.div_ceil(chunk_steps).max(1);
         let mut loss_sum = collect_metrics.then_some(0.0_f32);
         let mut base_grad_norm_sum = 0.0_f32;
         let mut base_grad_scale_sum = 0.0_f32;
@@ -1374,9 +1540,10 @@ mod $module {
         let mut adapter_grad_max = 0.0_f32;
         let mut grad_metric_chunks = 0usize;
         let mut particle_steps = 0.0_f64;
-        let mut remaining_steps = config.rollout_steps;
+        let mut remaining_steps = rollout_steps;
         while remaining_steps > 0 {
             let steps = remaining_steps.min(chunk_steps);
+            let final_chunk = remaining_steps <= chunk_steps;
             let adapter_batch = BurnAdapterBatch::from_indices(adapters, indices);
             let displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
             let (next_x, next_s, displacement) = rollout_batch_chunk(
@@ -1392,6 +1559,13 @@ mod $module {
                 steps,
                 displacement,
             );
+            if config.loss_on_final_chunk_only && !final_chunk {
+                x = detach3(next_x);
+                s = detach3(next_s);
+                particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
+                remaining_steps -= steps;
+                continue;
+            }
             let loss = target_splat_loss_batch(
                 &next_x,
                 &next_s,
@@ -1428,11 +1602,19 @@ mod $module {
             particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
             remaining_steps -= steps;
         }
+        if let Some((pool, pool_indices)) = pool_update {
+            pool.update_batch(&pool_indices, x, s)?;
+        }
         let elapsed = started.elapsed();
         let grad_metric_chunks = grad_metric_chunks.max(1);
+        let loss_chunk_count = if config.loss_on_final_chunk_only {
+            1
+        } else {
+            chunk_count
+        };
         Ok(DirectBasisStepStats {
             loss: loss_sum.map_or(0.0, |value| {
-                value / indices.len() as f32 / chunk_count as f32
+                value / indices.len() as f32 / loss_chunk_count as f32
             }),
             base_grad_norm: base_grad_norm_sum / grad_metric_chunks as f32,
             base_grad_scale: if collect_metrics {
@@ -1467,7 +1649,8 @@ mod $module {
     ) -> Result<DirectBasisStepStats, Box<dyn std::error::Error>> {
         let started = Instant::now();
         let chunk_steps = tbptt_chunk_steps(config);
-        let chunk_count = config.rollout_steps.div_ceil(chunk_steps).max(1);
+        let rollout_steps = sampled_training_rollout_steps(config, step_seed);
+        let chunk_count = rollout_steps.div_ceil(chunk_steps).max(1);
         let mut loss_sum = collect_metrics.then_some(0.0_f32);
         let mut base_grad_norm_sum = 0.0_f32;
         let mut base_grad_scale_sum = 0.0_f32;
@@ -1486,9 +1669,10 @@ mod $module {
                 device,
             );
             let mut rng = StdRng::seed_from_u64(step_seed.wrapping_add(idx as u64) ^ 0x005e_ed2d);
-            let mut remaining_steps = config.rollout_steps;
+            let mut remaining_steps = rollout_steps;
             while remaining_steps > 0 {
                 let steps = remaining_steps.min(chunk_steps);
+                let final_chunk = remaining_steps <= chunk_steps;
                 let displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
                 let (next_x, next_s, displacement) = rollout_single_chunk(
                     params,
@@ -1501,6 +1685,13 @@ mod $module {
                     steps,
                     displacement,
                 );
+                if config.loss_on_final_chunk_only && !final_chunk {
+                    x = detach2(next_x);
+                    s = detach2(next_s);
+                    particle_steps += target.particle_count as f64 * steps as f64;
+                    remaining_steps -= steps;
+                    continue;
+                }
                 let loss = target_splat_loss(
                     &next_x,
                     &next_s,
@@ -1541,9 +1732,14 @@ mod $module {
         }
         let elapsed = started.elapsed();
         let grad_metric_chunks = grad_metric_chunks.max(1);
+        let loss_chunk_count = if config.loss_on_final_chunk_only {
+            1
+        } else {
+            chunk_count
+        };
         Ok(DirectBasisStepStats {
             loss: loss_sum.map_or(0.0, |value| {
-                value / indices.len() as f32 / chunk_count as f32
+                value / indices.len() as f32 / loss_chunk_count as f32
             }),
             base_grad_norm: base_grad_norm_sum / grad_metric_chunks as f32,
             base_grad_scale: if collect_metrics {
@@ -1701,6 +1897,16 @@ mod $module {
         elapsed_ms: f64,
     }
 
+    fn sampled_training_rollout_steps(config: DirectBasisTrainConfig, seed: u64) -> usize {
+        let max_steps = config.rollout_steps.max(1);
+        let min_steps = config.rollout_step_min.max(1).min(max_steps);
+        if min_steps == max_steps {
+            return max_steps;
+        }
+        let mut rng = StdRng::seed_from_u64(seed ^ 0x6d2b_79f5);
+        rng.random_range(min_steps..max_steps)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn train_oracle_model_batch_step_tbptt(
         params: &mut [BurnBaseParams],
@@ -1726,13 +1932,14 @@ mod $module {
             .map(|idx| StdRng::seed_from_u64(step_seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
             .collect::<Vec<_>>();
         let chunk_steps = tbptt_chunk_steps(config);
-        let chunk_count = config.rollout_steps.div_ceil(chunk_steps).max(1);
+        let rollout_steps = sampled_training_rollout_steps(config, step_seed);
+        let chunk_count = rollout_steps.div_ceil(chunk_steps).max(1);
         let mut loss_sums = collect_metrics.then(|| vec![0.0_f32; params.len()]);
         let mut grad_norm_sums = vec![0.0_f32; params.len()];
         let mut grad_scale_sums = vec![0.0_f32; params.len()];
         let mut grad_metric_chunks = 0usize;
         let mut particle_steps = 0.0_f64;
-        let mut remaining_steps = config.rollout_steps;
+        let mut remaining_steps = rollout_steps;
         while remaining_steps > 0 {
             let steps = remaining_steps.min(chunk_steps);
             let param_batch = BurnBaseBatch::from_params(params);
@@ -1940,6 +2147,71 @@ mod $module {
         summary.mean_color_loss *= scale;
         summary.mean_density_loss *= scale;
         Ok(Some(summary))
+    }
+
+    fn evaluate_target_geometry(
+        params: &BurnBaseParams,
+        adapters: &[BurnAdapterParams],
+        targets: &[BurnTargetExample],
+        config: DirectBasisTrainConfig,
+        requested_examples: usize,
+        seed: u64,
+    ) -> Result<Option<BurnGeometrySummary>, Box<dyn std::error::Error>> {
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let mut indices = (0..targets.len()).collect::<Vec<_>>();
+        if requested_examples > 0 && requested_examples < indices.len() {
+            let mut rng = StdRng::seed_from_u64(seed);
+            indices.shuffle(&mut rng);
+            indices.truncate(requested_examples);
+            indices.sort_unstable();
+        }
+        let eval_batch_size = normalized_eval_batch_size(config.eval_batch_size, indices.len());
+        let mut total = BurnGeometrySummary {
+            examples: 0,
+            mean_score: 0.0,
+            mean_foreground_iou: 0.0,
+            mean_target_recall: 0.0,
+            mean_generated_precision: 0.0,
+            mean_bbox_iou: 0.0,
+            mean_lit_pixel_ratio: 0.0,
+            mean_bbox_width_ratio: 0.0,
+            mean_bbox_area_ratio: 0.0,
+        };
+        for chunk in indices.chunks(eval_batch_size) {
+            if homogeneous_particle_count(targets, chunk).is_none() {
+                continue;
+            }
+            let Some(summary) =
+                batch_example_geometry(params, adapters, targets, chunk, config, seed)?
+            else {
+                continue;
+            };
+            let weight = summary.examples as f32;
+            total.examples += summary.examples;
+            total.mean_score += summary.mean_score * weight;
+            total.mean_foreground_iou += summary.mean_foreground_iou * weight;
+            total.mean_target_recall += summary.mean_target_recall * weight;
+            total.mean_generated_precision += summary.mean_generated_precision * weight;
+            total.mean_bbox_iou += summary.mean_bbox_iou * weight;
+            total.mean_lit_pixel_ratio += summary.mean_lit_pixel_ratio * weight;
+            total.mean_bbox_width_ratio += summary.mean_bbox_width_ratio * weight;
+            total.mean_bbox_area_ratio += summary.mean_bbox_area_ratio * weight;
+        }
+        if total.examples == 0 {
+            return Ok(None);
+        }
+        let scale = 1.0 / total.examples as f32;
+        total.mean_score *= scale;
+        total.mean_foreground_iou *= scale;
+        total.mean_target_recall *= scale;
+        total.mean_generated_precision *= scale;
+        total.mean_bbox_iou *= scale;
+        total.mean_lit_pixel_ratio *= scale;
+        total.mean_bbox_width_ratio *= scale;
+        total.mean_bbox_area_ratio *= scale;
+        Ok(Some(total))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2248,7 +2520,7 @@ mod $module {
         mut displacement: Tensor1,
     ) -> (Tensor2, Tensor2, Tensor1) {
         for _ in 0..steps {
-            let features = dense_perception(&x, &s, config);
+            let features = rollout_dense_perception(&x, &s, config);
             let update = params.forward_adapter(features, adapter, config);
             let dx_raw = update.clone().narrow(1, 0, 2);
             let ds = update.narrow(1, 2, s.shape().dims::<2>()[1]);
@@ -2296,7 +2568,7 @@ mod $module {
         mut displacement: Tensor1,
     ) -> (Tensor3, Tensor3, Tensor1) {
         for _ in 0..steps {
-            let features = dense_perception_batch(&x, &s, config);
+            let features = rollout_dense_perception_batch(&x, &s, config);
             let update = params.forward_adapter_batch(features, adapter_batch);
             let state_dims = s.shape().dims::<3>()[2];
             let dx_raw = update.clone().narrow(2, 0, 2);
@@ -2344,7 +2616,7 @@ mod $module {
         mut displacement: Tensor1,
     ) -> (Tensor3, Tensor3, Tensor1) {
         for _ in 0..steps {
-            let features = dense_perception_batch(&x, &s, config);
+            let features = rollout_dense_perception_batch(&x, &s, config);
             let update = params.forward_adapter_batch(features, adapter_batch);
             let state_dims = s.shape().dims::<3>()[2];
             let dx_raw = update.clone().narrow(2, 0, 2);
@@ -2393,7 +2665,7 @@ mod $module {
         mut displacement: Tensor1,
     ) -> (Tensor3, Tensor3, Tensor1) {
         for _ in 0..steps {
-            let features = dense_perception_batch(&x, &s, config);
+            let features = rollout_dense_perception_batch(&x, &s, config);
             let update = params.forward(features);
             let state_dims = s.shape().dims::<3>()[2];
             let dx_raw = update.clone().narrow(2, 0, 2);
@@ -2528,6 +2800,71 @@ mod $module {
         ))
     }
 
+    fn batch_example_geometry(
+        params: &BurnBaseParams,
+        adapters: &[BurnAdapterParams],
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        seed: u64,
+    ) -> Result<Option<BurnGeometrySummary>, Box<dyn std::error::Error>> {
+        let Some(particle_count) = homogeneous_particle_count(targets, indices) else {
+            return Ok(None);
+        };
+        let device = &targets[indices[0]].target_rgb.device();
+        let adapter_batch = BurnAdapterBatch::from_indices(adapters, indices);
+        let (mut x, mut s) =
+            seed_batch_tensors(targets, indices, particle_count, config, seed, device);
+        let mut rngs = indices
+            .iter()
+            .map(|idx| StdRng::seed_from_u64(seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
+            .collect::<Vec<_>>();
+        let mut displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
+        let chunk_steps = tbptt_chunk_steps(config);
+        let mut remaining_steps = config.rollout_steps;
+        while remaining_steps > 0 {
+            let steps = remaining_steps.min(chunk_steps);
+            (x, s, displacement) = rollout_batch_eval_chunk(
+                params,
+                &adapter_batch,
+                targets,
+                indices,
+                x,
+                s,
+                config,
+                particle_count,
+                &mut rngs,
+                steps,
+                displacement,
+            );
+            remaining_steps -= steps;
+            if remaining_steps > 0 {
+                x = detach3(x);
+                s = detach3(s);
+                displacement = detach1(displacement);
+            }
+        }
+
+        let centered = if config.loss_config.center {
+            let target_mean = stack_target_mean(targets, indices);
+            x.clone() - x.clone().mean_dim(1).expand([indices.len(), particle_count, 2])
+                + target_mean.expand([indices.len(), particle_count, 2])
+        } else {
+            x.clone()
+        };
+        let state_dims = s.shape().dims::<3>()[2];
+        let colors = s.narrow(2, state_dims - 3, 3).add_scalar(0.5);
+        let (_, density) =
+            splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        let target_density = stack_target_density(targets, indices);
+        geometry_summary_from_density(
+            tensor3_vec(density.inner())?,
+            tensor3_vec(target_density.inner())?,
+            indices.len(),
+            config.loss_config.image_size,
+        )
+    }
+
     fn homogeneous_particle_count(
         targets: &[BurnTargetExample],
         indices: &[usize],
@@ -2535,6 +2872,220 @@ mod $module {
         let mut iter = indices.iter().map(|idx| targets[*idx].particle_count);
         let first = iter.next()?;
         iter.all(|count| count == first).then_some(first)
+    }
+
+    fn geometry_summary_from_density(
+        density: Vec<f32>,
+        target_density: Vec<f32>,
+        batches: usize,
+        image_size: usize,
+    ) -> Result<Option<BurnGeometrySummary>, Box<dyn std::error::Error>> {
+        let pixels = image_size * image_size;
+        if batches == 0 {
+            return Ok(None);
+        }
+        if density.len() != batches * pixels || target_density.len() != batches * pixels {
+            return Err(std::io::Error::other(format!(
+                "Burn geometry density shape mismatch: density={} target={} expected={}",
+                density.len(),
+                target_density.len(),
+                batches * pixels
+            ))
+            .into());
+        }
+        let mut summary = BurnGeometrySummary {
+            examples: batches,
+            mean_score: 0.0,
+            mean_foreground_iou: 0.0,
+            mean_target_recall: 0.0,
+            mean_generated_precision: 0.0,
+            mean_bbox_iou: 0.0,
+            mean_lit_pixel_ratio: 0.0,
+            mean_bbox_width_ratio: 0.0,
+            mean_bbox_area_ratio: 0.0,
+        };
+        for batch in 0..batches {
+            let start = batch * pixels;
+            let end = start + pixels;
+            let generated = &density[start..end];
+            let target = &target_density[start..end];
+            let threshold = target
+                .iter()
+                .copied()
+                .fold(0.0_f32, |max_value, value| max_value.max(value))
+                .mul_add(0.05, 0.0)
+                .max(1.0e-6);
+            let (lit_pixels, bbox) = density_lit_stats(generated, image_size, threshold)?;
+            let (target_lit_pixels, target_bbox) =
+                density_lit_stats(target, image_size, threshold)?;
+            let lit_ratio = lit_pixels as f32 / target_lit_pixels.max(1) as f32;
+            let iou = bbox_iou(bbox, target_bbox).unwrap_or(0.0);
+            let width_ratio = bbox_width_ratio(bbox, target_bbox).unwrap_or(0.0);
+            let area_ratio = bbox_area_ratio(bbox, target_bbox).unwrap_or(0.0);
+            let overlap = density_overlap_stats(generated, target, threshold)?;
+            let score = 1.5 * overlap.iou
+                + 0.5 * overlap.target_recall
+                + 0.25 * overlap.generated_precision
+                + 0.25 * iou
+                - 0.25 * (lit_ratio - 1.0).abs()
+                - 0.35 * (width_ratio - 1.0).abs()
+                - 0.15 * (area_ratio - 1.0).abs();
+            summary.mean_score += score;
+            summary.mean_foreground_iou += overlap.iou;
+            summary.mean_target_recall += overlap.target_recall;
+            summary.mean_generated_precision += overlap.generated_precision;
+            summary.mean_bbox_iou += iou;
+            summary.mean_lit_pixel_ratio += lit_ratio;
+            summary.mean_bbox_width_ratio += width_ratio;
+            summary.mean_bbox_area_ratio += area_ratio;
+        }
+        let scale = 1.0 / batches as f32;
+        summary.mean_score *= scale;
+        summary.mean_foreground_iou *= scale;
+        summary.mean_target_recall *= scale;
+        summary.mean_generated_precision *= scale;
+        summary.mean_bbox_iou *= scale;
+        summary.mean_lit_pixel_ratio *= scale;
+        summary.mean_bbox_width_ratio *= scale;
+        summary.mean_bbox_area_ratio *= scale;
+        Ok(Some(summary))
+    }
+
+    #[derive(Clone, Copy)]
+    struct BurnDensityOverlapStats {
+        iou: f32,
+        target_recall: f32,
+        generated_precision: f32,
+    }
+
+    fn density_overlap_stats(
+        generated: &[f32],
+        target: &[f32],
+        threshold: f32,
+    ) -> Result<BurnDensityOverlapStats, Box<dyn std::error::Error>> {
+        if generated.len() != target.len() {
+            return Err(std::io::Error::other("Burn geometry density overlap shape mismatch").into());
+        }
+        let mut generated_count = 0usize;
+        let mut target_count = 0usize;
+        let mut intersection = 0usize;
+        let mut union = 0usize;
+        for (&generated_density, &target_density) in generated.iter().zip(target) {
+            let generated_hit = generated_density >= threshold;
+            let target_hit = target_density >= threshold;
+            generated_count += usize::from(generated_hit);
+            target_count += usize::from(target_hit);
+            intersection += usize::from(generated_hit && target_hit);
+            union += usize::from(generated_hit || target_hit);
+        }
+        Ok(BurnDensityOverlapStats {
+            iou: intersection as f32 / union.max(1) as f32,
+            target_recall: intersection as f32 / target_count.max(1) as f32,
+            generated_precision: intersection as f32 / generated_count.max(1) as f32,
+        })
+    }
+
+    fn density_lit_stats(
+        density: &[f32],
+        image_size: usize,
+        threshold: f32,
+    ) -> Result<(usize, Option<[usize; 4]>), Box<dyn std::error::Error>> {
+        if density.len() != image_size * image_size {
+            return Err(std::io::Error::other("Burn geometry density shape mismatch").into());
+        }
+        let mut lit_pixels = 0usize;
+        let mut min_x = image_size;
+        let mut min_y = image_size;
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+        for y in 0..image_size {
+            for x in 0..image_size {
+                if density[y * image_size + x] < threshold {
+                    continue;
+                }
+                lit_pixels += 1;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        Ok((
+            lit_pixels,
+            (lit_pixels > 0).then_some([min_x, min_y, max_x, max_y]),
+        ))
+    }
+
+    fn bbox_iou(left: Option<[usize; 4]>, right: Option<[usize; 4]>) -> Option<f32> {
+        let left = left?;
+        let right = right?;
+        let x0 = left[0].max(right[0]);
+        let y0 = left[1].max(right[1]);
+        let x1 = left[2].min(right[2]);
+        let y1 = left[3].min(right[3]);
+        let intersection = if x1 >= x0 && y1 >= y0 {
+            bbox_area([x0, y0, x1, y1])
+        } else {
+            0.0
+        };
+        let union = bbox_area(left) + bbox_area(right) - intersection;
+        Some(intersection / union.max(f32::MIN_POSITIVE))
+    }
+
+    fn bbox_width_ratio(left: Option<[usize; 4]>, right: Option<[usize; 4]>) -> Option<f32> {
+        Some(bbox_width(left?) / bbox_width(right?).max(f32::MIN_POSITIVE))
+    }
+
+    fn bbox_area_ratio(left: Option<[usize; 4]>, right: Option<[usize; 4]>) -> Option<f32> {
+        Some(bbox_area(left?) / bbox_area(right?).max(f32::MIN_POSITIVE))
+    }
+
+    fn bbox_width(bbox: [usize; 4]) -> f32 {
+        bbox[2].saturating_sub(bbox[0]).saturating_add(1) as f32
+    }
+
+    fn bbox_height(bbox: [usize; 4]) -> f32 {
+        bbox[3].saturating_sub(bbox[1]).saturating_add(1) as f32
+    }
+
+    fn bbox_area(bbox: [usize; 4]) -> f32 {
+        bbox_width(bbox) * bbox_height(bbox)
+    }
+
+    fn rollout_dense_perception(
+        x: &Tensor2,
+        s: &Tensor2,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor2 {
+        let feature_x = if config.stopgrad_pos {
+            detach2(x.clone())
+        } else {
+            x.clone()
+        };
+        let feature_s = if config.stopgrad_state {
+            detach2(s.clone())
+        } else {
+            s.clone()
+        };
+        dense_perception(&feature_x, &feature_s, config)
+    }
+
+    fn rollout_dense_perception_batch(
+        x: &Tensor3,
+        s: &Tensor3,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor3 {
+        let feature_x = if config.stopgrad_pos {
+            detach3(x.clone())
+        } else {
+            x.clone()
+        };
+        let feature_s = if config.stopgrad_state {
+            detach3(s.clone())
+        } else {
+            s.clone()
+        };
+        dense_perception_batch(&feature_x, &feature_s, config)
     }
 
     fn dense_perception(x: &Tensor2, s: &Tensor2, config: DirectBasisTrainConfig) -> Tensor2 {
@@ -2751,6 +3302,39 @@ mod $module {
         )
     }
 
+    fn background_density_term(density: Tensor2, foreground: Tensor2) -> Tensor2 {
+        let background = foreground.mul_scalar(-1.0).add_scalar(1.0);
+        let leak = density.mul(background);
+        leak.clone().mul(leak)
+    }
+
+    fn background_density_term_batch(density: Tensor3, foreground: Tensor3) -> Tensor3 {
+        let background = foreground.mul_scalar(-1.0).add_scalar(1.0);
+        let leak = density.mul(background);
+        leak.clone().mul(leak)
+    }
+
+    fn foreground_density_term(
+        density: Tensor2,
+        target_density: Tensor2,
+        foreground: Tensor2,
+        foreground_scale: f32,
+    ) -> Tensor1 {
+        l1l2_tensor((density - target_density).mul(foreground))
+            .mean()
+            .mul_scalar(foreground_scale)
+    }
+
+    fn foreground_density_term_batch(
+        density: Tensor3,
+        target_density: Tensor3,
+        foreground: Tensor3,
+        foreground_scales: Tensor3,
+    ) -> Tensor3 {
+        l1l2_tensor3((density - target_density).mul(foreground))
+            .mul(foreground_scales)
+    }
+
     fn target_splat_loss(
         x: &Tensor2,
         s: &Tensor2,
@@ -2769,6 +3353,14 @@ mod $module {
         };
         let colors = s.clone().narrow(1, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) = splat_render(&centered, &colors, target, config, particle_count);
+        let background_density_loss =
+            background_density_term(density.clone(), target.target_foreground.clone()).mean();
+        let foreground_density_loss = foreground_density_term(
+            density.clone(),
+            target.target_density.clone(),
+            target.target_foreground.clone(),
+            target.target_foreground_scale,
+        );
         let density_diff = density - target.target_density.clone();
         let density_term = l1l2_tensor(density_diff);
         let density_loss = density_term.clone().mean();
@@ -2779,12 +3371,19 @@ mod $module {
         let color_loss = l1l2_tensor(rgb - target.target_rgb.clone())
             .mul(color_gate)
             .mean();
+        let shape_chamfer_loss = target_shape_chamfer_loss(&centered, target, config);
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
             + density_loss
                 .clone()
-                .mul_scalar(config.loss_config.density_loss_weight);
+                .mul_scalar(config.loss_config.density_loss_weight)
+            + background_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.background_density_loss_weight)
+            + foreground_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.foreground_density_loss_weight);
         let bound = relu(x.clone().abs().add_scalar(-1.0));
         let bound_loss = bound.mean();
         let overflow = relu(s.clone().abs().add_scalar(-1.0));
@@ -2792,6 +3391,7 @@ mod $module {
         let mut total = splat
             .clone()
             .mul_scalar(config.loss_config.splat_loss_weight)
+            + shape_chamfer_loss.mul_scalar(config.loss_config.shape_chamfer_loss_weight)
             + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
             + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
             + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
@@ -2829,7 +3429,18 @@ mod $module {
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        let background_density_loss =
+            background_density_term_batch(density.clone(), stack_target_foreground(targets, indices))
+                .mean();
         let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let foreground_density_loss = foreground_density_term_batch(
+            density.clone(),
+            target_density.clone(),
+            target_foreground,
+            stack_target_foreground_scales(targets, indices),
+        )
+        .mean();
         let density_diff = density - target_density;
         let density_term = l1l2_tensor3(density_diff);
         let density_loss = density_term.clone().mean();
@@ -2841,17 +3452,26 @@ mod $module {
         let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
             .mul(color_gate)
             .mean();
+        let shape_chamfer_loss =
+            target_shape_chamfer_loss_batch_vector(&centered, targets, indices, config).mean();
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
             + density_loss
                 .clone()
-                .mul_scalar(config.loss_config.density_loss_weight);
+                .mul_scalar(config.loss_config.density_loss_weight)
+            + background_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.background_density_loss_weight)
+            + foreground_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.foreground_density_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0)).mean();
         let overflow_loss = relu(s.clone().abs().add_scalar(-1.0)).mean();
         let mut total = splat
             .clone()
             .mul_scalar(config.loss_config.splat_loss_weight)
+            + shape_chamfer_loss.mul_scalar(config.loss_config.shape_chamfer_loss_weight)
             + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
             + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
             + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
@@ -2890,7 +3510,25 @@ mod $module {
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
-        let density_diff = density - stack_target_density(targets, indices);
+        let background_density_loss = background_density_term_batch(
+            density.clone(),
+            stack_target_foreground(targets, indices),
+        )
+        .reshape([batches, pixels])
+        .mean_dim(1)
+        .squeeze_dim::<1>(1);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let foreground_density_loss = foreground_density_term_batch(
+            density.clone(),
+            target_density.clone(),
+            target_foreground,
+            stack_target_foreground_scales(targets, indices),
+        )
+        .reshape([batches, pixels])
+        .mean_dim(1)
+        .squeeze_dim::<1>(1);
+        let density_diff = density - target_density;
         let density_term = l1l2_tensor3(density_diff);
         let density_loss = density_term
             .clone()
@@ -2906,12 +3544,20 @@ mod $module {
             .reshape([batches, pixels * 3])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
+        let shape_chamfer_loss =
+            target_shape_chamfer_loss_batch_vector(&centered, targets, indices, config);
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
             + density_loss
                 .clone()
-                .mul_scalar(config.loss_config.density_loss_weight);
+                .mul_scalar(config.loss_config.density_loss_weight)
+            + background_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.background_density_loss_weight)
+            + foreground_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.foreground_density_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -2923,6 +3569,7 @@ mod $module {
         let mut total = splat
             .clone()
             .mul_scalar(config.loss_config.splat_loss_weight)
+            + shape_chamfer_loss.mul_scalar(config.loss_config.shape_chamfer_loss_weight)
             + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
             + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
             + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
@@ -2972,7 +3619,25 @@ mod $module {
             .reshape([batches, pixels * 3])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
-        let density_diff = density - stack_target_density(targets, indices);
+        let background_density_loss = background_density_term_batch(
+            density.clone(),
+            stack_target_foreground(targets, indices),
+        )
+        .reshape([batches, pixels])
+        .mean_dim(1)
+        .squeeze_dim::<1>(1);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let foreground_density_loss = foreground_density_term_batch(
+            density.clone(),
+            target_density.clone(),
+            target_foreground,
+            stack_target_foreground_scales(targets, indices),
+        )
+        .reshape([batches, pixels])
+        .mean_dim(1)
+        .squeeze_dim::<1>(1);
+        let density_diff = density - target_density;
         let density_term = l1l2_tensor3(density_diff);
         let density_loss = density_term
             .clone()
@@ -2988,12 +3653,20 @@ mod $module {
             .reshape([batches, pixels * 3])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
+        let shape_chamfer_loss =
+            target_shape_chamfer_loss_batch_vector(&centered, targets, indices, config);
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
             + density_loss
                 .clone()
-                .mul_scalar(config.loss_config.density_loss_weight);
+                .mul_scalar(config.loss_config.density_loss_weight)
+            + background_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.background_density_loss_weight)
+            + foreground_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.foreground_density_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -3005,6 +3678,7 @@ mod $module {
         let mut total = splat
             .clone()
             .mul_scalar(config.loss_config.splat_loss_weight)
+            + shape_chamfer_loss.mul_scalar(config.loss_config.shape_chamfer_loss_weight)
             + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
             + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
             + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
@@ -3048,7 +3722,25 @@ mod $module {
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
-        let density_diff = density - stack_target_density(targets, indices);
+        let background_density_loss = background_density_term_batch(
+            density.clone(),
+            stack_target_foreground(targets, indices),
+        )
+        .reshape([batches, pixels])
+        .mean_dim(1)
+        .squeeze_dim::<1>(1);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let foreground_density_loss = foreground_density_term_batch(
+            density.clone(),
+            target_density.clone(),
+            target_foreground,
+            stack_target_foreground_scales(targets, indices),
+        )
+        .reshape([batches, pixels])
+        .mean_dim(1)
+        .squeeze_dim::<1>(1);
+        let density_diff = density - target_density;
         let density_term = l1l2_tensor3(density_diff);
         let density_loss = density_term
             .clone()
@@ -3064,12 +3756,20 @@ mod $module {
             .reshape([batches, pixels * 3])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
+        let shape_chamfer_loss =
+            target_shape_chamfer_loss_batch_vector(&centered, targets, indices, config);
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
             + density_loss
                 .clone()
-                .mul_scalar(config.loss_config.density_loss_weight);
+                .mul_scalar(config.loss_config.density_loss_weight)
+            + background_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.background_density_loss_weight)
+            + foreground_density_loss
+                .clone()
+                .mul_scalar(config.loss_config.foreground_density_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -3081,6 +3781,7 @@ mod $module {
         let total = splat
             .clone()
             .mul_scalar(config.loss_config.splat_loss_weight)
+            + shape_chamfer_loss.mul_scalar(config.loss_config.shape_chamfer_loss_weight)
             + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
             + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
             + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
@@ -3090,6 +3791,60 @@ mod $module {
             color: color_loss,
             density: density_loss,
         }
+    }
+
+    fn target_shape_chamfer_loss(
+        x: &Tensor2,
+        target: &BurnTargetExample,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor1 {
+        if config.loss_config.shape_chamfer_loss_weight <= 0.0 {
+            return Tensor::<BurnBackend, 1>::zeros([1], &target.target_rgb.device());
+        }
+        let particle_count = x.shape().dims::<2>()[0];
+        let target_count = target.target_positions.shape().dims::<2>()[0];
+        if particle_count == 0 || target_count == 0 {
+            return Tensor::<BurnBackend, 1>::zeros([1], &target.target_rgb.device());
+        }
+        let particle_i = x
+            .clone()
+            .unsqueeze_dim::<3>(1)
+            .expand([particle_count, target_count, 2]);
+        let target_j = target
+            .target_positions
+            .clone()
+            .unsqueeze_dim::<3>(0)
+            .expand([particle_count, target_count, 2]);
+        let diff = particle_i - target_j;
+        let dist2 = diff.clone().mul(diff).sum_dim(2).squeeze_dim::<2>(2);
+        let particle_to_target = dist2.clone().min_dim(1).mean();
+        let target_to_particle = dist2.min_dim(0).mean();
+        particle_to_target + target_to_particle
+    }
+
+    fn target_shape_chamfer_loss_batch_vector(
+        x: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+    ) -> Tensor1 {
+        if config.loss_config.shape_chamfer_loss_weight <= 0.0 {
+            return Tensor::<BurnBackend, 1>::zeros(
+                [indices.len()],
+                &targets[indices[0]].target_rgb.device(),
+            );
+        }
+        Tensor::cat(
+            indices
+                .iter()
+                .enumerate()
+                .map(|(local, idx)| {
+                    let x_local = x.clone().narrow(0, local, 1).squeeze_dim::<2>(0);
+                    target_shape_chamfer_loss(&x_local, &targets[*idx], config)
+                })
+                .collect::<Vec<_>>(),
+            0,
+        )
     }
 
     fn splat_render(
@@ -4575,11 +5330,26 @@ mod $module {
             .iter()
             .map(|example| {
                 let render = render_target_2d_splat(&example.target, config.loss_config)?;
+                let foreground = target_2d_foreground_mask(&example.target, config.loss_config)?;
+                let foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
                 let target_mean = example.target.mean_position();
+                let target_positions = example
+                    .target
+                    .positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect::<Vec<_>>();
                 Ok(BurnTargetExample {
                     target_rgb: tensor(render.rgb, [pixels, 3], device),
                     target_density: tensor(render.density, [pixels, 1], device),
+                    target_foreground: tensor(foreground, [pixels, 1], device),
+                    target_foreground_scale: foreground_scale,
                     target_mean: tensor([target_mean[0], target_mean[1]].to_vec(), [1, 2], device),
+                    target_positions: tensor(
+                        target_positions,
+                        [example.target.positions.len(), 2],
+                        device,
+                    ),
                     pixel_xy: pixel_xy.clone(),
                     pixel_size: example.target.pixel_size,
                     target_points: example.target.point_count(),
@@ -4617,11 +5387,26 @@ mod $module {
             .iter()
             .map(|example| {
                 let render = render_target_2d_splat(&example.target, direct_config.loss_config)?;
+                let foreground = target_2d_foreground_mask(&example.target, direct_config.loss_config)?;
+                let foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
                 let target_mean = example.target.mean_position();
+                let target_positions = example
+                    .target
+                    .positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect::<Vec<_>>();
                 Ok(BurnTargetExample {
                     target_rgb: tensor(render.rgb, [pixels, 3], device),
                     target_density: tensor(render.density, [pixels, 1], device),
+                    target_foreground: tensor(foreground, [pixels, 1], device),
+                    target_foreground_scale: foreground_scale,
                     target_mean: tensor([target_mean[0], target_mean[1]].to_vec(), [1, 2], device),
+                    target_positions: tensor(
+                        target_positions,
+                        [example.target.positions.len(), 2],
+                        device,
+                    ),
                     pixel_xy: pixel_xy.clone(),
                     pixel_size: example.target.pixel_size,
                     target_points: example.target.point_count(),
@@ -4639,7 +5424,15 @@ mod $module {
             report_interval: config.report_interval,
             example_batch_size: config.example_batch_size,
             tbptt_chunk_steps: config.tbptt_chunk_steps,
+            loss_on_final_chunk_only: false,
+            use_particle_pool: false,
+            pool_size: 0,
+            inject_seed_interval: 0,
+            brush_size: 0.0,
+            stopgrad_pos: config.stopgrad_pos,
+            stopgrad_state: config.stopgrad_state,
             rollout_particles: config.rollout_particles,
+            rollout_step_min: config.rollout_steps,
             rollout_steps: config.rollout_steps,
             update_prob: config.update_prob,
             seed: config.seed,
@@ -4892,6 +5685,28 @@ mod $module {
         )
     }
 
+    fn stack_target_foreground(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        Tensor::cat(
+            indices
+                .iter()
+                .map(|idx| targets[*idx].target_foreground.clone().unsqueeze_dim::<3>(0))
+                .collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn stack_target_foreground_scales(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
+        let values = indices
+            .iter()
+            .map(|idx| targets[*idx].target_foreground_scale)
+            .collect::<Vec<_>>();
+        tensor3(
+            values,
+            [indices.len(), 1, 1],
+            &targets[indices[0]].target_rgb.device(),
+        )
+    }
+
     fn stack_target_mean(targets: &[BurnTargetExample], indices: &[usize]) -> Tensor3 {
         Tensor::cat(
             indices
@@ -5103,6 +5918,153 @@ mod $module {
             example.adapter = adapter.to_adapter()?;
         }
         Ok(())
+    }
+
+    impl BurnHostParticlePool {
+        fn new(
+            pool_size: usize,
+            particle_count: usize,
+            state_dims: usize,
+            seed_scale: f32,
+            config: DirectBasisTrainConfig,
+        ) -> Self {
+            let (positions, states) = seed_particles_scaled(
+                pool_size,
+                particle_count,
+                state_dims,
+                2,
+                config.seed,
+                config.seed_mode,
+                seed_scale,
+            );
+            Self {
+                positions: positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect(),
+                states,
+                pool_size,
+                particle_count,
+                state_dims,
+            }
+        }
+
+        fn sample_batch(
+            &self,
+            rng: &mut StdRng,
+            batch_size: usize,
+            replace_seed: bool,
+            seed_scale: f32,
+            config: DirectBasisTrainConfig,
+            device: &BurnDevice,
+        ) -> BurnPoolBatch {
+            let mut pool_indices = (0..self.pool_size).collect::<Vec<_>>();
+            pool_indices.shuffle(rng);
+            pool_indices.truncate(batch_size.min(self.pool_size));
+
+            let mut positions = Vec::with_capacity(pool_indices.len() * self.particle_count * 2);
+            let mut states =
+                Vec::with_capacity(pool_indices.len() * self.particle_count * self.state_dims);
+            for pool_index in &pool_indices {
+                let position_start = pool_index * self.particle_count * 2;
+                let position_end = position_start + self.particle_count * 2;
+                positions.extend_from_slice(&self.positions[position_start..position_end]);
+                let state_start = pool_index * self.particle_count * self.state_dims;
+                let state_end = state_start + self.particle_count * self.state_dims;
+                states.extend_from_slice(&self.states[state_start..state_end]);
+            }
+
+            if replace_seed && !pool_indices.is_empty() {
+                let seed = config.seed ^ rng.random::<u64>();
+                let (seed_positions, seed_states) = seed_particles_scaled(
+                    1,
+                    self.particle_count,
+                    self.state_dims,
+                    2,
+                    seed,
+                    config.seed_mode,
+                    seed_scale,
+                );
+                for (particle, position) in seed_positions.iter().enumerate() {
+                    let base = particle * 2;
+                    positions[base] = position[0];
+                    positions[base + 1] = position[1];
+                }
+                states[..self.particle_count * self.state_dims]
+                    .copy_from_slice(&seed_states[..self.particle_count * self.state_dims]);
+            }
+
+            if config.brush_size > 0.0 {
+                self.apply_brush_damage(&positions, &mut states, pool_indices.len(), config.brush_size, rng);
+            }
+
+            BurnPoolBatch {
+                pool_indices,
+                x: tensor3(
+                    positions,
+                    [batch_size.min(self.pool_size), self.particle_count, 2],
+                    device,
+                ),
+                s: tensor3(
+                    states,
+                    [
+                        batch_size.min(self.pool_size),
+                        self.particle_count,
+                        self.state_dims,
+                    ],
+                    device,
+                ),
+            }
+        }
+
+        fn apply_brush_damage(
+            &self,
+            positions: &[f32],
+            states: &mut [f32],
+            batch_size: usize,
+            brush_size: f32,
+            rng: &mut StdRng,
+        ) {
+            for batch in 0..batch_size {
+                let center_idx = batch * self.particle_count + rng.random_range(0..self.particle_count);
+                let center_base = center_idx * 2;
+                let center_x = positions[center_base];
+                let center_y = positions[center_base + 1];
+                let brush2 = brush_size * brush_size;
+                for particle in 0..self.particle_count {
+                    let row = batch * self.particle_count + particle;
+                    let position_base = row * 2;
+                    let dx = positions[position_base] - center_x;
+                    let dy = positions[position_base + 1] - center_y;
+                    if dx * dx + dy * dy < brush2 {
+                        let state_base = row * self.state_dims;
+                        states[state_base..state_base + self.state_dims].fill(0.0);
+                    }
+                }
+            }
+        }
+
+        fn update_batch(
+            &mut self,
+            pool_indices: &[usize],
+            x: Tensor3,
+            s: Tensor3,
+        ) -> AutomataResult<()> {
+            let positions = tensor3_vec(x.inner())?;
+            let states = tensor3_vec(s.inner())?;
+            for (batch, pool_index) in pool_indices.iter().copied().enumerate() {
+                let position_dst = pool_index * self.particle_count * 2;
+                let position_src = batch * self.particle_count * 2;
+                self.positions[position_dst..position_dst + self.particle_count * 2]
+                    .copy_from_slice(&positions[position_src..position_src + self.particle_count * 2]);
+
+                let state_dst = pool_index * self.particle_count * self.state_dims;
+                let state_src = batch * self.particle_count * self.state_dims;
+                self.states[state_dst..state_dst + self.particle_count * self.state_dims]
+                    .copy_from_slice(&states[state_src..state_src + self.particle_count * self.state_dims]);
+            }
+            Ok(())
+        }
     }
 
     struct PhaseBatchSampler {
@@ -5379,6 +6341,12 @@ mod $module {
         })
     }
 
+    fn tensor3_vec(tensor: Tensor3Inner) -> AutomataResult<Vec<f32>> {
+        tensor.into_data().to_vec::<f32>().map_err(|err| {
+            AutomataError::InvalidArgument(format!("Burn dense tensor readback failed: {err}"))
+        })
+    }
+
     fn tensor1_vec(tensor: Tensor1Inner) -> AutomataResult<Vec<f32>> {
         tensor.into_data().to_vec::<f32>().map_err(|err| {
             AutomataError::InvalidArgument(format!("Burn dense tensor readback failed: {err}"))
@@ -5494,6 +6462,282 @@ mod $module {
         use super::*;
 
         #[test]
+        fn dense_perception_matches_reference_kernel_fixture() {
+            let npa_config = NpaConfig::growing_2d();
+            let grid = burn_automata_kernels::HashGridConfig::growing_2d();
+            let (positions, states) = seed_particles_scaled(
+                1,
+                4,
+                npa_config.state_dims,
+                npa_config.spatial_dims,
+                17,
+                crate::ParticleSeed::UniformCircle,
+                0.08,
+            );
+            let options = burn_automata_kernels::PerceptionOptions {
+                state_grad: npa_config.state_grad,
+                density_grad: npa_config.density_grad,
+                eps0: npa_config.eps0,
+                scale_equivariance: npa_config.scale_equivariant(),
+                particle_density_equivariance: npa_config.particle_density_equivariant(),
+                log_norm_grad: npa_config.log_norm_grad,
+                log_norm_density_grad: npa_config.log_norm_density_grad,
+                hybrid_state_gradient: true,
+                position_features: npa_config.position_features,
+            };
+            let reference = burn_automata_kernels::perceive_with_options(
+                &positions,
+                &states,
+                1,
+                4,
+                npa_config.state_dims,
+                &grid,
+                options,
+            )
+            .unwrap();
+            let device = BurnDevice::default();
+            let x = tensor(
+                positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect(),
+                [4, 2],
+                &device,
+            );
+            let s = tensor(states, [4, npa_config.state_dims], &device);
+            let config = DirectBasisTrainConfig {
+                steps: 0,
+                report_interval: 1,
+                example_batch_size: 1,
+                tbptt_chunk_steps: 1,
+                loss_on_final_chunk_only: false,
+                use_particle_pool: false,
+                pool_size: 0,
+                inject_seed_interval: 0,
+                brush_size: 0.0,
+                stopgrad_pos: npa_config.stopgrad_pos,
+                stopgrad_state: npa_config.stopgrad_state,
+                rollout_particles: 4,
+                rollout_step_min: 1,
+                rollout_steps: 1,
+                update_prob: 1.0,
+                seed: 17,
+                seed_scale: 0.08,
+                seed_mode: crate::ParticleSeed::UniformCircle,
+                grid_eps: grid.eps,
+                motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
+                loss_config: crate::Target2dLossConfig::default(),
+                per_parameter_grad_normalization: false,
+                base_sgd: SgdConfig {
+                    learning_rate: 0.0,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+                adapter_sgd: SgdConfig {
+                    learning_rate: 0.0,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+                adapter_l2_weight: 0.0,
+                update_base: true,
+                eval_examples: 1,
+                eval_interval: 0,
+                eval_batch_size: 1,
+                eval_seed: 17,
+                system_memory_budget_gb: None,
+                gpu_memory_budget_gb: None,
+                max_dense_train_particles: 4,
+                max_dense_chunk_floats: 1_000_000,
+                max_splat_chunk_floats: 1_000_000,
+            };
+            let features = tensor_vec(dense_perception(&x, &s, config).inner()).unwrap();
+            let max_abs_diff = features
+                .iter()
+                .zip(reference.features.iter())
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0_f32, f32::max);
+
+            assert!(
+                max_abs_diff < 2.0e-3,
+                "dense Burn perception diverged from reference: max_abs_diff={max_abs_diff}"
+            );
+        }
+
+        #[test]
+        fn burn_target_splat_loss_matches_reference_cpu_fixture() {
+            let npa_config = NpaConfig::growing_2d();
+            let grid = burn_automata_kernels::HashGridConfig::growing_2d();
+            let target = crate::TargetImage2d {
+                source_width: 16,
+                source_height: 16,
+                positions: vec![[-0.35, 0.25], [0.2, 0.05], [0.45, -0.3]],
+                colors: vec![[0.1, 0.8, 0.2], [0.7, 0.3, 0.1], [0.2, 0.4, 0.9]],
+                pixel_size: 2.0 / 16.0,
+                threshold: 0.05,
+                aabb: [-1.0, 1.0, -1.0, 1.0],
+            };
+            let loss_config = crate::Target2dLossConfig {
+                image_size: 16,
+                sigma: 1.0,
+                center: true,
+                foreground_density_loss_weight: 0.5,
+                displacement_regularizer_weight: 0.0,
+                overflow_regularizer_weight: 0.0,
+                bound_regularizer_weight: 0.0,
+                ..crate::Target2dLossConfig::default()
+            };
+            let (positions, mut states) = seed_particles_scaled(
+                1,
+                4,
+                npa_config.state_dims,
+                npa_config.spatial_dims,
+                29,
+                crate::ParticleSeed::UniformCircle,
+                0.3,
+            );
+            for particle in 0..4 {
+                let base = particle * npa_config.state_dims + npa_config.state_dims - 3;
+                states[base] = -0.3 + particle as f32 * 0.1;
+                states[base + 1] = 0.2 - particle as f32 * 0.05;
+                states[base + 2] = -0.1 + particle as f32 * 0.07;
+            }
+            let reference = crate::target_2d_loss(
+                &positions,
+                &states,
+                1,
+                4,
+                npa_config.state_dims,
+                &target,
+                loss_config,
+            )
+            .unwrap();
+
+            let device = BurnDevice::default();
+            let pixels = loss_config.image_size * loss_config.image_size;
+            let render = render_target_2d_splat(&target, loss_config).unwrap();
+            let foreground = target_2d_foreground_mask(&target, loss_config).unwrap();
+            let foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
+            let target_mean = target.mean_position();
+            let target = BurnTargetExample {
+                target_rgb: tensor(render.rgb, [pixels, 3], &device),
+                target_density: tensor(render.density, [pixels, 1], &device),
+                target_foreground: tensor(foreground, [pixels, 1], &device),
+                target_foreground_scale: foreground_scale,
+                target_mean: tensor([target_mean[0], target_mean[1]].to_vec(), [1, 2], &device),
+                target_positions: tensor(
+                    target
+                        .positions
+                        .iter()
+                        .flat_map(|position| [position[0], position[1]])
+                        .collect(),
+                    [target.positions.len(), 2],
+                    &device,
+                ),
+                pixel_xy: tensor(pixel_xy_values(loss_config.image_size), [pixels, 2], &device),
+                pixel_size: 2.0 / 16.0,
+                target_points: 3,
+                particle_count: 4,
+                update_prob: 1.0,
+                seed_scale: 0.3,
+            };
+            let model = NpaModel::upstream_seeded(npa_config.clone(), 29);
+            let adapter = BurnAdapterParams::from_adapter(
+                &NpaLowRankAdapter::zeros(&npa_config, 1, 1.0),
+                &model,
+                &device,
+            )
+            .unwrap();
+            let config = DirectBasisTrainConfig {
+                steps: 0,
+                report_interval: 1,
+                example_batch_size: 1,
+                tbptt_chunk_steps: 1,
+                loss_on_final_chunk_only: false,
+                use_particle_pool: false,
+                pool_size: 0,
+                inject_seed_interval: 0,
+                brush_size: 0.0,
+                stopgrad_pos: npa_config.stopgrad_pos,
+                stopgrad_state: npa_config.stopgrad_state,
+                rollout_particles: 4,
+                rollout_step_min: 1,
+                rollout_steps: 1,
+                update_prob: 1.0,
+                seed: 29,
+                seed_scale: 0.3,
+                seed_mode: crate::ParticleSeed::UniformCircle,
+                grid_eps: grid.eps,
+                motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
+                loss_config,
+                per_parameter_grad_normalization: false,
+                base_sgd: SgdConfig {
+                    learning_rate: 0.0,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+                adapter_sgd: SgdConfig {
+                    learning_rate: 0.0,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+                adapter_l2_weight: 0.0,
+                update_base: true,
+                eval_examples: 1,
+                eval_interval: 0,
+                eval_batch_size: 1,
+                eval_seed: 29,
+                system_memory_budget_gb: None,
+                gpu_memory_budget_gb: None,
+                max_dense_train_particles: 4,
+                max_dense_chunk_floats: 1_000_000,
+                max_splat_chunk_floats: 1_000_000,
+            };
+            let x = tensor(
+                positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect(),
+                [4, 2],
+                &device,
+            );
+            let s = tensor(states, [4, npa_config.state_dims], &device);
+            let loss = target_splat_loss(
+                &x,
+                &s,
+                &target,
+                config,
+                &adapter,
+                Tensor::<BurnBackend, 1>::zeros([1], &device),
+            );
+
+            let burn_total = loss.total.inner().into_scalar();
+            let burn_splat = loss.splat.inner().into_scalar();
+            let burn_color = loss.color.inner().into_scalar();
+            let burn_density = loss.density.inner().into_scalar();
+
+            assert!(
+                (burn_total - reference.total_loss).abs() < 1.0e-4,
+                "Burn total target2d loss diverged from CPU reference: burn={burn_total} reference={}",
+                reference.total_loss
+            );
+            assert!(
+                (burn_splat - reference.splat_loss).abs() < 1.0e-4,
+                "Burn splat target2d loss diverged from CPU reference: burn={burn_splat} reference={}",
+                reference.splat_loss
+            );
+            assert!(
+                (burn_color - reference.color_loss).abs() < 1.0e-4,
+                "Burn color target2d loss diverged from CPU reference: burn={burn_color} reference={}",
+                reference.color_loss
+            );
+            assert!(
+                (burn_density - reference.density_loss).abs() < 1.0e-4,
+                "Burn density target2d loss diverged from CPU reference: burn={burn_density} reference={}",
+                reference.density_loss
+            );
+        }
+
+        #[test]
         fn phase_batch_sampler_covers_all_examples_across_epoch() {
             let mut rng = StdRng::seed_from_u64(7);
             let mut sampler = PhaseBatchSampler::new(10, 3, &mut rng);
@@ -5553,6 +6797,7 @@ mod $module {
                 history: Vec::new(),
                 best_loss,
                 best_step,
+                best_geometry_score: None,
                 sample_updates: sample_update_stats(&[]),
             }
         }

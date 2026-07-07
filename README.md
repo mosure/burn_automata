@@ -98,21 +98,29 @@ mutually exclusive with teacher-seed and teacher-model targets.
 Use `--batch-source features` only for low-level MLP regression checks; it is no
 longer the default path for 2D or 3D training.
 
-Run upstream-aligned 2D target-image training on CUDA. `train-target2d`
-defaults to `--training-device gpu` and refuses to fall back to CPU; use
-`--training-device cpu` only for small deterministic reference tests. The GPU
-path expects a Python environment with CUDA PyTorch and the upstream NPA-wave
-`sphops` extension available:
+Validate 2D NPA parity against the official SelfOrg-NPA lizard baseline before
+trusting local oracle experiments. The upstream checkout is external and cached
+under `.cache/`; the full gate also consumes a small exported fixture:
 
 ```bash
-cargo run -p burn_automata --features cli --bin burn_automata -- train-target2d \
-  --python ~/.venvs/torch/bin/python \
-  --gpu-upstream-root /tmp/NPA-wave \
+scripts/fetch_selforg_npa.sh
+python3 scripts/export_selforg_npa_fixture.py \
+  --upstream-root .cache/selforg_npa/NPA \
   --target-image assets/catalog_thumbnails/lizard.png \
-  --reference-model models/catalog/growing/lizard.bpk \
-  --output target/gpu_lizard_report.json \
-  --model-output target/gpu_lizard.bpk
+  --output artifacts/reference/selforg_npa/lizard_fixture.json
+
+cargo run -p burn_automata --features cli --bin burn_automata -- \
+  validate-npa2d-parity --config configs/verified/2d/parity/lizard_smoke.toml
 ```
+
+`train-target2d` is deliberately marked experimental until it passes that
+official parity harness with the same target extraction, initialization, rollout,
+loss, gradients, optimizer update, and 4096-particle rollout behavior. Use
+`--experimental` only for diagnostics; do not treat its outputs as oracle
+baselines.
+
+Canonical 2D HyperNPA configs live under `configs/verified/2d/hyper_e2e/`.
+Exploratory TOMLs belong in gitignored `configs/sandbox/`.
 
 The retired built-in 3D mesh commands now default to writing legacy diagnostic
 artifacts under `artifacts/`, not catalog models. Multi-view render-proxy

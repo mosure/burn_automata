@@ -1,4 +1,6 @@
-use crate::cli::commands::hyper_support::{load_condition_image_2d, write_pretty_json};
+#[cfg(feature = "dino")]
+use crate::cli::commands::hyper_support::load_condition_image_2d;
+use crate::cli::commands::hyper_support::write_pretty_json;
 use crate::cli::prelude::*;
 use crate::hyper::condition::DINO_VITS_EMBED_DIMS;
 use std::time::Instant;
@@ -910,9 +912,12 @@ fn run_burn_e2e_rollout_training(
     let loss_config = super::super::target2d::target2d_loss_config(
         report.target.loss_image_size,
         report.target.splat_sigma,
+        true,
         report.target.splat_loss_weight,
         report.target.color_loss_weight,
         report.target.density_loss_weight,
+        Target2dLossConfig::default().background_density_loss_weight,
+        Target2dLossConfig::default().foreground_density_loss_weight,
         report.target.displacement_regularizer_weight,
         report.target.overflow_regularizer_weight,
         report.target.bound_regularizer_weight,
@@ -932,7 +937,7 @@ fn run_burn_e2e_rollout_training(
             .unwrap_or_else(|| NpaConfig::seed_scale_for_preset(report.preset)),
         seed_mode: report.rollout.seed_mode,
         grid_eps: hashgrid.eps,
-        motion_scale: npa_config.motion_eps(hashgrid.eps),
+        motion_scale: npa_config.alpha * npa_config.motion_eps(hashgrid.eps),
         loss_config,
         per_parameter_grad_normalization: report.optimizer.per_parameter_grad_normalization,
         shared_base_trainable: report.model.shared_base_trainable,
@@ -947,6 +952,8 @@ fn run_burn_e2e_rollout_training(
         generator_sample_steps: report.adapter.flow_sample_steps,
         generator_output_scale: report.adapter.flow_source_scale,
         generator_init_scale: report.adapter.init_scale,
+        stopgrad_pos: npa_config.stopgrad_pos,
+        stopgrad_state: npa_config.stopgrad_state,
         system_memory_budget_gb: report.training.system_memory_budget_gb,
         gpu_memory_budget_gb: report.training.gpu_memory_budget_gb,
         max_dense_train_particles: report.training.max_dense_train_particles,
@@ -1340,50 +1347,15 @@ mod tests {
     }
 
     #[test]
-    fn bundled_rollout_smoke_config_parses() {
+    fn verified_rollout_configs_parse() {
         for (name, expected_steps) in [
-            ("smoke_omnisvg_8_dino_online_joint.toml", 0),
-            ("smoke_lizard_steps1_dino_online_joint.toml", 1),
-            ("smoke_omnisvg_4_steps2_dino_online_joint.toml", 2),
-            ("smoke_omnisvg_4_steps2_dino_online_joint_cuda.toml", 2),
-            ("pilot_omnisvg_4_steps100_dino_online_joint.toml", 100),
-            ("bench_omnisvg_8_steps80_b1_p64s4.toml", 80),
-            ("bench_omnisvg_8_steps80_b2_p64s4.toml", 80),
-            ("bench_omnisvg_8_steps80_b4_p64s4.toml", 80),
-            ("bench_omnisvg_8_steps200_b4_p128s4.toml", 200),
-            ("preflight_omnisvg_1k_dino_online_joint.toml", 0),
-            ("stability_omnisvg_1k_steps200_b8_p64s4_cuda.toml", 200),
-            ("train_omnisvg_1k_steps300_b8_p128s4_cuda.toml", 300),
-            ("train_omnisvg_1k_steps500_b8_p128s4_lr1e4_cuda.toml", 500),
-            (
-                "train_omnisvg_1k_steps1000_b8_p128s4_rank16_cosine_cuda.toml",
-                1000,
-            ),
-            ("preflight_omnisvg_10k_dino_online_joint.toml", 0),
-            (
-                "stability_omnisvg_10k_steps300_b16_p64s4_lr1e4_cuda.toml",
-                300,
-            ),
-            (
-                "train_omnisvg_10k_steps300_b16_p128s4_attention_lr1e4_cuda.toml",
-                300,
-            ),
-            (
-                "train_omnisvg_10k_steps1000_b16_p128s4_lr1e4_cuda.toml",
-                1000,
-            ),
-            (
-                "train_omnisvg_10k_steps1500_b16_p128s4_rank16_cosine_cuda.toml",
-                1500,
-            ),
-            (
-                "train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda.toml",
-                3000,
-            ),
+            ("smoke_lizard_dino_online.toml", 1),
+            ("bench_omnisvg_8_b4_p128.toml", 200),
+            ("production_omnisvg_10k_rank16_cuda.toml", 3000),
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
-                .join("configs/hyper2d_e2e_rollout")
+                .join("configs/verified/2d/hyper_e2e")
                 .join(name);
             let text = std::fs::read_to_string(path).unwrap();
             let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();

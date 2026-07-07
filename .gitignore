@@ -4,6 +4,8 @@
 
 # Generated experiment outputs and local model stores
 /artifacts/
+/configs/sandbox/
+/.cache/
 /models/
 /assets/models/
 /data/omnisvg/

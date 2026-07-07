@@ -26,6 +26,7 @@ mod sources;
 pub(crate) use direct_basis::{
     run_train_hyper_2d_adapter_bank, run_train_hyper_2d_direct_basis,
     run_validate_hyper_2d_direct_basis_oracles, run_validate_hyper_2d_psnr_gate,
+    train_target_2d_burn_oracle,
 };
 pub(crate) use rollout::run_train_hyper_2d_e2e_rollout;
 
@@ -298,9 +299,12 @@ pub(crate) fn run_train_hyper_2d_e2e(command: Command) -> Result<(), Box<dyn std
     let loss_config = super::target2d::target2d_loss_config(
         target_loss_image_size,
         target_splat_sigma,
+        true,
         target_splat_loss_weight,
         target_color_loss_weight,
         target_density_loss_weight,
+        Target2dLossConfig::default().background_density_loss_weight,
+        Target2dLossConfig::default().foreground_density_loss_weight,
         target_displacement_regularizer_weight,
         target_overflow_regularizer_weight,
         target_bound_regularizer_weight,

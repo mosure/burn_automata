@@ -1,85 +1,69 @@
 # Burn-First Cleanup Status
 
-This repository now treats the Rust/Burn CLI as the primary implementation for
-2D direct-basis and Hyper2D adapter-bank experiments. Python remains only where
-it provides reference validation or external checkpoint/model interchange.
+The 2D codebase is being reset around a small number of maintained paths. The
+official SelfOrg-NPA release remains the oracle reference until local Burn
+training passes strict parity.
 
-## Primary Paths
+## Canonical 2D Paths
 
-| Workflow | Primary command | Status |
+| Workflow | Command/config | Status |
 | --- | --- | --- |
-| Single-sample 2D target training | `train-target2d` | Rust CPU entrypoint; the former upstream Python/CUDA trainer is removed. |
-| Shared 2D base plus per-sample LoRA bank | `train-hyper2d-direct-basis` | Defaults to `burn-wgpu` in TOML recipes. |
-| Image condition to LoRA generator | `train-hyper2d-adapter-bank` | Burn/WGPU training path; CPU is for smoke correctness only. |
-| Hyper2D validation summary | `report-hyper2d` | Rust JSON, Markdown, and LaTeX summary path with optional quality-gate failure. |
-| Single-target 3D oracle overfit | `train-render3d --config` | Burn-native TOML recipes under `configs/render3d/`. |
-| Shared 3D base plus per-target adapters | `train-render3d-adapters --config` | Burn-native TOML recipes under `configs/render3d_adapters/`. |
+| Official 2D lizard reference | `scripts/fetch_selforg_npa.sh`, `scripts/export_selforg_npa_fixture.py`, `validate-npa2d-parity` | Canonical parity gate; upstream code is cached externally under `.cache/`. |
+| Imported 2D inference | `.bpk` catalog models plus CPU/WGPU rollout commands | Maintained inference hot path. |
+| Online HyperNPA training | `train-hyper2d-e2e-rollout --config configs/verified/2d/hyper_e2e/*.toml` | Maintained Burn/WGPU/CUDA HyperNPA path. |
+| Single-sample Burn target training | `train-target2d --experimental` | Experimental diagnostic only; not an accepted oracle baseline. |
+
+## Config Policy
+
+Tracked, supported configs live in `configs/verified/`. Current verified 2D
+configs are:
+
+- `configs/verified/2d/parity/lizard_smoke.toml`
+- `configs/verified/2d/parity/lizard_full.toml`
+- `configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml`
+- `configs/verified/2d/hyper_e2e/bench_omnisvg_8_b4_p128.toml`
+- `configs/verified/2d/hyper_e2e/production_omnisvg_10k_rank16_cuda.toml`
+
+Exploratory configs, failed sweeps, and local one-offs belong in
+`configs/sandbox/`, which is gitignored. Direct-basis LoRA banks, static
+adapter reconstruction, and dense Burn target-image trainers stay in sandbox or
+artifacts until they pass the official parity gate.
 
 ## Retained Python Inventory
 
-| Path | Classification | Boundary |
-| --- | --- | --- |
-| `scripts/import_selforg_catalog.py`, `scripts/export_npa_checkpoint.py` | Import/export utilities | Allowed for external SelfOrg/PyTorch checkpoint interchange. |
-| `scripts/setup_dino_vits.py` | Model export utility | Allowed while Burn DINO model-pack generation still depends on a Torch checkpoint. |
-| `scripts/validate_import_parity.py`, `scripts/validate_catalog_parity.py`, `scripts/validate_3d_catalog.py`, `scripts/compare_3d_candidate.py`, `scripts/catalog3d_validation/` | Reference/parity validation | Allowed for imported-catalog and renderer parity checks. |
+Python is restricted to external reference/export work:
 
-## Removed Python Surfaces
+- `scripts/fetch_selforg_npa.sh` fetches the official upstream repo into
+  `.cache/selforg_npa/NPA`.
+- `scripts/export_selforg_npa_fixture.py` exports official target/checkpoint
+  metadata for Rust parity checks.
+- `scripts/import_selforg_catalog.py` and `scripts/export_npa_checkpoint.py`
+  handle external SelfOrg/PyTorch checkpoint interchange.
+- `scripts/setup_dino_vits.py` creates the Burn DINO model pack from a Torch
+  checkpoint.
+- `scripts/validate_*`, `scripts/compare_3d_candidate.py`, and
+  `scripts/catalog3d_validation/` remain reference/parity utilities.
 
-- Python/Torch training backends for target2d and Hyper2D direct-basis training.
-- Python report/paper renderers; use Rust `report-hyper2d` and checked-in report
-  artifacts instead.
-- Python benchmark matrix wrappers; use Rust `bench`, `bench-spatial`, and
-  `bench-training` commands or TOML/Rust experiment bundles.
+Do not add Python training, benchmark-matrix, or paper-rendering entrypoints.
+New experiments should be Rust/Burn CLI commands with TOML configs.
 
-## Report Gates
+## Parity Requirements Before Promotion
 
-`report-hyper2d` writes `validation_summary.json`, `validation_report.md`, and
-`validation_report.tex` by default. Add `--require-quality-ready` when a local
-or CI run should fail if the summarized artifact is below threshold.
+Burn 2D oracle training is not promoted until a strict harness shows agreement
+with upstream for:
 
-| Report kind | Ready status | Gate |
-| --- | --- | --- |
-| Direct-basis shared base plus stored LoRA | `direct_basis_oracle_ready` | Train and holdout oracle max ratio must be `<= 1.20x`. |
-| Direct-basis shared base plus stored LoRA | `direct_basis_oracle_ready` | Train and holdout shared-vs-zero max ratio must be `<= 1.00x`. |
-| Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout adapter-vector normalized RMSE must be `<= 0.35`. |
-| Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout adapter-vector mean cosine must be `>= 0.80`. |
-| Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout rollout max ratio to static LoRA must be `<= 1.15x`. |
-| Condition image to LoRA generator | `conditioning_quality_ready` | Train and holdout rollout max ratio to zero adapter must be `<= 1.00x`. |
-| Condition image to LoRA generator | `conditioning_quality_ready` | Oracle render RGB PSNR from `validate-hyper2d-psnr-gate` must be `>= 26.0 dB`. |
+- target extraction and adaptive target point count,
+- seeded model initialization and imported pretrained weights,
+- one-step SPH perception/update semantics,
+- upstream splat loss without extra background, Chamfer, or altered weights,
+- gradient and optimizer update behavior,
+- bounded 4096-particle rollout quality against the official pretrained lizard.
 
-Reports also summarize available throughput history: direct-basis reports expose
-particle-steps/sec when present, and adapter-bank reports expose
-adapter-values/sec when present.
+Until those gates pass, any model produced by `train-target2d --experimental` is
+a diagnostic artifact, not a baseline for HyperNPA papers or quality claims.
 
-The direct-basis oracle validator and PSNR gate both accept TOML configs, so
-quality runs can be bundled and reproduced without long CLI argument lists:
-`configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048.toml` and
-`configs/hyper2d_adapter_bank/psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml`
-are the current reference validation recipes.
+## 3D Boundary
 
-## Current Experimental Reading
-
-The direct-basis 10k artifact is a shared-base plus stored-adapter result, not a
-conditioned hypernet. The adapter-bank command trains the conditioned HyperNPA
-stage from that stored bank. Current summary-token pilot reports show that the
-pipeline runs on Burn/WGPU, but generated adapter vectors underfit the stored
-LoRAs. That makes DINO features, a stronger adapter decoder, and residual/flow
-adapter generation the next 2D HyperNPA priorities before scaling claims.
-
-The direct-basis command now accepts only Burn backends. Removed aliases include
-`upstream-python`, `python`, `torch-cuda`, and `legacy-upstream-python`; old
-experiment TOMLs using them should be migrated to `burn-wgpu` or `burn-cuda`.
-
-## 3D Cleanup Boundary
-
-The 3D Burn-native oracle path has TOML experiment loading through
-`train-render3d --config configs/render3d/torus_oracle_smoke.toml`. The
-`configs/render3d/torus_oracle_quality.toml` recipe is the first parity-oriented
-3D overfit target.
-
-The 3D adapter-suite path now has TOML experiment loading through
-`train-render3d-adapters --config configs/render3d_adapters/torus_smoke.toml`.
-The smoke recipe validates report and adapter-bank plumbing; the next quality
-step is running `configs/render3d_adapters/many_slice_quality.toml` after a
-3D oracle baseline is accepted, then training a conditioned 3D adapter generator
-against that bank.
+This cleanup pass intentionally does not reorganize 3D training. Existing
+`configs/render3d/` and `configs/render3d_adapters/` remain in place for the
+separate 3D cleanup/parity effort.

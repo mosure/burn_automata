@@ -1,6 +1,6 @@
 mod viewer;
 
-pub use viewer::{AutomataRuntime, AutomataSettings, AutomataViewerPlugin, run};
+pub use viewer::{AutomataRuntime, AutomataSettings, AutomataViewerPlugin, run, run_with_settings};
 
 #[cfg(all(feature = "headless", feature = "splatting", feature = "gpu_wgpu"))]
 pub use viewer::headless::{

@@ -805,197 +805,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_psnr_gate_config_parses() {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_1k_dino_token_grid_flow_h512_rms_noise.toml");
+    fn psnr_gate_config_accepts_nested_toml() {
+        let config: PsnrGateExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
 
-        let config = load_psnr_gate_experiment_config(Some(&path)).unwrap();
+            [input]
+            base_model = "base.bpk"
+            adapter_bank = "adapter_bank.json"
+            oracle_report = "oracle.json"
+            hyper = "hyper.json"
+
+            [selection]
+            selection_manifest = "selection.json"
+
+            [condition]
+            dino_model = "models/dino/dino_vits.mpk"
+            dino_image_size = 518
+            dino_batch_size = 4
+            feature_cache = "artifacts/dino_features.json"
+            token_grid_width = 8
+            token_grid_height = 8
+
+            [eval]
+            limit = 16
+            particles = 2048
+            steps = [32, 64]
+
+            [gate]
+            min_render_rgb_psnr_db = 26.0
+            fail_on_threshold = true
+            "#,
+        )
+        .unwrap();
 
         assert_eq!(config.preset.as_deref(), Some("growing-2d"));
         assert!(config.input.base_model.is_some());
         assert!(config.input.adapter_bank.is_some());
         assert!(config.input.oracle_report.is_some());
         assert!(config.input.hyper.is_some());
+        assert!(config.selection.selection_manifest.is_some());
         assert!(config.condition.dino_model.is_some());
         assert_eq!(config.condition.dino_image_size, Some(518));
         assert_eq!(config.condition.dino_batch_size, Some(4));
         assert_eq!(config.condition.token_grid_width, Some(8));
         assert_eq!(config.condition.token_grid_height, Some(8));
+        assert_eq!(config.eval.limit, Some(16));
         assert_eq!(config.eval.particles, Some(2048));
         assert_eq!(config.eval.steps.as_deref(), Some(&[32, 64][..]));
         assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
         assert_eq!(config.gate.fail_on_threshold, Some(true));
-
-        for file_name in [
-            "psnr_gate_1k_dino_token_grid_flow_h512_rms_noise_oracle8x8.toml",
-            "psnr_gate_1k_dino_token_grid_flow_h512_sampled_refine_oracle8x8.toml",
-            "psnr_gate_10k_dino_canonical_h1024_valselect_oracle8x8.toml",
-        ] {
-            let path = repo_root
-                .join("configs/hyper2d_adapter_bank")
-                .join(file_name);
-            let config = load_psnr_gate_experiment_config(Some(&path)).unwrap();
-            assert_eq!(config.preset.as_deref(), Some("growing-2d"));
-            assert!(config.input.base_model.is_some());
-            assert!(config.input.adapter_bank.is_some());
-            assert!(config.input.oracle_report.is_some());
-            assert!(config.input.hyper.is_some());
-            assert!(config.condition.feature_cache.is_some());
-            if file_name.contains("token_grid") {
-                assert_eq!(config.condition.token_grid_width, Some(8));
-                assert_eq!(config.condition.token_grid_height, Some(8));
-            }
-            assert_eq!(config.eval.limit, Some(16));
-            assert_eq!(config.eval.particles, Some(2048));
-            assert_eq!(config.eval.steps.as_deref(), Some(&[32][..]));
-            assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
-            assert_eq!(config.gate.fail_on_threshold, Some(false));
-        }
-
-        let direct_only_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_direct.toml");
-        let direct_only = load_psnr_gate_experiment_config(Some(&direct_only_path)).unwrap();
-        assert!(direct_only.input.base_model.is_some());
-        assert!(direct_only.input.adapter_bank.is_some());
-        assert!(direct_only.input.oracle_report.is_some());
-        assert!(direct_only.input.hyper.is_none());
-        assert_eq!(direct_only.eval.particles, Some(2048));
-        assert_eq!(direct_only.eval.steps.as_deref(), Some(&[32][..]));
-        assert_eq!(direct_only.gate.fail_on_threshold, Some(false));
-
-        let direct_pilot_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k64x16_2048_rank132_direct.toml");
-        let direct_pilot = load_psnr_gate_experiment_config(Some(&direct_pilot_path)).unwrap();
-        assert!(direct_pilot.selection.selection_manifest.is_some());
-        assert!(direct_pilot.input.base_model.is_some());
-        assert!(direct_pilot.input.adapter_bank.is_some());
-        assert!(direct_pilot.input.oracle_report.is_some());
-        assert!(direct_pilot.input.hyper.is_none());
-        assert_eq!(direct_pilot.eval.limit, Some(80));
-        assert_eq!(direct_pilot.eval.particles, Some(2048));
-        assert_eq!(direct_pilot.eval.steps.as_deref(), Some(&[32, 64, 128][..]));
-        assert_eq!(direct_pilot.gate.fail_on_threshold, Some(true));
-
-        let direct_pilot_256_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k256x64_2048_rank132_direct.toml");
-        let direct_pilot_256 =
-            load_psnr_gate_experiment_config(Some(&direct_pilot_256_path)).unwrap();
-        assert!(direct_pilot_256.selection.selection_manifest.is_some());
-        assert!(direct_pilot_256.input.base_model.is_some());
-        assert!(direct_pilot_256.input.adapter_bank.is_some());
-        assert!(direct_pilot_256.input.oracle_report.is_some());
-        assert!(direct_pilot_256.input.hyper.is_none());
-        assert_eq!(direct_pilot_256.eval.limit, Some(320));
-        assert_eq!(direct_pilot_256.eval.particles, Some(2048));
-        assert_eq!(
-            direct_pilot_256.eval.steps.as_deref(),
-            Some(&[32, 64, 128][..])
-        );
-        assert_eq!(direct_pilot_256.gate.fail_on_threshold, Some(true));
-
-        let dino_flow_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_overfit.toml");
-        let dino_flow = load_psnr_gate_experiment_config(Some(&dino_flow_path)).unwrap();
-        assert!(dino_flow.input.base_model.is_some());
-        assert!(dino_flow.input.adapter_bank.is_some());
-        assert!(dino_flow.input.oracle_report.is_some());
-        assert!(dino_flow.input.hyper.is_some());
-        assert!(dino_flow.condition.feature_cache.is_some());
-        assert_eq!(dino_flow.condition.token_grid_width, Some(8));
-        assert_eq!(dino_flow.condition.token_grid_height, Some(8));
-        assert_eq!(dino_flow.eval.particles, Some(2048));
-        assert_eq!(dino_flow.eval.steps.as_deref(), Some(&[32][..]));
-        assert_eq!(dino_flow.gate.fail_on_threshold, Some(false));
-
-        let dino_flow_pilot_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k64x16_2048_rank132_dino_flow_sampled.toml");
-        let dino_flow_pilot =
-            load_psnr_gate_experiment_config(Some(&dino_flow_pilot_path)).unwrap();
-        assert!(dino_flow_pilot.selection.selection_manifest.is_some());
-        assert!(dino_flow_pilot.input.hyper.is_some());
-        assert!(dino_flow_pilot.condition.feature_cache.is_some());
-        assert_eq!(dino_flow_pilot.condition.token_grid_width, Some(8));
-        assert_eq!(dino_flow_pilot.condition.token_grid_height, Some(8));
-        assert_eq!(dino_flow_pilot.eval.particles, Some(2048));
-        assert_eq!(
-            dino_flow_pilot.eval.steps.as_deref(),
-            Some(&[32, 64, 128][..])
-        );
-
-        let dino_flow_pilot_256_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k256x64_2048_rank132_dino_flow_sampled.toml");
-        let dino_flow_pilot_256 =
-            load_psnr_gate_experiment_config(Some(&dino_flow_pilot_256_path)).unwrap();
-        assert!(dino_flow_pilot_256.selection.selection_manifest.is_some());
-        assert!(dino_flow_pilot_256.input.hyper.is_some());
-        assert!(dino_flow_pilot_256.condition.feature_cache.is_some());
-        assert_eq!(dino_flow_pilot_256.condition.token_grid_width, Some(8));
-        assert_eq!(dino_flow_pilot_256.condition.token_grid_height, Some(8));
-        assert_eq!(dino_flow_pilot_256.eval.limit, Some(320));
-        assert_eq!(dino_flow_pilot_256.eval.particles, Some(2048));
-        assert_eq!(
-            dino_flow_pilot_256.eval.steps.as_deref(),
-            Some(&[32, 64, 128][..])
-        );
-
-        let dino_flow_linear_path = repo_root
-            .join("configs/hyper2d_adapter_bank")
-            .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_linear_solve_overfit.toml");
-        let dino_flow_linear =
-            load_psnr_gate_experiment_config(Some(&dino_flow_linear_path)).unwrap();
-        assert!(dino_flow_linear.input.hyper.is_some());
-        assert!(dino_flow_linear.condition.feature_cache.is_some());
-        assert_eq!(dino_flow_linear.condition.token_grid_width, Some(8));
-        assert_eq!(dino_flow_linear.condition.token_grid_height, Some(8));
-        assert_eq!(dino_flow_linear.eval.particles, Some(2048));
-        assert_eq!(dino_flow_linear.eval.steps.as_deref(), Some(&[32][..]));
-        assert_eq!(dino_flow_linear.gate.fail_on_threshold, Some(false));
-
-        let dino_flow_warmstart_path = repo_root.join("configs/hyper2d_adapter_bank").join(
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_warmstart.toml",
-        );
-        let dino_flow_warmstart =
-            load_psnr_gate_experiment_config(Some(&dino_flow_warmstart_path)).unwrap();
-        assert!(dino_flow_warmstart.input.hyper.is_some());
-        assert!(dino_flow_warmstart.condition.feature_cache.is_some());
-        assert_eq!(dino_flow_warmstart.condition.token_grid_width, Some(8));
-        assert_eq!(dino_flow_warmstart.condition.token_grid_height, Some(8));
-        assert_eq!(dino_flow_warmstart.eval.particles, Some(2048));
-        assert_eq!(dino_flow_warmstart.eval.steps.as_deref(), Some(&[32][..]));
-        assert_eq!(dino_flow_warmstart.gate.fail_on_threshold, Some(false));
-
-        for file_name in [
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_overfit.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_lr2e3.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_lr2e4_refine.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_lr2e5_refine2.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_refine.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_refine2.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_refine.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_margin_refine.toml",
-            "psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_h384_sampled_weighted_floor_refine.toml",
-        ] {
-            let path = repo_root
-                .join("configs/hyper2d_adapter_bank")
-                .join(file_name);
-            let config = load_psnr_gate_experiment_config(Some(&path)).unwrap();
-            assert!(config.input.hyper.is_some());
-            assert!(config.condition.feature_cache.is_some());
-            assert_eq!(config.condition.token_grid_width, Some(8));
-            assert_eq!(config.condition.token_grid_height, Some(8));
-            assert_eq!(config.eval.particles, Some(2048));
-            assert_eq!(config.eval.steps.as_deref(), Some(&[32][..]));
-            assert_eq!(config.gate.min_render_rgb_psnr_db, Some(26.0));
-            assert_eq!(config.gate.fail_on_threshold, Some(false));
-        }
     }
 
     #[test]

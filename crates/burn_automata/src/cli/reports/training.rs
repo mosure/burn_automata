@@ -41,6 +41,59 @@ pub(crate) struct CliTarget2dEvalReport {
     pub(crate) reference_loss: Option<Target2dLossReport>,
     pub(crate) total_loss_gap_to_reference: Option<f32>,
     pub(crate) total_loss_ratio_to_reference: Option<f32>,
+    pub(crate) render_diagnostics: Option<CliTarget2dRenderDiagnosticsReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTarget2dRenderDiagnosticsReport {
+    pub(crate) output_dir: String,
+    pub(crate) image_size: usize,
+    pub(crate) density_lit_threshold: f32,
+    pub(crate) target: CliTarget2dRenderImageReport,
+    pub(crate) model_cpu: CliTarget2dRenderImageReport,
+    pub(crate) reference_cpu: Option<CliTarget2dRenderImageReport>,
+    pub(crate) model_wgpu: Option<CliTarget2dRenderImageReport>,
+    pub(crate) reference_wgpu: Option<CliTarget2dRenderImageReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTarget2dRenderImageReport {
+    pub(crate) label: &'static str,
+    pub(crate) rgb_png: String,
+    pub(crate) density_png: String,
+    pub(crate) rgb_mse_to_target: Option<f32>,
+    pub(crate) rgb_psnr_db_to_target: Option<f32>,
+    pub(crate) density_mse_to_target: Option<f32>,
+    pub(crate) density_psnr_db_to_target: Option<f32>,
+    pub(crate) density_total: f32,
+    pub(crate) density_max: f32,
+    pub(crate) lit_pixels: usize,
+    pub(crate) lit_bbox_xyxy: Option<[usize; 4]>,
+    pub(crate) geometry_to_target: Option<CliTarget2dRenderGeometryReport>,
+    pub(crate) particle_stats: Option<CliTarget2dParticleStatsReport>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CliTarget2dRenderGeometryReport {
+    pub(crate) lit_pixel_ratio: f32,
+    pub(crate) foreground_iou: f32,
+    pub(crate) target_recall: f32,
+    pub(crate) generated_precision: f32,
+    pub(crate) bbox_iou: Option<f32>,
+    pub(crate) bbox_width_ratio: Option<f32>,
+    pub(crate) bbox_height_ratio: Option<f32>,
+    pub(crate) bbox_area_ratio: Option<f32>,
+    pub(crate) particle_rms_radius_ratio: Option<f32>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct CliTarget2dParticleStatsReport {
+    pub(crate) count: usize,
+    pub(crate) mean_xy: [f32; 2],
+    pub(crate) rms_radius: f32,
+    pub(crate) bounds_min_xy: [f32; 2],
+    pub(crate) bounds_max_xy: [f32; 2],
+    pub(crate) out_of_domain_fraction: f32,
 }
 
 #[derive(Serialize)]
@@ -48,6 +101,8 @@ pub(crate) struct CliTarget2dTrainingReport {
     pub(crate) preset: AutomataPreset,
     pub(crate) requested_training_device: TrainingDeviceArg,
     pub(crate) training_device: TrainingDeviceArg,
+    pub(crate) gpu_backend: Option<DirectBasisOracleBackendArg>,
+    pub(crate) gpu_training: Option<CliHyper2dDirectBasisGpuTrainingReport>,
     pub(crate) target_image: String,
     pub(crate) target_source_width: usize,
     pub(crate) target_source_height: usize,

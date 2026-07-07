@@ -244,8 +244,7 @@ pub(in crate::gpu) fn adaptive_tiled_bucket_capacity(
     particle_count: usize,
 ) -> AutomataResult<usize> {
     let with_headroom = max_occupancy
-        .saturating_mul(2)
-        .saturating_add(64)
+        .saturating_add((max_occupancy / 4).max(64))
         .max(max_occupancy.saturating_add(16));
     let capacity = with_headroom.next_power_of_two().min(particle_count.max(1));
     u32_checked(capacity, "adaptive tiled bucket_capacity")?;
@@ -298,14 +297,8 @@ fn auto_bucket_capacity(grid: &HashGridConfig, particle_count: usize) -> usize {
     if grid.mode == HashGridMode::Particle {
         return 0;
     }
-    if grid.dim == 2 && grid.boundary == Boundary::Periodic {
-        return 0;
-    }
-    if grid.dim == 2 && particle_count <= grid.cell_count().saturating_mul(4) {
-        return 0;
-    }
     if grid.dim == 2 {
-        return particle_count;
+        return 0;
     }
     if grid.dim == 3 && particle_count <= grid.cell_count() {
         return 0;

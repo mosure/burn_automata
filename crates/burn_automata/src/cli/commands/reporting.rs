@@ -1530,7 +1530,7 @@ mod tests {
     #[test]
     fn adapter_bank_summary_flags_vector_underfit_even_when_rollout_ratio_is_close() {
         let report = json!({
-            "experiment_config": "configs/hyper2d_adapter_bank/smoke.toml",
+            "experiment_config": "configs/sandbox/hyper2d_adapter_bank/smoke.toml",
             "preset": "Growing2d",
             "output_dir": "artifacts/hyper2d_adapter_bank",
             "shared_base": "shared_base.bpk",
@@ -1620,7 +1620,7 @@ mod tests {
     #[test]
     fn adapter_bank_summary_rejects_zero_baseline_gap() {
         let report = json!({
-            "experiment_config": "configs/hyper2d_adapter_bank/flow.toml",
+            "experiment_config": "configs/sandbox/hyper2d_adapter_bank/flow.toml",
             "preset": "Growing2d",
             "output_dir": "artifacts/hyper2d_adapter_bank",
             "shared_base": "shared_base.bpk",
@@ -1819,7 +1819,7 @@ mod tests {
     #[test]
     fn direct_basis_summary_uses_external_oracle_report() {
         let report = json!({
-            "experiment_config": "configs/hyper2d_direct_basis/omnisvg_10k.toml",
+            "experiment_config": "configs/sandbox/hyper2d_direct_basis/omnisvg_10k.toml",
             "preset": "Growing2d",
             "output_dir": "artifacts/hyper2d_direct_basis",
             "shared_base_output": "shared_base.bpk",
@@ -1992,7 +1992,7 @@ mod tests {
 
     fn psnr_ready_adapter_bank_report() -> Value {
         json!({
-            "experiment_config": "configs/hyper2d_adapter_bank/quality.toml",
+            "experiment_config": "configs/sandbox/hyper2d_adapter_bank/quality.toml",
             "preset": "Growing2d",
             "output_dir": "artifacts/hyper2d_adapter_bank",
             "shared_base": "shared_base.bpk",

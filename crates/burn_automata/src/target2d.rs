@@ -79,7 +79,13 @@ impl TargetImage2d {
             for x in 0..width {
                 let base = (y * width + x) * 4;
                 let alpha = rgba[base + 3];
-                if alpha <= cfg.threshold {
+                if !target_2d_foreground_rgba_pixel(
+                    rgba[base],
+                    rgba[base + 1],
+                    rgba[base + 2],
+                    alpha,
+                    cfg.threshold,
+                ) {
                     continue;
                 }
                 let world_x = min_x + size_x * (x as f32 + 0.5) / width as f32;
@@ -122,6 +128,16 @@ impl TargetImage2d {
     }
 }
 
+pub fn target_2d_foreground_rgba_pixel(
+    _red: f32,
+    _green: f32,
+    _blue: f32,
+    alpha: f32,
+    threshold: f32,
+) -> bool {
+    alpha > threshold
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Target2dLossConfig {
     pub image_size: usize,
@@ -132,6 +148,11 @@ pub struct Target2dLossConfig {
     pub splat_loss_weight: f32,
     pub color_loss_weight: f32,
     pub density_loss_weight: f32,
+    pub background_density_loss_weight: f32,
+    #[serde(default)]
+    pub foreground_density_loss_weight: f32,
+    #[serde(default)]
+    pub shape_chamfer_loss_weight: f32,
     pub displacement_regularizer_weight: f32,
     pub overflow_regularizer_weight: f32,
     pub bound_regularizer_weight: f32,
@@ -148,6 +169,9 @@ impl Default for Target2dLossConfig {
             splat_loss_weight: 2.0,
             color_loss_weight: 5.0,
             density_loss_weight: 1.0,
+            background_density_loss_weight: 0.0,
+            foreground_density_loss_weight: 0.0,
+            shape_chamfer_loss_weight: 0.0,
             displacement_regularizer_weight: 0.01,
             overflow_regularizer_weight: 100.0,
             bound_regularizer_weight: 100.0,
@@ -161,6 +185,11 @@ pub struct Target2dLossReport {
     pub splat_loss: f32,
     pub color_loss: f32,
     pub density_loss: f32,
+    pub background_density_loss: f32,
+    #[serde(default)]
+    pub foreground_density_loss: f32,
+    #[serde(default)]
+    pub shape_chamfer_loss: f32,
     pub displacement_regularizer: f32,
     pub overflow_regularizer: f32,
     pub bound_regularizer: f32,
@@ -414,9 +443,15 @@ pub fn target_2d_loss_with_adjoint(
     let density_denom = (batch_size * pixels).max(1) as f32;
     let mut color_loss = 0.0_f32;
     let mut density_loss = 0.0_f32;
+    let mut background_density_loss = 0.0_f32;
+    let mut foreground_density_loss = 0.0_f32;
+    let mut shape_chamfer_loss = 0.0_f32;
     let mut position_gradients = vec![[0.0_f32; 4]; positions.len()];
     let mut state_gradients = vec![0.0_f32; states.len()];
     let target_mean = target.mean_position();
+    let foreground_mask = target_2d_foreground_mask(target, cfg)?;
+    let foreground_denom =
+        (batch_size as f32 * foreground_mask.iter().sum::<f32>().max(1.0)).max(1.0);
 
     for batch in 0..batch_size {
         let range = batch * particle_count..(batch + 1) * particle_count;
@@ -437,6 +472,26 @@ pub fn target_2d_loss_with_adjoint(
             *density_adj =
                 cfg.splat_loss_weight * cfg.density_loss_weight * l1l2_grad(density_diff)
                     / density_denom;
+            let background = 1.0 - foreground_mask[pixel];
+            if background > 0.0 && cfg.background_density_loss_weight > 0.0 {
+                let leak = rendered.density[pixel] * background;
+                background_density_loss += leak * leak / density_denom;
+                *density_adj += cfg.splat_loss_weight
+                    * cfg.background_density_loss_weight
+                    * 2.0
+                    * leak
+                    * background
+                    / density_denom;
+            }
+            let foreground = foreground_mask[pixel];
+            if foreground > 0.0 && cfg.foreground_density_loss_weight > 0.0 {
+                foreground_density_loss += density_term * foreground / foreground_denom;
+                *density_adj += cfg.splat_loss_weight
+                    * cfg.foreground_density_loss_weight
+                    * foreground
+                    * l1l2_grad(density_diff)
+                    / foreground_denom;
+            }
             let color_gate = (-density_term).exp();
             for channel in 0..3 {
                 let idx = pixel * 3 + channel;
@@ -459,17 +514,37 @@ pub fn target_2d_loss_with_adjoint(
             cfg,
             point_scale,
         )?;
+        let shape_chamfer_adjoint = if cfg.shape_chamfer_loss_weight > 0.0 {
+            let (loss, adjoint) = shape_chamfer_loss_and_adjoint(&centered, target);
+            shape_chamfer_loss += loss / batch_size.max(1) as f32;
+            Some(adjoint)
+        } else {
+            None
+        };
         let mut mean_position_adjoint = [0.0_f32; 2];
         if cfg.center {
             for gradient in &adjoint.positions {
                 mean_position_adjoint[0] += gradient[0] / particle_count.max(1) as f32;
                 mean_position_adjoint[1] += gradient[1] / particle_count.max(1) as f32;
             }
+            if let Some(shape_adjoint) = &shape_chamfer_adjoint {
+                for gradient in shape_adjoint {
+                    mean_position_adjoint[0] += cfg.shape_chamfer_loss_weight * gradient[0]
+                        / (batch_size.max(1) * particle_count.max(1)) as f32;
+                    mean_position_adjoint[1] += cfg.shape_chamfer_loss_weight * gradient[1]
+                        / (batch_size.max(1) * particle_count.max(1)) as f32;
+                }
+            }
         }
         for local in 0..particle_count {
             let row = range.start + local;
             position_gradients[row][0] += adjoint.positions[local][0] - mean_position_adjoint[0];
             position_gradients[row][1] += adjoint.positions[local][1] - mean_position_adjoint[1];
+            if let Some(shape_adjoint) = &shape_chamfer_adjoint {
+                let scale = cfg.shape_chamfer_loss_weight / batch_size.max(1) as f32;
+                position_gradients[row][0] += shape_adjoint[local][0] * scale;
+                position_gradients[row][1] += shape_adjoint[local][1] * scale;
+            }
             let state_base = row * state_dims + state_dims - 3;
             state_gradients[state_base] += adjoint.colors[local][0];
             state_gradients[state_base + 1] += adjoint.colors[local][1];
@@ -489,8 +564,12 @@ pub fn target_2d_loss_with_adjoint(
         cfg.bound_regularizer_weight,
     );
     let displacement_regularizer = mean_dx_norm_sum;
-    let splat_loss = cfg.color_loss_weight * color_loss + cfg.density_loss_weight * density_loss;
+    let splat_loss = cfg.color_loss_weight * color_loss
+        + cfg.density_loss_weight * density_loss
+        + cfg.background_density_loss_weight * background_density_loss
+        + cfg.foreground_density_loss_weight * foreground_density_loss;
     let total_loss = cfg.splat_loss_weight * splat_loss
+        + cfg.shape_chamfer_loss_weight * shape_chamfer_loss
         + cfg.displacement_regularizer_weight * displacement_regularizer
         + cfg.overflow_regularizer_weight * overflow_regularizer
         + cfg.bound_regularizer_weight * bound_regularizer;
@@ -501,6 +580,9 @@ pub fn target_2d_loss_with_adjoint(
             splat_loss,
             color_loss,
             density_loss,
+            background_density_loss,
+            foreground_density_loss,
+            shape_chamfer_loss,
             displacement_regularizer,
             overflow_regularizer,
             bound_regularizer,
@@ -878,6 +960,51 @@ fn render_target_splat(
     splat_render(&positions, &target.colors, target.pixel_size, cfg, 1.0)
 }
 
+fn validate_render_config(cfg: Target2dLossConfig) -> AutomataResult<()> {
+    if cfg.image_size == 0 || !cfg.sigma.is_finite() || cfg.sigma <= 0.0 {
+        return Err(AutomataError::InvalidArgument(
+            "target 2D render requires positive image_size and sigma".to_string(),
+        ));
+    }
+    if !cfg.lo.is_finite() || !cfg.hi.is_finite() || cfg.hi <= cfg.lo {
+        return Err(AutomataError::InvalidArgument(
+            "target 2D render requires finite lo < hi".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn target_2d_foreground_mask(
+    target: &TargetImage2d,
+    cfg: Target2dLossConfig,
+) -> AutomataResult<Vec<f32>> {
+    validate_render_config(cfg)?;
+    let size = cfg.image_size;
+    let mut mask = vec![0.0_f32; size * size];
+    let radius = cfg.sigma.ceil().max(1.0) as isize;
+    for position in &target.positions {
+        let px = (position[0] - cfg.lo) / (cfg.hi - cfg.lo) * (size as f32 - 1.0);
+        let py_unflipped = (position[1] - cfg.lo) / (cfg.hi - cfg.lo) * (size as f32 - 1.0);
+        let py = (size as f32 - 1.0) - py_unflipped;
+        let base_x = px.round() as isize;
+        let base_y = py.round() as isize;
+        for oy in -radius..=radius {
+            for ox in -radius..=radius {
+                if ox * ox + oy * oy > radius * radius {
+                    continue;
+                }
+                let x = base_x + ox;
+                let y = base_y + oy;
+                if x < 0 || y < 0 || x >= size as isize || y >= size as isize {
+                    continue;
+                }
+                mask[y as usize * size + x as usize] = 1.0;
+            }
+        }
+    }
+    Ok(mask)
+}
+
 fn centered_batch_positions(
     positions: &[[f32; 4]],
     target_mean: [f32; 2],
@@ -919,6 +1046,55 @@ fn tail_colors(states: &[f32], state_dims: usize) -> Vec<[f32; 3]> {
             ]
         })
         .collect()
+}
+
+fn shape_chamfer_loss_and_adjoint(
+    positions: &[[f32; 2]],
+    target: &TargetImage2d,
+) -> (f32, Vec<[f32; 2]>) {
+    let mut loss = 0.0_f32;
+    let mut adjoint = vec![[0.0_f32; 2]; positions.len()];
+    if positions.is_empty() || target.positions.is_empty() {
+        return (loss, adjoint);
+    }
+    let particle_scale = 1.0 / positions.len() as f32;
+    for (particle, position) in positions.iter().enumerate() {
+        let mut nearest = target.positions[0];
+        let mut nearest_distance2 = distance2_2d(*position, nearest);
+        for &candidate in target.positions.iter().skip(1) {
+            let distance2 = distance2_2d(*position, candidate);
+            if distance2 < nearest_distance2 {
+                nearest = candidate;
+                nearest_distance2 = distance2;
+            }
+        }
+        loss += nearest_distance2 * particle_scale;
+        adjoint[particle][0] += 2.0 * (position[0] - nearest[0]) * particle_scale;
+        adjoint[particle][1] += 2.0 * (position[1] - nearest[1]) * particle_scale;
+    }
+    let target_scale = 1.0 / target.positions.len() as f32;
+    for &target_position in &target.positions {
+        let mut nearest_particle = 0usize;
+        let mut nearest_distance2 = distance2_2d(positions[0], target_position);
+        for (particle, &candidate) in positions.iter().enumerate().skip(1) {
+            let distance2 = distance2_2d(candidate, target_position);
+            if distance2 < nearest_distance2 {
+                nearest_particle = particle;
+                nearest_distance2 = distance2;
+            }
+        }
+        let position = positions[nearest_particle];
+        loss += nearest_distance2 * target_scale;
+        adjoint[nearest_particle][0] += 2.0 * (position[0] - target_position[0]) * target_scale;
+        adjoint[nearest_particle][1] += 2.0 * (position[1] - target_position[1]) * target_scale;
+    }
+    (loss, adjoint)
+}
+
+fn distance2_2d(left: [f32; 2], right: [f32; 2]) -> f32 {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+    dx * dx + dy * dy
 }
 
 fn splat_render(
@@ -1624,6 +1800,25 @@ mod tests {
     }
 
     #[test]
+    fn target_image_uses_upstream_alpha_only_foreground_rule() {
+        let rgba = vec![
+            0.0, 0.0, 0.0, 1.0, //
+            0.0, 0.8, 0.1, 1.0, //
+            0.02, 0.02, 0.02, 1.0, //
+            0.7, 0.6, 0.2, 1.0,
+        ];
+        let target =
+            TargetImage2d::from_rgba_pixels(2, 2, &rgba, TargetImage2dExtractConfig::default())
+                .unwrap();
+
+        assert_eq!(target.point_count(), 4);
+        assert_eq!(target.colors[0], [0.0, 0.0, 0.0]);
+        assert_eq!(target.colors[1], [0.0, 0.8, 0.1]);
+        assert_eq!(target.colors[2], [0.02, 0.02, 0.02]);
+        assert_eq!(target.colors[3], [0.7, 0.6, 0.2]);
+    }
+
+    #[test]
     fn upstream_growing_hashgrid_matches_growing_yaml() {
         let grid = upstream_growing_2d_hashgrid();
         let (_, preset_grid) = NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
@@ -1701,6 +1896,40 @@ mod tests {
             (loss.state_gradients[0] - finite).abs() < 2.0e-2,
             "analytic={} finite={finite}",
             loss.state_gradients[0]
+        );
+    }
+
+    #[test]
+    fn target_shape_chamfer_adjoint_matches_position_finite_difference() {
+        let target = single_point_target();
+        let cfg = Target2dLossConfig {
+            splat_loss_weight: 0.0,
+            shape_chamfer_loss_weight: 1.0,
+            center: false,
+            displacement_regularizer_weight: 0.0,
+            overflow_regularizer_weight: 0.0,
+            bound_regularizer_weight: 0.0,
+            ..finite_difference_loss_config()
+        };
+        let mut positions = vec![[0.18, -0.09, 0.0, 0.0], [-0.42, 0.31, 0.0, 0.0]];
+        let states = vec![0.20, -0.30, 0.10, -0.10, 0.15, 0.05];
+        let loss = target_2d_loss_with_adjoint(&positions, &states, 1, 2, 3, &target, cfg, 0.0, 0)
+            .unwrap();
+        let eps = 1.0e-3;
+        positions[0][0] += eps;
+        let plus = target_2d_loss(&positions, &states, 1, 2, 3, &target, cfg)
+            .unwrap()
+            .total_loss;
+        positions[0][0] -= 2.0 * eps;
+        let minus = target_2d_loss(&positions, &states, 1, 2, 3, &target, cfg)
+            .unwrap()
+            .total_loss;
+        let finite = (plus - minus) / (2.0 * eps);
+
+        assert!(
+            (loss.position_gradients[0][0] - finite).abs() < 2.0e-3,
+            "analytic={} finite={finite}",
+            loss.position_gradients[0][0]
         );
     }
 
