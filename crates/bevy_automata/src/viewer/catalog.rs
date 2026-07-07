@@ -525,6 +525,9 @@ pub(super) fn catalog_entry_matches_settings(
     entry: &ModelCatalogEntry,
     settings: &AutomataSettings,
 ) -> bool {
+    if settings.generated_model_label.is_some() {
+        return false;
+    }
     match entry.source {
         ModelCatalogSource::Preset => {
             settings.model_path.is_none() && settings.preset == entry.preset
@@ -569,6 +572,7 @@ pub(super) fn select_catalog_entry(
     };
 
     settings.model_path = next_model_path;
+    settings.generated_model_label = None;
     settings.preset = entry.preset;
     settings.particle_count = entry.particle_count;
     settings.seed_scale = entry.seed_scale;

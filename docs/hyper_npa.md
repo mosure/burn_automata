@@ -1,112 +1,136 @@
-# HyperNPA: Latest Paper Status
+# HyperNPA: Current Paper Status
 
-This document mirrors the current `docs/hyper_npa.tex` paper revision. The
-paper has been reframed around the latest high-particle oracle comparison rather
-than the older low-particle 10k pilot.
+This document mirrors the current `docs/hyper_npa.tex` revision.
+
+## Current Paradigm
+
+The current HyperNPA path is end-to-end and image-conditioned:
+
+```text
+image -> DINO ViT-S full tokens -> token-aware rectified-flow LoRA generator
+      -> shared trainable NPA base -> rollout image loss
+```
+
+This replaces the older primary emphasis on per-sample oracle LoRA training plus
+raw adapter-vector regression. Oracle adapters are now treated as baselines and
+controls, not the main training target.
+
+## Main Artifact
+
+The current default E2E artifact is:
+
+- `artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/shared_base.bpk`
+- `artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/hyper_2d.json`
+- `models/dino/dino_vits.mpk`
+
+Training config:
+
+- 10k OmniSVG selected examples.
+- 9500 train / 500 holdout.
+- Online DINO ViT-S full tokens: CLS + 37x37 patch grid, 1370 tokens x 384 dims.
+- Trainable shared growing-2D NPA base from step zero.
+- Generated LoRA rank 16, alpha 16.
+- Token-aware rectified-flow generator, hidden 128, two sample steps.
+- Burn/CUDA autodiff.
+- 128 rollout particles, 4 rollout steps, TBPTT chunk size 2.
+- Target-2D rollout image loss.
+
+## Latest E2E Results
+
+The selected checkpoint is step 2700, chosen by best holdout PSNR.
+
+| checkpoint | step | train loss | holdout loss | holdout PSNR |
+| --- | ---: | ---: | ---: | ---: |
+| first report | 100 | 7.642 | 5.398 | 4.83 dB |
+| best holdout PSNR | 2700 | 7.305 | 4.592 | 8.56 dB |
+| best holdout loss | 2900 | 6.364 | 4.578 | 8.35 dB |
+| final | 3000 | 4.896 | 4.583 | 8.42 dB |
+
+The 32-sample holdout validation at training scale is:
+
+| metric | value |
+| --- | ---: |
+| particles / steps | 128 / 4 |
+| mean target-image PSNR | 8.56 dB |
+| min target-image PSNR | 0.56 dB |
+| max target-image PSNR | 16.75 dB |
+| mean total validation loss | 4.592 |
+| passes 8 dB threshold | false |
+
+This is not oracle parity. It is a functional E2E training run with low current
+quality.
+
+## New Bevy Renderer Figure
+
+New paper figure:
+
+- `docs/hyper_npa_figures/e2e_bevy_rollouts/e2e_hypernpa_bevy_rollout_panel.png`
+
+Supporting generated artifacts:
+
+- `docs/hyper_npa_figures/e2e_bevy_rollouts/e2e_bevy_rollout_summary.json`
+- per-sample PNGs and reports under `docs/hyper_npa_figures/e2e_bevy_rollouts/<slug>/`
+
+The figure uses the current E2E HyperNPA inference path through `bevy_automata`
+headless export:
+
+```sh
+cargo run -p bevy_automata -- export \
+  --hyper-image <condition.png> \
+  --output-dir docs/hyper_npa_figures/e2e_bevy_rollouts/<slug> \
+  --output-prefix <slug> \
+  --steps 128 \
+  --capture-steps 4,16,64,128 \
+  --width 192 \
+  --height 192 \
+  --particles 2048
+```
+
+Rows are the top eight held-out validation samples from the E2E report. The
+panel shows actual `bevy_gaussian_splatting` output at rollout steps 4, 16, 64,
+and 128. It also shows the current weakness clearly: many rollouts decay or go
+near-empty by long horizons.
+
+## Oracle Comparison
+
+Available high-particle oracle comparisons remain separate from the current E2E
+10k holdout slice.
+
+| system | examples | particles | steps | mean PSNR | min PSNR | status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Direct exact LoRA vs oracle NPA | 16 | 2048 | 32 | 99.00 | 99.00 | materialization sanity pass |
+| DINO-flow zero-source control vs oracle NPA | 16 | 2048 | 32 | 30.44 | 27.31 | passes 26 dB gate |
+| Trained WGPU DINO-flow adapter model vs oracle NPA | 16 | 2048 | 32 | 9.10 | 0.53 | fails oracle gate |
+| Current E2E HyperNPA vs target image | 32 | 128 | 4 | 8.56 | 0.56 | not oracle-comparable |
+
+The direct/zero-source rows prove the NPA + LoRA representation and sampling
+path can match oracle-trained per-sample NPAs. The current E2E model has not yet
+matched that quality.
 
 ## Claim Boundary
 
-We have **not** proven broad generalized image -> DINO -> rectified-flow LoRA ->
-NPA quality.
+What is proven:
 
-What is now proven:
+- Feed-forward image -> DINO -> generated LoRA -> NPA rollout works in the
+  actual Bevy viewer/export path.
+- The 10k E2E training objective learns a measurable target-image signal.
+- The repo has high-particle oracle controls showing the representational upper
+  bound.
 
-- Direct exact LoRA adapters can materialize persisted per-sample oracle NPAs.
-- DINO ViT-S 8x8 token-grid conditions can key an exact 16-sample
-  condition-to-adapter control.
-- The rectified-flow sampling path can emit nearly exact adapter vectors when
-  constructed with the deterministic zero-source control.
-- The 2048-particle PSNR gate and DINO feature-cache validation path are
-  functioning.
+What is not proven:
 
-What is still failing:
+- Broad 1k/10k generalized oracle-quality HyperNPA.
+- Matched 2048-particle oracle PSNR for the current E2E holdout slice.
+- Long-rollout stability.
+- Parity with per-sample overfit NPA oracles.
 
-- The WGPU-trained DINO rectified-flow adapter generator does not learn the exact
-  adapter bank yet.
-- The passing control is train-only over 16 samples, not holdout or 1k/10k
-  generalized quality.
+## Next Work
 
-## Latest Results
-
-All metrics below use persisted oracle NPA models as the baseline, 2048 rollout
-particles, 32 rollout steps, update probability 0.5, 128x128 Gaussian raster
-metrics, and seed 42.
-
-| system | examples | vector NRMSE | cosine | mean render PSNR | min render PSNR | status |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Direct exact LoRA vs oracle | 16 | 0.0 | 1.000 | 99.00 dB | 99.00 dB | passes materialization sanity gate |
-| DINO-flow zero-source control vs oracle | 16 | 1.18e-7 | 1.000 | 30.44 dB | 27.31 dB | passes narrow overfit gate |
-| WGPU-trained DINO-flow vs oracle | 16 | 1.112 | 0.151 | 9.10 dB | 0.53 dB | fails |
-
-The zero-source control is intentionally deterministic: `flow_source_scale = 0.0`.
-It proves the adapter representation and flow sampling path can express the
-targets. It does not prove that WGPU training can learn them.
-
-## Per-Sample HyperNPA Control PSNR
-
-Direct exact LoRA is 99 dB for every row. HyperNPA values below are the
-DINO-flow zero-source control sorted from worst to best.
-
-| sample | render PSNR | sample | render PSNR |
-| --- | ---: | --- | ---: |
-| `00009725` | 27.31 | `00006072` | 29.91 |
-| `00001643` | 27.91 | `00005000` | 30.28 |
-| `00005840` | 28.29 | `00007095` | 30.48 |
-| `00005598` | 28.71 | `00005512` | 31.37 |
-| `00000371` | 28.83 | `00009530` | 31.99 |
-| `00002120` | 28.89 | `00003130` | 33.22 |
-| `00006450` | 29.24 | `00005081` | 33.71 |
-| `00006500` | 29.47 | `00009750` | 37.44 |
-
-## Figures
-
-New high-particle paper figures:
-
-- `docs/hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_panel_a.png`
-- `docs/hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_panel_b.png`
-- `docs/hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_summary.json`
-
-Each row shows:
-
-1. condition thumbnail;
-2. DINO-flow zero-source HyperNPA adapter rollout;
-3. direct exact LoRA rollout;
-4. persisted oracle NPA rollout.
-
-All rollouts in those panels use 2048 particles and 32 steps. They are dense
-particle rollout rasterizations, not low-count sparse thumbnails.
-
-The separate WGPU viewer renderer reference remains:
-
-- `docs/hyper_npa_figures/lizard_wgpu_gaussian_4096_rollout.png`
-
-That lizard figure validates the WGPU/Bevy Gaussian renderer path for an
-imported catalog model. It is not a generated HyperNPA result.
-
-## Reproduction
-
-Regenerate the underlying validation artifacts with the Rust CLIs:
-
-```sh
-cargo run -p burn_automata --features "cli dino backend_wgpu" --bin burn_automata -- \
-  validate-hyper2d-psnr-gate --config configs/hyper2d_adapter_bank/psnr_gate_exact_oracle_10k256x64_2048_rank132_dino_flow_sampled.toml
-cargo run -p burn_automata --features "cli dino backend_wgpu" --bin burn_automata -- \
-  report-hyper2d --input artifacts/hyper2d_adapter_bank_exact_oracle_10k256x64_dino_token_grid_flow_zero_source_h384_sampled/report.json
-```
-
-The validation consumes:
-
-- `artifacts/hyper2d_adapter_bank_exact_oracle_10k8x8_dino_token_grid_flow_linear_solve_overfit_train_all/psnr_gate_report.json`
-- `artifacts/hyper2d_adapter_bank_exact_oracle_10k8x8_dino_token_grid_flow_overfit_train_all/psnr_gate_report.json`
-
-Rollout panels should be generated from renderer output artifacts referenced by
-the PSNR-gate report; Python paper renderers are no longer part of the canonical
-pipeline.
-
-## Interpretation
-
-The main bottleneck is no longer validation plumbing. The current bottleneck is
-the learned WGPU rectified-flow objective/optimizer/architecture. The next
-meaningful milestone is to make WGPU training match the zero-source control on
-the same 16-sample exact bank, then add holdout samples, then scale to 128 and
-1k examples while retaining the 2048-particle oracle gate.
+1. Generate matched oracle NPAs for the E2E validation slice.
+2. Report current E2E HyperNPA vs oracle PSNR on the same images shown in the
+   Bevy panel.
+3. Train with longer rollout horizons and stability penalties.
+4. Add a curriculum up to 2048-particle validation without dense all-pairs memory
+   blowups.
+5. Compare trainable shared-base E2E training against frozen-base and direct
+   oracle variants on identical samples.

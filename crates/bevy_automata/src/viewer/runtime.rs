@@ -29,6 +29,10 @@ pub(super) fn load_selected_model(
         return;
     }
 
+    if settings.generated_model_label.is_some() {
+        return;
+    }
+
     if runtime.loaded_model_path.is_none() && runtime.loaded_preset == Some(settings.preset) {
         return;
     }
@@ -322,12 +326,18 @@ pub(super) fn update_settings_label(
 
 pub(super) fn model_display_name(settings: &AutomataSettings) -> String {
     settings
-        .model_path
+        .generated_model_label
         .as_deref()
-        .and_then(|path| std::path::Path::new(path).file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("seeded")
-        .to_string()
+        .map(ToString::to_string)
+        .or_else(|| {
+            settings
+                .model_path
+                .as_deref()
+                .and_then(|path| std::path::Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "seeded".to_string())
 }
 
 pub(super) fn update_backward_probe(

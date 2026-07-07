@@ -17,6 +17,10 @@ mod oracle;
 mod psnr_gate;
 
 pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
+pub(super) use dense::{
+    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
+    train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
+};
 pub(crate) use psnr_gate::run_validate_hyper_2d_psnr_gate;
 
 use oracle::evaluate_direct_basis_oracles;

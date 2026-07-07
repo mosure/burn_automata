@@ -42,6 +42,10 @@ pub(in crate::viewer) enum RunControlKind {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub(in crate::viewer) struct RunControlButton(pub(in crate::viewer) RunControlKind);
 
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct HyperImageButton;
+
 #[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct AutomataUiPanel;
 

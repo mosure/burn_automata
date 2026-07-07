@@ -5,6 +5,9 @@
 //! one LoRA adapter and a particle prior for an existing base NPA.
 
 pub mod condition;
+#[cfg(feature = "dino")]
+pub mod dino;
+pub mod e2e;
 pub mod hypernet;
 pub mod inference;
 pub mod prior;
@@ -17,6 +20,12 @@ pub use condition::{
     DEFAULT_DINO_VITS_TOKEN_GRID_WIDTH, DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS,
     DINO_VITS_EMBED_DIMS, DINO_VITS_PATCH_STATS_FEATURE_DIMS, condition_feature_dims_for_encoder,
     condition_feature_dims_for_token_grid,
+};
+#[cfg(feature = "dino")]
+pub use dino::DinoVitsConditionEncoder;
+pub use e2e::{
+    E2eConditionedNpa2d, E2eHyperNpa2d, E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights,
+    generate_e2e_conditioned_npa_2d, load_e2e_hyper_npa_2d,
 };
 pub use hypernet::{
     HyperNpa2d, HyperNpa2dConfig, HyperNpa2dFlow, HyperNpa2dFlowActivation, HyperNpa2dFlowConfig,

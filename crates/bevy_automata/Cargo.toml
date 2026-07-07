@@ -11,10 +11,14 @@ homepage.workspace = true
 readme = "../../README.md"
 
 [features]
-default = ["viewer", "splatting", "gpu_wgpu"]
+default = ["viewer", "splatting", "gpu_wgpu", "hyper_dino_wgpu", "headless"]
 viewer = []
 splatting = ["dep:bevy_gaussian_splatting"]
 gpu_wgpu = ["burn_automata/gpu_wgpu"]
+hyper_dino = ["burn_automata/dino", "dep:crossbeam-channel", "dep:image", "dep:rfd"]
+hyper_dino_wgpu = ["hyper_dino", "burn_automata/backend_wgpu"]
+hyper_dino_cuda = ["hyper_dino", "burn_automata/backend_cuda"]
+headless = ["viewer", "splatting", "gpu_wgpu", "dep:clap", "dep:image", "dep:serde_json"]
 
 [dependencies]
 burn_automata = { path = "../burn_automata", version = "0.1.0", default-features = false, features = ["backend_ndarray"] }
@@ -52,9 +56,14 @@ bevy_gaussian_splatting = { workspace = true, optional = true, features = [
 ] }
 bevy_panorbit_camera.workspace = true
 bevy_ui_widgets.workspace = true
+clap = { workspace = true, optional = true }
+crossbeam-channel = { workspace = true, optional = true }
 getrandom.workspace = true
 getrandom_03.workspace = true
+image = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 image.workspace = true

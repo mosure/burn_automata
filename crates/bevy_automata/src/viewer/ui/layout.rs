@@ -256,6 +256,7 @@ pub(in crate::viewer) fn model_controls_row() -> impl Scene {
             row_gap: px(8),
         }
         Children [
+            hyper_image_button(),
             (
                 Node {
                     width: percent(100),

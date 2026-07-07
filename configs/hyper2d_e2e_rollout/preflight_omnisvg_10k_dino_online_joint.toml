@@ -1,0 +1,99 @@
+preset = "growing-2d"
+
+[source]
+source_limit = 10000
+
+[source.omnisvg]
+dataset = "illustration"
+split = "train"
+cache_dir = "data/omnisvg"
+offset = 0
+limit = 10000
+page_size = 100
+download = false
+refresh = false
+token_env = "HF_TOKEN"
+
+[split]
+holdout_stride = 20
+holdout_offset = 0
+
+[output]
+output_dir = "artifacts/hyper2d_e2e_rollout_preflight_omnisvg_10k"
+
+[condition]
+encoder = "dino-vits-full-tokens"
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 518
+dino_patch_size = 14
+dino_batch_size = 16
+online = true
+token_attention_heads = 4
+
+[model]
+shared_base_trainable = true
+shared_base_init = "upstream-seeded"
+hidden_dims = 128
+output_activation = "tanh"
+
+[training]
+backend = "gpu"
+objective = "target2d-rollout-image-loss"
+steps = 0
+report_interval = 100
+example_batch_size = 16
+tbptt_chunk_steps = 2
+max_dense_train_particles = 512
+system_memory_budget_gb = 88.0
+gpu_memory_budget_gb = 72.0
+seed = 42
+
+[gpu]
+backend = "burn-cuda"
+max_dense_chunk_floats = 524288
+max_splat_chunk_floats = 524288
+
+[adapter]
+rank = 8
+alpha = 8.0
+generator = "token-aware-rectified-flow"
+flow_hidden = 128
+flow_sample_steps = 2
+flow_source_scale = 1.0
+init_scale = 1.0e-3
+
+[rollout]
+particles = 128
+steps = 4
+update_prob = 0.5
+seed = 42
+seed_mode = "uniform-circle"
+
+[target]
+points = 512
+threshold = 0.05
+loss_image_size = 64
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+learning_rate = 1.0e-4
+weight_decay = 0.0
+grad_clip_norm = 1.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1.0e-8
+per_parameter_grad_normalization = true
+
+[validation]
+examples = 32
+particles = 128
+steps = 4
+update_prob = 0.5
+seed = 42
+psnr_threshold_db = 8.0

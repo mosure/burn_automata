@@ -113,3 +113,40 @@ pub(in crate::viewer) fn train_button() -> impl Scene {
         })
     }
 }
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn hyper_image_button() -> impl Scene {
+    bsn! {
+        Button
+        Node {
+            width: percent(100),
+            height: px(32),
+            border: px(1),
+            padding: UiRect::horizontal(px(10)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        template_value(HyperImageButton)
+        template_value(Hovered::default())
+        BorderColor::from(Color::srgb(0.28, 0.35, 0.37))
+        BackgroundColor(Color::srgb(0.09, 0.12, 0.13))
+        on(|mut event: On<Pointer<Press>>, mut requests: MessageWriter<OpenHyperNpaImage>| {
+            event.trigger_mut().propagate = false;
+            requests.write(OpenHyperNpaImage);
+        })
+        Children [(
+            Text("open image -> HyperNPA")
+            template_value(ModelCatalogTextSize(12.0))
+            TextColor(Color::srgb(0.86, 0.92, 0.90))
+        )]
+    }
+}
+
+#[cfg(not(feature = "hyper_dino"))]
+pub(in crate::viewer) fn hyper_image_button() -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::None,
+        }
+    }
+}

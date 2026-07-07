@@ -61,6 +61,10 @@ mod catalog_images;
 mod cloud;
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 mod gpu_bridge;
+#[cfg(all(feature = "headless", feature = "splatting", feature = "gpu_wgpu"))]
+pub mod headless;
+#[cfg(feature = "hyper_dino")]
+mod hyper_inference;
 mod runtime;
 mod ui;
 
@@ -72,6 +76,8 @@ use gpu_bridge::*;
 pub use gpu_bridge::{
     AutomataRenderDiagnostics, automata_executor_from_render_device, gaussian_storage_buffer_refs,
 };
+#[cfg(feature = "hyper_dino")]
+use hyper_inference::*;
 use runtime::*;
 use ui::*;
 
@@ -116,6 +122,12 @@ pub struct AutomataSettings {
     pub train_live: bool,
     pub training_learning_rate: f32,
     pub model_path: Option<String>,
+    pub generated_model_label: Option<String>,
+    pub hyper_base_model_path: Option<String>,
+    pub hyper_model_path: Option<String>,
+    pub hyper_dino_model_path: Option<String>,
+    pub hyper_dino_image_size: usize,
+    pub hyper_dino_patch_size: usize,
     pub revision: u64,
 }
 
@@ -148,6 +160,21 @@ impl Default for AutomataSettings {
             train_live: false,
             training_learning_rate: 1.0e-3,
             model_path,
+            generated_model_label: None,
+            hyper_base_model_path: env_or_workspace_path(
+                "BURN_AUTOMATA_HYPER_E2E_BASE",
+                "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/shared_base.bpk",
+            ),
+            hyper_model_path: env_or_workspace_path(
+                "BURN_AUTOMATA_HYPER_E2E_MODEL",
+                "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/hyper_2d.json",
+            ),
+            hyper_dino_model_path: env_or_workspace_path(
+                "BURN_AUTOMATA_DINO_MODEL",
+                "models/dino/dino_vits.mpk",
+            ),
+            hyper_dino_image_size: 518,
+            hyper_dino_patch_size: 14,
             revision: 1,
         }
     }
@@ -165,6 +192,23 @@ fn effective_hashgrid(runtime: &AutomataRuntime, settings: &AutomataSettings) ->
         settings.seed_scale,
         settings.reference_seed_scale,
     )
+}
+
+fn env_or_workspace_path(env_key: &str, workspace_relative: &str) -> Option<String> {
+    std::env::var(env_key).ok().or_else(|| {
+        resolve_workspace_path(workspace_relative).map(|path| path.display().to_string())
+    })
+}
+
+fn resolve_workspace_path(path: &str) -> Option<std::path::PathBuf> {
+    let direct = std::path::Path::new(path);
+    if direct.exists() {
+        return Some(direct.to_path_buf());
+    }
+    let workspace_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path);
+    workspace_path.exists().then_some(workspace_path)
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -241,6 +285,11 @@ impl Plugin for AutomataViewerPlugin {
             .init_resource::<AutomataUiState>()
             .init_resource::<CatalogPreviewState>()
             .init_resource::<CatalogPreviewImageState>();
+        #[cfg(feature = "hyper_dino")]
+        app.init_resource::<HyperNpaImageDialogChannel>()
+            .init_resource::<HyperNpaInferenceChannel>()
+            .init_resource::<HyperNpaInferenceState>()
+            .add_message::<OpenHyperNpaImage>();
         #[cfg(feature = "splatting")]
         app.init_resource::<AutomataCloudState>();
         #[cfg(feature = "splatting")]
@@ -274,6 +323,19 @@ impl Plugin for AutomataViewerPlugin {
                 update_run_control_button_styles,
                 update_status_label,
                 update_settings_label,
+            )
+                .chain(),
+        );
+
+        #[cfg(feature = "hyper_dino")]
+        app.add_systems(
+            Update,
+            (
+                handle_open_hyper_npa_image_dialog,
+                handle_hyper_npa_image_drop,
+                poll_hyper_npa_image_sources,
+                poll_hyper_npa_inference_results,
+                update_hyper_image_button_styles,
             )
                 .chain(),
         );

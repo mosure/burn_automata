@@ -28,6 +28,21 @@ fn train_source_defaults_to_rollout_local_metadata() {
 
 #[test]
 fn hyper2d_quality_facing_commands_use_safe_training_and_quality_eval_defaults() {
+    let args = CliArgs::try_parse_from([
+        "burn_automata",
+        "train-hyper2d-e2e-rollout",
+        "--config",
+        "configs/hyper2d_e2e_rollout/smoke_omnisvg_8_dino_online_joint.toml",
+    ])
+    .unwrap();
+    let Command::TrainHyper2dE2eRollout { config } = args.command else {
+        panic!("expected train-hyper2d-e2e-rollout command");
+    };
+    assert_eq!(
+        config,
+        PathBuf::from("configs/hyper2d_e2e_rollout/smoke_omnisvg_8_dino_online_joint.toml")
+    );
+
     let args = CliArgs::try_parse_from(["burn_automata", "train-hyper2d-direct-basis"]).unwrap();
     let Command::TrainHyper2dDirectBasis {
         rollout_particles,

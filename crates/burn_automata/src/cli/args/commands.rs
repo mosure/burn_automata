@@ -587,6 +587,15 @@ pub(crate) enum Command {
         quality_max_hyper_target_ratio: Option<f32>,
     },
     #[command(
+        name = "train-hyper2d-e2e-rollout",
+        alias = "train-hyper-2d-e2e-rollout",
+        alias = "train-hypernpa2d-e2e-rollout"
+    )]
+    TrainHyper2dE2eRollout {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    #[command(
         name = "train-hyper2d-direct-basis",
         alias = "train-hyper-2d-direct-basis",
         alias = "train-hyper2d-image-lora-suite"

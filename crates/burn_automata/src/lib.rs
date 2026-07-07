@@ -28,19 +28,22 @@ pub use burn_automata_kernels as kernels;
 pub use burn_automata_kernels::GaussianDecodeMode;
 pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
 pub use error::{AutomataError, AutomataResult};
+#[cfg(feature = "dino")]
+pub use hyper::DinoVitsConditionEncoder;
 pub use hyper::{
     CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionEncoder2d, ConditionImage2d,
     ConditionSummary2d, ConditionToken2d, ConditionedNpa2d, DEFAULT_CONDITION_TOKEN_GRID_HEIGHT,
     DEFAULT_CONDITION_TOKEN_GRID_WIDTH, DEFAULT_DINO_VITS_TOKEN_GRID_HEIGHT,
     DEFAULT_DINO_VITS_TOKEN_GRID_WIDTH, DINO_VITS_CLS_PATCH_MEAN_FEATURE_DIMS,
-    DINO_VITS_EMBED_DIMS, DINO_VITS_PATCH_STATS_FEATURE_DIMS, HyperAdapterExample2d,
+    DINO_VITS_EMBED_DIMS, DINO_VITS_PATCH_STATS_FEATURE_DIMS, E2eConditionedNpa2d, E2eHyperNpa2d,
+    E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights, HyperAdapterExample2d,
     HyperAdapterTrainingReport, HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, HyperNpa2dFlow,
     HyperNpa2dFlowActivation, HyperNpa2dFlowConfig, HyperNpa2dFlowWeights,
     HyperNpa2dOutputActivation, HyperNpa2dPreciseWeights, HyperNpa2dWeights, ParticlePrior2d,
     ParticlePriorConfig, condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
-    generate_conditioned_npa_2d, hyper_adapter_regression_loss,
+    generate_conditioned_npa_2d, generate_e2e_conditioned_npa_2d, hyper_adapter_regression_loss,
     hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
-    hyper_rectified_flow_train_step,
+    hyper_rectified_flow_train_step, load_e2e_hyper_npa_2d,
 };
 pub use import::{
     BpkAdapterManifest, BpkModelManifest, ExportedCheckpoint, ImportReport,

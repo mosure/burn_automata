@@ -19,6 +19,7 @@ use sources::{
 #[cfg(feature = "dino")]
 mod dino;
 mod direct_basis;
+mod rollout;
 mod shared_basis;
 mod sources;
 
@@ -26,6 +27,7 @@ pub(crate) use direct_basis::{
     run_train_hyper_2d_adapter_bank, run_train_hyper_2d_direct_basis,
     run_validate_hyper_2d_direct_basis_oracles, run_validate_hyper_2d_psnr_gate,
 };
+pub(crate) use rollout::run_train_hyper_2d_e2e_rollout;
 
 #[derive(Clone, Debug)]
 struct Hyper2dTrainedSource {

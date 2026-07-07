@@ -1,0 +1,118 @@
+{
+  "output_dir": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76",
+  "report_path": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76/00005680_772addd95d55344962af482f89778e76_report.json",
+  "config": {
+    "output_dir": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76",
+    "output_prefix": "00005680_772addd95d55344962af482f89778e76",
+    "width": 192,
+    "height": 192,
+    "particles": 2048,
+    "steps": 128,
+    "capture_every": null,
+    "capture_steps": [
+      4,
+      16,
+      64,
+      128
+    ],
+    "warmup_frames": 4,
+    "steps_per_frame": 1,
+    "preset": "Growing2d",
+    "seed_mode": "UniformCircle",
+    "model_path": null,
+    "hyper_image_path": "data/omnisvg/mmsvg-illustration/train/00005680_772addd95d55344962af482f89778e76.png",
+    "hyper_base_model_path": null,
+    "hyper_model_path": null,
+    "dino_model_path": null,
+    "dino_image_size": 518,
+    "dino_patch_size": 14,
+    "seed": 42,
+    "seed_scale": null,
+    "update_prob": 0.5,
+    "dt": 1.0,
+    "render_scale": 0.5,
+    "render_opacity": 2.0
+  },
+  "model_source": "hyper-image:data/omnisvg/mmsvg-illustration/train/00005680_772addd95d55344962af482f89778e76.png",
+  "requested_steps": [
+    4,
+    16,
+    64,
+    128
+  ],
+  "captures": [
+    {
+      "requested_step": 4,
+      "actual_step": 4,
+      "path": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76/00005680_772addd95d55344962af482f89778e76_step000004.png",
+      "particles": 2048,
+      "width": 192,
+      "height": 192,
+      "metrics": {
+        "width": 192,
+        "height": 192,
+        "lit_pixels": 1905,
+        "max_delta": 127,
+        "min_x": 67,
+        "max_x": 122,
+        "min_y": 67,
+        "max_y": 124
+      }
+    },
+    {
+      "requested_step": 16,
+      "actual_step": 16,
+      "path": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76/00005680_772addd95d55344962af482f89778e76_step000016.png",
+      "particles": 2048,
+      "width": 192,
+      "height": 192,
+      "metrics": {
+        "width": 192,
+        "height": 192,
+        "lit_pixels": 591,
+        "max_delta": 87,
+        "min_x": 58,
+        "max_x": 130,
+        "min_y": 45,
+        "max_y": 124
+      }
+    },
+    {
+      "requested_step": 64,
+      "actual_step": 64,
+      "path": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76/00005680_772addd95d55344962af482f89778e76_step000064.png",
+      "particles": 2048,
+      "width": 192,
+      "height": 192,
+      "metrics": {
+        "width": 192,
+        "height": 192,
+        "lit_pixels": 2,
+        "max_delta": 44,
+        "min_x": 94,
+        "max_x": 98,
+        "min_y": 127,
+        "max_y": 145
+      }
+    },
+    {
+      "requested_step": 128,
+      "actual_step": 128,
+      "path": "/home/mosure/repos/burn_automata/docs/hyper_npa_figures/e2e_bevy_rollouts/00005680_772addd95d55344962af482f89778e76/00005680_772addd95d55344962af482f89778e76_step000128.png",
+      "particles": 2048,
+      "width": 192,
+      "height": 192,
+      "metrics": {
+        "width": 192,
+        "height": 192,
+        "lit_pixels": 0,
+        "max_delta": 6,
+        "min_x": 192,
+        "max_x": 0,
+        "min_y": 192,
+        "max_y": 0
+      }
+    }
+  ],
+  "elapsed_ms": 2765.931805
+}

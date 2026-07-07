@@ -206,6 +206,28 @@ pub(in crate::viewer) fn update_run_control_button_styles(
     }
 }
 
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn update_hyper_image_button_styles(
+    inference: Res<HyperNpaInferenceState>,
+    mut buttons: Query<(&Hovered, &mut BackgroundColor, &mut BorderColor), With<HyperImageButton>>,
+) {
+    for (hovered, mut background, mut border) in &mut buttons {
+        let active = inference.pending > 0;
+        background.0 = match (active, hovered.0) {
+            (true, true) => Color::srgb(0.19, 0.34, 0.31),
+            (true, false) => Color::srgb(0.13, 0.25, 0.23),
+            (false, true) => Color::srgb(0.12, 0.15, 0.15),
+            (false, false) => Color::srgb(0.09, 0.12, 0.13),
+        };
+        *border = BorderColor::from(match (active, hovered.0) {
+            (true, true) => Color::srgb(0.48, 0.82, 0.70),
+            (true, false) => Color::srgb(0.34, 0.64, 0.56),
+            (false, true) => Color::srgb(0.39, 0.47, 0.48),
+            (false, false) => Color::srgb(0.28, 0.35, 0.37),
+        });
+    }
+}
+
 pub(in crate::viewer) fn run_control_is_active(
     kind: RunControlKind,
     settings: &AutomataSettings,

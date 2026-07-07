@@ -13,6 +13,9 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::EvalDynamics2d { .. } => dynamics2d::run_eval_dynamics_2d(command),
         command @ Command::TrainHyper2d { .. } => hyper::run_train_hyper_2d(command),
         command @ Command::TrainHyper2dE2e { .. } => hyper_e2e::run_train_hyper_2d_e2e(command),
+        command @ Command::TrainHyper2dE2eRollout { .. } => {
+            hyper_e2e::run_train_hyper_2d_e2e_rollout(command)
+        }
         command @ Command::TrainHyper2dDirectBasis { .. } => {
             hyper_e2e::run_train_hyper_2d_direct_basis(command)
         }
