@@ -475,7 +475,20 @@ struct ExactAdapterBankOutput {
     base_model: String,
     adapter_rank: usize,
     adapter_alpha: f32,
+    skipped_entries: Vec<ExactAdapterBankSkippedEntry>,
     entries: Vec<ExactAdapterBankEntry>,
+}
+
+#[derive(Clone, Serialize)]
+struct ExactAdapterBankSkippedEntry {
+    slug: String,
+    split: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct ExactOracleModelEntry {
+    path: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -587,15 +600,23 @@ pub(crate) fn run_build_exact_adapter_bank(
 
     let source_text = std::fs::read_to_string(&source_adapter_bank)?;
     let source_bank: ExactAdapterBankSource = serde_json::from_str(&source_text)?;
-    let oracle_models = exact_oracle_models_by_slug(&oracle_report)?;
+    let oracle_models = exact_oracle_models_by_split_slug(&oracle_report)?;
     let adapter_dir = output_dir.join("adapters");
     let adapter_bank_output =
         adapter_bank_output.unwrap_or_else(|| output_dir.join("adapter_bank.json"));
     let mut entries = Vec::new();
+    let mut skipped_entries = Vec::new();
     for mut entry in source_bank.entries {
-        let Some(target_model_path) = oracle_models.get(&entry.slug) else {
+        let key = (entry.split.clone(), entry.slug.clone());
+        let Some(target_model) = oracle_models.get(&key) else {
+            skipped_entries.push(ExactAdapterBankSkippedEntry {
+                slug: entry.slug,
+                split: entry.split,
+                reason: "missing_oracle_model_output".to_string(),
+            });
             continue;
         };
+        let target_model_path = &target_model.path;
         let target_manifest = crate::import::load_manifest(target_model_path)?;
         if target_manifest.hashgrid != base_manifest.hashgrid {
             return Err(std::io::Error::other(format!(
@@ -635,6 +656,7 @@ pub(crate) fn run_build_exact_adapter_bank(
         base_model: base_model.display().to_string(),
         adapter_rank: rank,
         adapter_alpha: alpha,
+        skipped_entries,
         entries,
     };
     if let Some(parent) = adapter_bank_output.parent() {
@@ -668,9 +690,9 @@ fn load_exact_adapter_bank_experiment_config(
     })
 }
 
-fn exact_oracle_models_by_slug(
+fn exact_oracle_models_by_split_slug(
     oracle_report: &Path,
-) -> Result<HashMap<String, PathBuf>, Box<dyn std::error::Error>> {
+) -> Result<HashMap<(String, String), ExactOracleModelEntry>, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(oracle_report)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let entries = value
@@ -686,19 +708,49 @@ fn exact_oracle_models_by_slug(
         let Some(slug) = entry.get("slug").and_then(|value| value.as_str()) else {
             continue;
         };
+        let Some(split) = entry
+            .get("split")
+            .or_else(|| entry.get("oracle_split"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
         let Some(path) = entry
             .get("oracle_model_output")
             .and_then(|value| value.as_str())
         else {
             continue;
         };
+        if !exact_oracle_entry_has_finite_loss(entry) {
+            continue;
+        }
         let mut path = PathBuf::from(path);
         if path.is_relative() && !path.exists() {
             path = report_parent.join(path);
         }
-        models.insert(slug.to_string(), path);
+        let key = (split.to_string(), slug.to_string());
+        if models
+            .insert(key.clone(), ExactOracleModelEntry { path })
+            .is_some()
+        {
+            return Err(std::io::Error::other(format!(
+                "oracle report contains duplicate split/slug entry {}:{}",
+                key.0, key.1
+            ))
+            .into());
+        }
     }
     Ok(models)
+}
+
+fn exact_oracle_entry_has_finite_loss(entry: &serde_json::Value) -> bool {
+    entry
+        .pointer("/oracle_final_loss/total_loss")
+        .or_else(|| entry.pointer("/oracle_best_eval_loss/total_loss"))
+        .or_else(|| entry.get("oracle_loss"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value.is_finite())
+        .unwrap_or(true)
 }
 
 pub(crate) fn run_manifest(command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -730,25 +782,130 @@ mod tests {
         let train_all_path = repo_root
             .join("configs/hyper2d_adapter_bank")
             .join("build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact_train_all.toml");
+        let pilot_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("build_exact_oracle_bank_10k64x16_2048_rank132_bias_exact.toml");
+        let pilot_256_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("build_exact_oracle_bank_10k256x64_2048_rank132_bias_exact.toml");
 
         let config = load_exact_adapter_bank_experiment_config(Some(&path)).unwrap();
         let train_all_config =
             load_exact_adapter_bank_experiment_config(Some(&train_all_path)).unwrap();
+        let pilot_config = load_exact_adapter_bank_experiment_config(Some(&pilot_path)).unwrap();
+        let pilot_256_config =
+            load_exact_adapter_bank_experiment_config(Some(&pilot_256_path)).unwrap();
 
         assert!(config.input.base_model.is_some());
         assert!(config.input.source_adapter_bank.is_some());
         assert!(config.input.oracle_report.is_some());
+        assert!(pilot_config.input.oracle_report.is_some());
+        assert!(pilot_256_config.input.oracle_report.is_some());
         assert_eq!(config.adapter.rank, Some(132));
         assert_eq!(config.adapter.alpha, Some(132.0));
+        assert_eq!(pilot_config.adapter.rank, Some(132));
+        assert_eq!(pilot_256_config.adapter.rank, Some(132));
         assert_eq!(
             config.output.output_dir.as_deref(),
             Some(Path::new(
                 "artifacts/hyper2d_exact_oracle_bank_10k8x8_2048_rank132_bias_exact"
             ))
         );
+        assert!(
+            pilot_256_config
+                .output
+                .output_dir
+                .as_ref()
+                .unwrap()
+                .display()
+                .to_string()
+                .contains("10k256x64")
+        );
         assert_eq!(
             train_all_config.adapter.force_split.as_deref(),
             Some("train")
         );
+    }
+
+    #[test]
+    fn exact_oracle_models_match_by_split_and_slug() {
+        let dir = unique_temp_dir("burn_automata_exact_oracle_split_slug");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report_path = dir.join("report.json");
+        let report = serde_json::json!({
+            "oracle_validation": {
+                "entries": [
+                    {
+                        "split": "train",
+                        "slug": "same",
+                        "oracle_model_output": "oracle_models/train/same.bpk",
+                        "oracle_final_loss": {"total_loss": 1.0}
+                    },
+                    {
+                        "split": "holdout",
+                        "slug": "same",
+                        "oracle_model_output": "oracle_models/holdout/same.bpk",
+                        "oracle_final_loss": {"total_loss": 2.0}
+                    }
+                ]
+            }
+        });
+        std::fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+        let models = exact_oracle_models_by_split_slug(&report_path).unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert!(
+            models
+                .get(&("train".to_string(), "same".to_string()))
+                .unwrap()
+                .path
+                .ends_with("oracle_models/train/same.bpk")
+        );
+        assert!(
+            models
+                .get(&("holdout".to_string(), "same".to_string()))
+                .unwrap()
+                .path
+                .ends_with("oracle_models/holdout/same.bpk")
+        );
+    }
+
+    #[test]
+    fn exact_oracle_models_reject_duplicate_split_slug() {
+        let dir = unique_temp_dir("burn_automata_exact_oracle_duplicate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let report_path = dir.join("report.json");
+        let report = serde_json::json!({
+            "oracle_validation": {
+                "entries": [
+                    {
+                        "split": "train",
+                        "slug": "dup",
+                        "oracle_model_output": "a.bpk"
+                    },
+                    {
+                        "split": "train",
+                        "slug": "dup",
+                        "oracle_model_output": "b.bpk"
+                    }
+                ]
+            }
+        });
+        std::fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+        let err = exact_oracle_models_by_split_slug(&report_path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("duplicate split/slug"));
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nanos))
     }
 }

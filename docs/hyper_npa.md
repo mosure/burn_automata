@@ -85,19 +85,23 @@ imported catalog model. It is not a generated HyperNPA result.
 
 ## Reproduction
 
-Regenerate the 16-sample paper panel:
+Regenerate the underlying validation artifacts with the Rust CLIs:
 
 ```sh
-scripts/render_hypernpa_psnr_gate_paper.py
+cargo run -p burn_automata --features "cli dino backend_wgpu" --bin burn_automata -- \
+  validate-hyper2d-psnr-gate --config configs/hyper2d_adapter_bank/psnr_gate_exact_oracle_10k256x64_2048_rank132_dino_flow_sampled.toml
+cargo run -p burn_automata --features "cli dino backend_wgpu" --bin burn_automata -- \
+  report-hyper2d --input artifacts/hyper2d_adapter_bank_exact_oracle_10k256x64_dino_token_grid_flow_zero_source_h384_sampled/report.json
 ```
 
-The script consumes:
+The validation consumes:
 
 - `artifacts/hyper2d_adapter_bank_exact_oracle_10k8x8_dino_token_grid_flow_linear_solve_overfit_train_all/psnr_gate_report.json`
 - `artifacts/hyper2d_adapter_bank_exact_oracle_10k8x8_dino_token_grid_flow_overfit_train_all/psnr_gate_report.json`
 
-It materializes traces from the BPKs already referenced by the PSNR-gate report
-and writes the panel/summary under `docs/hyper_npa_figures/exact_dino_flow_psnr`.
+Rollout panels should be generated from renderer output artifacts referenced by
+the PSNR-gate report; Python paper renderers are no longer part of the canonical
+pipeline.
 
 ## Interpretation
 

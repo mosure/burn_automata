@@ -123,11 +123,6 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         target_image,
         output,
         training_device,
-        python,
-        gpu_upstream_root,
-        gpu_device,
-        gpu_checkpoint_output,
-        gpu_metrics_output,
         model_output,
         reference_model,
         epochs,
@@ -227,9 +222,16 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         },
         scheduler_gamma,
     };
-    let actual_training_device = resolve_target2d_training_device(training_device);
-    let (training, gpu_training, model_output, model_eval_loss) = match actual_training_device {
-        TrainingDeviceArg::Auto => unreachable!("target2d training device should be resolved"),
+    let actual_training_device = match training_device {
+        TrainingDeviceArg::Auto | TrainingDeviceArg::Cpu => TrainingDeviceArg::Cpu,
+        TrainingDeviceArg::Gpu => {
+            return Err(std::io::Error::other(
+                "train-target2d no longer shells out to the legacy Python/CUDA trainer; use --training-device cpu here or train-hyper2d-direct-basis with a Burn GPU backend for GPU experiments",
+            )
+            .into());
+        }
+    };
+    let (training, model_output, model_eval_loss) = match actual_training_device {
         TrainingDeviceArg::Cpu => {
             let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), student_seed);
             let training = train_target_2d(
@@ -252,44 +254,12 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
             }
             (
                 Some(training.clone()),
-                None,
                 model_output,
                 Some(training.final_loss),
             )
         }
-        TrainingDeviceArg::Gpu => {
-            let gpu = run_target2d_upstream_gpu_training(Target2dGpuTrainingRequest {
-                python,
-                upstream_root: gpu_upstream_root,
-                device: gpu_device,
-                target_image: target_image.clone(),
-                output_report: output.clone(),
-                model_output,
-                checkpoint_output: gpu_checkpoint_output,
-                metrics_output: gpu_metrics_output,
-                training_config: &training_config,
-                loss_config,
-                target_threshold,
-                target_image_size,
-                target_points,
-            })?;
-            let model_eval_loss = evaluate_target2d_model_loss(
-                &gpu.model_output,
-                &target,
-                loss_config,
-                particles,
-                step_max,
-                update_prob,
-                seed,
-                seed_scale,
-                seed_mode,
-            )?;
-            (
-                None,
-                Some(gpu.report),
-                Some(gpu.model_output),
-                Some(model_eval_loss),
-            )
+        TrainingDeviceArg::Auto | TrainingDeviceArg::Gpu => {
+            unreachable!("target2d training device should be resolved")
         }
     };
     let reference_loss = reference_model
@@ -321,7 +291,6 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         target_points: target.point_count(),
         model_output: model_output.as_ref().map(|path| path.display().to_string()),
         model_eval_loss,
-        gpu_training,
         reference_model: reference_model
             .as_ref()
             .map(|path| path.display().to_string()),
@@ -351,199 +320,6 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
             .unwrap_or_else(|| "none".to_string()),
     );
     Ok(())
-}
-
-struct Target2dGpuTrainingRequest<'a> {
-    python: PathBuf,
-    upstream_root: Option<PathBuf>,
-    device: String,
-    target_image: PathBuf,
-    output_report: PathBuf,
-    model_output: Option<PathBuf>,
-    checkpoint_output: Option<PathBuf>,
-    metrics_output: Option<PathBuf>,
-    training_config: &'a Target2dTrainingConfig,
-    loss_config: Target2dLossConfig,
-    target_threshold: f32,
-    target_image_size: Option<usize>,
-    target_points: usize,
-}
-
-struct Target2dGpuTrainingRun {
-    model_output: PathBuf,
-    report: CliTarget2dGpuTrainingReport,
-}
-
-fn resolve_target2d_training_device(requested: TrainingDeviceArg) -> TrainingDeviceArg {
-    match requested {
-        TrainingDeviceArg::Auto | TrainingDeviceArg::Gpu => TrainingDeviceArg::Gpu,
-        TrainingDeviceArg::Cpu => TrainingDeviceArg::Cpu,
-    }
-}
-
-fn run_target2d_upstream_gpu_training(
-    request: Target2dGpuTrainingRequest<'_>,
-) -> Result<Target2dGpuTrainingRun, Box<dyn std::error::Error>> {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/train_target2d_upstream_gpu.py");
-    let model_output = request
-        .model_output
-        .unwrap_or_else(|| path_with_extra_extension(&request.output_report, "bpk"));
-    let checkpoint_output = request
-        .checkpoint_output
-        .unwrap_or_else(|| path_with_extra_extension(&request.output_report, "pth"));
-    let metrics_output = request
-        .metrics_output
-        .unwrap_or_else(|| path_with_extra_extension(&request.output_report, "gpu.json"));
-    let mut command = std::process::Command::new(&request.python);
-    command
-        .arg(&script)
-        .arg("--target-image")
-        .arg(&request.target_image)
-        .arg("--checkpoint-output")
-        .arg(&checkpoint_output)
-        .arg("--metrics-output")
-        .arg(&metrics_output)
-        .arg("--device")
-        .arg(&request.device)
-        .arg("--epochs")
-        .arg(request.training_config.epochs.to_string())
-        .arg("--repetitions")
-        .arg(request.training_config.repetitions.to_string())
-        .arg("--report-interval")
-        .arg(request.training_config.report_interval.to_string())
-        .arg("--batch-size")
-        .arg(request.training_config.batch_size.to_string())
-        .arg("--pool-size")
-        .arg(request.training_config.pool_size.to_string())
-        .arg("--particles")
-        .arg(request.training_config.particle_count.to_string())
-        .arg("--step-min")
-        .arg(request.training_config.step_min.to_string())
-        .arg("--step-max")
-        .arg(request.training_config.step_max.to_string())
-        .arg("--inject-seed-interval")
-        .arg(request.training_config.inject_seed_interval.to_string())
-        .arg("--update-prob")
-        .arg(request.training_config.update_prob.to_string())
-        .arg("--seed")
-        .arg(request.training_config.seed.to_string())
-        .arg("--seed-scale")
-        .arg(request.training_config.seed_scale.to_string())
-        .arg("--seed-mode")
-        .arg(upstream_seed_mode(request.training_config.seed_mode)?)
-        .arg("--brush-size")
-        .arg(request.training_config.brush_size.to_string())
-        .arg("--learning-rate")
-        .arg(request.training_config.optimizer.learning_rate.to_string())
-        .arg("--weight-decay")
-        .arg(request.training_config.optimizer.weight_decay.to_string())
-        .arg("--adam-beta1")
-        .arg(request.training_config.optimizer.beta1.to_string())
-        .arg("--adam-beta2")
-        .arg(request.training_config.optimizer.beta2.to_string())
-        .arg("--adam-epsilon")
-        .arg(request.training_config.optimizer.epsilon.to_string())
-        .arg("--scheduler-milestones")
-        .arg(join_usize_csv(
-            &request.training_config.scheduler_milestones,
-        ))
-        .arg("--scheduler-gamma")
-        .arg(request.training_config.scheduler_gamma.to_string())
-        .arg("--target-points")
-        .arg(request.target_points.to_string())
-        .arg("--target-threshold")
-        .arg(request.target_threshold.to_string())
-        .arg("--image-size")
-        .arg(request.loss_config.image_size.to_string())
-        .arg("--splat-sigma")
-        .arg(request.loss_config.sigma.to_string())
-        .arg("--splat-loss-weight")
-        .arg(request.loss_config.splat_loss_weight.to_string())
-        .arg("--color-loss-weight")
-        .arg(request.loss_config.color_loss_weight.to_string())
-        .arg("--density-loss-weight")
-        .arg(request.loss_config.density_loss_weight.to_string())
-        .arg("--displacement-regularizer-weight")
-        .arg(
-            request
-                .loss_config
-                .displacement_regularizer_weight
-                .to_string(),
-        )
-        .arg("--overflow-regularizer-weight")
-        .arg(request.loss_config.overflow_regularizer_weight.to_string())
-        .arg("--bound-regularizer-weight")
-        .arg(request.loss_config.bound_regularizer_weight.to_string());
-    if let Some(upstream_root) = &request.upstream_root {
-        command.arg("--upstream-root").arg(upstream_root);
-    }
-    if let Some(target_image_size) = request.target_image_size {
-        command
-            .arg("--target-image-size")
-            .arg(target_image_size.to_string());
-    }
-    if request.training_config.per_parameter_grad_normalization {
-        command.arg("--normalize-grads");
-    } else {
-        command.arg("--no-normalize-grads");
-    }
-
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "GPU target2d training failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        ))
-        .into());
-    }
-    let metrics_text = std::fs::read_to_string(&metrics_output)?;
-    let metrics: serde_json::Value = serde_json::from_str(&metrics_text)?;
-    let import = import_model(&checkpoint_output, &model_output)?;
-    Ok(Target2dGpuTrainingRun {
-        model_output,
-        report: CliTarget2dGpuTrainingReport {
-            backend: "upstream_torch_cuda_sphops",
-            python: request.python.display().to_string(),
-            device: request.device,
-            upstream_root: request
-                .upstream_root
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            checkpoint_output: checkpoint_output.display().to_string(),
-            metrics_output: metrics_output.display().to_string(),
-            import,
-            metrics,
-        },
-    })
-}
-
-fn upstream_seed_mode(seed_mode: ParticleSeed) -> Result<&'static str, Box<dyn std::error::Error>> {
-    match seed_mode {
-        ParticleSeed::Gaussian => Ok("gaussian"),
-        ParticleSeed::Uniform => Ok("uniform"),
-        ParticleSeed::UniformCircle => Ok("uniform_circle"),
-        other => Err(std::io::Error::other(format!(
-            "upstream target2d GPU training supports only 2D seed modes; got {other:?}",
-        ))
-        .into()),
-    }
-}
-
-fn join_usize_csv(values: &[usize]) -> String {
-    values
-        .iter()
-        .map(usize::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn path_with_extra_extension(path: &Path, extension: &str) -> PathBuf {
-    let mut output = path.to_path_buf();
-    output.set_extension(extension);
-    output
 }
 
 fn validate_target2d_rollout_args(

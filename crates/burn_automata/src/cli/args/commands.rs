@@ -170,18 +170,8 @@ pub(crate) enum Command {
             default_value = "/tmp/burn_automata_target2d_training_report.json"
         )]
         output: PathBuf,
-        #[arg(long, default_value = "gpu")]
+        #[arg(long, default_value = "cpu")]
         training_device: TrainingDeviceArg,
-        #[arg(long, default_value = "python3")]
-        python: PathBuf,
-        #[arg(long)]
-        gpu_upstream_root: Option<PathBuf>,
-        #[arg(long, default_value = "cuda:0")]
-        gpu_device: String,
-        #[arg(long)]
-        gpu_checkpoint_output: Option<PathBuf>,
-        #[arg(long)]
-        gpu_metrics_output: Option<PathBuf>,
         #[arg(long)]
         model_output: Option<PathBuf>,
         #[arg(long)]
@@ -668,14 +658,6 @@ pub(crate) enum Command {
         training_device: TrainingDeviceArg,
         #[arg(long, default_value = "burn-wgpu")]
         gpu_backend: Hyper2dDirectBasisGpuBackendArg,
-        #[arg(long, default_value = "python3")]
-        python: PathBuf,
-        #[arg(long)]
-        gpu_upstream_root: Option<PathBuf>,
-        #[arg(long, default_value = "cuda:0")]
-        gpu_device: String,
-        #[arg(long)]
-        gpu_payload_output: Option<PathBuf>,
         #[arg(long, default_value_t = 16)]
         adapter_rank: usize,
         #[arg(long, default_value_t = 16.0)]
@@ -772,7 +754,7 @@ pub(crate) enum Command {
         system_memory_budget_gb: Option<f32>,
         #[arg(long)]
         gpu_memory_budget_gb: Option<f32>,
-        #[arg(long, default_value_t = 1024)]
+        #[arg(long, default_value_t = 2048)]
         max_dense_train_particles: usize,
         #[arg(long, default_value_t = 4 * 1024 * 1024)]
         max_dense_chunk_floats: usize,

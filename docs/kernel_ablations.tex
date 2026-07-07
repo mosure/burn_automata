@@ -257,35 +257,14 @@ telemetry in long rollouts, not only final-state overflow.
 \section{Reproducibility}
 \begin{verbatim}
 cargo build -p burn_automata --release --features gpu_wgpu
-scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_auto_after.json \
-  --preset growing-3d-gs --preset growing-2d --preset texture-2d \
-  --particles 4096 --particles 8192 --steps 8 --repeats 2 \
-  --geometry seed --geometry dense --geometry line --geometry uniform \
-  --geometry plane --geometry torus --mode auto
-scripts/bench_spatial_index.py --no-build --output target/bench_spatial_index_perf.json
-scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_bvh_ablation.json \
-  --preset growing-3d-gs --preset growing-2d --particles 4096 --particles 8192 \
-  --steps 6 --repeats 2 --geometry dense --geometry line --geometry torus \
-  --geometry uniform --mode auto --mode linked-list --mode tiled-fixed-buckets:128 \
-  --mode tiled-fixed-buckets:512 --mode sorted-cells \
-  --mode bvh:8 --mode bvh:16 --mode bvh:32 --mode bvh:64
-scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_gpu_bvh_ablation.json \
-  --preset growing-3d-gs --preset growing-2d --particles 4096 --particles 8192 \
-  --steps 6 --repeats 2 --geometry dense --geometry line --geometry torus \
-  --geometry uniform --mode auto --mode linked-list --mode tiled-fixed-buckets:512 \
-  --mode sorted-cells --mode bvh:16 \
-  --mode gpu-bvh:8 --mode gpu-bvh:16 --mode gpu-bvh:32
-scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_lbvh_ablation.json \
-  --preset growing-3d-gs --preset growing-2d --particles 4096 --particles 8192 \
-  --steps 6 --repeats 2 --geometry dense --geometry line --geometry torus \
-  --geometry uniform --mode auto --mode linked-list --mode tiled-fixed-buckets:512 \
-  --mode sorted-cells --mode bvh:16 --mode gpu-bvh:16 \
-  --mode gpu-lbvh:16 --mode gpu-lbvh:32
-scripts/bench_gpu_matrix.py --no-build --output target/bench_gpu_morton_lbvh_ablation.json \
-  --preset growing-3d-gs --particles 4096 --particles 8192 --steps 4 \
-  --repeats 1 --geometry dense --geometry line --geometry torus --geometry uniform \
-  --mode auto --mode gpu-bvh:16 --mode gpu-lbvh:16 --mode gpu-morton-lbvh:16
-scripts/render_kernel_ablation_paper.py
+cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- \
+  bench --preset growing-3d-gs --particles 8192 --steps 8 --gpu \
+  --geometry torus --neighbor-mode auto --step-timing
+cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- \
+  bench --preset growing-3d-gs --particles 8192 --steps 8 --gpu \
+  --geometry line --neighbor-mode sorted-cells --step-timing
+cargo run --release -p burn_automata --features cli --bin burn_automata -- \
+  bench-spatial --preset growing-3d-gs --particles 8192 --strategy all
 \end{verbatim}
 
 \begin{thebibliography}{9}

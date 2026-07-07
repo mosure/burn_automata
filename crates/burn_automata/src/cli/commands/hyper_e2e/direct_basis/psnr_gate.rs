@@ -11,8 +11,8 @@ use super::super::{
     default_dino_cache_write_interval_batches, default_dino_feature_batch_size,
 };
 use super::{
-    DirectBasisAdapterBankLoadEntry, config_value_enum, load_direct_basis_adapter_bank,
-    resolve_direct_basis_artifact_path,
+    DirectBasisAdapterBankLoadEntry, DirectBasisAdapterBankSelectionManifest, config_value_enum,
+    load_direct_basis_adapter_bank, resolve_direct_basis_artifact_path,
 };
 
 #[derive(Deserialize)]
@@ -30,6 +30,7 @@ struct PsnrGateOracleValidationLoad {
 struct PsnrGateExperimentConfig {
     preset: Option<String>,
     input: PsnrGateInputExperimentConfig,
+    selection: PsnrGateSelectionExperimentConfig,
     condition: PsnrGateConditionExperimentConfig,
     output: PsnrGateOutputExperimentConfig,
     eval: PsnrGateEvalExperimentConfig,
@@ -43,6 +44,12 @@ struct PsnrGateInputExperimentConfig {
     adapter_bank: Option<PathBuf>,
     oracle_report: Option<PathBuf>,
     hyper: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PsnrGateSelectionExperimentConfig {
+    selection_manifest: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -100,6 +107,7 @@ struct Hyper2dPsnrGateReport {
     adapter_bank: String,
     oracle_report: String,
     hyper: Option<String>,
+    selection_manifest: Option<String>,
     output: String,
     generated_dir: String,
     adapter_bank_base_model: String,
@@ -181,6 +189,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     let PsnrGateExperimentConfig {
         preset: config_preset,
         input: config_input,
+        selection: config_selection,
         condition: config_condition,
         output: config_output,
         eval: config_eval,
@@ -192,6 +201,9 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         oracle_report: config_oracle_report,
         hyper: config_hyper,
     } = config_input;
+    let PsnrGateSelectionExperimentConfig {
+        selection_manifest: config_selection_manifest,
+    } = config_selection;
     let PsnrGateConditionExperimentConfig {
         dino_model: config_dino_model,
         dino_image_size: config_dino_image_size,
@@ -330,18 +342,22 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         *oracle_slug_counts.entry(entry.slug.clone()).or_default() += 1;
     }
     let bank_anchor = adapter_bank.parent().unwrap_or_else(|| Path::new(""));
-    let oracle_backed_entries = bank
-        .entries
-        .iter()
-        .filter(|entry| {
-            oracle_entry_for_bank_entry(entry, &oracle_by_key, &oracle_by_slug, &oracle_slug_counts)
-                .is_some()
-        })
-        .collect::<Vec<_>>();
-    let selected_entries = oracle_backed_entries
-        .into_iter()
-        .take(if limit == 0 { usize::MAX } else { limit })
-        .collect::<Vec<_>>();
+    let mut split_indices = HashMap::<String, usize>::new();
+    let mut oracle_backed_entries = Vec::new();
+    for entry in &bank.entries {
+        let split_index = *split_indices.entry(entry.split.clone()).or_default();
+        *split_indices.entry(entry.split.clone()).or_default() += 1;
+        if oracle_entry_for_bank_entry(entry, &oracle_by_key, &oracle_by_slug, &oracle_slug_counts)
+            .is_some()
+        {
+            oracle_backed_entries.push((split_index, entry));
+        }
+    }
+    let selected_entries = select_psnr_gate_entries(
+        oracle_backed_entries,
+        limit,
+        config_selection_manifest.as_deref(),
+    )?;
     if selected_entries.is_empty() {
         return Err(std::io::Error::other(
             "no adapter-bank entries with oracle-model coverage selected",
@@ -353,7 +369,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     {
         let selected_sources = selected_entries
             .iter()
-            .map(|entry| Hyper2dScratchSource {
+            .map(|(_, entry)| Hyper2dScratchSource {
                 slug: entry.slug.clone(),
                 title: entry.title.clone(),
                 group: entry.group.clone(),
@@ -383,7 +399,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
     };
 
     let mut report_entries = Vec::with_capacity(selected_entries.len() * steps.len() * 2);
-    for bank_entry in selected_entries {
+    for (_, bank_entry) in selected_entries {
         let oracle_entry = oracle_entry_for_bank_entry(
             bank_entry,
             &oracle_by_key,
@@ -522,6 +538,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         adapter_bank: adapter_bank.display().to_string(),
         oracle_report: oracle_report.display().to_string(),
         hyper: hyper.as_ref().map(|path| path.display().to_string()),
+        selection_manifest: config_selection_manifest.map(|path| path.display().to_string()),
         output: output.display().to_string(),
         generated_dir: generated_dir.display().to_string(),
         adapter_bank_base_model: bank.base_model,
@@ -598,6 +615,52 @@ fn load_oracle_entries(
         return Err(std::io::Error::other("oracle report has no oracle entries").into());
     }
     Ok(oracle_validation.entries)
+}
+
+fn select_psnr_gate_entries<'a>(
+    oracle_backed_entries: Vec<(usize, &'a DirectBasisAdapterBankLoadEntry)>,
+    limit: usize,
+    selection_manifest_path: Option<&Path>,
+) -> Result<Vec<(usize, &'a DirectBasisAdapterBankLoadEntry)>, Box<dyn std::error::Error>> {
+    let Some(path) = selection_manifest_path else {
+        return Ok(oracle_backed_entries
+            .into_iter()
+            .take(if limit == 0 { usize::MAX } else { limit })
+            .collect());
+    };
+    let text = std::fs::read_to_string(path)?;
+    let manifest: DirectBasisAdapterBankSelectionManifest = serde_json::from_str(&text)?;
+    let mut selected = Vec::new();
+    for selection in manifest.train.iter().chain(manifest.holdout.iter()) {
+        let candidates = oracle_backed_entries
+            .iter()
+            .filter(|(_, entry)| entry.split == selection.split && entry.slug == selection.slug)
+            .collect::<Vec<_>>();
+        if let Some((bank_split_index, entry)) = candidates
+            .iter()
+            .find(|(bank_split_index, _)| *bank_split_index == selection.bank_split_index)
+        {
+            selected.push((*bank_split_index, *entry));
+        } else if let [(bank_split_index, entry)] = candidates.as_slice() {
+            selected.push((*bank_split_index, *entry));
+        } else if candidates.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "PSNR selection manifest row {}:{} index {} is not oracle-backed",
+                selection.split, selection.slug, selection.bank_split_index
+            ))
+            .into());
+        } else {
+            return Err(std::io::Error::other(format!(
+                "PSNR selection manifest row {}:{} index {} is ambiguous",
+                selection.split, selection.slug, selection.bank_split_index
+            ))
+            .into());
+        }
+        if limit > 0 && selected.len() >= limit {
+            break;
+        }
+    }
+    Ok(selected)
 }
 
 fn oracle_key(split: &str, slug: &str) -> String {
@@ -803,6 +866,38 @@ mod tests {
         assert_eq!(direct_only.eval.steps.as_deref(), Some(&[32][..]));
         assert_eq!(direct_only.gate.fail_on_threshold, Some(false));
 
+        let direct_pilot_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k64x16_2048_rank132_direct.toml");
+        let direct_pilot = load_psnr_gate_experiment_config(Some(&direct_pilot_path)).unwrap();
+        assert!(direct_pilot.selection.selection_manifest.is_some());
+        assert!(direct_pilot.input.base_model.is_some());
+        assert!(direct_pilot.input.adapter_bank.is_some());
+        assert!(direct_pilot.input.oracle_report.is_some());
+        assert!(direct_pilot.input.hyper.is_none());
+        assert_eq!(direct_pilot.eval.limit, Some(80));
+        assert_eq!(direct_pilot.eval.particles, Some(2048));
+        assert_eq!(direct_pilot.eval.steps.as_deref(), Some(&[32, 64, 128][..]));
+        assert_eq!(direct_pilot.gate.fail_on_threshold, Some(true));
+
+        let direct_pilot_256_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k256x64_2048_rank132_direct.toml");
+        let direct_pilot_256 =
+            load_psnr_gate_experiment_config(Some(&direct_pilot_256_path)).unwrap();
+        assert!(direct_pilot_256.selection.selection_manifest.is_some());
+        assert!(direct_pilot_256.input.base_model.is_some());
+        assert!(direct_pilot_256.input.adapter_bank.is_some());
+        assert!(direct_pilot_256.input.oracle_report.is_some());
+        assert!(direct_pilot_256.input.hyper.is_none());
+        assert_eq!(direct_pilot_256.eval.limit, Some(320));
+        assert_eq!(direct_pilot_256.eval.particles, Some(2048));
+        assert_eq!(
+            direct_pilot_256.eval.steps.as_deref(),
+            Some(&[32, 64, 128][..])
+        );
+        assert_eq!(direct_pilot_256.gate.fail_on_threshold, Some(true));
+
         let dino_flow_path = repo_root
             .join("configs/hyper2d_adapter_bank")
             .join("psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_overfit.toml");
@@ -817,6 +912,39 @@ mod tests {
         assert_eq!(dino_flow.eval.particles, Some(2048));
         assert_eq!(dino_flow.eval.steps.as_deref(), Some(&[32][..]));
         assert_eq!(dino_flow.gate.fail_on_threshold, Some(false));
+
+        let dino_flow_pilot_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k64x16_2048_rank132_dino_flow_sampled.toml");
+        let dino_flow_pilot =
+            load_psnr_gate_experiment_config(Some(&dino_flow_pilot_path)).unwrap();
+        assert!(dino_flow_pilot.selection.selection_manifest.is_some());
+        assert!(dino_flow_pilot.input.hyper.is_some());
+        assert!(dino_flow_pilot.condition.feature_cache.is_some());
+        assert_eq!(dino_flow_pilot.condition.token_grid_width, Some(8));
+        assert_eq!(dino_flow_pilot.condition.token_grid_height, Some(8));
+        assert_eq!(dino_flow_pilot.eval.particles, Some(2048));
+        assert_eq!(
+            dino_flow_pilot.eval.steps.as_deref(),
+            Some(&[32, 64, 128][..])
+        );
+
+        let dino_flow_pilot_256_path = repo_root
+            .join("configs/hyper2d_adapter_bank")
+            .join("psnr_gate_exact_oracle_10k256x64_2048_rank132_dino_flow_sampled.toml");
+        let dino_flow_pilot_256 =
+            load_psnr_gate_experiment_config(Some(&dino_flow_pilot_256_path)).unwrap();
+        assert!(dino_flow_pilot_256.selection.selection_manifest.is_some());
+        assert!(dino_flow_pilot_256.input.hyper.is_some());
+        assert!(dino_flow_pilot_256.condition.feature_cache.is_some());
+        assert_eq!(dino_flow_pilot_256.condition.token_grid_width, Some(8));
+        assert_eq!(dino_flow_pilot_256.condition.token_grid_height, Some(8));
+        assert_eq!(dino_flow_pilot_256.eval.limit, Some(320));
+        assert_eq!(dino_flow_pilot_256.eval.particles, Some(2048));
+        assert_eq!(
+            dino_flow_pilot_256.eval.steps.as_deref(),
+            Some(&[32, 64, 128][..])
+        );
 
         let dino_flow_linear_path = repo_root
             .join("configs/hyper2d_adapter_bank")
@@ -893,6 +1021,60 @@ mod tests {
         }
 
         assert_eq!(selected_entries_len(&entries, 2), 2);
+    }
+
+    #[test]
+    fn psnr_selection_manifest_replays_compact_exact_bank_rows() {
+        let temp_dir = unique_temp_dir("psnr_selection_manifest_replays_compact_exact_bank_rows");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let manifest_path = temp_dir.join("selection.json");
+        let manifest = DirectBasisAdapterBankSelectionManifest {
+            selection_seed: 17,
+            train: vec![super::super::DirectBasisAdapterBankSelectionEntry {
+                split: "train".to_string(),
+                slug: "same-slug".to_string(),
+                bank_split_index: 371,
+            }],
+            holdout: Vec::new(),
+        };
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let entry = DirectBasisAdapterBankLoadEntry {
+            slug: "same-slug".to_string(),
+            split: "train".to_string(),
+            title: None,
+            group: None,
+            condition: "same-slug.png".to_string(),
+            adapter_output: "same-slug.bpk".to_string(),
+            target_source_width: 128,
+            target_source_height: 128,
+            target_points: 2048,
+            last_train_loss: Some(0.0),
+        };
+
+        let selected =
+            select_psnr_gate_entries(vec![(0, &entry)], 0, Some(&manifest_path)).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, 0);
+        assert_eq!(selected[0].1.slug, "same-slug");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    fn unique_temp_dir(test_name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "burn_automata_{test_name}_{}_{}",
+            std::process::id(),
+            nanos
+        ))
     }
 
     fn test_metrics(rollout_steps: usize) -> CliHyper2dDynamicsMetricsReport {

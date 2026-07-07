@@ -10,9 +10,11 @@ use super::super::{
     default_dino_cache_write_interval_batches, default_dino_feature_batch_size,
 };
 use super::{
-    DirectBasisAdapterBankLoadEntry, DirectBasisTargetConfig, EvalConfig, config_value_enum,
-    eval_indices, evaluate_direct_basis_example, load_direct_basis_adapter_bank,
-    parse_direct_basis_split, resolve_direct_basis_artifact_path,
+    DirectBasisAdapterBankIndexedEntry, DirectBasisAdapterBankLoadEntry, DirectBasisTargetConfig,
+    EvalConfig, config_value_enum, direct_basis_adapter_bank_selection_manifest, eval_indices,
+    evaluate_direct_basis_example, load_direct_basis_adapter_bank, parse_direct_basis_split,
+    read_direct_basis_adapter_bank_selection_manifest, replay_direct_basis_adapter_bank_selection,
+    resolve_direct_basis_artifact_path, select_direct_basis_adapter_bank_oracle_entries,
 };
 
 mod types;
@@ -83,6 +85,7 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
     let AdapterBankExperimentConfig {
         preset: config_preset,
         input: config_input,
+        selection: config_selection,
         output: config_output,
         condition: config_condition,
         training: config_training,
@@ -98,6 +101,10 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
         train_limit: config_train_limit,
         holdout_limit: config_holdout_limit,
     } = config_input;
+    let AdapterBankSelectionExperimentConfig {
+        selection_seed: config_selection_seed,
+        selection_manifest: config_selection_manifest,
+    } = config_selection;
     let AdapterBankOutputExperimentConfig {
         output_dir: config_output_dir,
         report_output: config_report_output,
@@ -195,6 +202,7 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
     let source_limit = config_source_limit.unwrap_or(source_limit);
     let train_limit = config_train_limit.unwrap_or(train_limit);
     let holdout_limit = config_holdout_limit.unwrap_or(holdout_limit);
+    let selection_seed = config_selection_seed;
     let condition_encoder: ConditionEncoder2d = config_value_enum(
         "condition.encoder",
         config_condition_encoder,
@@ -307,8 +315,14 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
     let bank = load_direct_basis_adapter_bank(&adapter_bank)?;
     let adapter_rank = bank.adapter_rank;
     let adapter_alpha = bank.adapter_alpha;
-    let selected_entries =
-        select_adapter_bank_entries(bank.entries, source_limit, train_limit, holdout_limit)?;
+    let (selected_entries, selection_report) = select_adapter_bank_entries(
+        bank.entries,
+        source_limit,
+        train_limit,
+        holdout_limit,
+        selection_seed,
+        config_selection_manifest.as_deref(),
+    )?;
     let selected_sources = selected_entries
         .iter()
         .map(|entry| {
@@ -551,6 +565,7 @@ pub(crate) fn run_train_hyper_2d_adapter_bank(
         source_limit,
         train_limit,
         holdout_limit,
+        selection: selection_report,
         target_stats,
         requested_training: AdapterBankTrainingSettingsReport {
             objective: objective.label(),
@@ -624,14 +639,36 @@ fn select_adapter_bank_entries(
     source_limit: usize,
     train_limit: usize,
     holdout_limit: usize,
-) -> Result<Vec<DirectBasisAdapterBankLoadEntry>, Box<dyn std::error::Error>> {
+    selection_seed: Option<u64>,
+    selection_manifest_path: Option<&Path>,
+) -> Result<
+    (
+        Vec<DirectBasisAdapterBankLoadEntry>,
+        AdapterBankSelectionReport,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let limited_entries = entries
+        .into_iter()
+        .take(if source_limit == 0 {
+            usize::MAX
+        } else {
+            source_limit
+        })
+        .collect::<Vec<_>>();
+    if selection_seed.is_some() || selection_manifest_path.is_some() {
+        return select_adapter_bank_entries_seeded(
+            limited_entries,
+            train_limit,
+            holdout_limit,
+            selection_seed.unwrap_or(0),
+            selection_manifest_path,
+        );
+    }
     let mut selected = Vec::new();
     let mut train_count = 0usize;
     let mut holdout_count = 0usize;
-    for entry in entries {
-        if source_limit > 0 && selected.len() >= source_limit {
-            break;
-        }
+    for entry in limited_entries {
         let split = parse_direct_basis_split(&entry.split)?;
         if split.is_train() {
             if train_limit > 0 && train_count >= train_limit {
@@ -649,7 +686,90 @@ fn select_adapter_bank_entries(
     if selected.is_empty() {
         return Err(std::io::Error::other("adapter bank selection produced no examples").into());
     }
-    Ok(selected)
+    Ok((
+        selected.clone(),
+        AdapterBankSelectionReport {
+            selection_seed: None,
+            selection_manifest: None,
+            replayed_manifest: false,
+            train_selected: train_count,
+            holdout_selected: holdout_count,
+        },
+    ))
+}
+
+fn select_adapter_bank_entries_seeded(
+    entries: Vec<DirectBasisAdapterBankLoadEntry>,
+    train_limit: usize,
+    holdout_limit: usize,
+    selection_seed: u64,
+    selection_manifest_path: Option<&Path>,
+) -> Result<
+    (
+        Vec<DirectBasisAdapterBankLoadEntry>,
+        AdapterBankSelectionReport,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut train_entries = Vec::<DirectBasisAdapterBankIndexedEntry>::new();
+    let mut holdout_entries = Vec::<DirectBasisAdapterBankIndexedEntry>::new();
+    for entry in entries {
+        let split = parse_direct_basis_split(&entry.split)?;
+        if split.is_train() {
+            train_entries.push((train_entries.len(), entry));
+        } else {
+            holdout_entries.push((holdout_entries.len(), entry));
+        }
+    }
+    let (selected_train, selected_holdout, replayed_manifest) =
+        if let Some(path) = selection_manifest_path.filter(|path| path.exists()) {
+            let manifest = read_direct_basis_adapter_bank_selection_manifest(path)?;
+            (
+                replay_direct_basis_adapter_bank_selection(&train_entries, &manifest.train)?,
+                replay_direct_basis_adapter_bank_selection(&holdout_entries, &manifest.holdout)?,
+                true,
+            )
+        } else {
+            (
+                select_direct_basis_adapter_bank_oracle_entries(
+                    &train_entries,
+                    train_limit,
+                    selection_seed,
+                ),
+                select_direct_basis_adapter_bank_oracle_entries(
+                    &holdout_entries,
+                    holdout_limit,
+                    selection_seed ^ 0x90_1d_2d,
+                ),
+                false,
+            )
+        };
+    let manifest = direct_basis_adapter_bank_selection_manifest(
+        selection_seed,
+        &selected_train,
+        &selected_holdout,
+    );
+    if !replayed_manifest && let Some(path) = selection_manifest_path {
+        write_pretty_json(path, &manifest)?;
+    }
+    let selected = selected_train
+        .iter()
+        .chain(selected_holdout.iter())
+        .map(|(_, entry)| entry.clone())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(std::io::Error::other("adapter bank selection produced no examples").into());
+    }
+    Ok((
+        selected,
+        AdapterBankSelectionReport {
+            selection_seed: Some(selection_seed),
+            selection_manifest: selection_manifest_path.map(|path| path.display().to_string()),
+            replayed_manifest,
+            train_selected: manifest.train.len(),
+            holdout_selected: manifest.holdout.len(),
+        },
+    ))
 }
 
 fn load_conditioned_adapter_bank_examples(
@@ -1971,7 +2091,7 @@ fn sample_indices(examples_len: usize, batch_size: usize, rng: &mut StdRng) -> V
     indices.into_iter().collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn append_rectified_flow_training_row(
     features: &[f32],
     target: &[f32],
@@ -2301,6 +2421,56 @@ mod tests {
         assert_eq!(config.training.flow_source_scale, Some(0.0));
         assert_eq!(config.eval.particles, Some(2048));
         assert_eq!(config.target.points, Some(2048));
+    }
+
+    #[test]
+    fn bundled_staged_oracle_configs_parse() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (file_name, backend, train_limit, holdout_limit) in [
+            (
+                "exact_oracle_10k64x16_dino_token_grid_linear_solve_control.toml",
+                "linear-solve",
+                64,
+                16,
+            ),
+            (
+                "exact_oracle_10k64x16_dino_token_grid_flow_zero_source_h384_sampled.toml",
+                "burn-wgpu",
+                64,
+                16,
+            ),
+            (
+                "exact_oracle_10k256x64_dino_token_grid_linear_solve_control.toml",
+                "linear-solve",
+                256,
+                64,
+            ),
+            (
+                "exact_oracle_10k256x64_dino_token_grid_flow_zero_source_h384_sampled.toml",
+                "burn-wgpu",
+                256,
+                64,
+            ),
+        ] {
+            let path = repo_root
+                .join("configs/hyper2d_adapter_bank")
+                .join(file_name);
+            let config = load_adapter_bank_experiment_config(Some(&path)).unwrap();
+
+            assert_eq!(config.preset.as_deref(), Some("growing-2d"));
+            assert_eq!(config.input.train_limit, Some(train_limit));
+            assert_eq!(config.input.holdout_limit, Some(holdout_limit));
+            assert!(config.selection.selection_manifest.is_some());
+            assert_eq!(
+                config.condition.encoder.as_deref(),
+                Some("dino-vits-token-grid")
+            );
+            assert_eq!(config.condition.token_grid_width, Some(8));
+            assert_eq!(config.condition.token_grid_height, Some(8));
+            assert_eq!(config.training.backend.as_deref(), Some(backend));
+            assert_eq!(config.eval.particles, Some(2048));
+            assert_eq!(config.target.points, Some(2048));
+        }
     }
 
     #[test]

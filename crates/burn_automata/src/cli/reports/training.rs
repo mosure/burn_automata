@@ -54,25 +54,12 @@ pub(crate) struct CliTarget2dTrainingReport {
     pub(crate) target_points: usize,
     pub(crate) model_output: Option<String>,
     pub(crate) model_eval_loss: Option<Target2dLossReport>,
-    pub(crate) gpu_training: Option<CliTarget2dGpuTrainingReport>,
     pub(crate) reference_model: Option<String>,
     pub(crate) reference_loss: Option<Target2dLossReport>,
     pub(crate) final_loss_gap_to_reference: Option<f32>,
     pub(crate) final_loss_ratio_to_reference: Option<f32>,
     pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
     pub(crate) training: Option<Target2dTrainingReport>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct CliTarget2dGpuTrainingReport {
-    pub(crate) backend: &'static str,
-    pub(crate) python: String,
-    pub(crate) device: String,
-    pub(crate) upstream_root: Option<String>,
-    pub(crate) checkpoint_output: String,
-    pub(crate) metrics_output: String,
-    pub(crate) import: crate::import::ImportReport,
-    pub(crate) metrics: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -456,13 +443,7 @@ pub(crate) struct CliHyper2dDirectBasisTrainingReport {
 #[derive(Serialize)]
 pub(crate) struct CliHyper2dDirectBasisGpuTrainingReport {
     pub(crate) backend: String,
-    pub(crate) python: Option<String>,
     pub(crate) device: String,
-    pub(crate) upstream_root: Option<String>,
-    pub(crate) payload_output: Option<String>,
-    pub(crate) gpu_name: Option<String>,
-    pub(crate) torch_version: Option<String>,
-    pub(crate) cuda_version: Option<String>,
     pub(crate) metrics: serde_json::Value,
 }
 
@@ -492,6 +473,10 @@ pub(crate) struct CliHyper2dDirectBasisHistoryEntry {
 
 #[derive(Clone, Serialize)]
 pub(crate) struct CliHyper2dDirectBasisOracleReport {
+    pub(crate) backend: DirectBasisOracleBackendArg,
+    pub(crate) gpu_device: Option<String>,
+    pub(crate) resume_existing: bool,
+    pub(crate) gpu_parallel_jobs: usize,
     pub(crate) train_examples_requested: usize,
     pub(crate) holdout_examples_requested: usize,
     pub(crate) train_examples: usize,
@@ -504,6 +489,8 @@ pub(crate) struct CliHyper2dDirectBasisOracleReport {
     pub(crate) weight_decay: f32,
     pub(crate) grad_clip_norm: f32,
     pub(crate) seed: u64,
+    pub(crate) effective_particle_steps_per_sec: f64,
+    pub(crate) mean_reported_particle_steps_per_sec: f64,
     pub(crate) train_summary: Option<CliHyper2dDirectBasisOracleSummary>,
     pub(crate) holdout_summary: Option<CliHyper2dDirectBasisOracleSummary>,
     pub(crate) entries: Vec<CliHyper2dDirectBasisOracleEntry>,
@@ -530,7 +517,10 @@ pub(crate) struct CliHyper2dDirectBasisOracleEntry {
     pub(crate) slug: String,
     pub(crate) split: &'static str,
     pub(crate) condition: String,
+    pub(crate) oracle_backend: DirectBasisOracleBackendArg,
     pub(crate) oracle_model_output: Option<String>,
+    pub(crate) oracle_checkpoint_output: Option<String>,
+    pub(crate) oracle_metrics_output: Option<String>,
     pub(crate) shared_loss: Target2dLossReport,
     pub(crate) zero_adapter_loss: Target2dLossReport,
     pub(crate) oracle_initial_eval_loss: Target2dLossReport,

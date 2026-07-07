@@ -108,7 +108,17 @@ direct stored LoRAs at quality scale.
 | `omnisvg_10k_from_direct_basis.toml` | 10k summary-token scale-up against the current direct-basis adapter bank. |
 | `omnisvg_10k_quality_2048_from_direct_basis.toml` | 10k quality-scale condition-to-LoRA run against a 2048-particle direct-basis bank. |
 | `build_exact_oracle_bank_10k8x8_2048_rank132_bias_exact.toml` | Build the clean 8-train/8-holdout rank-132 exact adapter bank from persisted oracle NPA models. |
+| `build_exact_oracle_bank_10k64x16_2048_rank132_bias_exact.toml` | Build the staged 64-train/16-holdout exact adapter bank from the expanded oracle pilot. |
+| `build_exact_oracle_bank_10k256x64_2048_rank132_bias_exact.toml` | Build the next staged 256-train/64-holdout exact adapter bank from the resumed GPU oracle expansion. |
+| `exact_oracle_10k64x16_dino_token_grid_linear_solve_control.toml` | DINO 8x8 token-grid linear-solve control for the staged 64/16 exact adapter bank. |
+| `exact_oracle_10k64x16_dino_token_grid_flow_zero_source_h384_sampled.toml` | First WGPU sampled-adapter rectified-flow run against the staged 64/16 exact adapter bank. |
+| `exact_oracle_10k256x64_dino_token_grid_linear_solve_control.toml` | DINO 8x8 token-grid linear-solve control for the next 256/64 exact adapter bank. |
+| `exact_oracle_10k256x64_dino_token_grid_flow_zero_source_h384_sampled.toml` | WGPU sampled-adapter rectified-flow run for the next 256/64 exact adapter bank. |
 | `psnr_gate_exact_oracle_10k8x8_2048_rank132_direct.toml` | Direct-only PSNR gate proving exact adapters materialize the persisted oracle NPA models at 2048-particle quality scale. |
+| `psnr_gate_exact_oracle_10k64x16_2048_rank132_direct.toml` | Direct-only PSNR gate for the staged 64/16 exact bank; this is the shared-trunk/basis gate before HyperNPA claims. |
+| `psnr_gate_exact_oracle_10k256x64_2048_rank132_direct.toml` | Direct-only PSNR gate for the next 256/64 exact bank. |
+| `psnr_gate_exact_oracle_10k64x16_2048_rank132_dino_flow_sampled.toml` | Generated-adapter PSNR gate for the staged 64/16 DINO-flow HyperNPA run. |
+| `psnr_gate_exact_oracle_10k256x64_2048_rank132_dino_flow_sampled.toml` | Generated-adapter PSNR gate for the next 256/64 DINO-flow HyperNPA run. |
 | `psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_overfit.toml` | PSNR gate comparing DINO-flow generated adapters and direct exact adapters against persisted oracle NPA models. |
 | `psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_linear_solve_overfit.toml` | PSNR gate for the deterministic DINO-flow linear-solve overfit control. |
 | `psnr_gate_exact_oracle_10k8x8_2048_rank132_dino_flow_zero_source_overfit.toml` | PSNR gate for the WGPU random-init zero-source overfit checkpoint. |
@@ -178,6 +188,46 @@ Latest exact-oracle DINO-flow status:
   architecture and sampling path are proven by linear-solve/warm-start controls,
   and WGPU optimization now moves the real PSNR gate, but the remaining gap is a
   rollout-sensitive quality objective problem, not DINO feature availability.
+- The staged 64-train/16-holdout oracle expansion completed as a broader
+  negative control. GPU target2d oracle generation produced 80 quality-scale
+  persisted NPA targets in about 102 minutes at roughly 1.82M particle-steps/s.
+  The rank-132 exact adapter bank passed direct 2048-particle PSNR validation at
+  99 dB for every row and rollout length, proving exact-bank conversion and base
+  alignment. The DINO token-grid sampled-flow HyperNPA run did not generalize:
+  best validation stayed at step 0 with holdout adapter-vector nRMSE 1.0007 and
+  cosine 0.00045, rollout loss was effectively zero-adapter quality, and the
+  generated PSNR gate failed every check (`mean=15.55/14.89/11.86 dB` at
+  `32/64/128` steps; `240/240` generated rows below 26 dB). Treat this as
+  evidence that the current high-dimensional rank-132 residual target is not
+  learnable from a 64-example condition distribution.
+
+Next oracle-bank expansion sequence:
+
+1. Run
+   `configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048_pilot64x16.toml`.
+   It writes a seeded `64 train / 16 holdout` selection manifest and persisted
+   oracle NPA models.
+2. Build the exact target bank with
+   `build_exact_oracle_bank_10k64x16_2048_rank132_bias_exact.toml`.
+   This rank-132 bias-exact bank is an upper-bound/control target: it tests
+   whether the conditioned generator can learn broad oracle adapter vectors, not
+   whether a rank-16 LoRA basis is expressive enough.
+3. Run `psnr_gate_exact_oracle_10k64x16_2048_rank132_direct.toml`. If direct
+   exact adapters do not pass the 2048-particle gate, treat exact-bank
+   conversion or base-model alignment as the blocker before any conditioned-flow
+   run.
+4. Run the DINO token-grid linear-solve control, then the WGPU sampled-flow
+   recipe, and finally
+   `psnr_gate_exact_oracle_10k64x16_2048_rank132_dino_flow_sampled.toml`.
+5. The 64/16 held-out HyperNPA gate is not clean. The next scale run should be
+   the explicit `256+64` TOML sequence only as a data-sufficiency probe, not a
+   quality claim. Do not move to `900+100` or wider 10k coverage until the
+   generated held-out PSNR gate beats zero-adapter quality and approaches the
+   direct exact-adapter gate.
+6. Answer the shared-trunk capacity question with a separate rank sweep
+   (`rank=16/32/64/132`) against the same selection manifest. Rank-132 exact
+   adapters isolate the DINO/flow generator; lower-rank direct gates are the
+   evidence for whether the shared trunk plus compact LoRA basis is well formed.
 
 The DINO condition path is compiled behind the Rust `dino` feature. Run DINO
 experiments with:

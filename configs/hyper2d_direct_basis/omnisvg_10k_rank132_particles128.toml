@@ -35,7 +35,6 @@ max_dense_train_particles = 1024
 
 [gpu]
 backend = "burn-wgpu"
-device = "cuda:0"
 max_dense_chunk_floats = 4194304
 max_splat_chunk_floats = 4194304
 

@@ -2,44 +2,34 @@
 
 This repository now treats the Rust/Burn CLI as the primary implementation for
 2D direct-basis and Hyper2D adapter-bank experiments. Python remains only where
-it still provides parity checks, historical imports, or rich paper rendering.
+it provides reference validation or external checkpoint/model interchange.
 
 ## Primary Paths
 
 | Workflow | Primary command | Status |
 | --- | --- | --- |
-| Single-sample 2D target training | `train-target2d` | Burn CLI entrypoint with upstream parity checks retained. |
+| Single-sample 2D target training | `train-target2d` | Rust CPU entrypoint; the former upstream Python/CUDA trainer is removed. |
 | Shared 2D base plus per-sample LoRA bank | `train-hyper2d-direct-basis` | Defaults to `burn-wgpu` in TOML recipes. |
 | Image condition to LoRA generator | `train-hyper2d-adapter-bank` | Burn/WGPU training path; CPU is for smoke correctness only. |
 | Hyper2D validation summary | `report-hyper2d` | Rust JSON, Markdown, and LaTeX summary path with optional quality-gate failure. |
 | Single-target 3D oracle overfit | `train-render3d --config` | Burn-native TOML recipes under `configs/render3d/`. |
 | Shared 3D base plus per-target adapters | `train-render3d-adapters --config` | Burn-native TOML recipes under `configs/render3d_adapters/`. |
 
-## Legacy Python Inventory
+## Retained Python Inventory
 
-| Path | Classification | Retirement condition |
+| Path | Classification | Boundary |
 | --- | --- | --- |
-| `scripts/train_target2d_upstream_gpu.py` | Legacy parity trainer | Remove after Burn 2D parity gates cover target loss, rollout quality, and throughput on catalog samples. |
-| `scripts/train_hyper2d_direct_basis_gpu.py` | Legacy parity trainer | Remove after `train-hyper2d-direct-basis --gpu-backend burn-wgpu` is the only needed backend for 1k/10k experiments. |
-| `scripts/render_hyper2d_direct_basis_paper.py` | Legacy paper renderer | Keep only for rollout-grid figures and PDF assembly until Rust reporting renders those assets. |
-| `scripts/render_kernel_ablation_paper.py` | Paper renderer | Keep until kernel ablation paper generation moves into Rust or `xtask`. |
-| `scripts/import_selforg_catalog.py`, `scripts/export_npa_checkpoint.py` | Import/export utilities | Keep while external checkpoint/catalog interchange is supported. |
-| `scripts/validate_import_parity.py`, `scripts/validate_catalog_parity.py`, `scripts/validate_3d_catalog.py` | Parity validation | Keep while imported upstream catalogs remain a compatibility target. |
-| `scripts/bench_*.py` | Benchmark helpers | Migrate once equivalent Rust `bench-*` commands cover the same matrix outputs. |
+| `scripts/import_selforg_catalog.py`, `scripts/export_npa_checkpoint.py` | Import/export utilities | Allowed for external SelfOrg/PyTorch checkpoint interchange. |
+| `scripts/setup_dino_vits.py` | Model export utility | Allowed while Burn DINO model-pack generation still depends on a Torch checkpoint. |
+| `scripts/validate_import_parity.py`, `scripts/validate_catalog_parity.py`, `scripts/validate_3d_catalog.py`, `scripts/compare_3d_candidate.py`, `scripts/catalog3d_validation/` | Reference/parity validation | Allowed for imported-catalog and renderer parity checks. |
 
-## Required Gates Before Removing Upstream Python Training
+## Removed Python Surfaces
 
-1. `train-target2d` Burn training reproduces single-sample 2D oracle quality for
-   representative catalog targets and OmniSVG thumbnails.
-2. `train-hyper2d-direct-basis` Burn/WGPU produces a shared base and persistent
-   per-sample LoRA bank whose oracle-validation ratios are within the documented
-   `report-hyper2d` gate and whose stored adapters beat the zero-adapter
-   baseline at quality scale.
-3. `train-hyper2d-adapter-bank` Burn/WGPU reports generated LoRA vector metrics
-   and rollout-vs-static-adapter metrics that pass `report-hyper2d`, with an
-   attached `validate-hyper2d-psnr-gate` report against oracle rollouts.
-4. CI or local validation includes Rust tests for config parsing, report
-   interpretation, adapter persistence, and GPU backend selection.
+- Python/Torch training backends for target2d and Hyper2D direct-basis training.
+- Python report/paper renderers; use Rust `report-hyper2d` and checked-in report
+  artifacts instead.
+- Python benchmark matrix wrappers; use Rust `bench`, `bench-spatial`, and
+  `bench-training` commands or TOML/Rust experiment bundles.
 
 ## Report Gates
 
@@ -76,9 +66,9 @@ pipeline runs on Burn/WGPU, but generated adapter vectors underfit the stored
 LoRAs. That makes DINO features, a stronger adapter decoder, and residual/flow
 adapter generation the next 2D HyperNPA priorities before scaling claims.
 
-The direct-basis command still accepts `upstream-python`, `python`, and
-`torch-cuda` as compatibility aliases, but the canonical backend name is now
-`legacy-upstream-python`. New experiment TOMLs should use `burn-wgpu`.
+The direct-basis command now accepts only Burn backends. Removed aliases include
+`upstream-python`, `python`, `torch-cuda`, and `legacy-upstream-python`; old
+experiment TOMLs using them should be migrated to `burn-wgpu` or `burn-cuda`.
 
 ## 3D Cleanup Boundary
 

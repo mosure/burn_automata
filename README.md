@@ -334,8 +334,6 @@ cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- 
 cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset texture-2d --particles 4096 --steps 16 --gpu --neighbor-mode auto --step-timing
 cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset texture-2d --particles 4096 --steps 16 --gpu --neighbor-mode linked-list
 cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset growing-3d-gs --particles 16384 --steps 16 --gpu --gaussian
-scripts/bench_gpu_matrix.py --matrix quick --output target/bench_gpu_matrix_final.json
-scripts/bench_seed_scale_matrix.py --output target/bench_seed_scale_matrix.json
 ```
 
 Run the focused checks:

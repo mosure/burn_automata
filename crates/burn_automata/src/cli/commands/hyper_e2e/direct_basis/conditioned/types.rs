@@ -25,6 +25,7 @@ pub(super) struct AdapterBankRolloutEvalConfig {
     pub(super) requested_examples_per_split: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(super) struct AdapterBankTrainConfig {
     pub(super) objective: AdapterBankTrainingObjective,
@@ -45,6 +46,7 @@ pub(super) enum AdapterBankTrainingObjective {
     RectifiedFlow,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(super) struct AdapterBankFlowTrainConfig {
     pub(super) hidden_dims: usize,
@@ -94,6 +96,7 @@ impl Default for AdapterBankSampleWeights {
 pub(super) struct AdapterBankExperimentConfig {
     pub(super) preset: Option<String>,
     pub(super) input: AdapterBankInputExperimentConfig,
+    pub(super) selection: AdapterBankSelectionExperimentConfig,
     pub(super) output: AdapterBankOutputExperimentConfig,
     pub(super) condition: AdapterBankConditionExperimentConfig,
     pub(super) training: AdapterBankTrainingExperimentConfig,
@@ -111,6 +114,13 @@ pub(super) struct AdapterBankInputExperimentConfig {
     pub(super) source_limit: Option<usize>,
     pub(super) train_limit: Option<usize>,
     pub(super) holdout_limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct AdapterBankSelectionExperimentConfig {
+    pub(super) selection_seed: Option<u64>,
+    pub(super) selection_manifest: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -221,6 +231,7 @@ pub(super) struct AdapterBankConditionedTrainingReport {
     pub(super) source_limit: usize,
     pub(super) train_limit: usize,
     pub(super) holdout_limit: usize,
+    pub(super) selection: AdapterBankSelectionReport,
     pub(super) target_stats: AdapterBankTargetVectorStats,
     pub(super) requested_training: AdapterBankTrainingSettingsReport,
     pub(super) adapter_target_canonicalization: &'static str,
@@ -233,6 +244,15 @@ pub(super) struct AdapterBankConditionedTrainingReport {
     pub(super) target_points: usize,
     pub(super) target_loss_config: Target2dLossConfig,
     pub(super) rollout_eval: AdapterBankRolloutEvalReport,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct AdapterBankSelectionReport {
+    pub(super) selection_seed: Option<u64>,
+    pub(super) selection_manifest: Option<String>,
+    pub(super) replayed_manifest: bool,
+    pub(super) train_selected: usize,
+    pub(super) holdout_selected: usize,
 }
 
 #[derive(Serialize)]

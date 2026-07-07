@@ -78,16 +78,27 @@ pub(crate) enum TrainingDeviceArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+pub(crate) enum DirectBasisOracleBackendArg {
+    #[value(
+        name = "burn-cpu",
+        alias = "cpu",
+        alias = "rust-cpu",
+        alias = "reference-cpu"
+    )]
+    #[serde(rename = "BurnCpu")]
+    Cpu,
+    #[value(name = "burn-wgpu", alias = "wgpu", alias = "burn")]
+    #[serde(rename = "BurnWgpu")]
+    Wgpu,
+    #[value(name = "burn-cuda", alias = "cuda")]
+    #[serde(rename = "BurnCuda")]
+    Cuda,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
 pub(crate) enum Hyper2dDirectBasisGpuBackendArg {
     #[value(name = "burn-wgpu", alias = "burn", alias = "wgpu")]
     BurnWgpu,
-    #[value(
-        name = "legacy-upstream-python",
-        alias = "upstream-python",
-        alias = "python",
-        alias = "torch-cuda"
-    )]
-    UpstreamPython,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]

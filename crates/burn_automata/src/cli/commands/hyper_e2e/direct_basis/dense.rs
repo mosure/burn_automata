@@ -1,15 +1,46 @@
-#[cfg(feature = "backend_wgpu")]
-mod imp {
+pub(super) struct BurnWgpuDirectBasisOutput {
+    pub(super) backend: &'static str,
+    pub(super) device: String,
+    pub(super) metrics: serde_json::Value,
+    pub(super) history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
+    pub(super) train_refine_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
+    pub(super) holdout_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
+    pub(super) best_train_loss: Option<f32>,
+    pub(super) best_train_step: usize,
+}
+
+pub(super) struct BurnDenseOracleBatchOutput {
+    pub(super) backend: &'static str,
+    pub(super) device: String,
+    pub(super) metrics: serde_json::Value,
+    pub(super) history: Vec<crate::cli::reports::CliHyper2dDirectBasisHistoryEntry>,
+    pub(super) per_model_history: Vec<Vec<crate::cli::reports::CliHyper2dDirectBasisHistoryEntry>>,
+    pub(super) best_train_loss: Vec<Option<f32>>,
+    pub(super) best_train_step: Vec<usize>,
+}
+
+macro_rules! dense_direct_basis_backend {
+    (
+        $module:ident,
+        $feature:meta,
+        $inner_backend:ty,
+        $backend_name:expr,
+        $device_label:expr,
+        $log_backend:expr
+    ) => {
+#[cfg($feature)]
+mod $module {
     use std::{fs, process::Command, time::Instant};
 
     use burn::{
-        backend::{Autodiff, Wgpu},
+        backend::Autodiff,
         tensor::{Device, Tensor, TensorData, activation::relu},
     };
     use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
     use serde::Serialize;
     use serde_json::json;
 
+    use super::{BurnDenseOracleBatchOutput, BurnWgpuDirectBasisOutput};
     use super::super::{DirectBasisExample, DirectBasisStepStats, DirectBasisTrainConfig};
     use crate::cli::reports::{
         CliHyper2dDirectBasisHistoryEntry, CliHyper2dDirectBasisLossSummary,
@@ -21,7 +52,7 @@ mod imp {
         target2d::render_target_2d_splat,
     };
 
-    type InnerBackend = Wgpu<f32>;
+    type InnerBackend = $inner_backend;
     type BurnBackend = Autodiff<InnerBackend>;
     type BurnDevice = Device<BurnBackend>;
     type Tensor1 = Tensor<BurnBackend, 1>;
@@ -31,19 +62,10 @@ mod imp {
     type Tensor1Inner = Tensor<InnerBackend, 1>;
     type Tensor2Inner = Tensor<InnerBackend, 2>;
 
-    const BACKEND: &str = "burn_wgpu_autodiff_dense_direct_basis";
+    const BACKEND: &str = $backend_name;
+    const DEVICE_LABEL: &str = $device_label;
+    const LOG_BACKEND: &str = $log_backend;
     const EPSILON: f32 = 1.0e-6;
-
-    pub(crate) struct BurnWgpuDirectBasisOutput {
-        pub(crate) backend: &'static str,
-        pub(crate) device: String,
-        pub(crate) metrics: serde_json::Value,
-        pub(crate) history: Vec<CliHyper2dDirectBasisHistoryEntry>,
-        pub(crate) train_refine_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
-        pub(crate) holdout_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
-        pub(crate) best_train_loss: Option<f32>,
-        pub(crate) best_train_step: usize,
-    }
 
     #[derive(Clone)]
     struct BurnBaseParams {
@@ -51,6 +73,13 @@ mod imp {
         b1: Tensor2,
         w2: Tensor2,
         b2: Tensor2,
+    }
+
+    struct BurnBaseBatch {
+        w1: Tensor3,
+        b1: Tensor3,
+        w2: Tensor3,
+        b2: Tensor3,
     }
 
     #[derive(Clone)]
@@ -123,6 +152,7 @@ mod imp {
         density: Tensor1,
     }
 
+    #[derive(Clone)]
     struct BurnLossBatchTensors {
         total: Tensor1,
         splat: Tensor1,
@@ -163,7 +193,7 @@ mod imp {
         zero_update_examples: usize,
     }
 
-    pub(crate) fn train_direct_basis_burn_wgpu(
+    pub(crate) fn train_direct_basis_burn_dense(
         base: &mut NpaModel,
         train_examples: &mut [DirectBasisExample],
         holdout_examples: &mut [DirectBasisExample],
@@ -173,7 +203,7 @@ mod imp {
     ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
         if base.config.spatial_dims != 2 {
             return Err(std::io::Error::other(
-                "Burn/WGPU direct-basis training currently supports 2D",
+                "Burn dense direct-basis training currently supports 2D",
             )
             .into());
         }
@@ -261,7 +291,7 @@ mod imp {
 
         let metrics = json!({
             "backend": BACKEND,
-            "device": "wgpu-default",
+            "device": DEVICE_LABEL,
             "objective": "target2d_pixel_splat_loss_full_image",
             "perception": "dense_compact_sph_blur_state_grad_density_grad_hybrid_moment_log_norm",
             "adapter_cache": adapter_cache_metrics(
@@ -323,11 +353,194 @@ mod imp {
             best_training_checkpoint(train_config.steps, &train_phase, &train_refine_phase);
         Ok(BurnWgpuDirectBasisOutput {
             backend: BACKEND,
-            device: "wgpu-default".to_string(),
+            device: DEVICE_LABEL.to_string(),
             metrics,
             history: train_phase.history,
             train_refine_history: train_refine_phase.history,
             holdout_history: holdout_phase.history,
+            best_train_loss,
+            best_train_step,
+        })
+    }
+
+    pub(crate) fn train_oracle_models_burn_dense(
+        models: &mut [NpaModel],
+        examples: &[DirectBasisExample],
+        config: DirectBasisTrainConfig,
+    ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+        if models.is_empty() || examples.is_empty() {
+            return Err(std::io::Error::other(
+                "Burn dense oracle model batch requires at least one model/example",
+            )
+            .into());
+        }
+        if models.len() != examples.len() {
+            return Err(std::io::Error::other(format!(
+                "Burn dense oracle model batch length mismatch: models={} examples={}",
+                models.len(),
+                examples.len()
+            ))
+            .into());
+        }
+        if models
+            .iter()
+            .any(|model| model.config.spatial_dims != 2 || model.config != models[0].config)
+        {
+            return Err(std::io::Error::other(
+                "Burn dense oracle model batch requires matching 2D NPA model configs",
+            )
+            .into());
+        }
+
+        let mut memory_snapshots = Vec::new();
+        let mut gpu_memory_snapshots = Vec::new();
+        memory_snapshots.push(check_process_memory_budget("oracle_batch:start", config)?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget("oracle_batch:start", config)?);
+        let device = BurnDevice::default();
+        let mut params = models
+            .iter()
+            .map(|model| BurnBaseParams::from_model(model, &device))
+            .collect::<AutomataResult<Vec<_>>>()?;
+        let targets = burn_targets(examples, config, &device)?;
+        let indices = (0..targets.len()).collect::<Vec<_>>();
+        let Some(particle_count) = homogeneous_particle_count(&targets, &indices) else {
+            return Err(std::io::Error::other(
+                "Burn dense vectorized oracle batch requires homogeneous particle counts",
+            )
+            .into());
+        };
+        memory_snapshots.push(check_process_memory_budget(
+            "oracle_batch:after_target_cache",
+            config,
+        )?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget(
+            "oracle_batch:after_target_cache",
+            config,
+        )?);
+
+        let mut optimizers = params
+            .iter()
+            .map(BurnBaseAdamWState::zeros_like)
+            .collect::<Vec<_>>();
+        let mut history = Vec::new();
+        let mut per_model_history = vec![Vec::new(); models.len()];
+        let mut best_train_loss = vec![None::<f32>; models.len()];
+        let mut best_train_step = vec![0usize; models.len()];
+
+        for step in 1..=config.steps {
+            let should_report =
+                step == config.steps || step.is_multiple_of(config.report_interval.max(1));
+            let step_seed = config
+                .seed
+                .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9));
+            let stats = train_oracle_model_batch_step_tbptt(
+                &mut params,
+                &mut optimizers,
+                &targets,
+                particle_count,
+                config,
+                step_seed,
+                should_report,
+            )?;
+            if should_report {
+                let mean_loss = stats
+                    .per_model_loss
+                    .iter()
+                    .copied()
+                    .sum::<f32>()
+                    / stats.per_model_loss.len().max(1) as f32;
+                let mean_base_grad_norm = stats
+                    .per_model_base_grad_norm
+                    .iter()
+                    .copied()
+                    .sum::<f32>()
+                    / stats.per_model_base_grad_norm.len().max(1) as f32;
+                let mean_base_grad_scale = stats
+                    .per_model_base_grad_scale
+                    .iter()
+                    .copied()
+                    .sum::<f32>()
+                    / stats.per_model_base_grad_scale.len().max(1) as f32;
+                println!(
+                    "{LOG_BACKEND} oracle-model-batch train step {step}/{} loss={mean_loss:.6} models={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
+                    config.steps,
+                    models.len(),
+                    stats.particle_steps_per_sec,
+                    stats.elapsed_ms
+                );
+                history.push(CliHyper2dDirectBasisHistoryEntry {
+                    step,
+                    loss: mean_loss,
+                    eval_loss: None,
+                    base_grad_norm: mean_base_grad_norm,
+                    base_grad_scale: mean_base_grad_scale,
+                    mean_adapter_grad_norm: 0.0,
+                    max_adapter_grad_norm: 0.0,
+                    examples_seen: models.len(),
+                    particle_steps_per_sec: stats.particle_steps_per_sec,
+                    elapsed_ms: stats.elapsed_ms,
+                });
+                for (idx, loss) in stats.per_model_loss.iter().copied().enumerate() {
+                    if best_train_loss[idx].is_none_or(|best| loss < best) {
+                        best_train_loss[idx] = Some(loss);
+                        best_train_step[idx] = step;
+                    }
+                    per_model_history[idx].push(CliHyper2dDirectBasisHistoryEntry {
+                        step,
+                        loss,
+                        eval_loss: None,
+                        base_grad_norm: stats.per_model_base_grad_norm[idx],
+                        base_grad_scale: stats.per_model_base_grad_scale[idx],
+                        mean_adapter_grad_norm: 0.0,
+                        max_adapter_grad_norm: 0.0,
+                        examples_seen: 1,
+                        particle_steps_per_sec: stats.particle_steps_per_sec
+                            / models.len().max(1) as f64,
+                        elapsed_ms: stats.elapsed_ms,
+                    });
+                }
+                let _ = check_process_memory_budget(
+                    &format!("oracle_batch:report_step:{step}"),
+                    config,
+                )?;
+                let _ = check_gpu_memory_budget(
+                    &format!("oracle_batch:report_step:{step}"),
+                    config,
+                )?;
+            }
+        }
+
+        for (model, params) in models.iter_mut().zip(&params) {
+            params.write_to_model(model)?;
+        }
+        memory_snapshots.push(check_process_memory_budget("oracle_batch:end", config)?);
+        gpu_memory_snapshots.push(check_gpu_memory_budget("oracle_batch:end", config)?);
+        let metrics = json!({
+            "backend": BACKEND,
+            "device": DEVICE_LABEL,
+            "objective": "target2d_pixel_splat_loss_full_image",
+            "mode": "vectorized_independent_oracle_models",
+            "model_batch_size": models.len(),
+            "optimizer_state": "separate_adamw_state_per_oracle_model",
+            "parameter_sharing": false,
+            "rollout_batch_size_per_model": 1,
+            "particle_count": particle_count,
+            "steps": config.steps,
+            "rollout_steps": config.rollout_steps,
+            "tbptt_chunk_steps": config.tbptt_chunk_steps,
+            "max_dense_chunk_floats": config.max_dense_chunk_floats,
+            "max_splat_chunk_floats": config.max_splat_chunk_floats,
+            "system_memory_budget_gb": config.system_memory_budget_gb,
+            "gpu_memory_budget_gb": config.gpu_memory_budget_gb,
+            "process_memory_snapshots": memory_snapshots,
+            "gpu_memory_snapshots": gpu_memory_snapshots,
+        });
+        Ok(BurnDenseOracleBatchOutput {
+            backend: BACKEND,
+            device: DEVICE_LABEL.to_string(),
+            metrics,
+            history,
+            per_model_history,
             best_train_loss,
             best_train_step,
         })
@@ -434,7 +647,7 @@ mod imp {
                         best_adapters = Some(adapters.to_vec());
                     }
                     println!(
-                        "burn-wgpu direct-basis {phase_label} step {step}/{} loss={:.6} eval_mean={:.6} examples={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
+                        "{LOG_BACKEND} direct-basis {phase_label} step {step}/{} loss={:.6} eval_mean={:.6} examples={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
                         config.steps,
                         stats.loss,
                         eval_loss.mean_total_loss,
@@ -456,7 +669,7 @@ mod imp {
                     });
                 } else {
                     println!(
-                        "burn-wgpu direct-basis {phase_label} step {step}/{} loss={:.6} examples={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
+                        "{LOG_BACKEND} direct-basis {phase_label} step {step}/{} loss={:.6} examples={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
                         config.steps,
                         stats.loss,
                         stats.examples_seen,
@@ -785,6 +998,129 @@ mod imp {
         })
     }
 
+    struct OracleModelBatchStepStats {
+        per_model_loss: Vec<f32>,
+        per_model_base_grad_norm: Vec<f32>,
+        per_model_base_grad_scale: Vec<f32>,
+        particle_steps_per_sec: f64,
+        elapsed_ms: f64,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn train_oracle_model_batch_step_tbptt(
+        params: &mut [BurnBaseParams],
+        optimizers: &mut [BurnBaseAdamWState],
+        targets: &[BurnTargetExample],
+        particle_count: usize,
+        config: DirectBasisTrainConfig,
+        step_seed: u64,
+        collect_metrics: bool,
+    ) -> Result<OracleModelBatchStepStats, Box<dyn std::error::Error>> {
+        if params.is_empty() || params.len() != optimizers.len() || params.len() != targets.len() {
+            return Err(
+                std::io::Error::other("Burn oracle model batch length mismatch").into(),
+            );
+        }
+        let started = Instant::now();
+        let device = &targets[0].target_rgb.device();
+        let indices = (0..targets.len()).collect::<Vec<_>>();
+        let (mut x, mut s) =
+            seed_batch_tensors(targets, &indices, particle_count, config, step_seed, device);
+        let mut rngs = indices
+            .iter()
+            .map(|idx| StdRng::seed_from_u64(step_seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
+            .collect::<Vec<_>>();
+        let chunk_steps = tbptt_chunk_steps(config);
+        let chunk_count = config.rollout_steps.div_ceil(chunk_steps).max(1);
+        let mut loss_sums = collect_metrics.then(|| vec![0.0_f32; params.len()]);
+        let mut grad_norm_sums = vec![0.0_f32; params.len()];
+        let mut grad_scale_sums = vec![0.0_f32; params.len()];
+        let mut grad_metric_chunks = 0usize;
+        let mut particle_steps = 0.0_f64;
+        let mut remaining_steps = config.rollout_steps;
+        while remaining_steps > 0 {
+            let steps = remaining_steps.min(chunk_steps);
+            let param_batch = BurnBaseBatch::from_params(params);
+            let displacement = Tensor::<BurnBackend, 1>::zeros([params.len()], device);
+            let (next_x, next_s, displacement) = rollout_oracle_model_batch_chunk(
+                &param_batch,
+                targets,
+                &indices,
+                x,
+                s,
+                config,
+                particle_count,
+                &mut rngs,
+                steps,
+                displacement,
+            );
+            let loss = target_splat_loss_batch_vector_base_only(
+                &next_x,
+                &next_s,
+                targets,
+                &indices,
+                config,
+                displacement,
+            );
+            if let Some(loss_sums) = loss_sums.as_mut() {
+                for (idx, scalars) in loss_vector_scalars(loss.clone())?.into_iter().enumerate() {
+                    loss_sums[idx] += scalars.total;
+                }
+            }
+            let mut grads = loss.total.sum().backward();
+            for (idx, (param, optimizer)) in params
+                .iter_mut()
+                .zip(&mut *optimizers)
+                .enumerate()
+            {
+                let (grad_norm, grad_scale) = param.apply_adamw(
+                    &mut grads,
+                    optimizer,
+                    adamw_from_sgd(config.base_sgd),
+                    config.per_parameter_grad_normalization,
+                    collect_metrics,
+                )?;
+                if collect_metrics {
+                    grad_norm_sums[idx] += grad_norm;
+                    grad_scale_sums[idx] += grad_scale;
+                }
+            }
+            if collect_metrics {
+                grad_metric_chunks += 1;
+            }
+            x = detach3(next_x);
+            s = detach3(next_s);
+            particle_steps += params.len() as f64 * particle_count as f64 * steps as f64;
+            remaining_steps -= steps;
+        }
+        let elapsed = started.elapsed();
+        let grad_metric_chunks = grad_metric_chunks.max(1);
+        let per_model_loss = loss_sums
+            .unwrap_or_else(|| vec![0.0; params.len()])
+            .into_iter()
+            .map(|loss| loss / chunk_count as f32)
+            .collect::<Vec<_>>();
+        Ok(OracleModelBatchStepStats {
+            per_model_loss,
+            per_model_base_grad_norm: grad_norm_sums
+                .into_iter()
+                .map(|value| value / grad_metric_chunks as f32)
+                .collect(),
+            per_model_base_grad_scale: grad_scale_sums
+                .into_iter()
+                .map(|value| {
+                    if collect_metrics {
+                        value / grad_metric_chunks as f32
+                    } else {
+                        1.0
+                    }
+                })
+                .collect(),
+            particle_steps_per_sec: particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
+            elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+        })
+    }
+
     struct ChunkGradStats {
         base_grad_norm: f32,
         base_grad_scale: f32,
@@ -1030,6 +1366,55 @@ mod imp {
         for _ in 0..steps {
             let features = dense_perception_batch(&x, &s, config);
             let update = params.forward_adapter_batch(features, adapter_batch);
+            let state_dims = s.shape().dims::<3>()[2];
+            let dx_raw = update.clone().narrow(2, 0, 2);
+            let ds = update.narrow(2, 2, state_dims);
+            let norm = dx_raw
+                .clone()
+                .mul(dx_raw.clone())
+                .sum_dim(2)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .add_scalar(1.0)
+                .expand([indices.len(), particle_count, 2]);
+            let dx = dx_raw.mul_scalar(config.motion_scale).div(norm);
+            let dx_norm = dx
+                .clone()
+                .mul(dx.clone())
+                .sum_dim(2)
+                .add_scalar(EPSILON * EPSILON)
+                .sqrt()
+                .reshape([indices.len(), particle_count])
+                .mean_dim(1)
+                .squeeze_dim::<1>(1);
+            displacement = displacement + dx_norm;
+            let mask = tensor3(
+                batch_masks_with_rngs(targets, indices, particle_count, rngs),
+                [indices.len(), particle_count, 1],
+                &targets[indices[0]].target_rgb.device(),
+            );
+            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+        }
+        (x, s, displacement)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rollout_oracle_model_batch_chunk(
+        params: &BurnBaseBatch,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        mut x: Tensor3,
+        mut s: Tensor3,
+        config: DirectBasisTrainConfig,
+        particle_count: usize,
+        rngs: &mut [StdRng],
+        steps: usize,
+        mut displacement: Tensor1,
+    ) -> (Tensor3, Tensor3, Tensor1) {
+        for _ in 0..steps {
+            let features = dense_perception_batch(&x, &s, config);
+            let update = params.forward(features);
             let state_dims = s.shape().dims::<3>()[2];
             let dx_raw = update.clone().narrow(2, 0, 2);
             let ds = update.narrow(2, 2, state_dims);
@@ -1567,6 +1952,73 @@ mod imp {
                     .l2_loss_vector()
                     .mul_scalar(config.adapter_l2_weight);
         }
+        BurnLossBatchTensors {
+            total,
+            splat,
+            color: color_loss,
+            density: density_loss,
+        }
+    }
+
+    fn target_splat_loss_batch_vector_base_only(
+        x: &Tensor3,
+        s: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        displacement: Tensor1,
+    ) -> BurnLossBatchTensors {
+        let dims = x.shape().dims::<3>();
+        let batches = dims[0];
+        let particle_count = dims[1];
+        let state_dims = s.shape().dims::<3>()[2];
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let target_mean = stack_target_mean(targets, indices);
+        let centered = if config.loss_config.center {
+            x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
+                + target_mean.expand([batches, particle_count, 2])
+        } else {
+            x.clone()
+        };
+        let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
+        let (rgb, density) =
+            splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        let density_diff = density - stack_target_density(targets, indices);
+        let density_term = l1l2_tensor3(density_diff);
+        let density_loss = density_term
+            .clone()
+            .reshape([batches, pixels])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let color_gate = density_term
+            .mul_scalar(-1.0)
+            .exp()
+            .expand([batches, pixels, 3]);
+        let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
+            .mul(color_gate)
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let splat = color_loss
+            .clone()
+            .mul_scalar(config.loss_config.color_loss_weight)
+            + density_loss
+                .clone()
+                .mul_scalar(config.loss_config.density_loss_weight);
+        let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
+            .reshape([batches, particle_count * 2])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let overflow_loss = relu(s.clone().abs().add_scalar(-1.0))
+            .reshape([batches, particle_count * state_dims])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let total = splat
+            .clone()
+            .mul_scalar(config.loss_config.splat_loss_weight)
+            + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
+            + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
+            + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
         BurnLossBatchTensors {
             total,
             splat,
@@ -2357,6 +2809,30 @@ mod imp {
         }
     }
 
+    impl BurnBaseBatch {
+        fn from_params(params: &[BurnBaseParams]) -> Self {
+            Self {
+                w1: stack_base_tensor(params, |param| &param.w1),
+                b1: stack_base_tensor(params, |param| &param.b1),
+                w2: stack_base_tensor(params, |param| &param.w2),
+                b2: stack_base_tensor(params, |param| &param.b2),
+            }
+        }
+
+        fn forward(&self, features: Tensor3) -> Tensor3 {
+            let dims = features.shape().dims::<3>();
+            let batches = dims[0];
+            let rows = dims[1];
+            let hidden_dims = self.b1.shape().dims::<3>()[2];
+            let output_dims = self.b2.shape().dims::<3>()[2];
+            let b1 = self.b1.clone().expand([batches, rows, hidden_dims]);
+            let b2 = self.b2.clone().expand([batches, rows, output_dims]);
+            relu(features.matmul(self.w1.clone().swap_dims(1, 2)) + b1)
+                .matmul(self.w2.clone().swap_dims(1, 2))
+                + b2
+        }
+    }
+
     impl BurnAdapterParams {
         fn from_adapter(
             adapter: &NpaLowRankAdapter,
@@ -2597,6 +3073,19 @@ mod imp {
             indices
                 .iter()
                 .map(|idx| select(&adapters[*idx]).clone().unsqueeze_dim::<3>(0))
+                .collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn stack_base_tensor(
+        params: &[BurnBaseParams],
+        select: impl Fn(&BurnBaseParams) -> &Tensor2,
+    ) -> Tensor3 {
+        Tensor::cat(
+            params
+                .iter()
+                .map(|param| select(param).clone().unsqueeze_dim::<3>(0))
                 .collect::<Vec<_>>(),
             0,
         )
@@ -3185,13 +3674,13 @@ mod imp {
 
     fn tensor_vec(tensor: Tensor2Inner) -> AutomataResult<Vec<f32>> {
         tensor.into_data().to_vec::<f32>().map_err(|err| {
-            AutomataError::InvalidArgument(format!("Burn/WGPU tensor readback failed: {err}"))
+            AutomataError::InvalidArgument(format!("Burn dense tensor readback failed: {err}"))
         })
     }
 
     fn tensor1_vec(tensor: Tensor1Inner) -> AutomataResult<Vec<f32>> {
         tensor.into_data().to_vec::<f32>().map_err(|err| {
-            AutomataError::InvalidArgument(format!("Burn/WGPU tensor readback failed: {err}"))
+            AutomataError::InvalidArgument(format!("Burn dense tensor readback failed: {err}"))
         })
     }
 
@@ -3221,7 +3710,7 @@ mod imp {
             && rss_bytes > budget_bytes
         {
             return Err(std::io::Error::other(format!(
-                "Burn/WGPU direct-basis memory budget exceeded at {label}: rss={:.2} GiB budget={:.2} GiB",
+                "Burn dense direct-basis memory budget exceeded at {label}: rss={:.2} GiB budget={:.2} GiB",
                 bytes_to_gib(rss_bytes),
                 bytes_to_gib(budget_bytes)
             ))
@@ -3255,7 +3744,7 @@ mod imp {
             && used_bytes > budget_bytes
         {
             return Err(std::io::Error::other(format!(
-                "Burn/WGPU direct-basis GPU memory budget exceeded at {label}: used={:.2} GiB budget={:.2} GiB",
+                "Burn dense direct-basis GPU memory budget exceeded at {label}: used={:.2} GiB budget={:.2} GiB",
                 bytes_to_gib(used_bytes),
                 bytes_to_gib(budget_bytes)
             ))
@@ -3368,20 +3857,44 @@ mod imp {
         }
     }
 }
+    };
+}
+
+dense_direct_basis_backend!(
+    wgpu_imp,
+    feature = "backend_wgpu",
+    burn::backend::Wgpu<f32>,
+    "burn_wgpu_autodiff_dense_direct_basis",
+    "wgpu-default",
+    "burn-wgpu"
+);
+
+dense_direct_basis_backend!(
+    cuda_imp,
+    feature = "backend_cuda",
+    burn::backend::Cuda<f32>,
+    "burn_cuda_autodiff_dense_direct_basis",
+    "cuda-default",
+    "burn-cuda"
+);
 
 #[cfg(feature = "backend_wgpu")]
-pub(super) use imp::*;
-
-#[cfg(not(feature = "backend_wgpu"))]
-pub(super) struct BurnWgpuDirectBasisOutput {
-    pub(super) backend: &'static str,
-    pub(super) device: String,
-    pub(super) metrics: serde_json::Value,
-    pub(super) history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) train_refine_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) holdout_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) best_train_loss: Option<f32>,
-    pub(super) best_train_step: usize,
+pub(super) fn train_direct_basis_burn_wgpu(
+    base: &mut super::NpaModel,
+    train_examples: &mut [super::DirectBasisExample],
+    holdout_examples: &mut [super::DirectBasisExample],
+    train_config: super::DirectBasisTrainConfig,
+    train_refine_config: super::DirectBasisTrainConfig,
+    holdout_config: super::DirectBasisTrainConfig,
+) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
+    wgpu_imp::train_direct_basis_burn_dense(
+        base,
+        train_examples,
+        holdout_examples,
+        train_config,
+        train_refine_config,
+        holdout_config,
+    )
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
@@ -3394,7 +3907,83 @@ pub(super) fn train_direct_basis_burn_wgpu(
     _holdout_config: super::DirectBasisTrainConfig,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
-        "Burn/WGPU direct-basis training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu or use the legacy --gpu-backend legacy-upstream-python parity path",
+        "Burn/WGPU direct-basis training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu or choose the Burn/CUDA backend in a CUDA build",
+    )
+    .into())
+}
+
+#[cfg(feature = "backend_wgpu")]
+pub(super) fn train_oracle_models_burn_wgpu(
+    models: &mut [super::NpaModel],
+    examples: &[super::DirectBasisExample],
+    train_config: super::DirectBasisTrainConfig,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    wgpu_imp::train_oracle_models_burn_dense(models, examples, train_config)
+}
+
+#[cfg(not(feature = "backend_wgpu"))]
+pub(super) fn train_oracle_models_burn_wgpu(
+    _models: &mut [super::NpaModel],
+    _examples: &[super::DirectBasisExample],
+    _train_config: super::DirectBasisTrainConfig,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    Err(std::io::Error::other(
+        "Burn/WGPU vectorized oracle training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
+    )
+    .into())
+}
+
+#[cfg(feature = "backend_cuda")]
+pub(super) fn train_direct_basis_burn_cuda(
+    base: &mut super::NpaModel,
+    train_examples: &mut [super::DirectBasisExample],
+    holdout_examples: &mut [super::DirectBasisExample],
+    train_config: super::DirectBasisTrainConfig,
+    train_refine_config: super::DirectBasisTrainConfig,
+    holdout_config: super::DirectBasisTrainConfig,
+) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
+    cuda_imp::train_direct_basis_burn_dense(
+        base,
+        train_examples,
+        holdout_examples,
+        train_config,
+        train_refine_config,
+        holdout_config,
+    )
+}
+
+#[cfg(not(feature = "backend_cuda"))]
+pub(super) fn train_direct_basis_burn_cuda(
+    _base: &mut super::NpaModel,
+    _train_examples: &mut [super::DirectBasisExample],
+    _holdout_examples: &mut [super::DirectBasisExample],
+    _train_config: super::DirectBasisTrainConfig,
+    _train_refine_config: super::DirectBasisTrainConfig,
+    _holdout_config: super::DirectBasisTrainConfig,
+) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
+    Err(std::io::Error::other(
+        "Burn/CUDA dense direct-basis training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",
+    )
+    .into())
+}
+
+#[cfg(feature = "backend_cuda")]
+pub(super) fn train_oracle_models_burn_cuda(
+    models: &mut [super::NpaModel],
+    examples: &[super::DirectBasisExample],
+    train_config: super::DirectBasisTrainConfig,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    cuda_imp::train_oracle_models_burn_dense(models, examples, train_config)
+}
+
+#[cfg(not(feature = "backend_cuda"))]
+pub(super) fn train_oracle_models_burn_cuda(
+    _models: &mut [super::NpaModel],
+    _examples: &[super::DirectBasisExample],
+    _train_config: super::DirectBasisTrainConfig,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    Err(std::io::Error::other(
+        "Burn/CUDA vectorized oracle training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",
     )
     .into())
 }

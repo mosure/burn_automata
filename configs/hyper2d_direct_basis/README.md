@@ -10,21 +10,18 @@ The TOML file is the experiment recipe. Values supplied in TOML take precedence 
 
 The OmniSVG recipes default to `download = false` so they use the local cache. Set `[source.omnisvg].download = true` when the cache needs to be populated or refreshed.
 
-These configs intentionally use `[gpu].backend = "burn-wgpu"`. The older
-upstream Python/CUDA scripts remain useful for parity checks and historical
-comparison, but new 2D direct-basis experiments should start from these
-Burn/WGPU TOML recipes.
+These configs intentionally use Burn backends. New 2D direct-basis experiments
+should start from `[gpu].backend = "burn-wgpu"` and oracle validation should use
+`oracle.backend = "burn-wgpu"` or `oracle.backend = "burn-cuda"`.
 
-The Burn/WGPU direct-basis trainer is now guarded by a conservative memory
-preflight. Dense all-pairs autodiff training is capped at
-`max_dense_train_particles = 1024` until a fused/tiled backward backend exists.
-Training recipes also set `gpu_memory_budget_gb`; the preflight estimates the
-live WGPU autodiff graph separately from cached target tensors and rejects
-unsafe phase batches before allocation. The observed 512-particle batch-4
-dense path exhausted a 98 GB GPU, and a full 1k 512-particle batch-1 refine run
-crossed the 64 GiB experiment budget, so the staged 384 recipe is the current
-highest full-training curriculum target until the dense backward path is fused
-or allocator lifetime is fixed.
+The Burn direct-basis trainer is guarded by a conservative memory preflight.
+Most shared-base training recipes still pin `max_dense_train_particles = 1024`
+or lower because long dense-autodiff phases can retain large graphs. The Burn
+oracle path now has a bounded 2048-particle tiled-autodiff mode: quality-scale
+oracle smokes use TBPTT-1, tight dense/splat chunk caps, and memory-capped
+launchers before allocation. This is not a fused sparse neighbor training
+kernel yet, but it removes the old 512/1024-particle hard stop for bounded
+2048-particle oracle training checks.
 
 Training batches use a shuffled epoch sampler rather than independent random
 draws. Reports include per-phase adapter update coverage so 1k/10k quality
@@ -32,9 +29,10 @@ runs can distinguish optimizer/objective failure from undersampled adapters.
 Adapter-only phases evaluate the phase-initial state for checkpoint selection;
 if refine regresses, the incoming base/adapters are preserved instead of being
 overwritten by the least-bad refine checkpoint.
-Recipes with `2048` rollout particles are validation/evaluation recipes only:
-their direct-basis training phases are set to zero, and nonzero 2048 training is
-rejected before WGPU allocation.
+Shared-base recipes with `2048` rollout particles remain validation/evaluation
+recipes unless they explicitly opt into tight tiled/TBPTT training caps. Burn
+oracle recipes may train at 2048 particles through the bounded tiled-autodiff
+path; treat short smoke outputs as memory/throughput checks, not quality claims.
 
 Use `scripts/safe_train_hyper2d_direct_basis.sh` for local runs. It wraps the
 trainer in `timeout` and a systemd memory scope (`BURN_AUTOMATA_MEMORY_MAX`,
@@ -73,6 +71,23 @@ scripts/safe_validate_hyper2d_direct_basis_oracles.sh \
   --config configs/hyper2d_direct_basis/oracle_validate_10k_quality_2048_smoke.toml
 ```
 
+For broad HyperNPA target-bank expansion, start with
+`oracle_validate_10k_quality_2048_pilot64x16.toml`. It persists a
+seeded `64 train / 16 holdout` oracle slice manifest under the artifact output
+directory. Reuse that manifest for exact-adapter-bank construction, conditioned
+flow training, and PSNR gates so the target, training, and validation
+distributions cannot drift.
+
+GPU oracle batch-size ablation on the seeded four-sample 2048-particle slice:
+`batch_size = 16`, `gpu_parallel_jobs = 4`, `lr = 5e-4`, and `grad_clip_norm = 1`
+matched the batch-1 quality baseline within the current four-sample tolerance
+(`1.03x` mean oracle loss, `1.00x` worst-sample oracle loss) while raising
+aggregate throughput from 3.64M to 19.09M particle-steps/s. `batch_size = 32`
+is not quality-ready on the same setup: LR 5e-4 diverged even after CUDA grad
+clipping was wired, while conservative clipped runs completed but underfit
+badly. Keep batch-32 as a hardware stress/optimizer research setting until it
+passes the oracle-quality ablation.
+
 Latest diagnostic: `omnisvg_1k_p64_refine_lr1e4.toml` completed with full train
 adapter coverage (`min_updates=4`, zero missing) and refine coverage
 (`min_updates=6`, zero missing). The best checkpoint remained the base-training
@@ -104,5 +119,11 @@ the gates required before removing the legacy upstream-Python training backend.
 | `omnisvg_10k_rank132_particles128.toml` | Rank-132 expressivity pilot matching exact-oracle adapter capacity; batch size is lower because adapter state is much larger. |
 | `oracle_validate_10k_quality_2048.toml` | Quality-scale oracle plus zero-adapter validation for the current 10k rank-16 bank; run before training more conditioned HyperNPA models against that bank. |
 | `oracle_validate_10k_quality_2048_smoke.toml` | 1-train/1-holdout quality-scale smoke for the current 10k rank-16 bank; useful for fast zero-baseline checks before the full 8/8 run. |
+| `oracle_validate_burn_wgpu_smoke_particles128.toml` | Low-particle Burn/WGPU dense-oracle smoke proving the Rust oracle path without running quality-scale dense autodiff backward. |
+| `oracle_validate_burn_cuda_smoke_particles128.toml` | Low-particle Burn/CUDA dense-oracle smoke. Build with `--features cli,backend_wgpu,backend_cuda` when both dense Burn backends should be selectable from one binary. |
+| `oracle_validate_burn_wgpu_quality2048_smoke.toml` | Bounded 2048-particle/2048-target Burn/WGPU tiled-autodiff oracle smoke with batch-2 same-target rollouts and TBPTT-1. |
+| `oracle_validate_burn_cuda_quality2048_smoke.toml` | Bounded 2048-particle/2048-target Burn/CUDA tiled-autodiff oracle smoke using the same config shape as the WGPU smoke. |
+| `oracle_validate_burn_wgpu_quality2048_model_batch2_smoke.toml` | Bounded Burn/WGPU smoke for true independent two-oracle model batching: separate base weights and AdamW state per oracle model in one tensor batch. |
+| `oracle_validate_burn_cuda_quality2048_model_batch2_smoke.toml` | CUDA version of the independent two-oracle model-batch smoke. |
 | `oracle_validate_smoke_rank132_particles512_quality_train_2048.toml` | 1-train/1-holdout 2048-particle oracle smoke for the staged rank-132/512-particle bank. |
 | `oracle_validate_exact_oracle_10k8x8_2048_rank132_smoke.toml` | 1-train/1-holdout oracle smoke for the exact rank-132 oracle-delta adapter bank. |

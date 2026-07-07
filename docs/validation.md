@@ -1045,7 +1045,6 @@ cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- 
 cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset growing-3d-gs --particles 8192 --steps 30 --gpu --geometry line --seed-mode torus-morphogen-dense-3d --seed-scale 0.04 --normalize-seed-scale --neighbor-mode sorted
 cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset growing-3d-gs --particles 8192 --steps 30 --gpu --geometry line --seed-mode torus-morphogen-dense-3d --seed-scale 0.04 --normalize-seed-scale --neighbor-mode tiled --bucket-capacity 256
 cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset growing-3d-gs --particles 16384 --steps 16 --gpu --gaussian
-scripts/bench_gpu_matrix.py --matrix quick --output target/bench_gpu_matrix_final.json
 ```
 
 Measured locally on the current ARM workstation:

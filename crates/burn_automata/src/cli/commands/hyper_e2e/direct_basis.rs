@@ -9,9 +9,10 @@ use super::sources::{
 };
 use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
+use std::collections::HashMap;
 
-mod burn_wgpu;
 mod conditioned;
+mod dense;
 mod oracle;
 mod psnr_gate;
 
@@ -33,6 +34,7 @@ struct DirectBasisExample {
     last_train_loss: Option<f32>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct DirectBasisTrainConfig {
     steps: usize,
@@ -105,8 +107,12 @@ struct DirectBasisWgpuMemoryPreflightReport {
     gpu_memory_budget_passed: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DirectBasisOracleConfig {
+    backend: DirectBasisOracleBackendArg,
+    gpu_device: String,
+    resume_existing: bool,
+    gpu_parallel_jobs: usize,
     train_examples: usize,
     holdout_examples: usize,
     epochs: usize,
@@ -136,7 +142,7 @@ struct DirectBasisAdapterBankLoadManifest {
     entries: Vec<DirectBasisAdapterBankLoadEntry>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct DirectBasisAdapterBankLoadEntry {
     slug: String,
     split: String,
@@ -158,6 +164,11 @@ type DirectBasisAdapterBankIndexedEntry = (usize, DirectBasisAdapterBankLoadEntr
 type DirectBasisAdapterBankSplitEntries = (
     Vec<DirectBasisAdapterBankIndexedEntry>,
     Vec<DirectBasisAdapterBankIndexedEntry>,
+);
+type DirectBasisAdapterBankSelectedEntries = (
+    Vec<DirectBasisAdapterBankIndexedEntry>,
+    Vec<DirectBasisAdapterBankIndexedEntry>,
+    DirectBasisAdapterBankSelectionReport,
 );
 
 #[derive(Serialize)]
@@ -184,67 +195,42 @@ struct DirectBasisOracleValidationReport {
     seed_scale: f32,
     seed_mode: ParticleSeed,
     per_parameter_grad_normalization: bool,
+    selection: DirectBasisAdapterBankSelectionReport,
     oracle_validation: Option<CliHyper2dDirectBasisOracleReport>,
 }
 
-#[derive(Serialize)]
-struct DirectBasisSourceManifest {
-    sources: Vec<DirectBasisSourceEntry>,
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DirectBasisAdapterBankSelectionExperimentConfig {
+    selection_seed: Option<u64>,
+    selection_manifest: Option<PathBuf>,
 }
 
-#[derive(Serialize)]
-struct DirectBasisSourceEntry {
-    slug: String,
-    split: &'static str,
-    title: Option<String>,
-    group: Option<String>,
-    path: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DirectBasisAdapterBankSelectionManifest {
+    selection_seed: u64,
+    train: Vec<DirectBasisAdapterBankSelectionEntry>,
+    holdout: Vec<DirectBasisAdapterBankSelectionEntry>,
 }
 
-#[derive(Deserialize)]
-struct GpuDirectBasisPayload {
-    backend: String,
-    upstream_root: Option<String>,
-    device: String,
-    torch_version: Option<String>,
-    cuda_version: Option<String>,
-    gpu_name: Option<String>,
-    train_examples: usize,
-    holdout_examples: usize,
-    initial_train_loss: Option<CliHyper2dDirectBasisLossSummary>,
-    final_train_loss: Option<CliHyper2dDirectBasisLossSummary>,
-    initial_holdout_loss: Option<CliHyper2dDirectBasisLossSummary>,
-    final_holdout_loss: Option<CliHyper2dDirectBasisLossSummary>,
-    best_train_loss: Option<f32>,
-    best_train_step: usize,
-    history: Vec<CliHyper2dDirectBasisHistoryEntry>,
-    holdout_history: Vec<CliHyper2dDirectBasisHistoryEntry>,
-    base: GpuDirectBasisBaseWeights,
-    adapters: Vec<GpuDirectBasisAdapter>,
-}
-
-#[derive(Deserialize)]
-struct GpuDirectBasisBaseWeights {
-    w1: Vec<f32>,
-    b1: Vec<f32>,
-    w2: Vec<f32>,
-    b2: Vec<f32>,
-}
-
-#[derive(Deserialize)]
-struct GpuDirectBasisAdapter {
-    slug: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DirectBasisAdapterBankSelectionEntry {
     split: String,
-    title: Option<String>,
-    group: Option<String>,
-    condition: String,
-    #[serde(default)]
-    target_source_width: usize,
-    #[serde(default)]
-    target_source_height: usize,
-    target_points: usize,
-    last_train_loss: Option<f32>,
-    adapter: Vec<f32>,
+    slug: String,
+    bank_split_index: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DirectBasisAdapterBankSelectionReport {
+    selection_seed: u64,
+    selection_manifest: Option<String>,
+    replayed_manifest: bool,
+    train_requested: usize,
+    holdout_requested: usize,
+    train_selected: usize,
+    holdout_selected: usize,
+    train: Vec<DirectBasisAdapterBankSelectionEntry>,
+    holdout: Vec<DirectBasisAdapterBankSelectionEntry>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -272,6 +258,7 @@ struct DirectBasisOracleValidationExperimentConfig {
     preset: Option<String>,
     input: DirectBasisOracleValidationInputConfig,
     output: DirectBasisOracleValidationOutputConfig,
+    selection: DirectBasisAdapterBankSelectionExperimentConfig,
     rollout: DirectBasisRolloutExperimentConfig,
     target: DirectBasisTargetExperimentConfig,
     optimizer: DirectBasisOptimizerExperimentConfig,
@@ -358,10 +345,6 @@ struct DirectBasisTrainingExperimentConfig {
 #[serde(default, deny_unknown_fields)]
 struct DirectBasisGpuExperimentConfig {
     backend: Option<String>,
-    python: Option<PathBuf>,
-    upstream_root: Option<PathBuf>,
-    device: Option<String>,
-    payload_output: Option<PathBuf>,
     max_dense_chunk_floats: Option<usize>,
     max_splat_chunk_floats: Option<usize>,
 }
@@ -434,6 +417,10 @@ struct DirectBasisEvalExperimentConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DirectBasisOracleExperimentConfig {
+    backend: Option<String>,
+    gpu_device: Option<String>,
+    resume_existing: Option<bool>,
+    gpu_parallel_jobs: Option<usize>,
     train_examples: Option<usize>,
     holdout_examples: Option<usize>,
     epochs: Option<usize>,
@@ -546,10 +533,6 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         adapter_output_dir,
         training_device,
         gpu_backend,
-        python,
-        gpu_upstream_root,
-        gpu_device,
-        gpu_payload_output,
         adapter_rank,
         adapter_alpha,
         steps,
@@ -688,10 +671,6 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     } = config_training;
     let DirectBasisGpuExperimentConfig {
         backend: config_gpu_backend,
-        python: config_python,
-        upstream_root: config_gpu_upstream_root,
-        device: config_gpu_device,
-        payload_output: config_gpu_payload_output,
         max_dense_chunk_floats: config_max_dense_chunk_floats,
         max_splat_chunk_floats: config_max_splat_chunk_floats,
     } = config_gpu;
@@ -750,6 +729,10 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         seed: config_eval_seed,
     } = config_eval;
     let DirectBasisOracleExperimentConfig {
+        backend: config_oracle_backend,
+        gpu_device: config_oracle_gpu_device,
+        resume_existing: config_oracle_resume_existing,
+        gpu_parallel_jobs: config_oracle_gpu_parallel_jobs,
         train_examples: config_oracle_train_examples,
         holdout_examples: config_oracle_holdout_examples,
         epochs: config_oracle_epochs,
@@ -799,10 +782,6 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let training_device =
         config_value_enum("training.device", config_training_device, training_device)?;
     let gpu_backend = config_value_enum("gpu.backend", config_gpu_backend, gpu_backend)?;
-    let python = config_python.unwrap_or(python);
-    let gpu_upstream_root = config_gpu_upstream_root.or(gpu_upstream_root);
-    let gpu_device = config_gpu_device.unwrap_or(gpu_device);
-    let gpu_payload_output = config_gpu_payload_output.or(gpu_payload_output);
     let adapter_rank = config_adapter_rank.unwrap_or(adapter_rank);
     let adapter_alpha = config_adapter_alpha.unwrap_or(adapter_alpha);
     let steps = config_steps.unwrap_or(steps);
@@ -888,6 +867,14 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let oracle_weight_decay = config_oracle_weight_decay.unwrap_or(oracle_weight_decay);
     let oracle_grad_clip_norm = config_oracle_grad_clip_norm.unwrap_or(oracle_grad_clip_norm);
     let oracle_seed = config_oracle_seed.unwrap_or(oracle_seed);
+    let oracle_backend = config_value_enum(
+        "oracle.backend",
+        config_oracle_backend,
+        DirectBasisOracleBackendArg::Cpu,
+    )?;
+    let oracle_gpu_device = config_oracle_gpu_device.unwrap_or_else(|| "cuda:0".to_string());
+    let oracle_resume_existing = config_oracle_resume_existing.unwrap_or(false);
+    let oracle_gpu_parallel_jobs = config_oracle_gpu_parallel_jobs.unwrap_or(1);
 
     let preset_arg = preset;
     let preset: AutomataPreset = preset.into();
@@ -920,6 +907,10 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let seed_mode: ParticleSeed = seed_mode.into();
     let seed_scale = seed_scale.unwrap_or_else(|| NpaConfig::seed_scale_for_preset(preset));
     let oracle_config = DirectBasisOracleConfig {
+        backend: oracle_backend,
+        gpu_device: oracle_gpu_device,
+        resume_existing: oracle_resume_existing,
+        gpu_parallel_jobs: oracle_gpu_parallel_jobs,
         train_examples: oracle_train_examples,
         holdout_examples: oracle_holdout_examples,
         epochs: oracle_epochs,
@@ -932,7 +923,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         grad_clip_norm: oracle_grad_clip_norm,
         seed: oracle_seed,
     };
-    validate_oracle_config(oracle_config)?;
+    validate_oracle_config(&oracle_config)?;
     let report_output = report_output.unwrap_or_else(|| output_dir.join("report.json"));
     let shared_base_output =
         shared_base_output.unwrap_or_else(|| output_dir.join("shared_base.bpk"));
@@ -1026,11 +1017,6 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
             shared_base_output: &shared_base_output,
             adapter_bank_output: &adapter_bank_output,
             adapter_output_dir: &adapter_output_dir,
-            python: &python,
-            gpu_upstream_root: gpu_upstream_root.as_ref(),
-            gpu_device,
-            gpu_payload_output: gpu_payload_output
-                .unwrap_or_else(|| output_dir.join("gpu_direct_basis_payload.json")),
             sources: &sources,
             splits: &splits,
             hashgrid,
@@ -1074,7 +1060,6 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         };
         return match gpu_backend {
             Hyper2dDirectBasisGpuBackendArg::BurnWgpu => run_burn_wgpu_direct_basis(request),
-            Hyper2dDirectBasisGpuBackendArg::UpstreamPython => run_python_gpu_direct_basis(request),
         };
     }
     let mut base = NpaModel::upstream_seeded(NpaConfig::growing_2d(), base_seed);
@@ -1386,6 +1371,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         preset: config_preset,
         input: config_input,
         output: config_output,
+        selection: config_selection,
         rollout: config_rollout,
         target: config_target,
         optimizer: config_optimizer,
@@ -1398,6 +1384,10 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     let DirectBasisOracleValidationOutputConfig {
         report_output: config_report_output,
     } = config_output;
+    let DirectBasisAdapterBankSelectionExperimentConfig {
+        selection_seed: config_selection_seed,
+        selection_manifest: config_selection_manifest,
+    } = config_selection;
     let DirectBasisRolloutExperimentConfig {
         particles: config_rollout_particles,
         steps: config_rollout_steps,
@@ -1431,6 +1421,10 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         adapter_l2: _,
     } = config_optimizer;
     let DirectBasisOracleExperimentConfig {
+        backend: config_oracle_backend,
+        gpu_device: config_oracle_gpu_device,
+        resume_existing: config_oracle_resume_existing,
+        gpu_parallel_jobs: config_oracle_gpu_parallel_jobs,
         train_examples: config_oracle_train_examples,
         holdout_examples: config_oracle_holdout_examples,
         epochs: config_oracle_epochs,
@@ -1492,6 +1486,15 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     let oracle_weight_decay = config_oracle_weight_decay.unwrap_or(oracle_weight_decay);
     let oracle_grad_clip_norm = config_oracle_grad_clip_norm.unwrap_or(oracle_grad_clip_norm);
     let oracle_seed = config_oracle_seed.unwrap_or(oracle_seed);
+    let oracle_backend = config_value_enum(
+        "oracle.backend",
+        config_oracle_backend,
+        DirectBasisOracleBackendArg::Cpu,
+    )?;
+    let oracle_gpu_device = config_oracle_gpu_device.unwrap_or_else(|| "cuda:0".to_string());
+    let oracle_resume_existing = config_oracle_resume_existing.unwrap_or(false);
+    let oracle_gpu_parallel_jobs = config_oracle_gpu_parallel_jobs.unwrap_or(1);
+    let selection_seed = config_selection_seed.unwrap_or(oracle_seed);
 
     let preset: AutomataPreset = preset.into();
     if preset != AutomataPreset::Growing2d {
@@ -1513,6 +1516,10 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         target_bound_regularizer_weight,
     )?;
     let oracle_config = DirectBasisOracleConfig {
+        backend: oracle_backend,
+        gpu_device: oracle_gpu_device,
+        resume_existing: oracle_resume_existing,
+        gpu_parallel_jobs: oracle_gpu_parallel_jobs,
         train_examples: oracle_train_examples,
         holdout_examples: oracle_holdout_examples,
         epochs: oracle_epochs,
@@ -1535,7 +1542,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         eval_batch_size: 1,
         system_memory_budget_gb: Some(24.0),
         gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
-        max_dense_train_particles: 1024,
+        max_dense_train_particles: 2048,
         max_dense_chunk_floats: 4 * 1024 * 1024,
         max_splat_chunk_floats: 4 * 1024 * 1024,
         base_learning_rate: 0.0,
@@ -1544,7 +1551,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         holdout_adapter_learning_rate: None,
         adapter_l2: 0.0,
     })?;
-    validate_oracle_config(oracle_config)?;
+    validate_oracle_config(&oracle_config)?;
 
     let base_manifest = crate::import::load_manifest(&shared_base)?;
     let hashgrid = base_manifest.hashgrid.clone();
@@ -1557,16 +1564,15 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     let (train_entries, holdout_entries) = split_direct_basis_adapter_bank_entries(bank.entries)?;
     let total_train_examples = train_entries.len();
     let total_holdout_examples = holdout_entries.len();
-    let selected_train_entries = select_direct_basis_adapter_bank_oracle_entries(
-        &train_entries,
-        oracle_train_examples,
-        oracle_seed,
-    );
-    let selected_holdout_entries = select_direct_basis_adapter_bank_oracle_entries(
-        &holdout_entries,
-        oracle_holdout_examples,
-        oracle_seed ^ 0x90_1d_2d,
-    );
+    let (selected_train_entries, selected_holdout_entries, selection_report) =
+        select_direct_basis_adapter_bank_entries_with_manifest(
+            &train_entries,
+            &holdout_entries,
+            oracle_train_examples,
+            oracle_holdout_examples,
+            selection_seed,
+            config_selection_manifest.as_deref(),
+        )?;
     let train_examples = load_direct_basis_examples_from_adapter_bank_entries(
         &adapter_bank,
         &base,
@@ -1626,7 +1632,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         eval_seed,
         system_memory_budget_gb: Some(24.0),
         gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
-        max_dense_train_particles: 1024,
+        max_dense_train_particles: 2048,
         max_dense_chunk_floats: 4 * 1024 * 1024,
         max_splat_chunk_floats: 4 * 1024 * 1024,
     };
@@ -1663,6 +1669,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         seed_scale,
         seed_mode,
         per_parameter_grad_normalization,
+        selection: selection_report,
         oracle_validation,
     };
     write_pretty_json(&report_output, &report)?;
@@ -1704,10 +1711,6 @@ struct GpuDirectBasisRunRequest<'a> {
     shared_base_output: &'a Path,
     adapter_bank_output: &'a Path,
     adapter_output_dir: &'a Path,
-    python: &'a Path,
-    gpu_upstream_root: Option<&'a PathBuf>,
-    gpu_device: String,
-    gpu_payload_output: PathBuf,
     sources: &'a [super::sources::Hyper2dScratchSource],
     splits: &'a [Hyper2dE2eSplit],
     hashgrid: burn_automata_kernels::HashGridConfig,
@@ -1800,14 +1803,17 @@ fn validate_direct_basis_burn_wgpu_preflight(
         .loss_config
         .image_size
         .saturating_mul(train_config.loss_config.image_size);
-    let estimated_graph_bytes = estimate_direct_basis_wgpu_graph_bytes(
-        max_phase_batch_size,
-        max_training_particles,
-        base_config.state_dims,
-        target_pixels,
-        train_config.rollout_steps,
-        train_config.tbptt_chunk_steps,
-    );
+    let estimated_graph_bytes =
+        estimate_direct_basis_wgpu_graph_bytes(DirectBasisWgpuGraphEstimateConfig {
+            batch_size: max_phase_batch_size,
+            particles: max_training_particles,
+            state_dims: base_config.state_dims,
+            target_pixels,
+            rollout_steps: train_config.rollout_steps,
+            tbptt_chunk_steps: train_config.tbptt_chunk_steps,
+            max_dense_chunk_floats: train_config.max_dense_chunk_floats,
+            max_splat_chunk_floats: train_config.max_splat_chunk_floats,
+        });
     let estimated_target_cache_bytes = estimate_direct_basis_target_cache_bytes(
         train_examples.len().saturating_add(holdout_examples.len()),
         target_pixels,
@@ -1857,8 +1863,8 @@ fn validate_direct_basis_burn_wgpu_preflight(
     };
     if !report.dense_train_particle_cap_passed {
         return Err(std::io::Error::other(format!(
-            "Burn/WGPU direct-basis dense training is capped at {} particles; requested {}. \
-Use staged lower-particle training or a fused/tiled backward backend. 2048-particle runs are validation-only on this path.",
+            "Burn direct-basis dense training is capped at {} particles for this config; requested {}. \
+Increase max_dense_train_particles only with tight TBPTT/chunk caps, or use staged lower-particle training.",
             report.max_dense_train_particles, report.max_training_particles
         ))
         .into());
@@ -1893,34 +1899,96 @@ fn direct_basis_max_particles(examples: &[DirectBasisExample], fallback: usize) 
         .unwrap_or(fallback)
 }
 
-fn estimate_direct_basis_wgpu_graph_bytes(
+struct DirectBasisWgpuGraphEstimateConfig {
     batch_size: usize,
     particles: usize,
     state_dims: usize,
     target_pixels: usize,
     rollout_steps: usize,
     tbptt_chunk_steps: usize,
-) -> u64 {
+    max_dense_chunk_floats: usize,
+    max_splat_chunk_floats: usize,
+}
+
+fn estimate_direct_basis_wgpu_graph_bytes(config: DirectBasisWgpuGraphEstimateConfig) -> u64 {
+    let DirectBasisWgpuGraphEstimateConfig {
+        batch_size,
+        particles,
+        state_dims,
+        target_pixels,
+        rollout_steps,
+        tbptt_chunk_steps,
+        max_dense_chunk_floats,
+        max_splat_chunk_floats,
+    } = config;
     let batch = batch_size.max(1) as u128;
     let particles = particles.max(1) as u128;
     let state_dims = state_dims.max(1) as u128;
-    let pixels = target_pixels.max(1) as u128;
     let tbptt = tbptt_chunk_steps.max(1).min(rollout_steps.max(1)) as u128;
-    let dense_graph_bytes = batch
-        .saturating_mul(particles)
+    let dense_query_rows = estimate_dense_query_chunk_rows(
+        batch_size,
+        particles as usize,
+        state_dims as usize,
+        max_dense_chunk_floats,
+    ) as u128;
+    let splat_pixel_rows = estimate_splat_pixel_chunk_rows(
+        batch_size,
+        particles as usize,
+        target_pixels,
+        max_splat_chunk_floats,
+    ) as u128;
+    let bytes_per_float = std::mem::size_of::<f32>() as u128;
+    let dense_tile_bytes = batch
+        .saturating_mul(dense_query_rows)
         .saturating_mul(particles)
         .saturating_mul(state_dims)
-        .saturating_mul(tbptt)
-        .saturating_mul(std::mem::size_of::<f32>() as u128)
-        .saturating_mul(6);
-    let splat_graph_bytes = batch
-        .saturating_mul(pixels)
+        .saturating_mul(bytes_per_float)
+        .saturating_mul(24);
+    let dense_output_bytes = batch
         .saturating_mul(particles)
-        .saturating_mul(std::mem::size_of::<f32>() as u128)
-        .saturating_mul(8);
+        .saturating_mul(state_dims.saturating_mul(4).saturating_add(8))
+        .saturating_mul(bytes_per_float)
+        .saturating_mul(4);
+    let dense_graph_bytes = dense_tile_bytes
+        .saturating_add(dense_output_bytes)
+        .saturating_mul(tbptt);
+    let splat_graph_bytes = batch
+        .saturating_mul(splat_pixel_rows)
+        .saturating_mul(particles)
+        .saturating_mul(bytes_per_float)
+        .saturating_mul(16);
     dense_graph_bytes
         .saturating_add(splat_graph_bytes)
         .min(u64::MAX as u128) as u64
+}
+
+fn estimate_dense_query_chunk_rows(
+    batches: usize,
+    rows: usize,
+    state_dims: usize,
+    max_floats: usize,
+) -> usize {
+    let denominator = batches
+        .max(1)
+        .saturating_mul(rows.max(1))
+        .saturating_mul(state_dims.max(1))
+        .saturating_mul(2)
+        .max(1);
+    (max_floats / denominator).max(1).min(rows.max(1))
+}
+
+fn estimate_splat_pixel_chunk_rows(
+    batches: usize,
+    particles: usize,
+    pixels: usize,
+    max_floats: usize,
+) -> usize {
+    let denominator = batches
+        .max(1)
+        .saturating_mul(particles.max(1))
+        .saturating_mul(2)
+        .max(1);
+    (max_floats / denominator).max(1).min(pixels.max(1))
 }
 
 fn estimate_direct_basis_target_cache_bytes(target_count: usize, target_pixels: usize) -> u64 {
@@ -2065,7 +2133,7 @@ fn run_burn_wgpu_direct_basis(
         request.eval_examples,
         request.eval_seed ^ 0x90_1d_2d,
     )?;
-    let mut burn_report = burn_wgpu::train_direct_basis_burn_wgpu(
+    let mut burn_report = dense::train_direct_basis_burn_wgpu(
         &mut base,
         &mut train_examples,
         &mut holdout_examples,
@@ -2165,13 +2233,7 @@ fn run_burn_wgpu_direct_basis(
         training_device: TrainingDeviceArg::Gpu,
         gpu_training: Some(CliHyper2dDirectBasisGpuTrainingReport {
             backend: burn_report.backend.to_string(),
-            python: None,
             device: burn_report.device,
-            upstream_root: None,
-            payload_output: None,
-            gpu_name: None,
-            torch_version: None,
-            cuda_version: None,
             metrics: burn_report.metrics,
         }),
         npa_config: base.config.clone(),
@@ -2240,346 +2302,6 @@ fn run_burn_wgpu_direct_basis(
         request.adapter_bank_output.display()
     );
     Ok(())
-}
-
-fn run_python_gpu_direct_basis(
-    request: GpuDirectBasisRunRequest<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/train_hyper2d_direct_basis_gpu.py");
-    let sources_output = request.output_dir.join("gpu_direct_basis_sources.json");
-    write_gpu_sources(&sources_output, request.sources, request.splits)?;
-    let mut command = std::process::Command::new(request.python);
-    command
-        .arg(&script)
-        .arg("--sources-json")
-        .arg(&sources_output)
-        .arg("--payload-output")
-        .arg(&request.gpu_payload_output)
-        .arg("--device")
-        .arg(&request.gpu_device)
-        .arg("--steps")
-        .arg(request.steps.to_string())
-        .arg("--report-interval")
-        .arg(request.report_interval.to_string())
-        .arg("--example-batch-size")
-        .arg(request.example_batch_size.to_string())
-        .arg("--rollout-particles")
-        .arg(request.rollout_particles.to_string())
-        .arg("--rollout-steps")
-        .arg(request.rollout_steps.to_string())
-        .arg("--update-prob")
-        .arg(request.update_prob.to_string())
-        .arg("--seed")
-        .arg(request.seed.to_string())
-        .arg("--base-seed")
-        .arg(request.base_seed.to_string())
-        .arg("--seed-scale")
-        .arg(request.seed_scale.to_string())
-        .arg("--seed-mode")
-        .arg(upstream_seed_mode(request.seed_mode)?)
-        .arg("--adapter-rank")
-        .arg(request.adapter_rank.to_string())
-        .arg("--adapter-alpha")
-        .arg(request.adapter_alpha.to_string())
-        .arg("--target-points")
-        .arg(request.target_points.to_string())
-        .arg("--target-threshold")
-        .arg(request.target_threshold.to_string())
-        .arg("--image-size")
-        .arg(request.loss_config.image_size.to_string())
-        .arg("--splat-sigma")
-        .arg(request.loss_config.sigma.to_string())
-        .arg("--splat-loss-weight")
-        .arg(request.loss_config.splat_loss_weight.to_string())
-        .arg("--color-loss-weight")
-        .arg(request.loss_config.color_loss_weight.to_string())
-        .arg("--density-loss-weight")
-        .arg(request.loss_config.density_loss_weight.to_string())
-        .arg("--displacement-regularizer-weight")
-        .arg(
-            request
-                .loss_config
-                .displacement_regularizer_weight
-                .to_string(),
-        )
-        .arg("--overflow-regularizer-weight")
-        .arg(request.loss_config.overflow_regularizer_weight.to_string())
-        .arg("--bound-regularizer-weight")
-        .arg(request.loss_config.bound_regularizer_weight.to_string())
-        .arg("--base-learning-rate")
-        .arg(request.base_sgd.learning_rate.to_string())
-        .arg("--base-weight-decay")
-        .arg(request.base_sgd.weight_decay.to_string())
-        .arg("--base-grad-clip-norm")
-        .arg(request.base_sgd.grad_clip_norm.to_string())
-        .arg("--adapter-learning-rate")
-        .arg(request.adapter_sgd.learning_rate.to_string())
-        .arg("--adapter-weight-decay")
-        .arg(request.adapter_sgd.weight_decay.to_string())
-        .arg("--adapter-grad-clip-norm")
-        .arg(request.adapter_sgd.grad_clip_norm.to_string())
-        .arg("--adapter-l2")
-        .arg(request.adapter_l2.to_string())
-        .arg("--holdout-adapter-steps")
-        .arg(request.holdout_adapter_steps.to_string())
-        .arg("--holdout-adapter-batch-size")
-        .arg(request.holdout_adapter_batch_size.to_string())
-        .arg("--eval-examples")
-        .arg(request.eval_examples.to_string())
-        .arg("--eval-seed")
-        .arg(request.eval_seed.to_string());
-    if let Some(upstream_root) = request.gpu_upstream_root {
-        command.arg("--upstream-root").arg(upstream_root);
-    }
-    if let Some(target_image_size) = request.target_image_size {
-        command
-            .arg("--target-image-size")
-            .arg(target_image_size.to_string());
-    }
-    if request.per_parameter_grad_normalization {
-        command.arg("--normalize-grads");
-    } else {
-        command.arg("--no-normalize-grads");
-    }
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "GPU direct-basis training failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        ))
-        .into());
-    }
-    let payload_text = std::fs::read_to_string(&request.gpu_payload_output)?;
-    let metrics: serde_json::Value = serde_json::from_str(&payload_text)?;
-    let payload: GpuDirectBasisPayload = serde_json::from_value(metrics.clone())?;
-    let config = NpaConfig::growing_2d();
-    let base = NpaModel {
-        config: config.clone(),
-        weights: NpaWeights {
-            w1: payload.base.w1,
-            b1: payload.base.b1,
-            w2: payload.base.w2,
-            b2: payload.base.b2,
-        },
-    };
-    base.validate()?;
-    let base_manifest = BpkModelManifest::from_model(
-        &base,
-        request.hashgrid.clone(),
-        Some(format!(
-            "trained-rust:hyper2d-direct-basis:gpu:sources={}:steps={}",
-            payload.train_examples, request.steps
-        )),
-    );
-    crate::import::save_manifest(request.shared_base_output, &base_manifest)?;
-    let adapter_reports = save_gpu_direct_basis_adapters(
-        &payload.adapters,
-        &base_manifest,
-        request.shared_base_output,
-        request.adapter_output_dir,
-        request.adapter_rank,
-        request.adapter_alpha,
-    )?;
-    let adapter_bank = DirectBasisAdapterBankManifest {
-        base_model: request.shared_base_output.display().to_string(),
-        adapter_rank: request.adapter_rank,
-        adapter_alpha: request.adapter_alpha,
-        entries: adapter_reports.clone(),
-    };
-    write_pretty_json(request.adapter_bank_output, &adapter_bank)?;
-    let report = CliHyper2dDirectBasisTrainingReport {
-        experiment_config: request.experiment_config.clone(),
-        preset: request.preset,
-        target_images: request
-            .target_images
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-        target_image_dirs: request
-            .target_image_dirs
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-        target_image_recursive: request.target_image_recursive,
-        image_extensions: request.image_extensions,
-        catalog: request.catalog.map(|path| path.display().to_string()),
-        catalog_group: request.catalog_group,
-        catalog_targets: request.catalog_targets,
-        omnisvg: request.omnisvg,
-        source_limit: request.source_limit,
-        holdout_targets: request.holdout_targets,
-        holdout_stride: request.holdout_stride,
-        holdout_offset: request.holdout_offset,
-        output_dir: request.output_dir.display().to_string(),
-        report_output: request.report_output.display().to_string(),
-        shared_base_output: request.shared_base_output.display().to_string(),
-        adapter_bank_output: request.adapter_bank_output.display().to_string(),
-        adapter_output_dir: request.adapter_output_dir.display().to_string(),
-        requested_training_device: request.requested_training_device,
-        training_device: TrainingDeviceArg::Gpu,
-        gpu_training: Some(CliHyper2dDirectBasisGpuTrainingReport {
-            backend: payload.backend,
-            python: Some(request.python.display().to_string()),
-            device: payload.device,
-            upstream_root: payload.upstream_root,
-            payload_output: Some(request.gpu_payload_output.display().to_string()),
-            gpu_name: payload.gpu_name,
-            torch_version: payload.torch_version,
-            cuda_version: payload.cuda_version,
-            metrics,
-        }),
-        npa_config: config,
-        hashgrid: request.hashgrid,
-        target_loss_config: request.loss_config,
-        adapter_rank: request.adapter_rank,
-        adapter_alpha: request.adapter_alpha,
-        train_examples: payload.train_examples,
-        holdout_examples: payload.holdout_examples,
-        steps: request.steps,
-        report_interval: request.report_interval,
-        example_batch_size: request.example_batch_size,
-        tbptt_chunk_steps: request.tbptt_chunk_steps,
-        rollout_particles: request.rollout_particles,
-        rollout_steps: request.rollout_steps,
-        update_prob: request.update_prob,
-        seed: request.seed,
-        seed_scale: request.seed_scale,
-        seed_mode: request.seed_mode,
-        per_parameter_grad_normalization: request.per_parameter_grad_normalization,
-        base_sgd: request.base_sgd,
-        adapter_sgd: request.adapter_sgd,
-        train_refine_adapter_sgd: request.train_refine_adapter_sgd,
-        holdout_adapter_sgd: request.holdout_adapter_sgd,
-        adapter_l2_weight: request.adapter_l2,
-        train_adapter_refine_steps: request.train_adapter_refine_steps,
-        train_adapter_refine_batch_size: if request.train_adapter_refine_batch_size == 0 {
-            request.example_batch_size
-        } else {
-            request.train_adapter_refine_batch_size
-        },
-        holdout_adapter_steps: request.holdout_adapter_steps,
-        holdout_adapter_batch_size: request.holdout_adapter_batch_size,
-        eval_examples: request.eval_examples,
-        eval_interval: request.eval_interval,
-        eval_batch_size: request.eval_batch_size,
-        system_memory_budget_gb: request.system_memory_budget_gb,
-        gpu_memory_budget_gb: request.gpu_memory_budget_gb,
-        max_dense_train_particles: request.max_dense_train_particles,
-        max_dense_chunk_floats: request.max_dense_chunk_floats,
-        max_splat_chunk_floats: request.max_splat_chunk_floats,
-        initial_train_loss: payload.initial_train_loss,
-        final_train_loss: payload.final_train_loss,
-        initial_holdout_loss: payload.initial_holdout_loss,
-        final_holdout_loss: payload.final_holdout_loss,
-        best_train_loss: payload.best_train_loss,
-        best_train_step: payload.best_train_step,
-        history: payload.history,
-        train_refine_history: Vec::new(),
-        holdout_history: payload.holdout_history,
-        oracle_validation: None,
-        adapters: adapter_reports,
-    };
-    write_pretty_json(request.report_output, &report)?;
-    println!(
-        "wrote {} train={} holdout={} shared_base={} adapter_bank={} backend=gpu",
-        request.report_output.display(),
-        report.train_examples,
-        report.holdout_examples,
-        request.shared_base_output.display(),
-        request.adapter_bank_output.display()
-    );
-    Ok(())
-}
-
-fn write_gpu_sources(
-    path: &Path,
-    sources: &[super::sources::Hyper2dScratchSource],
-    splits: &[Hyper2dE2eSplit],
-) -> Result<(), Box<dyn std::error::Error>> {
-    if sources.len() != splits.len() {
-        return Err(std::io::Error::other("source split count does not match sources").into());
-    }
-    let manifest = DirectBasisSourceManifest {
-        sources: sources
-            .iter()
-            .zip(splits)
-            .map(|(source, split)| {
-                let path = std::fs::canonicalize(&source.condition_path)
-                    .unwrap_or_else(|_| source.condition_path.clone());
-                DirectBasisSourceEntry {
-                    slug: source.slug.clone(),
-                    split: split.label(),
-                    title: source.title.clone(),
-                    group: source.group.clone(),
-                    path: path.display().to_string(),
-                }
-            })
-            .collect(),
-    };
-    write_pretty_json(path, &manifest)
-}
-
-fn save_gpu_direct_basis_adapters(
-    adapters: &[GpuDirectBasisAdapter],
-    base_manifest: &BpkModelManifest,
-    base_model_path: &Path,
-    adapter_dir: &Path,
-    adapter_rank: usize,
-    adapter_alpha: f32,
-) -> Result<Vec<CliHyper2dDirectBasisAdapterReport>, Box<dyn std::error::Error>> {
-    let mut reports = Vec::with_capacity(adapters.len());
-    for adapter_payload in adapters {
-        let adapter = NpaLowRankAdapter::from_parameter_vector(
-            &base_manifest.config,
-            adapter_rank,
-            adapter_alpha,
-            adapter_payload.adapter.clone(),
-        )?;
-        let slug = sanitize_slug(&adapter_payload.slug);
-        let adapter_path = adapter_dir.join(format!("{slug}.adapter.json"));
-        let adapter_manifest = BpkAdapterManifest::from_adapter(
-            base_manifest,
-            Some(base_model_path.display().to_string()),
-            adapter.clone(),
-            Some(format!(
-                "hyper2d-direct-basis-gpu:{}",
-                adapter_payload.condition
-            )),
-        )?;
-        crate::import::save_adapter_manifest(&adapter_path, &adapter_manifest)?;
-        reports.push(CliHyper2dDirectBasisAdapterReport {
-            slug: adapter_payload.slug.clone(),
-            split: match adapter_payload.split.as_str() {
-                "holdout" => "holdout",
-                _ => "train",
-            },
-            title: adapter_payload.title.clone(),
-            group: adapter_payload.group.clone(),
-            condition: adapter_payload.condition.clone(),
-            adapter_output: adapter_path.display().to_string(),
-            target_source_width: adapter_payload.target_source_width,
-            target_source_height: adapter_payload.target_source_height,
-            target_points: adapter_payload.target_points,
-            last_train_loss: adapter_payload.last_train_loss,
-            adapter_parameter_count: adapter.parameter_count(),
-        });
-    }
-    Ok(reports)
-}
-
-fn upstream_seed_mode(seed_mode: ParticleSeed) -> Result<&'static str, Box<dyn std::error::Error>> {
-    match seed_mode {
-        ParticleSeed::Gaussian => Ok("gaussian"),
-        ParticleSeed::Uniform => Ok("uniform"),
-        ParticleSeed::UniformCircle => Ok("uniform_circle"),
-        other => Err(std::io::Error::other(format!(
-            "direct-basis GPU training supports gaussian, uniform, and uniform-circle seeds, got {other:?}"
-        ))
-        .into()),
-    }
 }
 
 struct DirectBasisArgCheck {
@@ -2676,7 +2398,7 @@ fn validate_direct_basis_args(
 }
 
 fn validate_oracle_config(
-    config: DirectBasisOracleConfig,
+    config: &DirectBasisOracleConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if config.train_examples == 0 && config.holdout_examples == 0 {
         return Ok(());
@@ -2700,6 +2422,22 @@ fn validate_oracle_config(
     {
         return Err(std::io::Error::other(
             "oracle optimizer settings must be finite and non-negative",
+        )
+        .into());
+    }
+    if matches!(config.backend, DirectBasisOracleBackendArg::Cuda)
+        && config.gpu_device.trim().is_empty()
+    {
+        return Err(std::io::Error::other("oracle.gpu_device must not be empty").into());
+    }
+    if config.gpu_parallel_jobs == 0 {
+        return Err(
+            std::io::Error::other("oracle.gpu_parallel_jobs must be greater than zero").into(),
+        );
+    }
+    if config.gpu_parallel_jobs > 32 {
+        return Err(std::io::Error::other(
+            "oracle.gpu_parallel_jobs must be <= 32 to avoid accidental oversubscription",
         )
         .into());
     }
@@ -2777,6 +2515,134 @@ fn select_direct_basis_adapter_bank_oracle_entries(
         .into_iter()
         .map(|idx| entries[idx].clone())
         .collect()
+}
+
+fn select_direct_basis_adapter_bank_entries_with_manifest(
+    train_entries: &[DirectBasisAdapterBankIndexedEntry],
+    holdout_entries: &[DirectBasisAdapterBankIndexedEntry],
+    train_requested: usize,
+    holdout_requested: usize,
+    selection_seed: u64,
+    selection_manifest_path: Option<&Path>,
+) -> Result<DirectBasisAdapterBankSelectedEntries, Box<dyn std::error::Error>> {
+    let (train_selected, holdout_selected, replayed_manifest) =
+        if let Some(path) = selection_manifest_path.filter(|path| path.exists()) {
+            let manifest = read_direct_basis_adapter_bank_selection_manifest(path)?;
+            (
+                replay_direct_basis_adapter_bank_selection(train_entries, &manifest.train)?,
+                replay_direct_basis_adapter_bank_selection(holdout_entries, &manifest.holdout)?,
+                true,
+            )
+        } else {
+            (
+                select_direct_basis_adapter_bank_oracle_entries(
+                    train_entries,
+                    train_requested,
+                    selection_seed,
+                ),
+                select_direct_basis_adapter_bank_oracle_entries(
+                    holdout_entries,
+                    holdout_requested,
+                    selection_seed ^ 0x90_1d_2d,
+                ),
+                false,
+            )
+        };
+    let manifest = direct_basis_adapter_bank_selection_manifest(
+        selection_seed,
+        &train_selected,
+        &holdout_selected,
+    );
+    if !replayed_manifest && let Some(path) = selection_manifest_path {
+        write_pretty_json(path, &manifest)?;
+    }
+    let report = DirectBasisAdapterBankSelectionReport {
+        selection_seed,
+        selection_manifest: selection_manifest_path.map(|path| path.display().to_string()),
+        replayed_manifest,
+        train_requested,
+        holdout_requested,
+        train_selected: train_selected.len(),
+        holdout_selected: holdout_selected.len(),
+        train: manifest.train,
+        holdout: manifest.holdout,
+    };
+    Ok((train_selected, holdout_selected, report))
+}
+
+fn read_direct_basis_adapter_bank_selection_manifest(
+    path: &Path,
+) -> Result<DirectBasisAdapterBankSelectionManifest, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let manifest: DirectBasisAdapterBankSelectionManifest = serde_json::from_str(&text)?;
+    Ok(manifest)
+}
+
+fn direct_basis_adapter_bank_selection_manifest(
+    selection_seed: u64,
+    train: &[DirectBasisAdapterBankIndexedEntry],
+    holdout: &[DirectBasisAdapterBankIndexedEntry],
+) -> DirectBasisAdapterBankSelectionManifest {
+    DirectBasisAdapterBankSelectionManifest {
+        selection_seed,
+        train: direct_basis_adapter_bank_selection_entries(train),
+        holdout: direct_basis_adapter_bank_selection_entries(holdout),
+    }
+}
+
+fn direct_basis_adapter_bank_selection_entries(
+    entries: &[DirectBasisAdapterBankIndexedEntry],
+) -> Vec<DirectBasisAdapterBankSelectionEntry> {
+    entries
+        .iter()
+        .map(
+            |(bank_split_index, entry)| DirectBasisAdapterBankSelectionEntry {
+                split: entry.split.clone(),
+                slug: entry.slug.clone(),
+                bank_split_index: *bank_split_index,
+            },
+        )
+        .collect()
+}
+
+fn replay_direct_basis_adapter_bank_selection(
+    entries: &[DirectBasisAdapterBankIndexedEntry],
+    selection: &[DirectBasisAdapterBankSelectionEntry],
+) -> Result<Vec<DirectBasisAdapterBankIndexedEntry>, Box<dyn std::error::Error>> {
+    let mut by_key = HashMap::<(String, String), Vec<DirectBasisAdapterBankIndexedEntry>>::new();
+    for entry in entries {
+        by_key
+            .entry((entry.1.split.clone(), entry.1.slug.clone()))
+            .or_default()
+            .push(entry.clone());
+    }
+    let mut selected = Vec::with_capacity(selection.len());
+    for row in selection {
+        let key = (row.split.clone(), row.slug.clone());
+        let candidates = by_key.get(&key).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "selection manifest row {}:{} is not present in the adapter bank",
+                row.split, row.slug
+            ))
+        })?;
+        if let Some(exact) = candidates
+            .iter()
+            .find(|(bank_split_index, _)| *bank_split_index == row.bank_split_index)
+        {
+            selected.push(exact.clone());
+            continue;
+        }
+        if candidates.len() == 1 {
+            selected.push(candidates[0].clone());
+            continue;
+        }
+        return Err(std::io::Error::other(format!(
+            "selection manifest row {}:{} is ambiguous without bank_split_index {}",
+            row.split, row.slug, row.bank_split_index
+        ))
+        .into());
+    }
+    Ok(selected)
 }
 
 fn load_direct_basis_examples_from_adapter_bank_entries(
@@ -3222,6 +3088,55 @@ mod tests {
     }
 
     #[test]
+    fn adapter_bank_selection_manifest_replays_split_slug_rows() {
+        let train = vec![
+            (0, test_adapter_bank_entry("same", "train")),
+            (1, test_adapter_bank_entry("same", "train")),
+            (2, test_adapter_bank_entry("other", "train")),
+        ];
+        let holdout = vec![(0, test_adapter_bank_entry("same", "holdout"))];
+        let manifest = DirectBasisAdapterBankSelectionManifest {
+            selection_seed: 7,
+            train: vec![DirectBasisAdapterBankSelectionEntry {
+                split: "train".to_string(),
+                slug: "same".to_string(),
+                bank_split_index: 1,
+            }],
+            holdout: vec![DirectBasisAdapterBankSelectionEntry {
+                split: "holdout".to_string(),
+                slug: "same".to_string(),
+                bank_split_index: 0,
+            }],
+        };
+
+        let selected_train =
+            replay_direct_basis_adapter_bank_selection(&train, &manifest.train).unwrap();
+        let selected_holdout =
+            replay_direct_basis_adapter_bank_selection(&holdout, &manifest.holdout).unwrap();
+
+        assert_eq!(selected_train.len(), 1);
+        assert_eq!(selected_train[0].0, 1);
+        assert_eq!(selected_holdout.len(), 1);
+        assert_eq!(selected_holdout[0].1.split, "holdout");
+    }
+
+    #[test]
+    fn adapter_bank_selection_manifest_rejects_missing_rows() {
+        let entries = vec![(0, test_adapter_bank_entry("a", "train"))];
+        let selection = vec![DirectBasisAdapterBankSelectionEntry {
+            split: "train".to_string(),
+            slug: "missing".to_string(),
+            bank_split_index: 0,
+        }];
+
+        let err = replay_direct_basis_adapter_bank_selection(&entries, &selection)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("not present"));
+    }
+
+    #[test]
     fn direct_basis_arg_validation_rejects_empty_rollouts() {
         let err = validate_direct_basis_args(DirectBasisArgCheck {
             adapter_rank: 1,
@@ -3233,7 +3148,7 @@ mod tests {
             eval_batch_size: 1,
             system_memory_budget_gb: Some(24.0),
             gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
-            max_dense_train_particles: 1024,
+            max_dense_train_particles: 2048,
             max_dense_chunk_floats: 4 * 1024 * 1024,
             max_splat_chunk_floats: 4 * 1024 * 1024,
             base_learning_rate: 1.0e-4,
@@ -3249,10 +3164,47 @@ mod tests {
     }
 
     #[test]
-    fn burn_wgpu_preflight_rejects_2048_particle_dense_training() {
+    fn burn_wgpu_preflight_accepts_2048_particle_tiled_training() {
         let base_config = NpaConfig::growing_2d();
         let train_example = test_direct_basis_example(2048, &base_config);
-        let config = test_direct_basis_train_config(1, 2048);
+        let config = DirectBasisTrainConfig {
+            tbptt_chunk_steps: 1,
+            loss_config: Target2dLossConfig {
+                image_size: 128,
+                ..Target2dLossConfig::default()
+            },
+            max_dense_train_particles: 2048,
+            max_dense_chunk_floats: 512 * 1024,
+            max_splat_chunk_floats: 512 * 1024,
+            ..test_direct_basis_train_config(1, 2048)
+        };
+        let report = validate_direct_basis_burn_wgpu_preflight(
+            &[train_example],
+            &[],
+            &base_config,
+            config,
+            DirectBasisTrainConfig { steps: 0, ..config },
+            DirectBasisTrainConfig { steps: 0, ..config },
+        )
+        .unwrap();
+
+        assert!(report.training_requested);
+        assert!(report.dense_train_particle_cap_passed);
+        assert!(report.memory_budget_passed);
+        assert!(report.gpu_memory_budget_passed);
+        assert_eq!(report.max_training_particles, 2048);
+        assert_eq!(report.max_dense_train_particles, 2048);
+        assert_eq!(report.tbptt_chunk_steps, 1);
+    }
+
+    #[test]
+    fn burn_wgpu_preflight_rejects_2048_when_particle_cap_is_1024() {
+        let base_config = NpaConfig::growing_2d();
+        let train_example = test_direct_basis_example(2048, &base_config);
+        let config = DirectBasisTrainConfig {
+            max_dense_train_particles: 1024,
+            ..test_direct_basis_train_config(1, 2048)
+        };
         let err = validate_direct_basis_burn_wgpu_preflight(
             &[train_example],
             &[],
@@ -3276,6 +3228,8 @@ mod tests {
                 image_size: 96,
                 ..Target2dLossConfig::default()
             },
+            max_dense_chunk_floats: 512 * 1024,
+            max_splat_chunk_floats: 512 * 1024,
             ..test_direct_basis_train_config(1, 384)
         };
         let report = validate_direct_basis_burn_wgpu_preflight(
@@ -3302,6 +3256,7 @@ mod tests {
             .collect::<Vec<_>>();
         let config = DirectBasisTrainConfig {
             example_batch_size: 4,
+            gpu_memory_budget_gb: Some(0.1),
             ..test_direct_basis_train_config(1, 512)
         };
         let err = validate_direct_basis_burn_wgpu_preflight(
@@ -3327,6 +3282,7 @@ mod tests {
                 image_size: 96,
                 ..Target2dLossConfig::default()
             },
+            gpu_memory_budget_gb: Some(0.1),
             ..test_direct_basis_train_config(1, 512)
         };
         let err = validate_direct_basis_burn_wgpu_preflight(
@@ -3426,29 +3382,27 @@ mod tests {
             config_value_enum(
                 "gpu.backend",
                 config.gpu.backend,
-                Hyper2dDirectBasisGpuBackendArg::UpstreamPython,
+                Hyper2dDirectBasisGpuBackendArg::BurnWgpu,
             )
             .unwrap(),
             Hyper2dDirectBasisGpuBackendArg::BurnWgpu
         ));
-        assert!(matches!(
-            config_value_enum(
+        assert!(
+            config_value_enum::<Hyper2dDirectBasisGpuBackendArg>(
                 "gpu.backend",
                 Some("legacy-upstream-python".to_string()),
                 Hyper2dDirectBasisGpuBackendArg::BurnWgpu,
             )
-            .unwrap(),
-            Hyper2dDirectBasisGpuBackendArg::UpstreamPython
-        ));
-        assert!(matches!(
-            config_value_enum(
+            .is_err()
+        );
+        assert!(
+            config_value_enum::<Hyper2dDirectBasisGpuBackendArg>(
                 "gpu.backend",
                 Some("upstream-python".to_string()),
                 Hyper2dDirectBasisGpuBackendArg::BurnWgpu,
             )
-            .unwrap(),
-            Hyper2dDirectBasisGpuBackendArg::UpstreamPython
-        ));
+            .is_err()
+        );
         assert!(matches!(
             config_value_enum(
                 "rollout.seed_mode",
@@ -3481,6 +3435,85 @@ mod tests {
                 toml::from_str::<DirectBasisExperimentConfig>(&text)
                     .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
             }
+        }
+    }
+
+    #[test]
+    fn oracle_backend_parser_accepts_burn_names_only() {
+        assert_eq!(
+            config_value_enum(
+                "oracle.backend",
+                Some("burn-wgpu".to_string()),
+                DirectBasisOracleBackendArg::Cpu,
+            )
+            .unwrap(),
+            DirectBasisOracleBackendArg::Wgpu
+        );
+        assert_eq!(
+            config_value_enum(
+                "oracle.backend",
+                Some("burn-cuda".to_string()),
+                DirectBasisOracleBackendArg::Cpu,
+            )
+            .unwrap(),
+            DirectBasisOracleBackendArg::Cuda
+        );
+        assert!(
+            config_value_enum::<DirectBasisOracleBackendArg>(
+                "oracle.backend",
+                Some("legacy-upstream-python".to_string()),
+                DirectBasisOracleBackendArg::Cpu,
+            )
+            .is_err()
+        );
+        assert!(
+            config_value_enum::<DirectBasisOracleBackendArg>(
+                "oracle.backend",
+                Some("gpu".to_string()),
+                DirectBasisOracleBackendArg::Cpu,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn oracle_config_rejects_invalid_parallel_jobs() {
+        let mut config = DirectBasisOracleConfig {
+            backend: DirectBasisOracleBackendArg::Cuda,
+            gpu_device: "cuda:0".to_string(),
+            resume_existing: false,
+            gpu_parallel_jobs: 0,
+            train_examples: 1,
+            holdout_examples: 0,
+            epochs: 1,
+            repetitions: 1,
+            report_interval: 1,
+            batch_size: 1,
+            pool_size: 1,
+            learning_rate: 1.0e-3,
+            weight_decay: 0.0,
+            grad_clip_norm: 1.0,
+            seed: 42,
+        };
+        assert!(validate_oracle_config(&config).is_err());
+        config.gpu_parallel_jobs = 1;
+        assert!(validate_oracle_config(&config).is_ok());
+        config.gpu_parallel_jobs = 33;
+        assert!(validate_oracle_config(&config).is_err());
+    }
+
+    fn test_adapter_bank_entry(slug: &str, split: &str) -> DirectBasisAdapterBankLoadEntry {
+        DirectBasisAdapterBankLoadEntry {
+            slug: slug.to_string(),
+            split: split.to_string(),
+            title: None,
+            group: None,
+            condition: format!("{slug}.png"),
+            adapter_output: format!("{slug}.adapter.json"),
+            target_source_width: 0,
+            target_source_height: 0,
+            target_points: 0,
+            last_train_loss: None,
         }
     }
 
@@ -3524,7 +3557,7 @@ mod tests {
             eval_seed: 42,
             system_memory_budget_gb: Some(24.0),
             gpu_memory_budget_gb: Some(DEFAULT_WGPU_VRAM_BUDGET_GB),
-            max_dense_train_particles: 1024,
+            max_dense_train_particles: 2048,
             max_dense_chunk_floats: 4 * 1024 * 1024,
             max_splat_chunk_floats: 4 * 1024 * 1024,
         }
