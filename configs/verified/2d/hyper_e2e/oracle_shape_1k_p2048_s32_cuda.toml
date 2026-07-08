@@ -1,18 +1,17 @@
-# Scale diagnostic for the canonical online HyperNPA path. This config now uses
-# the oracle-shaped 32..64 step curriculum and sample-keyed state pool promoted
-# by the 1k staged configs; it should only be run after the 1k p512 run shows
-# improving oracle-scale validation.
+# Bounded oracle-shape probe. Use after 512p/1024p runs are stable; this config
+# intentionally keeps batch and step count small while training at the 2048p
+# particle scale used by local oracle wrappers.
 preset = "growing-2d"
 
 [source]
-source_limit = 10000
+source_limit = 1000
 
 [source.omnisvg]
 dataset = "illustration"
 split = "train"
 cache_dir = "data/omnisvg"
 offset = 0
-limit = 10000
+limit = 1000
 page_size = 100
 download = false
 refresh = false
@@ -23,7 +22,7 @@ holdout_stride = 20
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b2_p512s32to64_pool_rank16_cosine_cuda"
+output_dir = "artifacts/hyper2d_e2e_rollout_omnisvg_1k_oracle_shape_p2048_s32to64_rank16_cuda_probe"
 
 [condition]
 encoder = "dino-vits-full-tokens"
@@ -44,21 +43,21 @@ output_activation = "tanh"
 [training]
 backend = "gpu"
 objective = "target2d-rollout-image-loss"
-steps = 3000
-report_interval = 100
-example_batch_size = 2
+steps = 500
+report_interval = 50
+example_batch_size = 1
 tbptt_chunk_steps = 4
 loss_on_final_chunk_only = false
 tbptt_loss_mode = "endpoint-weighted"
 tbptt_intermediate_loss_weight = 0.25
 tbptt_final_loss_weight = 1.0
 use_particle_pool = true
-pool_slots_per_example = 2
+pool_slots_per_example = 1
 inject_seed_interval = 64
 pre_rollout_steps = 0
 target2d_loss_backend = "tiled-adjoint"
 perception_backend = "auto"
-max_dense_train_particles = 512
+max_dense_train_particles = 2048
 system_memory_budget_gb = 88.0
 gpu_memory_budget_gb = 72.0
 seed = 42
@@ -79,7 +78,7 @@ flow_source_scale = 1.0
 init_scale = 1.0e-3
 
 [rollout]
-particles = 512
+particles = 2048
 step_min = 32
 steps = 64
 update_prob = 0.5
@@ -99,9 +98,9 @@ overflow_regularizer_weight = 100.0
 bound_regularizer_weight = 100.0
 
 [optimizer]
-learning_rate = 1.0e-4
-base_learning_rate = 1.0e-4
-generator_learning_rate = 1.0e-4
+learning_rate = 5.0e-5
+base_learning_rate = 5.0e-5
+generator_learning_rate = 5.0e-5
 weight_decay = 0.0
 base_weight_decay = 0.0
 generator_weight_decay = 0.0
@@ -116,8 +115,8 @@ lr_schedule = "cosine"
 min_lr_scale = 0.1
 
 [validation]
-examples = 32
-interval = 500
+examples = 8
+interval = 250
 particles = 2048
 steps = 64
 update_prob = 0.5
@@ -125,7 +124,7 @@ seed = 42
 psnr_threshold_db = 26.0
 
 [gates]
-min_median_particle_steps_per_sec = 1000.0
-max_quality_validation_elapsed_fraction = 0.25
+min_median_particle_steps_per_sec = 250.0
+max_quality_validation_elapsed_fraction = 0.35
 require_validation_interval_at_least_report_interval = true
 fail_on_violation = true

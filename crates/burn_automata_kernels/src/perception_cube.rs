@@ -18,7 +18,14 @@ use cubecl::{CubeDim, CubeLaunch, calculate_cube_count_elemwise, cube, prelude::
 use crate::{KernelError, KernelResult};
 
 const PERCEPTION_ADJOINT_OP: &str = "burn_automata.perception.adjoint.v1";
+const PERCEPTION_FORWARD_OP: &str = "burn_automata.perception.forward.v1";
 const LOG_NORMALIZE_EPSILON: f32 = 1.0e-6;
+
+type FusionCubeBackend<R, F, I, BT> = Fusion<CubeBackend<R, F, I, BT>>;
+type PerceptionForwardFusionOutput<R, F, I, BT> =
+    PerceptionCubeForwardOutput<FusionCubeBackend<R, F, I, BT>>;
+type PerceptionAdjointFusionOutput<R, F, I, BT> =
+    PerceptionCubeAdjointOutput<FusionCubeBackend<R, F, I, BT>>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PerceptionCubeAdjointConfig {
@@ -41,6 +48,21 @@ pub struct PerceptionCubeAdjointOutput<B: BurnBackendTrait> {
     pub state_grad: BurnTensor<B, 3>,
 }
 
+pub struct PerceptionCubeForwardOutput<B: BurnBackendTrait> {
+    pub features: BurnTensor<B, 3>,
+}
+
+#[allow(unused_variables)]
+pub trait PerceptionCubeForwardBackend: BurnBackendTrait + Sized {
+    fn perception_cube_forward(
+        x: BurnTensor<Self, 3>,
+        s: BurnTensor<Self, 3>,
+        cfg: PerceptionCubeAdjointConfig,
+    ) -> Option<KernelResult<PerceptionCubeForwardOutput<Self>>> {
+        None
+    }
+}
+
 #[allow(unused_variables)]
 pub trait PerceptionCubeAdjointBackend: BurnBackendTrait + Sized {
     fn perception_cube_adjoint(
@@ -50,6 +72,22 @@ pub trait PerceptionCubeAdjointBackend: BurnBackendTrait + Sized {
         cfg: PerceptionCubeAdjointConfig,
     ) -> Option<KernelResult<PerceptionCubeAdjointOutput<Self>>> {
         None
+    }
+}
+
+#[cfg(feature = "cubecl_wgpu")]
+impl PerceptionCubeForwardBackend for burn::backend::Wgpu<f32> {
+    fn perception_cube_forward(
+        x: BurnTensor<Self, 3>,
+        s: BurnTensor<Self, 3>,
+        cfg: PerceptionCubeAdjointConfig,
+    ) -> Option<KernelResult<PerceptionCubeForwardOutput<Self>>> {
+        Some(perception_cube_forward_fusion::<
+            burn_cubecl::cubecl::wgpu::WgpuRuntime,
+            f32,
+            i32,
+            u32,
+        >(x, s, cfg))
     }
 }
 
@@ -67,6 +105,22 @@ impl PerceptionCubeAdjointBackend for burn::backend::Wgpu<f32> {
             i32,
             u32,
         >(x, s, feature_grad, cfg))
+    }
+}
+
+#[cfg(feature = "cubecl_cuda")]
+impl PerceptionCubeForwardBackend for burn::backend::Cuda<f32> {
+    fn perception_cube_forward(
+        x: BurnTensor<Self, 3>,
+        s: BurnTensor<Self, 3>,
+        cfg: PerceptionCubeAdjointConfig,
+    ) -> Option<KernelResult<PerceptionCubeForwardOutput<Self>>> {
+        Some(perception_cube_forward_fusion::<
+            burn_cubecl::cubecl::cuda::CudaRuntime,
+            f32,
+            i32,
+            u8,
+        >(x, s, cfg))
     }
 }
 
@@ -94,13 +148,84 @@ fn perception_feature_dims(state_dims: usize, cfg: PerceptionCubeAdjointConfig) 
         + usize::from(cfg.position_features) * 2
 }
 
-#[allow(clippy::type_complexity)]
-fn perception_cube_adjoint_fusion<R, F, I, BT>(
-    x: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 3>,
-    s: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 3>,
-    feature_grad: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 3>,
+fn perception_cube_forward_fusion<R, F, I, BT>(
+    x: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3>,
+    s: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3>,
     cfg: PerceptionCubeAdjointConfig,
-) -> KernelResult<PerceptionCubeAdjointOutput<Fusion<CubeBackend<R, F, I, BT>>>>
+) -> KernelResult<PerceptionForwardFusionOutput<R, F, I, BT>>
+where
+    R: CubeRuntime,
+    F: FloatElement,
+    I: IntElement,
+    BT: BoolElement,
+{
+    let x_dims = x.shape().dims::<3>();
+    let s_dims = s.shape().dims::<3>();
+    let batches = x_dims[0];
+    let particle_count = x_dims[1];
+    let state_dims = s_dims[2];
+    if x_dims[2] != 2 {
+        return Err(KernelError::InvalidArgument(format!(
+            "perception cube forward expects x shape [batch, particles, 2], got {x_dims:?}",
+        )));
+    }
+    if s_dims[0] != batches || s_dims[1] != particle_count {
+        return Err(KernelError::InvalidArgument(format!(
+            "perception cube forward tensor shape mismatch: x={x_dims:?} s={s_dims:?}",
+        )));
+    }
+    if !cfg.eps.is_finite() || cfg.eps <= 0.0 || !cfg.eps0.is_finite() || cfg.eps0 <= 0.0 {
+        return Err(KernelError::InvalidArgument(
+            "perception cube forward requires positive finite eps and eps0".to_string(),
+        ));
+    }
+
+    let x_fusion = x.into_primitive().tensor();
+    let s_fusion = s.into_primitive().tensor();
+    let client = x_fusion.client.clone();
+    let dtype = x_fusion.dtype;
+    let features_ir = TensorIr::uninit(
+        client.create_empty_handle(),
+        Shape::new([
+            batches,
+            particle_count,
+            perception_feature_dims(state_dims, cfg),
+        ]),
+        dtype,
+    );
+    let inputs = [x_fusion.clone().into_ir(), s_fusion.clone().into_ir()];
+    let outputs = [features_ir.clone()];
+    let streams = OperationStreams::with_inputs([&x_fusion, &s_fusion]);
+    let op = PerceptionForwardFusionOp::<R, F, I, BT> {
+        desc: PerceptionForwardDesc {
+            x: inputs[0].clone(),
+            s: inputs[1].clone(),
+            features: features_ir,
+        },
+        cfg,
+        _marker: PhantomData,
+    };
+    let [features_fusion] = client
+        .register(
+            streams,
+            OperationIr::Custom(CustomOpIr::new(PERCEPTION_FORWARD_OP, &inputs, &outputs)),
+            op,
+        )
+        .outputs::<1>();
+
+    Ok(PerceptionCubeForwardOutput {
+        features: BurnTensor::<FusionCubeBackend<R, F, I, BT>, 3>::from_primitive(
+            TensorPrimitive::Float(features_fusion),
+        ),
+    })
+}
+
+fn perception_cube_adjoint_fusion<R, F, I, BT>(
+    x: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3>,
+    s: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3>,
+    feature_grad: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3>,
+    cfg: PerceptionCubeAdjointConfig,
+) -> KernelResult<PerceptionAdjointFusionOutput<R, F, I, BT>>
 where
     R: CubeRuntime,
     F: FloatElement,
@@ -177,13 +302,55 @@ where
         .outputs::<2>();
 
     Ok(PerceptionCubeAdjointOutput {
-        position_grad: BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 3>::from_primitive(
+        position_grad: BurnTensor::<FusionCubeBackend<R, F, I, BT>, 3>::from_primitive(
             TensorPrimitive::Float(position_grad_fusion),
         ),
-        state_grad: BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 3>::from_primitive(
+        state_grad: BurnTensor::<FusionCubeBackend<R, F, I, BT>, 3>::from_primitive(
             TensorPrimitive::Float(state_grad_fusion),
         ),
     })
+}
+
+#[derive(Clone, Debug)]
+struct PerceptionForwardDesc {
+    x: TensorIr,
+    s: TensorIr,
+    features: TensorIr,
+}
+
+#[derive(Debug)]
+struct PerceptionForwardFusionOp<R, F, I, BT>
+where
+    R: CubeRuntime,
+    F: FloatElement,
+    I: IntElement,
+    BT: BoolElement,
+{
+    desc: PerceptionForwardDesc,
+    cfg: PerceptionCubeAdjointConfig,
+    _marker: PhantomData<(R, F, I, BT)>,
+}
+
+impl<R, F, I, BT> Operation<burn_cubecl::fusion::FusionCubeRuntime<R>>
+    for PerceptionForwardFusionOp<R, F, I, BT>
+where
+    R: CubeRuntime,
+    F: FloatElement,
+    I: IntElement,
+    BT: BoolElement,
+{
+    fn execute(
+        &self,
+        handles: &mut HandleContainer<
+            <burn_cubecl::fusion::FusionCubeRuntime<R> as burn_fusion::FusionRuntime>::FusionHandle,
+        >,
+    ) {
+        type Raw<R, F, I, BT> = CubeBackend<R, F, I, BT>;
+        let x = handles.get_float_tensor::<Raw<R, F, I, BT>>(&self.desc.x);
+        let s = handles.get_float_tensor::<Raw<R, F, I, BT>>(&self.desc.s);
+        let features = launch_perception_forward(x, s, self.cfg);
+        handles.register_float_tensor::<Raw<R, F, I, BT>>(&self.desc.features.id, features);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +406,104 @@ where
 struct PerceptionAdjointRawOutput<R: CubeRuntime> {
     position_grad: CubeTensor<R>,
     state_grad: CubeTensor<R>,
+}
+
+fn launch_perception_forward<R: CubeRuntime>(
+    x: CubeTensor<R>,
+    s: CubeTensor<R>,
+    cfg: PerceptionCubeAdjointConfig,
+) -> CubeTensor<R> {
+    let dims = x.shape().dims::<3>();
+    let batches = dims[0];
+    let particle_count = dims[1];
+    let state_dims = s.shape().dims::<3>()[2];
+    let feature_dims = perception_feature_dims(state_dims, cfg);
+    let dtype = x.dtype;
+    let client = x.client.clone();
+    let device = x.device.clone();
+    let density = empty_device_dtype(
+        client.clone(),
+        device.clone(),
+        Shape::new([batches, particle_count]),
+        dtype,
+    );
+    let features = empty_device_dtype(
+        client.clone(),
+        device.clone(),
+        Shape::new([batches, particle_count, feature_dims]),
+        dtype,
+    );
+    let args_density = PerceptionArgsLaunch::new(
+        InputScalar::new(cfg.eps, dtype),
+        InputScalar::new(cfg.eps0, dtype),
+        u32::from(cfg.state_grad),
+        u32::from(cfg.density_grad),
+        u32::from(cfg.scale_equivariance),
+        u32::from(cfg.particle_density_equivariance),
+        u32::from(cfg.log_norm_grad),
+        u32::from(cfg.log_norm_density_grad),
+        u32::from(cfg.hybrid_state_gradient),
+        u32::from(cfg.position_features),
+        u32::from(cfg.compute_position_grad),
+    );
+    if particle_count >= 512 {
+        let tile_size = 256usize;
+        let query_blocks = particle_count.div_ceil(tile_size);
+        perception_density_tiled_kernel::launch(
+            &client,
+            CubeCount::Static(query_blocks as u32, batches as u32, 1),
+            CubeDim::new_1d(tile_size as u32),
+            AddressType::U32,
+            x.clone().into_tensor_arg(),
+            density.clone().into_tensor_arg(),
+            args_density,
+            dtype.into(),
+        );
+    } else {
+        let units = batches * particle_count;
+        let cube_dim = CubeDim::new(&client, units);
+        let cube_count = calculate_cube_count_elemwise(&client, units, cube_dim);
+        perception_density_kernel::launch(
+            &client,
+            cube_count,
+            cube_dim,
+            AddressType::U32,
+            x.clone().into_tensor_arg(),
+            density.clone().into_tensor_arg(),
+            args_density,
+            dtype.into(),
+        );
+    }
+
+    let args_forward = PerceptionArgsLaunch::new(
+        InputScalar::new(cfg.eps, dtype),
+        InputScalar::new(cfg.eps0, dtype),
+        u32::from(cfg.state_grad),
+        u32::from(cfg.density_grad),
+        u32::from(cfg.scale_equivariance),
+        u32::from(cfg.particle_density_equivariance),
+        u32::from(cfg.log_norm_grad),
+        u32::from(cfg.log_norm_density_grad),
+        u32::from(cfg.hybrid_state_gradient),
+        u32::from(cfg.position_features),
+        u32::from(cfg.compute_position_grad),
+    );
+    let units = batches * particle_count;
+    let cube_dim = CubeDim::new(&client, units);
+    let cube_count = calculate_cube_count_elemwise(&client, units, cube_dim);
+    perception_forward_kernel::launch(
+        &client,
+        cube_count,
+        cube_dim,
+        AddressType::U32,
+        x.into_tensor_arg(),
+        s.into_tensor_arg(),
+        density.into_tensor_arg(),
+        features.clone().into_tensor_arg(),
+        args_forward,
+        dtype.into(),
+    );
+    features
 }
 
 fn launch_perception_adjoint<R: CubeRuntime>(
@@ -600,6 +865,15 @@ fn log_normalize_adjoint_2<F: Float>(x: F, y: F, adj_x: F, adj_y: F) -> (F, F) {
 }
 
 #[cube]
+fn log_normalize_2<F: Float>(x: F, y: F) -> (F, F) {
+    let norm = (x * x + y * y + F::new(LOG_NORMALIZE_EPSILON * LOG_NORMALIZE_EPSILON))
+        .sqrt()
+        .max(F::new(LOG_NORMALIZE_EPSILON));
+    let scale = (F::new(1.0_f32) + norm).ln() / norm;
+    (x * scale, y * scale)
+}
+
+#[cube]
 fn inverse_2d<F: Float>(m00: F, m01: F, m11: F) -> (F, F, F, F) {
     let det = m00 * m11 - m01 * m01;
     let mut i00 = F::new(1.0_f32);
@@ -725,6 +999,168 @@ fn perception_density_kernel<F: Float>(
     density[batch * density.stride(0) + particle * density.stride(1)] = rho;
 }
 
+#[cube(launch, address_type = "dynamic")]
+fn perception_forward_kernel<F: Float>(
+    x: &Tensor<F>,
+    s: &Tensor<F>,
+    density: &Tensor<F>,
+    features: &mut Tensor<F>,
+    args: &PerceptionArgs,
+    #[define(F)] _dtype: StorageType,
+) {
+    let index = ABSOLUTE_POS;
+    let particle_count = x.shape(1);
+    if index >= x.shape(0) * particle_count {
+        terminate!();
+    }
+    let batch = index / particle_count;
+    let particle = index - batch * particle_count;
+    let state_dims = s.shape(2);
+    let eps = args.eps.get::<F>();
+
+    let mut channel = 0usize;
+    while channel < state_dims {
+        write_feature::<F>(
+            features,
+            batch,
+            particle,
+            channel,
+            state_value::<F>(s, batch, particle, channel),
+        );
+        channel += 1;
+    }
+
+    let blur_cursor = state_dims;
+    channel = 0usize;
+    while channel < state_dims {
+        let mut blur = F::new(0.0_f32);
+        let mut neighbor = 0usize;
+        while neighbor < particle_count {
+            let (_, _, r2) = delta_from::<F>(x, batch, particle, neighbor);
+            let volume = recip_finite::<F>(density_value::<F>(density, batch, neighbor));
+            blur += poly6::<F>(r2, eps) * volume * state_value::<F>(s, batch, neighbor, channel);
+            neighbor += 1;
+        }
+        write_feature::<F>(features, batch, particle, blur_cursor + channel, blur);
+        channel += 1;
+    }
+
+    let mut m00 = F::new(0.0_f32);
+    let mut m01 = F::new(0.0_f32);
+    let mut m10 = F::new(0.0_f32);
+    let mut m11 = F::new(0.0_f32);
+    if args.state_grad != 0 && args.hybrid_state_gradient != 0 {
+        let mut neighbor = 0usize;
+        while neighbor < particle_count {
+            if neighbor != particle {
+                let (dx, dy, r2) = delta_from::<F>(x, batch, particle, neighbor);
+                let volume = recip_finite::<F>(density_value::<F>(density, batch, neighbor));
+                let (gx, gy) = spiky_gradient::<F>(dx, dy, r2, eps, volume);
+                m00 += dx * gx;
+                m01 += dx * gy;
+                m10 += dy * gx;
+                m11 += dy * gy;
+            }
+            neighbor += 1;
+        }
+    }
+    let mut inv00 = F::new(1.0_f32);
+    let mut inv01 = F::new(0.0_f32);
+    let mut inv10 = F::new(0.0_f32);
+    let mut inv11 = F::new(1.0_f32);
+    if args.state_grad != 0 && args.hybrid_state_gradient != 0 {
+        let (a, b, c, d) = inverse_2d::<F>(m00, m01, m11);
+        inv00 = a;
+        inv01 = b;
+        inv10 = c;
+        inv11 = d;
+    }
+
+    if args.state_grad != 0 {
+        let state_grad_cursor = feature_state_grad_cursor(state_dims);
+        channel = 0usize;
+        while channel < state_dims {
+            let mut raw_x = F::new(0.0_f32);
+            let mut raw_y = F::new(0.0_f32);
+            let state_i = state_value::<F>(s, batch, particle, channel);
+            let mut neighbor = 0usize;
+            while neighbor < particle_count {
+                let (dx, dy, r2) = delta_from::<F>(x, batch, particle, neighbor);
+                let volume = recip_finite::<F>(density_value::<F>(density, batch, neighbor));
+                let (gx, gy) = spiky_gradient::<F>(dx, dy, r2, eps, volume);
+                let diff = state_value::<F>(s, batch, neighbor, channel) - state_i;
+                raw_x += diff * gx;
+                raw_y += diff * gy;
+                neighbor += 1;
+            }
+            let corrected_x = raw_x * inv00 + raw_y * inv10;
+            let corrected_y = raw_x * inv01 + raw_y * inv11;
+            let (out_x, out_y) = if args.log_norm_grad != 0 {
+                log_normalize_2::<F>(corrected_x, corrected_y)
+            } else {
+                (corrected_x, corrected_y)
+            };
+            write_feature::<F>(
+                features,
+                batch,
+                particle,
+                state_grad_cursor + channel * 2,
+                out_x,
+            );
+            write_feature::<F>(
+                features,
+                batch,
+                particle,
+                state_grad_cursor + channel * 2 + 1,
+                out_y,
+            );
+            channel += 1;
+        }
+    }
+
+    if args.density_grad != 0 {
+        let density_cursor = feature_density_grad_cursor(state_dims, args);
+        let mut raw_x = F::new(0.0_f32);
+        let mut raw_y = F::new(0.0_f32);
+        let mut neighbor = 0usize;
+        while neighbor < particle_count {
+            let (dx, dy, r2) = delta_from::<F>(x, batch, particle, neighbor);
+            let (gx, gy) = spiky_gradient::<F>(dx, dy, r2, eps, F::new(1.0_f32));
+            raw_x += gx;
+            raw_y += gy;
+            neighbor += 1;
+        }
+        let scale = density_gradient_scale::<F>(eps, particle_count, args);
+        raw_x *= scale;
+        raw_y *= scale;
+        let (out_x, out_y) = if args.log_norm_density_grad != 0 {
+            log_normalize_2::<F>(raw_x, raw_y)
+        } else {
+            (raw_x, raw_y)
+        };
+        write_feature::<F>(features, batch, particle, density_cursor, out_x);
+        write_feature::<F>(features, batch, particle, density_cursor + 1, out_y);
+    }
+
+    if args.position_features != 0 {
+        let position_cursor = feature_position_cursor(state_dims, args);
+        write_feature::<F>(
+            features,
+            batch,
+            particle,
+            position_cursor,
+            x_value::<F>(x, batch, particle, 0),
+        );
+        write_feature::<F>(
+            features,
+            batch,
+            particle,
+            position_cursor + 1,
+            x_value::<F>(x, batch, particle, 1),
+        );
+    }
+}
+
 #[cube]
 fn feature_state_grad_cursor(state_dims: usize) -> usize {
     state_dims * 2
@@ -795,6 +1231,19 @@ fn x_value<F: Float>(x: &Tensor<F>, batch: usize, particle: usize, axis: usize) 
 #[cube]
 fn density_value<F: Float>(density: &Tensor<F>, batch: usize, particle: usize) -> F {
     density[batch * density.stride(0) + particle * density.stride(1)]
+}
+
+#[cube]
+fn write_feature<F: Float>(
+    features: &mut Tensor<F>,
+    batch: usize,
+    particle: usize,
+    channel: usize,
+    value: F,
+) {
+    features[batch * features.stride(0)
+        + particle * features.stride(1)
+        + channel * features.stride(2)] = value;
 }
 
 #[cube]

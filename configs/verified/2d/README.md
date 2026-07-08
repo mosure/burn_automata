@@ -27,11 +27,14 @@ settings even when they match the global defaults. They should also include
 bound throughput and validation overhead, and quality configs should add a PSNR
 gate only when the validation scale is sufficient for the claim. Scale configs
 should train on an oracle-shaped rollout curriculum (`rollout.step_min` plus
-`rollout.steps`) and may use `training.loss_on_final_chunk_only = true` when
-the goal is matching long-horizon oracle dynamics instead of optimizing every
-short TBPTT chunk independently. They should also set
-`training.target2d_loss_backend` explicitly. `dense` remains the conservative
-default, while `tiled-adjoint` is the parity-gated device-side Target2D adjoint
-path for throughput benchmarking and staged promotion.
+`rollout.steps`). The current promoted 2D HyperNPA shape is stochastic 32..64
+step training, endpoint-weighted TBPTT
+(`training.tbptt_loss_mode = "endpoint-weighted"`), sample-keyed particle
+pools (`training.use_particle_pool = true`), `training.target2d_loss_backend =
+"tiled-adjoint"`, and `training.perception_backend = "auto"` so training-scale
+128+ particle runs use the optimized device-side perception path. `dense`
+remains the conservative smoke default, while `tiled-adjoint` is the
+parity-gated device-side Target2D adjoint path for throughput benchmarking and
+staged promotion.
 `hyper_e2e/bench_omnisvg_8_b4_p128_tiled.toml` mirrors the dense bench shape
 but exercises the real device-side tiled Target2D adjoint path.

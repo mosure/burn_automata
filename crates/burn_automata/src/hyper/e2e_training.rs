@@ -163,6 +163,24 @@ impl E2eLrSchedule {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum E2eTbpttLossMode {
+    #[default]
+    AllChunks,
+    FinalOnly,
+    EndpointWeighted,
+}
+
+impl E2eTbpttLossMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AllChunks => "all-chunks",
+            Self::FinalOnly => "final-only",
+            Self::EndpointWeighted => "endpoint-weighted",
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct BurnE2eRolloutTrainConfig {
@@ -171,6 +189,13 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) example_batch_size: usize,
     pub(crate) tbptt_chunk_steps: usize,
     pub(crate) loss_on_final_chunk_only: bool,
+    pub(crate) tbptt_loss_mode: E2eTbpttLossMode,
+    pub(crate) tbptt_intermediate_loss_weight: f32,
+    pub(crate) tbptt_final_loss_weight: f32,
+    pub(crate) use_particle_pool: bool,
+    pub(crate) pool_slots_per_example: usize,
+    pub(crate) inject_seed_interval: usize,
+    pub(crate) pre_rollout_steps: usize,
     pub(crate) rollout_particles: usize,
     pub(crate) rollout_step_min: usize,
     pub(crate) rollout_steps: usize,
@@ -228,6 +253,7 @@ pub(crate) struct BurnE2eRolloutHistoryEntry {
     pub(crate) generator_grad_norm: f32,
     pub(crate) generator_grad_scale: f32,
     pub(crate) examples_seen: usize,
+    pub(crate) pool_seed_replacements: usize,
     pub(crate) particle_steps_per_sec: f64,
     pub(crate) dense_pair_interactions_per_sec: f64,
     pub(crate) elapsed_ms: f64,

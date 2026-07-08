@@ -1,18 +1,17 @@
-# Scale diagnostic for the canonical online HyperNPA path. This config now uses
-# the oracle-shaped 32..64 step curriculum and sample-keyed state pool promoted
-# by the 1k staged configs; it should only be run after the 1k p512 run shows
-# improving oracle-scale validation.
+# First oracle-shaped 1k HyperNPA scale run. This is the main next experiment:
+# sample-keyed state pool, 512 training particles, stochastic 32..64 step
+# rollouts, and 2048p/64 validation against oracle-scale dynamics.
 preset = "growing-2d"
 
 [source]
-source_limit = 10000
+source_limit = 1000
 
 [source.omnisvg]
 dataset = "illustration"
 split = "train"
 cache_dir = "data/omnisvg"
 offset = 0
-limit = 10000
+limit = 1000
 page_size = 100
 download = false
 refresh = false
@@ -23,7 +22,7 @@ holdout_stride = 20
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b2_p512s32to64_pool_rank16_cosine_cuda"
+output_dir = "artifacts/hyper2d_e2e_rollout_omnisvg_1k_oracle_shape_p512_s32to64_rank16_cuda"
 
 [condition]
 encoder = "dino-vits-full-tokens"
@@ -116,7 +115,7 @@ lr_schedule = "cosine"
 min_lr_scale = 0.1
 
 [validation]
-examples = 32
+examples = 16
 interval = 500
 particles = 2048
 steps = 64

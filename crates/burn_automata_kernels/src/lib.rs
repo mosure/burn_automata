@@ -21,6 +21,7 @@ pub use hashgrid::{HashGridSnapshot, build_hashgrid};
 #[cfg(feature = "cubecl")]
 pub use perception_cube::{
     PerceptionCubeAdjointBackend, PerceptionCubeAdjointConfig, PerceptionCubeAdjointOutput,
+    PerceptionCubeForwardBackend, PerceptionCubeForwardOutput,
 };
 pub use reference::{
     PerceptionAdjointOutput, PerceptionOptions, PerceptionOutput, euler_step, perceive,
