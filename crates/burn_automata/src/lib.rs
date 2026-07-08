@@ -70,11 +70,11 @@ pub use target_geometry::{
     OvoxelTarget, TargetProjection, TargetSurfaceSample, TriangleMeshTarget,
 };
 pub use target2d::{
-    Target2dLossConfig, Target2dLossOutput, Target2dLossReport, Target2dTrainingConfig,
-    Target2dTrainingHistoryEntry, Target2dTrainingReport, TargetImage2d,
-    TargetImage2dExtractConfig, target_2d_loss, target_2d_loss_with_adjoint,
-    target_2d_rollout_loss_with_gradients, train_target_2d, upstream_growing_2d_hashgrid,
-    upstream_growing_2d_model,
+    TARGET_2D_COLOR_GATE_GRADIENT, Target2dColorGateGradient, Target2dLossConfig,
+    Target2dLossOutput, Target2dLossReport, Target2dTrainingConfig, Target2dTrainingHistoryEntry,
+    Target2dTrainingReport, TargetImage2d, TargetImage2dExtractConfig, target_2d_loss,
+    target_2d_loss_with_adjoint, target_2d_rollout_loss_with_gradients, train_target_2d,
+    upstream_growing_2d_hashgrid, upstream_growing_2d_model,
 };
 pub use training::{
     AdamWConfig, AdamWState, LowRankAdapterGradients, SgdConfig, SupervisedBatch,

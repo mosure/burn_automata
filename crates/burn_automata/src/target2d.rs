@@ -13,6 +13,14 @@ const DEFAULT_AABB: [f32; 4] = [-1.0, 1.0, -1.0, 1.0];
 const SPATIAL_DIMS_2D: usize = 2;
 const IMAGE_EPSILON: f32 = 1.0e-8;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target2dColorGateGradient {
+    DetachedDensity,
+}
+
+pub const TARGET_2D_COLOR_GATE_GRADIENT: Target2dColorGateGradient =
+    Target2dColorGateGradient::DetachedDensity;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TargetImage2dExtractConfig {
     pub threshold: f32,
@@ -467,10 +475,10 @@ pub fn target_2d_loss_with_adjoint(
 
         for (pixel, density_adj) in density_adjoint.iter_mut().enumerate().take(pixels) {
             let density_diff = rendered.density[pixel] - target_render.density[pixel];
-            let density_term = l1l2(density_diff);
+            let density_term = target_2d_l1l2(density_diff);
             density_loss += density_term / density_denom;
             *density_adj =
-                cfg.splat_loss_weight * cfg.density_loss_weight * l1l2_grad(density_diff)
+                cfg.splat_loss_weight * cfg.density_loss_weight * target_2d_l1l2_grad(density_diff)
                     / density_denom;
             let background = 1.0 - foreground_mask[pixel];
             if background > 0.0 && cfg.background_density_loss_weight > 0.0 {
@@ -489,18 +497,18 @@ pub fn target_2d_loss_with_adjoint(
                 *density_adj += cfg.splat_loss_weight
                     * cfg.foreground_density_loss_weight
                     * foreground
-                    * l1l2_grad(density_diff)
+                    * target_2d_l1l2_grad(density_diff)
                     / foreground_denom;
             }
-            let color_gate = (-density_term).exp();
+            let color_gate = target_2d_color_gate_from_density_term(density_term);
             for channel in 0..3 {
                 let idx = pixel * 3 + channel;
                 let color_diff = rendered.rgb[idx] - target_render.rgb[idx];
-                color_loss += l1l2(color_diff) * color_gate / color_denom;
+                color_loss += target_2d_l1l2(color_diff) * color_gate / color_denom;
                 rgb_adjoint[idx] = cfg.splat_loss_weight
                     * cfg.color_loss_weight
                     * color_gate
-                    * l1l2_grad(color_diff)
+                    * target_2d_l1l2_grad(color_diff)
                     / color_denom;
             }
         }
@@ -1239,11 +1247,15 @@ fn splat_norm_scale(pixel_size: f32, cfg: Target2dLossConfig) -> f32 {
     (cfg.image_size as f32 * pixel_size / (cfg.hi - cfg.lo)).powi(2)
 }
 
-fn l1l2(value: f32) -> f32 {
+pub(crate) fn target_2d_color_gate_from_density_term(density_term: f32) -> f32 {
+    (-density_term).exp()
+}
+
+pub(crate) fn target_2d_l1l2(value: f32) -> f32 {
     value.abs() + value * value
 }
 
-fn l1l2_grad(value: f32) -> f32 {
+pub(crate) fn target_2d_l1l2_grad(value: f32) -> f32 {
     value.signum() + 2.0 * value
 }
 
@@ -1819,16 +1831,31 @@ mod tests {
     }
 
     #[test]
-    fn upstream_growing_hashgrid_matches_growing_yaml() {
+    fn upstream_growing_hashgrid_matches_target2d_parity_grid() {
         let grid = upstream_growing_2d_hashgrid();
-        let (_, preset_grid) = NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
 
         assert_eq!(grid.boundary, burn_automata_kernels::Boundary::Clamped);
         assert_eq!(grid.mode, burn_automata_kernels::HashGridMode::Grid);
         assert_eq!(grid.grid_size, [16, 16, 1]);
         assert_eq!(grid.eps, 0.1);
         assert_eq!(grid.max_particles_per_block, 32);
-        assert_eq!(preset_grid, grid);
+    }
+
+    #[test]
+    fn growing_2d_preset_keeps_runtime_particle_hashgrid() {
+        let (_, preset_grid) = NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
+
+        assert_eq!(
+            preset_grid.boundary,
+            burn_automata_kernels::Boundary::Clamped
+        );
+        assert_eq!(
+            preset_grid.mode,
+            burn_automata_kernels::HashGridMode::Particle
+        );
+        assert_eq!(preset_grid.grid_size, [64, 64, 1]);
+        assert_eq!(preset_grid.eps, 0.1);
+        assert_eq!(preset_grid.max_particles_per_block, 32);
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub(super) struct BurnDenseOracleBatchOutput {
     pub(super) best_train_step: Vec<usize>,
 }
 
+#[allow(dead_code)]
 pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutExample {
     pub(in crate::cli::commands::hyper_e2e) slug: String,
     pub(in crate::cli::commands::hyper_e2e) target: crate::TargetImage2d,
@@ -48,6 +49,7 @@ impl E2eLrSchedule {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutTrainConfig {
     pub(in crate::cli::commands::hyper_e2e) steps: usize,
@@ -170,6 +172,7 @@ macro_rules! dense_direct_basis_backend {
         $log_backend:expr
     ) => {
 #[cfg($feature)]
+#[allow(dead_code)]
 mod $module {
     use std::{fs, process::Command, time::Instant};
 
@@ -3364,7 +3367,7 @@ mod $module {
         let density_diff = density - target.target_density.clone();
         let density_term = l1l2_tensor(density_diff);
         let density_loss = density_term.clone().mean();
-        let color_gate = density_term.mul_scalar(-1.0).exp().expand([
+        let color_gate = target_2d_detached_color_gate2(density_term).expand([
             config.loss_config.image_size * config.loss_config.image_size,
             3,
         ]);
@@ -3444,7 +3447,7 @@ mod $module {
         let density_diff = density - target_density;
         let density_term = l1l2_tensor3(density_diff);
         let density_loss = density_term.clone().mean();
-        let color_gate = density_term.mul_scalar(-1.0).exp().expand([
+        let color_gate = target_2d_detached_color_gate3(density_term).expand([
             batches,
             config.loss_config.image_size * config.loss_config.image_size,
             3,
@@ -3535,10 +3538,7 @@ mod $module {
             .reshape([batches, pixels])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
-        let color_gate = density_term
-            .mul_scalar(-1.0)
-            .exp()
-            .expand([batches, pixels, 3]);
+        let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
         let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
             .mul(color_gate)
             .reshape([batches, pixels * 3])
@@ -3644,10 +3644,7 @@ mod $module {
             .reshape([batches, pixels])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
-        let color_gate = density_term
-            .mul_scalar(-1.0)
-            .exp()
-            .expand([batches, pixels, 3]);
+        let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
         let color_loss = l1l2_tensor3(rgb_diff)
             .mul(color_gate)
             .reshape([batches, pixels * 3])
@@ -3747,10 +3744,7 @@ mod $module {
             .reshape([batches, pixels])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
-        let color_gate = density_term
-            .mul_scalar(-1.0)
-            .exp()
-            .expand([batches, pixels, 3]);
+        let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
         let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
             .mul(color_gate)
             .reshape([batches, pixels * 3])
@@ -6331,6 +6325,22 @@ mod $module {
         Tensor::<BurnBackend, 3>::from_inner(tensor.inner())
     }
 
+    fn target_2d_detached_color_gate2(density_term: Tensor2) -> Tensor2 {
+        debug_assert_eq!(
+            crate::TARGET_2D_COLOR_GATE_GRADIENT,
+            crate::Target2dColorGateGradient::DetachedDensity
+        );
+        detach2(density_term.mul_scalar(-1.0).exp())
+    }
+
+    fn target_2d_detached_color_gate3(density_term: Tensor3) -> Tensor3 {
+        debug_assert_eq!(
+            crate::TARGET_2D_COLOR_GATE_GRADIENT,
+            crate::Target2dColorGateGradient::DetachedDensity
+        );
+        detach3(density_term.mul_scalar(-1.0).exp())
+    }
+
     fn track(tensor: Tensor2Inner) -> Tensor2 {
         Tensor::<BurnBackend, 2>::from_inner(tensor).require_grad()
     }
@@ -6601,7 +6611,7 @@ mod $module {
                 states[base + 1] = 0.2 - particle as f32 * 0.05;
                 states[base + 2] = -0.1 + particle as f32 * 0.07;
             }
-            let reference = crate::target_2d_loss(
+            let reference_output = crate::target_2d_loss_with_adjoint(
                 &positions,
                 &states,
                 1,
@@ -6609,8 +6619,11 @@ mod $module {
                 npa_config.state_dims,
                 &target,
                 loss_config,
+                0.0,
+                0,
             )
             .unwrap();
+            let reference = reference_output.report;
 
             let device = BurnDevice::default();
             let pixels = loss_config.image_size * loss_config.image_size;
@@ -6692,7 +6705,7 @@ mod $module {
                 max_dense_chunk_floats: 1_000_000,
                 max_splat_chunk_floats: 1_000_000,
             };
-            let x = tensor(
+            let x = tracked_tensor(
                 positions
                     .iter()
                     .flat_map(|position| [position[0], position[1]])
@@ -6700,7 +6713,7 @@ mod $module {
                 [4, 2],
                 &device,
             );
-            let s = tensor(states, [4, npa_config.state_dims], &device);
+            let s = tracked_tensor(states, [4, npa_config.state_dims], &device);
             let loss = target_splat_loss(
                 &x,
                 &s,
@@ -6710,10 +6723,10 @@ mod $module {
                 Tensor::<BurnBackend, 1>::zeros([1], &device),
             );
 
-            let burn_total = loss.total.inner().into_scalar();
-            let burn_splat = loss.splat.inner().into_scalar();
-            let burn_color = loss.color.inner().into_scalar();
-            let burn_density = loss.density.inner().into_scalar();
+            let burn_total = loss.total.clone().inner().into_scalar();
+            let burn_splat = loss.splat.clone().inner().into_scalar();
+            let burn_color = loss.color.clone().inner().into_scalar();
+            let burn_density = loss.density.clone().inner().into_scalar();
 
             assert!(
                 (burn_total - reference.total_loss).abs() < 1.0e-4,
@@ -6734,6 +6747,41 @@ mod $module {
                 (burn_density - reference.density_loss).abs() < 1.0e-4,
                 "Burn density target2d loss diverged from CPU reference: burn={burn_density} reference={}",
                 reference.density_loss
+            );
+
+            let mut grads = loss.total.backward();
+            let burn_x_grad = tensor_vec(
+                x.grad_remove(&mut grads)
+                    .unwrap_or_else(|| x.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let burn_s_grad = tensor_vec(
+                s.grad_remove(&mut grads)
+                    .unwrap_or_else(|| s.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let max_position_grad_diff = burn_x_grad
+                .chunks_exact(2)
+                .zip(&reference_output.position_gradients)
+                .flat_map(|(burn, reference)| {
+                    [
+                        (burn[0] - reference[0]).abs(),
+                        (burn[1] - reference[1]).abs(),
+                    ]
+                })
+                .fold(0.0_f32, f32::max);
+            let max_state_grad_diff = burn_s_grad
+                .iter()
+                .zip(&reference_output.state_gradients)
+                .map(|(burn, reference)| (burn - reference).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_position_grad_diff < 2.0e-3,
+                "Burn target2d position gradient diverged from CPU reference: max_abs_diff={max_position_grad_diff}"
+            );
+            assert!(
+                max_state_grad_diff < 2.0e-3,
+                "Burn target2d state gradient diverged from CPU reference: max_abs_diff={max_state_grad_diff}"
             );
         }
 
@@ -6813,6 +6861,15 @@ dense_direct_basis_backend!(
     "burn_wgpu_autodiff_dense_direct_basis",
     "wgpu-default",
     "burn-wgpu"
+);
+
+dense_direct_basis_backend!(
+    ndarray_imp,
+    all(test, feature = "backend_ndarray"),
+    burn::backend::NdArray<f32>,
+    "burn_ndarray_autodiff_dense_direct_basis",
+    "ndarray-default",
+    "burn-ndarray"
 );
 
 dense_direct_basis_backend!(

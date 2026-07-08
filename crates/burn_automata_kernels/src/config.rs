@@ -33,8 +33,8 @@ impl HashGridConfig {
         Self {
             dim: 2,
             boundary: Boundary::Clamped,
-            mode: HashGridMode::Grid,
-            grid_size: [16, 16, 1],
+            mode: HashGridMode::Particle,
+            grid_size: [64, 64, 1],
             eps: 0.1,
             max_particles_per_block: 32,
         }
