@@ -507,29 +507,10 @@ pub(crate) struct CliHyper2dDirectBasisGpuTrainingReport {
     pub(crate) metrics: serde_json::Value,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub(crate) struct CliHyper2dDirectBasisLossSummary {
-    pub(crate) examples: usize,
-    pub(crate) mean_total_loss: f32,
-    pub(crate) max_total_loss: f32,
-    pub(crate) mean_splat_loss: f32,
-    pub(crate) mean_color_loss: f32,
-    pub(crate) mean_density_loss: f32,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct CliHyper2dDirectBasisHistoryEntry {
-    pub(crate) step: usize,
-    pub(crate) loss: f32,
-    pub(crate) eval_loss: Option<CliHyper2dDirectBasisLossSummary>,
-    pub(crate) base_grad_norm: f32,
-    pub(crate) base_grad_scale: f32,
-    pub(crate) mean_adapter_grad_norm: f32,
-    pub(crate) max_adapter_grad_norm: f32,
-    pub(crate) examples_seen: usize,
-    pub(crate) particle_steps_per_sec: f64,
-    pub(crate) elapsed_ms: f64,
-}
+pub(crate) use crate::hyper::e2e_training::{
+    Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
+    Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
+};
 
 #[derive(Clone, Serialize)]
 pub(crate) struct CliHyper2dDirectBasisOracleReport {

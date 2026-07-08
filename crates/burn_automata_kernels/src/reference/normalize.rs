@@ -1,5 +1,7 @@
 use super::*;
 
+const LOG_NORMALIZE_EPSILON: f32 = 1.0e-6;
+
 pub(crate) fn normalize_state_gradient(
     gradient: &mut [f32],
     state_dims: usize,
@@ -56,13 +58,10 @@ pub(crate) fn normalize_density_gradient(
 }
 
 pub(crate) fn log_normalize_vector(values: &mut [f32]) {
-    let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm <= 1e-12 {
-        for value in values {
-            *value = 0.0;
-        }
-        return;
-    }
+    let norm = (values.iter().map(|v| v * v).sum::<f32>()
+        + LOG_NORMALIZE_EPSILON * LOG_NORMALIZE_EPSILON)
+        .sqrt()
+        .max(LOG_NORMALIZE_EPSILON);
     let scale = norm.ln_1p() / norm;
     for value in values {
         *value *= scale;
@@ -74,10 +73,10 @@ pub(crate) fn log_normalize_adjoint(
     output_adjoint: &[f32],
     input_adjoint: &mut [f32],
 ) {
-    let norm = input.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm <= 1e-12 {
-        return;
-    }
+    let norm = (input.iter().map(|value| value * value).sum::<f32>()
+        + LOG_NORMALIZE_EPSILON * LOG_NORMALIZE_EPSILON)
+        .sqrt()
+        .max(LOG_NORMALIZE_EPSILON);
     let scale = norm.ln_1p() / norm;
     let dscale_dnorm = (norm / (1.0 + norm) - norm.ln_1p()) / (norm * norm);
     let dot = input

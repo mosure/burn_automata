@@ -10,19 +10,21 @@ use super::sources::{
 };
 use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::collections::HashMap;
 
 mod conditioned;
-mod dense;
 mod oracle;
 mod psnr_gate;
 
-pub(in crate::cli::commands::hyper_e2e) use crate::hyper::e2e::Target2dLossBackend;
-pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
-pub(super) use dense::{
-    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
-    train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
+pub(in crate::cli::commands::hyper_e2e) use crate::hyper::e2e::{
+    PerceptionRolloutBackend, Target2dLossBackend,
 };
+use crate::hyper::e2e_training::dense;
+use crate::hyper::e2e_training::{
+    DirectBasisStepStats, DirectBasisTrainConfig, DirectBasisTrainingExample,
+    Target2dBurnCheckpointConfig,
+};
+pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
 pub(crate) use psnr_gate::run_validate_hyper_2d_psnr_gate;
 
 use oracle::evaluate_direct_basis_oracles;
@@ -45,70 +47,40 @@ struct DirectBasisExample {
     last_train_loss: Option<f32>,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-struct DirectBasisTrainConfig {
-    steps: usize,
-    report_interval: usize,
-    example_batch_size: usize,
-    tbptt_chunk_steps: usize,
-    loss_on_final_chunk_only: bool,
-    use_particle_pool: bool,
-    pool_size: usize,
-    inject_seed_interval: usize,
-    brush_size: f32,
-    stopgrad_pos: bool,
-    stopgrad_state: bool,
-    rollout_particles: usize,
-    rollout_step_min: usize,
-    rollout_steps: usize,
-    update_prob: f32,
-    seed: u64,
-    seed_scale: f32,
-    seed_mode: ParticleSeed,
-    grid_eps: f32,
-    motion_scale: f32,
-    loss_config: Target2dLossConfig,
-    target2d_loss_backend: Target2dLossBackend,
-    per_parameter_grad_normalization: bool,
-    base_sgd: SgdConfig,
-    adapter_sgd: SgdConfig,
-    adapter_l2_weight: f32,
-    update_base: bool,
-    eval_examples: usize,
-    eval_interval: usize,
-    eval_batch_size: usize,
-    eval_seed: u64,
-    system_memory_budget_gb: Option<f32>,
-    gpu_memory_budget_gb: Option<f32>,
-    max_dense_train_particles: usize,
-    max_dense_chunk_floats: usize,
-    max_splat_chunk_floats: usize,
+impl DirectBasisExample {
+    fn to_training_example(&self) -> DirectBasisTrainingExample {
+        DirectBasisTrainingExample {
+            target: self.target.clone(),
+            adapter: self.adapter.clone(),
+            last_train_loss: self.last_train_loss,
+            particle_count: self.source.particles,
+            update_prob: self.source.update_prob,
+            seed_scale: self.source.seed_scale,
+        }
+    }
+
+    fn sync_from_training_example(&mut self, trained: &DirectBasisTrainingExample) {
+        self.adapter = trained.adapter.clone();
+        self.last_train_loss = trained.last_train_loss;
+    }
 }
 
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) struct Target2dBurnCheckpointConfig {
-    pub(crate) current_model_output: PathBuf,
-    pub(crate) best_model_output: PathBuf,
-    pub(crate) metadata_output: PathBuf,
-    pub(crate) model_config: NpaConfig,
-    pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
-    pub(crate) source: String,
-    pub(crate) interval_steps: usize,
-    pub(crate) interval_duration: Option<Duration>,
+fn direct_basis_training_examples(
+    examples: &[DirectBasisExample],
+) -> Vec<DirectBasisTrainingExample> {
+    examples
+        .iter()
+        .map(DirectBasisExample::to_training_example)
+        .collect()
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct DirectBasisStepStats {
-    loss: f32,
-    base_grad_norm: f32,
-    base_grad_scale: f32,
-    mean_adapter_grad_norm: f32,
-    max_adapter_grad_norm: f32,
-    examples_seen: usize,
-    particle_steps_per_sec: f64,
-    elapsed_ms: f64,
+fn sync_direct_basis_training_examples(
+    examples: &mut [DirectBasisExample],
+    trained: &[DirectBasisTrainingExample],
+) {
+    for (example, trained) in examples.iter_mut().zip(trained) {
+        example.sync_from_training_example(trained);
+    }
 }
 
 struct DirectBasisPhaseReport {
@@ -1154,6 +1126,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         motion_scale,
         loss_config,
         target2d_loss_backend: Target2dLossBackend::Dense,
+        perception_backend: PerceptionRolloutBackend::Dense,
         per_parameter_grad_normalization,
         base_sgd,
         adapter_sgd,
@@ -1679,6 +1652,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         motion_scale: base.config.alpha * base.config.motion_eps(hashgrid.eps),
         loss_config,
         target2d_loss_backend: Target2dLossBackend::Dense,
+        perception_backend: PerceptionRolloutBackend::Dense,
         per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: 0.0,
@@ -2130,6 +2104,7 @@ fn run_burn_wgpu_direct_basis(
         motion_scale: base.config.alpha * base.config.motion_eps(request.hashgrid.eps),
         loss_config: request.loss_config,
         target2d_loss_backend: Target2dLossBackend::Dense,
+        perception_backend: PerceptionRolloutBackend::Dense,
         per_parameter_grad_normalization: request.per_parameter_grad_normalization,
         base_sgd: request.base_sgd,
         adapter_sgd: request.adapter_sgd,
@@ -2208,15 +2183,19 @@ fn run_burn_wgpu_direct_basis(
         request.eval_examples,
         request.eval_seed ^ 0x90_1d_2d,
     )?;
+    let mut train_training_examples = direct_basis_training_examples(&train_examples);
+    let mut holdout_training_examples = direct_basis_training_examples(&holdout_examples);
     let mut burn_report = dense::train_direct_basis_burn_wgpu(
         &mut base,
-        &mut train_examples,
-        &mut holdout_examples,
+        &mut train_training_examples,
+        &mut holdout_training_examples,
         train_config,
         train_refine_config,
         holdout_config,
         None,
     )?;
+    sync_direct_basis_training_examples(&mut train_examples, &train_training_examples);
+    sync_direct_basis_training_examples(&mut holdout_examples, &holdout_training_examples);
     if let Some(metrics) = burn_report.metrics.as_object_mut() {
         metrics.insert(
             "memory_preflight".to_string(),
@@ -2671,6 +2650,7 @@ pub(crate) fn train_target_2d_burn_oracle(
         motion_scale: model.config.alpha * model.config.motion_eps(hashgrid.eps),
         loss_config,
         target2d_loss_backend: Target2dLossBackend::Dense,
+        perception_backend: PerceptionRolloutBackend::Dense,
         per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: training_config.optimizer.learning_rate,
@@ -2699,11 +2679,13 @@ pub(crate) fn train_target_2d_burn_oracle(
         update_base: false,
         ..train_config
     };
+    let mut train_training_examples = direct_basis_training_examples(&train_examples);
+    let mut holdout_training_examples = direct_basis_training_examples(&holdout_examples);
     let burn_report = match backend {
         DirectBasisOracleBackendArg::Wgpu => dense::train_direct_basis_burn_wgpu(
             model,
-            &mut train_examples,
-            &mut holdout_examples,
+            &mut train_training_examples,
+            &mut holdout_training_examples,
             train_config,
             no_phase_config,
             no_phase_config,
@@ -2711,8 +2693,8 @@ pub(crate) fn train_target_2d_burn_oracle(
         )?,
         DirectBasisOracleBackendArg::Cuda => dense::train_direct_basis_burn_cuda(
             model,
-            &mut train_examples,
-            &mut holdout_examples,
+            &mut train_training_examples,
+            &mut holdout_training_examples,
             train_config,
             no_phase_config,
             no_phase_config,
@@ -2720,6 +2702,8 @@ pub(crate) fn train_target_2d_burn_oracle(
         )?,
         DirectBasisOracleBackendArg::Cpu => unreachable!("CPU backend rejected above"),
     };
+    sync_direct_basis_training_examples(&mut train_examples, &train_training_examples);
+    sync_direct_basis_training_examples(&mut holdout_examples, &holdout_training_examples);
     let mut metrics = burn_report.metrics;
     metrics["target2d_training_config"] = serde_json::to_value(&training_config)?;
     metrics["rollout_step_min"] = serde_json::json!(training_config.step_min);
@@ -3803,6 +3787,7 @@ mod tests {
                 ..Target2dLossConfig::default()
             },
             target2d_loss_backend: Target2dLossBackend::Dense,
+            perception_backend: PerceptionRolloutBackend::Dense,
             per_parameter_grad_normalization: true,
             base_sgd: SgdConfig {
                 learning_rate: 1.0e-4,

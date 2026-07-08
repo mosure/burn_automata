@@ -1,17 +1,18 @@
-use super::{
+use super::super::{
     BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
-    BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput,
+    BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput, DirectBasisTrainConfig,
+    DirectBasisTrainingExample, Target2dBurnCheckpointConfig,
 };
 
 #[cfg(feature = "backend_wgpu")]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn_wgpu(
+pub(crate) fn train_direct_basis_burn_wgpu(
     base: &mut crate::NpaModel,
-    train_examples: &mut [super::super::DirectBasisExample],
-    holdout_examples: &mut [super::super::DirectBasisExample],
-    train_config: super::super::DirectBasisTrainConfig,
-    train_refine_config: super::super::DirectBasisTrainConfig,
-    holdout_config: super::super::DirectBasisTrainConfig,
-    checkpoint: Option<&super::super::Target2dBurnCheckpointConfig>,
+    train_examples: &mut [DirectBasisTrainingExample],
+    holdout_examples: &mut [DirectBasisTrainingExample],
+    train_config: DirectBasisTrainConfig,
+    train_refine_config: DirectBasisTrainConfig,
+    holdout_config: DirectBasisTrainConfig,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     super::wgpu_imp::train_direct_basis_burn_dense(
         base,
@@ -25,7 +26,7 @@ pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn
 }
 
 #[cfg(feature = "backend_wgpu")]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_wgpu(
+pub(crate) fn train_e2e_rollout_burn_wgpu(
     base: &mut crate::NpaModel,
     train_examples: &mut [BurnE2eRolloutExample],
     holdout_examples: &mut [BurnE2eRolloutExample],
@@ -40,7 +41,7 @@ pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_wgpu(
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_wgpu(
+pub(crate) fn train_e2e_rollout_burn_wgpu(
     _base: &mut crate::NpaModel,
     _train_examples: &mut [BurnE2eRolloutExample],
     _holdout_examples: &mut [BurnE2eRolloutExample],
@@ -53,14 +54,14 @@ pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_wgpu(
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn_wgpu(
+pub(crate) fn train_direct_basis_burn_wgpu(
     _base: &mut crate::NpaModel,
-    _train_examples: &mut [super::super::DirectBasisExample],
-    _holdout_examples: &mut [super::super::DirectBasisExample],
-    _train_config: super::super::DirectBasisTrainConfig,
-    _train_refine_config: super::super::DirectBasisTrainConfig,
-    _holdout_config: super::super::DirectBasisTrainConfig,
-    _checkpoint: Option<&super::super::Target2dBurnCheckpointConfig>,
+    _train_examples: &mut [DirectBasisTrainingExample],
+    _holdout_examples: &mut [DirectBasisTrainingExample],
+    _train_config: DirectBasisTrainConfig,
+    _train_refine_config: DirectBasisTrainConfig,
+    _holdout_config: DirectBasisTrainConfig,
+    _checkpoint: Option<&Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/WGPU direct-basis training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu or choose the Burn/CUDA backend in a CUDA build",
@@ -69,19 +70,19 @@ pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn
 }
 
 #[cfg(feature = "backend_wgpu")]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_oracle_models_burn_wgpu(
+pub(crate) fn train_oracle_models_burn_wgpu(
     models: &mut [crate::NpaModel],
-    examples: &[super::super::DirectBasisExample],
-    train_config: super::super::DirectBasisTrainConfig,
+    examples: &[DirectBasisTrainingExample],
+    train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     super::wgpu_imp::train_oracle_models_burn_dense(models, examples, train_config)
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_oracle_models_burn_wgpu(
+pub(crate) fn train_oracle_models_burn_wgpu(
     _models: &mut [crate::NpaModel],
-    _examples: &[super::super::DirectBasisExample],
-    _train_config: super::super::DirectBasisTrainConfig,
+    _examples: &[DirectBasisTrainingExample],
+    _train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/WGPU vectorized oracle training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
@@ -90,14 +91,14 @@ pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_oracle_models_bur
 }
 
 #[cfg(feature = "backend_cuda")]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn_cuda(
+pub(crate) fn train_direct_basis_burn_cuda(
     base: &mut crate::NpaModel,
-    train_examples: &mut [super::super::DirectBasisExample],
-    holdout_examples: &mut [super::super::DirectBasisExample],
-    train_config: super::super::DirectBasisTrainConfig,
-    train_refine_config: super::super::DirectBasisTrainConfig,
-    holdout_config: super::super::DirectBasisTrainConfig,
-    checkpoint: Option<&super::super::Target2dBurnCheckpointConfig>,
+    train_examples: &mut [DirectBasisTrainingExample],
+    holdout_examples: &mut [DirectBasisTrainingExample],
+    train_config: DirectBasisTrainConfig,
+    train_refine_config: DirectBasisTrainConfig,
+    holdout_config: DirectBasisTrainConfig,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     super::cuda_imp::train_direct_basis_burn_dense(
         base,
@@ -111,7 +112,7 @@ pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn
 }
 
 #[cfg(feature = "backend_cuda")]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_cuda(
+pub(crate) fn train_e2e_rollout_burn_cuda(
     base: &mut crate::NpaModel,
     train_examples: &mut [BurnE2eRolloutExample],
     holdout_examples: &mut [BurnE2eRolloutExample],
@@ -126,7 +127,7 @@ pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_cuda(
 }
 
 #[cfg(not(feature = "backend_cuda"))]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_cuda(
+pub(crate) fn train_e2e_rollout_burn_cuda(
     _base: &mut crate::NpaModel,
     _train_examples: &mut [BurnE2eRolloutExample],
     _holdout_examples: &mut [BurnE2eRolloutExample],
@@ -139,14 +140,14 @@ pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_cuda(
 }
 
 #[cfg(not(feature = "backend_cuda"))]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn_cuda(
+pub(crate) fn train_direct_basis_burn_cuda(
     _base: &mut crate::NpaModel,
-    _train_examples: &mut [super::super::DirectBasisExample],
-    _holdout_examples: &mut [super::super::DirectBasisExample],
-    _train_config: super::super::DirectBasisTrainConfig,
-    _train_refine_config: super::super::DirectBasisTrainConfig,
-    _holdout_config: super::super::DirectBasisTrainConfig,
-    _checkpoint: Option<&super::super::Target2dBurnCheckpointConfig>,
+    _train_examples: &mut [DirectBasisTrainingExample],
+    _holdout_examples: &mut [DirectBasisTrainingExample],
+    _train_config: DirectBasisTrainConfig,
+    _train_refine_config: DirectBasisTrainConfig,
+    _holdout_config: DirectBasisTrainConfig,
+    _checkpoint: Option<&Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/CUDA dense direct-basis training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",
@@ -155,19 +156,19 @@ pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_direct_basis_burn
 }
 
 #[cfg(feature = "backend_cuda")]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_oracle_models_burn_cuda(
+pub(crate) fn train_oracle_models_burn_cuda(
     models: &mut [crate::NpaModel],
-    examples: &[super::super::DirectBasisExample],
-    train_config: super::super::DirectBasisTrainConfig,
+    examples: &[DirectBasisTrainingExample],
+    train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     super::cuda_imp::train_oracle_models_burn_dense(models, examples, train_config)
 }
 
 #[cfg(not(feature = "backend_cuda"))]
-pub(in crate::cli::commands::hyper_e2e::direct_basis) fn train_oracle_models_burn_cuda(
+pub(crate) fn train_oracle_models_burn_cuda(
     _models: &mut [crate::NpaModel],
-    _examples: &[super::super::DirectBasisExample],
-    _train_config: super::super::DirectBasisTrainConfig,
+    _examples: &[DirectBasisTrainingExample],
+    _train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/CUDA vectorized oracle training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",

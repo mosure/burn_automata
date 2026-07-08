@@ -1,22 +1,16 @@
 mod backends;
-mod types;
 
-pub(super) use backends::{
+pub(crate) use backends::{
     train_direct_basis_burn_cuda, train_direct_basis_burn_wgpu, train_oracle_models_burn_cuda,
     train_oracle_models_burn_wgpu,
 };
-pub(in crate::cli::commands::hyper_e2e) use backends::{
-    train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
-};
-pub(super) use types::{BurnDenseOracleBatchOutput, BurnWgpuDirectBasisOutput};
-pub(in crate::cli::commands::hyper_e2e) use types::{
-    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
-};
+pub(crate) use backends::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 
 macro_rules! dense_direct_basis_backend {
     (
         $module:ident,
         $feature:meta,
+        $perception_cube_feature:meta,
         $inner_backend:ty,
         $backend_name:expr,
         $device_label:expr,
@@ -28,26 +22,30 @@ mod $module {
     use std::{fs, process::Command, time::Instant};
 
     use burn::{
-        backend::Autodiff,
-        tensor::{Device, Int, Tensor, TensorData, activation::relu},
+        backend::{
+            Autodiff,
+            autodiff::{
+                checkpoint::strategy::NoCheckpointing,
+                grads::Gradients,
+                ops::{Backward, Ops, OpsKind},
+            },
+        },
+        tensor::{Device, Int, Tensor, TensorData, TensorPrimitive, activation::relu},
     };
     use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
     use serde::Serialize;
     use serde_json::json;
 
-    use super::{
-        BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
-        BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput, E2eLrSchedule,
-    };
-    use super::types::{
-        BurnE2eRolloutHistoryEntry, BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport,
-    };
     use super::super::{
-        DirectBasisExample, DirectBasisStepStats, DirectBasisTrainConfig, Target2dLossBackend,
+        BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
+        BurnE2eRolloutHistoryEntry, BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport,
+        BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput,
+        DirectBasisStepStats, DirectBasisTrainConfig,
+        DirectBasisTrainingExample as DirectBasisExample, E2eLrSchedule,
+        Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
+        Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
     };
-    use crate::cli::reports::{
-        CliHyper2dDirectBasisHistoryEntry, CliHyper2dDirectBasisLossSummary,
-    };
+    use crate::hyper::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
     use crate::{
         AdamWConfig, AutomataError, AutomataResult, NpaConfig, NpaLowRankAdapter, NpaModel,
         NpaWeights,
@@ -56,6 +54,8 @@ mod $module {
         target2d::{render_target_2d_splat, target_2d_foreground_mask},
         TargetImage2d,
     };
+    #[cfg($perception_cube_feature)]
+    use burn_automata_kernels::{PerceptionCubeAdjointBackend, PerceptionCubeAdjointConfig};
     #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
     use burn_automata_kernels::{Target2dCubeAdjointBackend, Target2dCubeLossConfig};
 
@@ -461,6 +461,9 @@ mod $module {
         metrics["target2d_loss_backend"] = json!(train_config.target2d_loss_backend.as_str());
         metrics["target2d_loss_backend_effective"] =
             json!(target2d_loss_backend_effective(train_config).as_str());
+        metrics["perception_backend"] = json!(train_config.perception_backend.as_str());
+        metrics["perception_backend_effective"] =
+            json!(perception_backend_effective(train_config).as_str());
         metrics["model_checkpoints"] = checkpoint_state
             .as_ref()
             .map(BurnDenseCheckpointState::report_json)
@@ -834,6 +837,14 @@ mod $module {
         metrics.insert(
             "target2d_loss_backend_effective".to_string(),
             json!(target2d_loss_backend_effective(direct_config_view(config)).as_str()),
+        );
+        metrics.insert(
+            "perception_backend".to_string(),
+            json!(config.perception_backend.as_str()),
+        );
+        metrics.insert(
+            "perception_backend_effective".to_string(),
+            json!(perception_backend_effective(direct_config_view(config)).as_str()),
         );
         metrics.insert(
             "max_dense_train_particles".to_string(),
@@ -3294,7 +3305,16 @@ mod $module {
         } else {
             s.clone()
         };
-        dense_perception(&feature_x, &feature_s, config)
+        match perception_backend_effective(config) {
+            PerceptionRolloutBackend::Dense => dense_perception(&feature_x, &feature_s, config),
+            PerceptionRolloutBackend::TiledAdjoint => perception_tiled_adjoint_batch(
+                feature_x.unsqueeze_dim::<3>(0),
+                feature_s.unsqueeze_dim::<3>(0),
+                config,
+            )
+            .squeeze_dim::<2>(0),
+            PerceptionRolloutBackend::Auto => unreachable!("auto perception backend resolved"),
+        }
     }
 
     fn rollout_dense_perception_batch(
@@ -3312,7 +3332,264 @@ mod $module {
         } else {
             s.clone()
         };
-        dense_perception_batch(&feature_x, &feature_s, config)
+        match perception_backend_effective(config) {
+            PerceptionRolloutBackend::Dense => dense_perception_batch(&feature_x, &feature_s, config),
+            PerceptionRolloutBackend::TiledAdjoint => {
+                perception_tiled_adjoint_batch(feature_x, feature_s, config)
+            }
+            PerceptionRolloutBackend::Auto => unreachable!("auto perception backend resolved"),
+        }
+    }
+
+    fn perception_backend_effective(
+        config: DirectBasisTrainConfig,
+    ) -> PerceptionRolloutBackend {
+        match config.perception_backend {
+            PerceptionRolloutBackend::Auto => perception_backend_auto(config),
+            PerceptionRolloutBackend::Dense => PerceptionRolloutBackend::Dense,
+            PerceptionRolloutBackend::TiledAdjoint => PerceptionRolloutBackend::TiledAdjoint,
+        }
+    }
+
+    fn perception_backend_auto(config: DirectBasisTrainConfig) -> PerceptionRolloutBackend {
+        #[cfg($perception_cube_feature)]
+        {
+            if config.rollout_particles >= 512 {
+                PerceptionRolloutBackend::TiledAdjoint
+            } else {
+                PerceptionRolloutBackend::Dense
+            }
+        }
+        #[cfg(not($perception_cube_feature))]
+        {
+            let _ = config;
+            PerceptionRolloutBackend::Dense
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PerceptionAdjointState {
+        x: Tensor3Inner,
+        s: Tensor3Inner,
+        batch_size: usize,
+        particle_count: usize,
+        state_dims: usize,
+        grid_eps: f32,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PerceptionAdjointOp;
+
+    impl Backward<InnerBackend, 2> for PerceptionAdjointOp {
+        type State = PerceptionAdjointState;
+
+        fn backward(
+            self,
+            ops: Ops<Self::State, 2>,
+            grads: &mut Gradients,
+            _checkpointer: &mut burn::backend::autodiff::checkpoint::base::Checkpointer,
+        ) {
+            let [x_parent, s_parent] = ops.parents;
+            if x_parent.is_none() && s_parent.is_none() {
+                return;
+            }
+            let feature_grad = grads.consume::<InnerBackend>(&ops.node);
+            let feature_grad_tensor =
+                Tensor::<InnerBackend, 3>::from_primitive(TensorPrimitive::Float(feature_grad));
+            let device = feature_grad_tensor.device();
+
+            #[cfg($perception_cube_feature)]
+            {
+                if let Some(device_adjoint) = InnerBackend::perception_cube_adjoint(
+                    ops.state.x.clone(),
+                    ops.state.s.clone(),
+                    feature_grad_tensor.clone(),
+                    perception_cube_adjoint_config(
+                        ops.state.grid_eps,
+                        x_parent.is_some(),
+                        s_parent.is_some(),
+                    ),
+                ) {
+                    let device_adjoint =
+                        device_adjoint.unwrap_or_else(|err| panic!("perception cube adjoint failed: {err}"));
+                    if let Some(parent) = x_parent {
+                        grads.register::<InnerBackend>(
+                            parent.id,
+                            device_adjoint.position_grad.into_primitive().tensor(),
+                        );
+                    }
+                    if let Some(parent) = s_parent {
+                        grads.register::<InnerBackend>(
+                            parent.id,
+                            device_adjoint.state_grad.into_primitive().tensor(),
+                        );
+                    }
+                    return;
+                }
+            }
+
+            let feature_grad = feature_grad_tensor
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_else(|err| panic!("perception adjoint readback failed: {err}"));
+            let x_values = ops
+                .state
+                .x
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_else(|err| panic!("perception adjoint position readback failed: {err}"));
+            let states = ops
+                .state
+                .s
+                .clone()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap_or_else(|err| panic!("perception adjoint state readback failed: {err}"));
+            let positions = xy_positions_to_reference_positions(&x_values);
+            let grid = perception_reference_grid(ops.state.grid_eps);
+            let options = perception_reference_options(ops.state.grid_eps);
+            let adjoint = burn_automata_kernels::perceive_adjoint_with_options(
+                &positions,
+                &states,
+                ops.state.batch_size,
+                ops.state.particle_count,
+                ops.state.state_dims,
+                &grid,
+                options,
+                &feature_grad,
+            )
+            .unwrap_or_else(|err| panic!("perception adjoint failed: {err}"));
+
+            if let Some(parent) = x_parent {
+                let position_grad = adjoint
+                    .position
+                    .iter()
+                    .flat_map(|value| [value[0], value[1]])
+                    .collect::<Vec<_>>();
+                let tensor = Tensor::<InnerBackend, 3>::from_data(
+                    TensorData::new(
+                        position_grad,
+                        [ops.state.batch_size, ops.state.particle_count, 2],
+                    ),
+                    &device,
+                )
+                .into_primitive()
+                .tensor();
+                grads.register::<InnerBackend>(parent.id, tensor);
+            }
+            if let Some(parent) = s_parent {
+                let tensor = Tensor::<InnerBackend, 3>::from_data(
+                    TensorData::new(
+                        adjoint.state,
+                        [
+                            ops.state.batch_size,
+                            ops.state.particle_count,
+                            ops.state.state_dims,
+                        ],
+                    ),
+                    &device,
+                )
+                .into_primitive()
+                .tensor();
+                grads.register::<InnerBackend>(parent.id, tensor);
+            }
+        }
+    }
+
+    fn perception_tiled_adjoint_batch(
+        x: Tensor3,
+        s: Tensor3,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor3 {
+        let dims = s.shape().dims::<3>();
+        let batch_size = dims[0];
+        let particle_count = dims[1];
+        let state_dims = dims[2];
+        let x_dims = x.shape().dims::<3>();
+        assert_eq!(
+            x_dims,
+            [batch_size, particle_count, 2],
+            "perception tiled-adjoint expects x shape [batch, particles, 2]"
+        );
+        let x_primitive = x.into_primitive().tensor();
+        let s_primitive = s.into_primitive().tensor();
+        let x_inner = Tensor::<InnerBackend, 3>::from_primitive(TensorPrimitive::Float(
+            x_primitive.primitive.clone(),
+        ));
+        let s_inner = Tensor::<InnerBackend, 3>::from_primitive(TensorPrimitive::Float(
+            s_primitive.primitive.clone(),
+        ));
+        let output = dense_perception_batch_inner(&x_inner, &s_inner, config)
+            .into_primitive()
+            .tensor();
+        let state = PerceptionAdjointState {
+            x: x_inner,
+            s: s_inner,
+            batch_size,
+            particle_count,
+            state_dims,
+            grid_eps: config.grid_eps,
+        };
+        let prep = PerceptionAdjointOp
+            .prepare::<NoCheckpointing>([x_primitive.node.clone(), s_primitive.node.clone()])
+            .compute_bound();
+        let output = match prep.stateful() {
+            OpsKind::Tracked(prep) => prep.finish(state, output),
+            OpsKind::UnTracked(prep) => prep.finish(output),
+        };
+        Tensor::<BurnBackend, 3>::from_primitive(TensorPrimitive::Float(output))
+    }
+
+    fn xy_positions_to_reference_positions(values: &[f32]) -> Vec<[f32; 4]> {
+        values
+            .chunks_exact(2)
+            .map(|chunk| [chunk[0], chunk[1], 0.0, 0.0])
+            .collect()
+    }
+
+    fn perception_reference_grid(grid_eps: f32) -> burn_automata_kernels::HashGridConfig {
+        let mut grid = burn_automata_kernels::HashGridConfig::growing_2d();
+        grid.eps = grid_eps.max(EPSILON);
+        grid
+    }
+
+    fn perception_reference_options(_grid_eps: f32) -> burn_automata_kernels::PerceptionOptions {
+        let npa = NpaConfig::growing_2d();
+        burn_automata_kernels::PerceptionOptions {
+            state_grad: npa.state_grad,
+            density_grad: npa.density_grad,
+            eps0: npa.eps0.max(f32::MIN_POSITIVE),
+            scale_equivariance: npa.scale_equivariant(),
+            particle_density_equivariance: npa.particle_density_equivariant(),
+            log_norm_grad: npa.log_norm_grad,
+            log_norm_density_grad: npa.log_norm_density_grad,
+            hybrid_state_gradient: true,
+            position_features: npa.position_features,
+        }
+    }
+
+    #[cfg($perception_cube_feature)]
+    fn perception_cube_adjoint_config(
+        grid_eps: f32,
+        compute_position_grad: bool,
+        compute_state_grad: bool,
+    ) -> PerceptionCubeAdjointConfig {
+        let npa = NpaConfig::growing_2d();
+        PerceptionCubeAdjointConfig {
+            eps: grid_eps.max(EPSILON),
+            eps0: npa.eps0.max(f32::MIN_POSITIVE),
+            state_grad: npa.state_grad,
+            density_grad: npa.density_grad,
+            scale_equivariance: npa.scale_equivariant(),
+            particle_density_equivariance: npa.particle_density_equivariant(),
+            log_norm_grad: npa.log_norm_grad,
+            log_norm_density_grad: npa.log_norm_density_grad,
+            hybrid_state_gradient: true,
+            position_features: npa.position_features,
+            compute_position_grad,
+            compute_state_grad,
+        }
     }
 
     fn dense_perception(x: &Tensor2, s: &Tensor2, config: DirectBasisTrainConfig) -> Tensor2 {
@@ -3529,6 +3806,135 @@ mod $module {
         )
     }
 
+    fn dense_perception_batch_inner(
+        x: &Tensor3Inner,
+        s: &Tensor3Inner,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor3Inner {
+        dense_perception_batch_generic::<InnerBackend>(x, s, config)
+    }
+
+    fn dense_perception_batch_generic<B: burn::tensor::backend::Backend>(
+        x: &Tensor<B, 3>,
+        s: &Tensor<B, 3>,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor<B, 3> {
+        let dims = s.shape().dims::<3>();
+        let batches = dims[0];
+        let rows = dims[1];
+        let state_dims = dims[2];
+        let density = dense_particle_density_batch_generic(x, config);
+        let chunk_size =
+            dense_query_chunk_size(batches, rows, state_dims, config.max_dense_chunk_floats);
+        let mut chunks = Vec::new();
+        for (start, len) in chunks_for(rows, chunk_size) {
+            chunks.push(dense_perception_batch_chunk_generic(
+                x, s, &density, config, start, len,
+            ));
+        }
+        Tensor::cat(chunks, 1)
+    }
+
+    fn dense_perception_batch_chunk_generic<B: burn::tensor::backend::Backend>(
+        x: &Tensor<B, 3>,
+        s: &Tensor<B, 3>,
+        density: &Tensor<B, 3>,
+        config: DirectBasisTrainConfig,
+        start: usize,
+        len: usize,
+    ) -> Tensor<B, 3> {
+        let dims = s.shape().dims::<3>();
+        let batches = dims[0];
+        let rows = dims[1];
+        let state_dims = dims[2];
+        let xi = x
+            .clone()
+            .narrow(1, start, len)
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, len, rows, 2]);
+        let xj = x
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .expand([batches, len, rows, 2]);
+        let diff = xj - xi;
+        let dist2 = diff
+            .clone()
+            .mul(diff.clone())
+            .sum_dim(3)
+            .squeeze_dim::<3>(3);
+        let eps = config.grid_eps.max(EPSILON);
+        let compact = relu(dist2.clone().mul_scalar(-1.0).add_scalar(eps * eps));
+        let compact2 = compact.clone().mul(compact.clone());
+        let smooth = compact2
+            .mul(compact)
+            .mul_scalar(4.0 / (std::f32::consts::PI * eps.powi(8)));
+        let volume_j = density
+            .clone()
+            .swap_dims(1, 2)
+            .recip()
+            .expand([batches, len, rows]);
+        let blur = smooth.clone().mul(volume_j.clone()).matmul(s.clone());
+
+        let r = dist2.add_scalar(EPSILON * EPSILON).sqrt();
+        let spiky = relu(r.clone().mul_scalar(-1.0).add_scalar(eps));
+        let spiky_mag = spiky
+            .clone()
+            .mul(spiky)
+            .div(r)
+            .mul_scalar(30.0 / (std::f32::consts::PI * eps.powi(5)));
+        let grad = diff.clone().mul(
+            spiky_mag
+                .unsqueeze_dim::<4>(3)
+                .expand([batches, len, rows, 2]),
+        );
+        let density_grad = log_normalize_vectors_batch_generic(
+            grad.clone()
+                .sum_dim(2)
+                .squeeze_dim::<3>(2)
+                .mul_scalar((eps / 0.1).powi(3) / rows.max(1) as f32),
+        );
+
+        let sj = s
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .expand([batches, len, rows, state_dims]);
+        let si = s
+            .clone()
+            .narrow(1, start, len)
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, len, rows, state_dims]);
+        let state_diff = sj - si;
+        let volume_grad = grad.mul(
+            volume_j
+                .unsqueeze_dim::<4>(3)
+                .expand([batches, len, rows, 2]),
+        );
+        let state_grad = state_diff
+            .unsqueeze_dim::<5>(4)
+            .expand([batches, len, rows, state_dims, 2])
+            .mul(
+                volume_grad
+                    .clone()
+                    .unsqueeze_dim::<5>(3)
+                    .expand([batches, len, rows, state_dims, 2]),
+            )
+            .sum_dim(2)
+            .squeeze_dim::<4>(2);
+        let state_grad =
+            apply_moment_correction_2d_batch_generic::<B>(state_grad, diff, volume_grad);
+        let state_grad = log_normalize_state_gradient_batch_generic(state_grad);
+
+        Tensor::cat(
+            vec![
+                s.clone().narrow(1, start, len),
+                blur,
+                state_grad,
+                density_grad,
+            ],
+            2,
+        )
+    }
+
     fn background_density_term(density: Tensor2, foreground: Tensor2) -> Tensor2 {
         let background = foreground.mul_scalar(-1.0).add_scalar(1.0);
         let leak = density.mul(background);
@@ -3647,6 +4053,10 @@ mod $module {
         let particle_count = dims[1];
         let state_dims = s.shape().dims::<3>()[2];
         let target_mean = stack_target_mean(targets, indices);
+        let target_rgb = stack_target_rgb(targets, indices);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
         let centered = if config.loss_config.center {
             x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
                 + target_mean.expand([batches, particle_count, 2])
@@ -3657,15 +4067,12 @@ mod $module {
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
         let background_density_loss =
-            background_density_term_batch(density.clone(), stack_target_foreground(targets, indices))
-                .mean();
-        let target_density = stack_target_density(targets, indices);
-        let target_foreground = stack_target_foreground(targets, indices);
+            background_density_term_batch(density.clone(), target_foreground.clone()).mean();
         let foreground_density_loss = foreground_density_term_batch(
             density.clone(),
             target_density.clone(),
             target_foreground,
-            stack_target_foreground_scales(targets, indices),
+            target_foreground_scales,
         )
         .mean();
         let density_diff = density - target_density;
@@ -3676,7 +4083,7 @@ mod $module {
             config.loss_config.image_size * config.loss_config.image_size,
             3,
         ]);
-        let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
+        let color_loss = l1l2_tensor3(rgb - target_rgb)
             .mul(color_gate)
             .mean();
         let shape_chamfer_loss =
@@ -3728,6 +4135,10 @@ mod $module {
         let state_dims = s.shape().dims::<3>()[2];
         let pixels = config.loss_config.image_size * config.loss_config.image_size;
         let target_mean = stack_target_mean(targets, indices);
+        let target_rgb = stack_target_rgb(targets, indices);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
         let centered = if config.loss_config.center {
             x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
                 + target_mean.expand([batches, particle_count, 2])
@@ -3739,18 +4150,16 @@ mod $module {
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
         let background_density_loss = background_density_term_batch(
             density.clone(),
-            stack_target_foreground(targets, indices),
+            target_foreground.clone(),
         )
         .reshape([batches, pixels])
         .mean_dim(1)
         .squeeze_dim::<1>(1);
-        let target_density = stack_target_density(targets, indices);
-        let target_foreground = stack_target_foreground(targets, indices);
         let foreground_density_loss = foreground_density_term_batch(
             density.clone(),
             target_density.clone(),
             target_foreground,
-            stack_target_foreground_scales(targets, indices),
+            target_foreground_scales,
         )
         .reshape([batches, pixels])
         .mean_dim(1)
@@ -3763,7 +4172,7 @@ mod $module {
             .mean_dim(1)
             .squeeze_dim::<1>(1);
         let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
-        let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
+        let color_loss = l1l2_tensor3(rgb - target_rgb)
             .mul(color_gate)
             .reshape([batches, pixels * 3])
             .mean_dim(1)
@@ -3893,12 +4302,21 @@ mod $module {
         let device = &x.device();
         #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
         if config.loss_config.shape_chamfer_loss_weight == 0.0 {
+            let target_mean = config
+                .loss_config
+                .center
+                .then(|| stack_target_mean(targets, indices).inner());
+            let target_rgb = stack_target_rgb(targets, indices).inner();
+            let target_density = stack_target_density(targets, indices).inner();
+            let target_foreground = stack_target_foreground(targets, indices).inner();
+            let target_foreground_scales = stack_target_foreground_scales(targets, indices).inner();
+            let pixel_sizes = stack_pixel_sizes(targets, indices).inner();
+            let target_point_counts = stack_target_point_counts(targets, indices).inner();
             if let Some(device_loss) = InnerBackend::target2d_cube_adjoint(
                 x.clone().inner(),
                 {
                     let x_inner = x.clone().inner();
-                    if config.loss_config.center {
-                        let target_mean = stack_target_mean(targets, indices).inner();
+                    if let Some(target_mean) = target_mean {
                         x_inner.clone()
                             - x_inner.clone().mean_dim(1).expand([batches, particle_count, 2])
                             + target_mean.expand([batches, particle_count, 2])
@@ -3907,12 +4325,12 @@ mod $module {
                     }
                 },
                 s.clone().inner(),
-                stack_target_rgb(targets, indices).inner(),
-                stack_target_density(targets, indices).inner(),
-                stack_target_foreground(targets, indices).inner(),
-                stack_target_foreground_scales(targets, indices).inner(),
-                stack_pixel_sizes(targets, indices).inner(),
-                stack_target_point_counts(targets, indices).inner(),
+                target_rgb,
+                target_density,
+                target_foreground,
+                target_foreground_scales,
+                pixel_sizes,
+                target_point_counts,
                 target2d_cube_loss_config(config.loss_config),
             ) {
                 let device_loss = device_loss?;
@@ -4091,6 +4509,10 @@ mod $module {
         let state_dims = s.shape().dims::<3>()[2];
         let pixels = config.loss_config.image_size * config.loss_config.image_size;
         let target_mean = stack_target_mean(targets, indices);
+        let target_rgb = stack_target_rgb(targets, indices);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
         let centered = if config.loss_config.center {
             x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
                 + target_mean.expand([batches, particle_count, 2])
@@ -4100,7 +4522,6 @@ mod $module {
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
-        let target_rgb = stack_target_rgb(targets, indices);
         let rgb_diff = rgb - target_rgb;
         let render_rgb_mse = rgb_diff
             .clone()
@@ -4110,18 +4531,16 @@ mod $module {
             .squeeze_dim::<1>(1);
         let background_density_loss = background_density_term_batch(
             density.clone(),
-            stack_target_foreground(targets, indices),
+            target_foreground.clone(),
         )
         .reshape([batches, pixels])
         .mean_dim(1)
         .squeeze_dim::<1>(1);
-        let target_density = stack_target_density(targets, indices);
-        let target_foreground = stack_target_foreground(targets, indices);
         let foreground_density_loss = foreground_density_term_batch(
             density.clone(),
             target_density.clone(),
             target_foreground,
-            stack_target_foreground_scales(targets, indices),
+            target_foreground_scales,
         )
         .reshape([batches, pixels])
         .mean_dim(1)
@@ -4199,6 +4618,10 @@ mod $module {
         let state_dims = s.shape().dims::<3>()[2];
         let pixels = config.loss_config.image_size * config.loss_config.image_size;
         let target_mean = stack_target_mean(targets, indices);
+        let target_rgb = stack_target_rgb(targets, indices);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
         let centered = if config.loss_config.center {
             x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
                 + target_mean.expand([batches, particle_count, 2])
@@ -4210,18 +4633,16 @@ mod $module {
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
         let background_density_loss = background_density_term_batch(
             density.clone(),
-            stack_target_foreground(targets, indices),
+            target_foreground.clone(),
         )
         .reshape([batches, pixels])
         .mean_dim(1)
         .squeeze_dim::<1>(1);
-        let target_density = stack_target_density(targets, indices);
-        let target_foreground = stack_target_foreground(targets, indices);
         let foreground_density_loss = foreground_density_term_batch(
             density.clone(),
             target_density.clone(),
             target_foreground,
-            stack_target_foreground_scales(targets, indices),
+            target_foreground_scales,
         )
         .reshape([batches, pixels])
         .mean_dim(1)
@@ -4234,7 +4655,7 @@ mod $module {
             .mean_dim(1)
             .squeeze_dim::<1>(1);
         let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
-        let color_loss = l1l2_tensor3(rgb - stack_target_rgb(targets, indices))
+        let color_loss = l1l2_tensor3(rgb - target_rgb)
             .mul(color_gate)
             .reshape([batches, pixels * 3])
             .mean_dim(1)
@@ -4376,7 +4797,9 @@ mod $module {
         let batches = indices.len();
         let pixels = config.loss_config.image_size * config.loss_config.image_size;
         let particle_pixels = particle_pixel_positions_batch(x, config);
-        let sigma = stack_pixel_sizes(targets, indices)
+        let pixel_sizes = stack_pixel_sizes(targets, indices);
+        let sigma = pixel_sizes
+            .clone()
             .mul_scalar(config.loss_config.sigma * config.loss_config.image_size as f32)
             .div_scalar(config.loss_config.hi - config.loss_config.lo)
             .clamp_min(EPSILON);
@@ -4388,7 +4811,7 @@ mod $module {
             sigma.clone(),
             config,
         );
-        let norm_scale = stack_pixel_sizes(targets, indices)
+        let norm_scale = pixel_sizes
             .mul_scalar(config.loss_config.image_size as f32)
             .div_scalar(config.loss_config.hi - config.loss_config.lo);
         let norm_scale = norm_scale.clone().mul(norm_scale);
@@ -4450,6 +4873,41 @@ mod $module {
     }
 
     fn dense_particle_density_batch(x: &Tensor3, config: DirectBasisTrainConfig) -> Tensor3 {
+        let dims = x.shape().dims::<3>();
+        let batches = dims[0];
+        let rows = dims[1];
+        let chunk_size = dense_query_chunk_size(batches, rows, 1, config.max_dense_chunk_floats);
+        let mut chunks = Vec::new();
+        for (start, len) in chunks_for(rows, chunk_size) {
+            let xi = x
+                .clone()
+                .narrow(1, start, len)
+                .unsqueeze_dim::<4>(2)
+                .expand([batches, len, rows, 2]);
+            let xj = x
+                .clone()
+                .unsqueeze_dim::<4>(1)
+                .expand([batches, len, rows, 2]);
+            let diff = xj - xi;
+            let dist2 = diff.clone().mul(diff).sum_dim(3).squeeze_dim::<3>(3);
+            let eps = config.grid_eps.max(EPSILON);
+            let compact = relu(dist2.mul_scalar(-1.0).add_scalar(eps * eps));
+            let compact2 = compact.clone().mul(compact.clone());
+            chunks.push(
+                compact2
+                    .mul(compact)
+                    .mul_scalar(4.0 / (std::f32::consts::PI * eps.powi(8)))
+                    .sum_dim(2)
+                    .clamp_min(EPSILON),
+            );
+        }
+        Tensor::cat(chunks, 1)
+    }
+
+    fn dense_particle_density_batch_generic<B: burn::tensor::backend::Backend>(
+        x: &Tensor<B, 3>,
+        config: DirectBasisTrainConfig,
+    ) -> Tensor<B, 3> {
         let dims = x.shape().dims::<3>();
         let batches = dims[0];
         let rows = dims[1];
@@ -4713,6 +5171,25 @@ mod $module {
                 .expand([dims[0], dims[1], dims[2]])
     }
 
+    fn log_normalize_vectors_batch_generic<B: burn::tensor::backend::Backend>(
+        values: Tensor<B, 3>,
+    ) -> Tensor<B, 3> {
+        let dims = values.shape().dims::<3>();
+        let norm = values
+            .clone()
+            .mul(values.clone())
+            .sum_dim(2)
+            .add_scalar(EPSILON * EPSILON)
+            .sqrt()
+            .clamp_min(EPSILON);
+        values
+            * norm
+                .clone()
+                .log1p()
+                .div(norm)
+                .expand([dims[0], dims[1], dims[2]])
+    }
+
     fn log_normalize_state_gradient(values: Tensor3) -> Tensor2 {
         let dims = values.shape().dims::<3>();
         let norm = values
@@ -4732,6 +5209,26 @@ mod $module {
     }
 
     fn log_normalize_state_gradient_batch(values: Tensor4) -> Tensor3 {
+        let dims = values.shape().dims::<4>();
+        let norm = values
+            .clone()
+            .mul(values.clone())
+            .sum_dim(3)
+            .add_scalar(EPSILON * EPSILON)
+            .sqrt()
+            .clamp_min(EPSILON);
+        (values
+            * norm
+                .clone()
+                .log1p()
+                .div(norm)
+                .expand([dims[0], dims[1], dims[2], dims[3]]))
+        .reshape([dims[0], dims[1], dims[2] * dims[3]])
+    }
+
+    fn log_normalize_state_gradient_batch_generic<B: burn::tensor::backend::Backend>(
+        values: Tensor<B, 4>,
+    ) -> Tensor<B, 3> {
         let dims = values.shape().dims::<4>();
         let norm = values
             .clone()
@@ -4867,6 +5364,74 @@ mod $module {
         let inv11 = a.mul(inv_det).mask_where(
             near_singular,
             Tensor::<BurnBackend, 3>::ones([batches, query_rows, 1], &state_gradient.device()),
+        );
+        let gx = state_gradient.clone().narrow(3, 0, 1);
+        let gy = state_gradient.narrow(3, 1, 1);
+        let inv00 = inv00
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, query_rows, state_dims, 1]);
+        let inv01 = inv01
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, query_rows, state_dims, 1]);
+        let inv11 = inv11
+            .unsqueeze_dim::<4>(2)
+            .expand([batches, query_rows, state_dims, 1]);
+        let corrected_x = gx.clone().mul(inv00) + gy.clone().mul(inv01.clone());
+        let corrected_y = gx.mul(inv01) + gy.mul(inv11);
+        Tensor::cat(vec![corrected_x, corrected_y], 3)
+    }
+
+    fn apply_moment_correction_2d_batch_generic<B: burn::tensor::backend::Backend>(
+        state_gradient: Tensor<B, 4>,
+        diff: Tensor<B, 4>,
+        volume_grad: Tensor<B, 4>,
+    ) -> Tensor<B, 4> {
+        let dims = state_gradient.shape().dims::<4>();
+        let batches = dims[0];
+        let query_rows = dims[1];
+        let state_dims = dims[2];
+        let neighbor_rows = diff.shape().dims::<4>()[2];
+        let moment = diff
+            .unsqueeze_dim::<5>(4)
+            .expand([batches, query_rows, neighbor_rows, 2, 2])
+            .mul(volume_grad.unsqueeze_dim::<5>(3).expand([
+                batches,
+                query_rows,
+                neighbor_rows,
+                2,
+                2,
+            ]))
+            .sum_dim(2)
+            .squeeze_dim::<4>(2);
+        let a = moment
+            .clone()
+            .narrow(2, 0, 1)
+            .narrow(3, 0, 1)
+            .reshape([batches, query_rows, 1]);
+        let b = moment
+            .clone()
+            .narrow(2, 0, 1)
+            .narrow(3, 1, 1)
+            .reshape([batches, query_rows, 1]);
+        let d = moment
+            .narrow(2, 1, 1)
+            .narrow(3, 1, 1)
+            .reshape([batches, query_rows, 1]);
+        let det = a.clone().mul(d.clone()) - b.clone().mul(b.clone());
+        let near_singular = det.clone().abs().lower_elem(1.0e-3);
+        let ones = Tensor::<B, 3>::ones([batches, query_rows, 1], &state_gradient.device());
+        let zeros = Tensor::<B, 3>::zeros([batches, query_rows, 1], &state_gradient.device());
+        let inv_det = det.mask_where(near_singular.clone(), ones.clone()).recip();
+        let inv00 = d
+            .mul(inv_det.clone())
+            .mask_where(near_singular.clone(), ones);
+        let inv01 = b
+            .mul_scalar(-1.0)
+            .mul(inv_det.clone())
+            .mask_where(near_singular.clone(), zeros);
+        let inv11 = a.mul(inv_det).mask_where(
+            near_singular,
+            Tensor::<B, 3>::ones([batches, query_rows, 1], &state_gradient.device()),
         );
         let gx = state_gradient.clone().narrow(3, 0, 1);
         let gy = state_gradient.narrow(3, 1, 1);
@@ -5836,9 +6401,9 @@ mod $module {
                     pixel_xy: pixel_xy.clone(),
                     pixel_size: example.target.pixel_size,
                     target_points: example.target.point_count(),
-                    particle_count: example.source.particles.unwrap_or(config.rollout_particles),
-                    update_prob: example.source.update_prob.unwrap_or(config.update_prob),
-                    seed_scale: example.source.seed_scale.unwrap_or(config.seed_scale),
+                    particle_count: example.particle_count.unwrap_or(config.rollout_particles),
+                    update_prob: example.update_prob.unwrap_or(config.update_prob),
+                    seed_scale: example.seed_scale.unwrap_or(config.seed_scale),
                     target_cpu: example.target.clone(),
                 })
             })
@@ -5955,6 +6520,7 @@ mod $module {
             motion_scale: config.motion_scale,
             loss_config: config.loss_config,
             target2d_loss_backend: config.target2d_loss_backend,
+            perception_backend: config.perception_backend,
             per_parameter_grad_normalization: config.per_parameter_grad_normalization,
             base_sgd: SgdConfig {
                 learning_rate: config.base_optimizer.learning_rate,
@@ -7019,6 +7585,75 @@ mod $module {
     mod tests {
         use super::*;
 
+        fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
+            assert_eq!(left.len(), right.len());
+            left.iter()
+                .zip(right)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0_f32, f32::max)
+        }
+
+        fn max_abs_difference_with_index(left: &[f32], right: &[f32]) -> (usize, f32, f32, f32) {
+            assert_eq!(left.len(), right.len());
+            left.iter()
+                .zip(right)
+                .enumerate()
+                .map(|(idx, (left, right))| (idx, (left - right).abs(), *left, *right))
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, 0.0, 0.0, 0.0))
+        }
+
+        fn reference_perception_state_finite_difference(
+            positions: &[[f32; 4]],
+            states: &[f32],
+            particle_count: usize,
+            state_dims: usize,
+            grid_eps: f32,
+            feature_adjoint: &[f32],
+            state_idx: usize,
+        ) -> f32 {
+            let eps = 1.0e-4;
+            let grid = perception_reference_grid(grid_eps);
+            let options = perception_reference_options(grid_eps);
+            let mut plus_states = states.to_vec();
+            plus_states[state_idx] += eps;
+            let plus = burn_automata_kernels::perceive_with_options(
+                positions,
+                &plus_states,
+                1,
+                particle_count,
+                state_dims,
+                &grid,
+                options,
+            )
+            .unwrap();
+            let mut minus_states = states.to_vec();
+            minus_states[state_idx] -= eps;
+            let minus = burn_automata_kernels::perceive_with_options(
+                positions,
+                &minus_states,
+                1,
+                particle_count,
+                state_dims,
+                &grid,
+                options,
+            )
+            .unwrap();
+            let plus_loss = plus
+                .features
+                .iter()
+                .zip(feature_adjoint)
+                .map(|(feature, adjoint)| feature * adjoint)
+                .sum::<f32>();
+            let minus_loss = minus
+                .features
+                .iter()
+                .zip(feature_adjoint)
+                .map(|(feature, adjoint)| feature * adjoint)
+                .sum::<f32>();
+            (plus_loss - minus_loss) / (2.0 * eps)
+        }
+
         #[test]
         fn dense_perception_matches_reference_kernel_fixture() {
             let npa_config = NpaConfig::growing_2d();
@@ -7086,6 +7721,7 @@ mod $module {
                 motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
                 loss_config: crate::Target2dLossConfig::default(),
                 target2d_loss_backend: Target2dLossBackend::Dense,
+                perception_backend: PerceptionRolloutBackend::Dense,
                 per_parameter_grad_normalization: false,
                 base_sgd: SgdConfig {
                     learning_rate: 0.0,
@@ -7119,6 +7755,163 @@ mod $module {
             assert!(
                 max_abs_diff < 2.0e-3,
                 "dense Burn perception diverged from reference: max_abs_diff={max_abs_diff}"
+            );
+        }
+
+        #[test]
+        fn perception_tiled_adjoint_matches_dense_vjp_fixture() {
+            let npa_config = NpaConfig::growing_2d();
+            let grid = burn_automata_kernels::HashGridConfig::growing_2d();
+            let (positions, states) = seed_particles_scaled(
+                1,
+                5,
+                npa_config.state_dims,
+                npa_config.spatial_dims,
+                23,
+                crate::ParticleSeed::UniformCircle,
+                0.12,
+            );
+            let device = BurnDevice::default();
+            let config = DirectBasisTrainConfig {
+                steps: 0,
+                report_interval: 1,
+                example_batch_size: 1,
+                tbptt_chunk_steps: 1,
+                loss_on_final_chunk_only: false,
+                use_particle_pool: false,
+                pool_size: 0,
+                inject_seed_interval: 0,
+                brush_size: 0.0,
+                stopgrad_pos: false,
+                stopgrad_state: false,
+                rollout_particles: 5,
+                rollout_step_min: 1,
+                rollout_steps: 1,
+                update_prob: 1.0,
+                seed: 23,
+                seed_scale: 0.12,
+                seed_mode: crate::ParticleSeed::UniformCircle,
+                grid_eps: grid.eps,
+                motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
+                loss_config: crate::Target2dLossConfig::default(),
+                target2d_loss_backend: Target2dLossBackend::Dense,
+                perception_backend: PerceptionRolloutBackend::Dense,
+                per_parameter_grad_normalization: false,
+                base_sgd: SgdConfig {
+                    learning_rate: 0.0,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+                adapter_sgd: SgdConfig {
+                    learning_rate: 0.0,
+                    weight_decay: 0.0,
+                    grad_clip_norm: 0.0,
+                },
+                adapter_l2_weight: 0.0,
+                update_base: true,
+                eval_examples: 1,
+                eval_interval: 0,
+                eval_batch_size: 1,
+                eval_seed: 23,
+                system_memory_budget_gb: None,
+                gpu_memory_budget_gb: None,
+                max_dense_train_particles: 5,
+                max_dense_chunk_floats: 1_000_000,
+                max_splat_chunk_floats: 1_000_000,
+            };
+            let position_values = positions
+                .iter()
+                .flat_map(|position| [position[0], position[1]])
+                .collect::<Vec<_>>();
+            let reference_positions = positions.clone();
+            let reference_states = states.clone();
+            let x_dense = tensor3(position_values.clone(), [1, 5, 2], &device).require_grad();
+            let s_dense = tensor3(states.clone(), [1, 5, npa_config.state_dims], &device)
+                .require_grad();
+            let dense_features = dense_perception_batch(&x_dense, &s_dense, config);
+            let feature_dims = dense_features.shape().dims::<3>()[2];
+            let feature_weights = (0..feature_dims * 5)
+                .map(|idx| (((idx * 17) % 13) as f32 - 6.0) * 0.01)
+                .collect::<Vec<_>>();
+            let reference_feature_weights = feature_weights.clone();
+            let weights = tensor3(feature_weights, [1, 5, feature_dims], &device);
+            let dense_loss = dense_features.clone().mul(weights.clone()).sum();
+            let dense_values = tensor3_vec(dense_features.inner()).unwrap();
+            let mut dense_grads = dense_loss.backward();
+            let dense_x_grad = tensor3_vec(
+                x_dense
+                    .grad_remove(&mut dense_grads)
+                    .unwrap_or_else(|| x_dense.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let dense_s_grad = tensor3_vec(
+                s_dense
+                    .grad_remove(&mut dense_grads)
+                    .unwrap_or_else(|| s_dense.clone().inner().zeros_like()),
+            )
+            .unwrap();
+
+            let x_tiled = tensor3(position_values, [1, 5, 2], &device).require_grad();
+            let s_tiled = tensor3(states, [1, 5, npa_config.state_dims], &device).require_grad();
+            let tiled_features = perception_tiled_adjoint_batch(x_tiled.clone(), s_tiled.clone(), config);
+            let tiled_loss = tiled_features.clone().mul(weights).sum();
+            let tiled_values = tensor3_vec(tiled_features.inner()).unwrap();
+            let mut tiled_grads = tiled_loss.backward();
+            let tiled_x_grad = tensor3_vec(
+                x_tiled
+                    .grad_remove(&mut tiled_grads)
+                    .unwrap_or_else(|| x_tiled.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let tiled_s_grad = tensor3_vec(
+                s_tiled
+                    .grad_remove(&mut tiled_grads)
+                    .unwrap_or_else(|| s_tiled.clone().inner().zeros_like()),
+            )
+            .unwrap();
+
+            let feature_diff = max_abs_difference(&dense_values, &tiled_values);
+            let (position_grad_idx, position_grad_diff, position_dense, position_tiled) =
+                max_abs_difference_with_index(&dense_x_grad, &tiled_x_grad);
+            let (state_grad_idx, state_grad_diff, state_dense, state_tiled) =
+                max_abs_difference_with_index(&dense_s_grad, &tiled_s_grad);
+            let manual_adjoint = burn_automata_kernels::perceive_adjoint_with_options(
+                &reference_positions,
+                &reference_states,
+                1,
+                5,
+                npa_config.state_dims,
+                &perception_reference_grid(grid.eps),
+                perception_reference_options(grid.eps),
+                &reference_feature_weights,
+            )
+            .unwrap();
+            let manual_state = manual_adjoint.state[state_grad_idx];
+            let finite_state = reference_perception_state_finite_difference(
+                &reference_positions,
+                &reference_states,
+                5,
+                npa_config.state_dims,
+                grid.eps,
+                &reference_feature_weights,
+                state_grad_idx,
+            );
+            let state_grad_relative = state_grad_diff
+                / state_dense
+                    .abs()
+                    .max(state_tiled.abs())
+                    .max(1.0);
+            assert!(
+                feature_diff < 2.0e-3,
+                "tiled perception features diverged from dense Burn features: max_abs_diff={feature_diff}"
+            );
+            assert!(
+                position_grad_diff < 1.0e-1,
+                "tiled perception position VJP diverged from dense Burn VJP: idx={position_grad_idx} dense={position_dense} tiled={position_tiled} max_abs_diff={position_grad_diff}"
+            );
+            assert!(
+                state_grad_diff < 3.0 && state_grad_relative < 3.5e-2,
+                "tiled perception state VJP diverged from dense Burn VJP: idx={state_grad_idx} dense={state_dense} tiled={state_tiled} manual={manual_state} finite={finite_state} max_abs_diff={state_grad_diff} rel_diff={state_grad_relative}"
             );
         }
 
@@ -7233,6 +8026,7 @@ mod $module {
                 motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
                 loss_config,
                 target2d_loss_backend: Target2dLossBackend::Dense,
+                perception_backend: PerceptionRolloutBackend::Dense,
                 per_parameter_grad_normalization: false,
                 base_sgd: SgdConfig {
                     learning_rate: 0.0,
@@ -7348,6 +8142,7 @@ mod $module {
             let adapter_batch = BurnAdapterBatch::from_indices(std::slice::from_ref(&adapter), &[0]);
             let tiled_config = DirectBasisTrainConfig {
                 target2d_loss_backend: Target2dLossBackend::TiledAdjoint,
+                perception_backend: PerceptionRolloutBackend::Dense,
                 ..config
             };
             let tiled_loss = target_splat_loss_batch_vector_selected(
@@ -7495,6 +8290,7 @@ mod $module {
 dense_direct_basis_backend!(
     wgpu_imp,
     feature = "backend_wgpu",
+    feature = "backend_wgpu",
     burn::backend::Wgpu<f32>,
     "burn_wgpu_autodiff_dense_direct_basis",
     "wgpu-default",
@@ -7504,6 +8300,7 @@ dense_direct_basis_backend!(
 dense_direct_basis_backend!(
     ndarray_imp,
     all(test, feature = "backend_ndarray"),
+    any(),
     burn::backend::NdArray<f32>,
     "burn_ndarray_autodiff_dense_direct_basis",
     "ndarray-default",
@@ -7512,6 +8309,7 @@ dense_direct_basis_backend!(
 
 dense_direct_basis_backend!(
     cuda_imp,
+    feature = "backend_cuda",
     feature = "backend_cuda",
     burn::backend::Cuda<f32>,
     "burn_cuda_autodiff_dense_direct_basis",

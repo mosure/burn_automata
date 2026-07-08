@@ -6,6 +6,8 @@
 pub mod config;
 pub mod gaussian;
 pub mod hashgrid;
+#[cfg(feature = "cubecl")]
+pub mod perception_cube;
 pub mod reference;
 pub mod spatial;
 pub mod splat;
@@ -16,6 +18,10 @@ pub mod tile;
 pub use config::{Boundary, HashGridConfig, HashGridMode, KernelError, KernelResult};
 pub use gaussian::{Gaussian3d, GaussianDecodeConfig, GaussianDecodeMode, decode_gaussians_3d};
 pub use hashgrid::{HashGridSnapshot, build_hashgrid};
+#[cfg(feature = "cubecl")]
+pub use perception_cube::{
+    PerceptionCubeAdjointBackend, PerceptionCubeAdjointConfig, PerceptionCubeAdjointOutput,
+};
 pub use reference::{
     PerceptionAdjointOutput, PerceptionOptions, PerceptionOutput, euler_step, perceive,
     perceive_adjoint_with_options, perceive_state_adjoint_with_options, perceive_with_options,

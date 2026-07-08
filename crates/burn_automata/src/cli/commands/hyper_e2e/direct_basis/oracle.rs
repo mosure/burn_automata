@@ -2,7 +2,7 @@ use crate::cli::prelude::*;
 
 use super::{
     DirectBasisExample, DirectBasisOracleConfig, DirectBasisTrainConfig, EvalConfig,
-    Target2dLossBackend, eval_indices, evaluate_direct_basis_example,
+    PerceptionRolloutBackend, Target2dLossBackend, eval_indices, evaluate_direct_basis_example,
 };
 
 #[derive(Clone)]
@@ -329,6 +329,7 @@ fn train_burn_model_batch_direct_basis_oracles(
         motion_scale: models[0].config.alpha * models[0].config.motion_eps(hashgrid.eps),
         loss_config: eval_config.loss_config,
         target2d_loss_backend: Target2dLossBackend::Dense,
+        perception_backend: PerceptionRolloutBackend::Dense,
         per_parameter_grad_normalization: eval_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: oracle_config.learning_rate,
@@ -352,13 +353,18 @@ fn train_burn_model_batch_direct_basis_oracles(
         max_dense_chunk_floats,
         max_splat_chunk_floats,
     };
+    let train_training_examples = super::direct_basis_training_examples(&train_examples);
     let batch_report = match backend {
-        DirectBasisOracleBackendArg::Wgpu => {
-            super::dense::train_oracle_models_burn_wgpu(&mut models, &train_examples, burn_config)?
-        }
-        DirectBasisOracleBackendArg::Cuda => {
-            super::dense::train_oracle_models_burn_cuda(&mut models, &train_examples, burn_config)?
-        }
+        DirectBasisOracleBackendArg::Wgpu => super::dense::train_oracle_models_burn_wgpu(
+            &mut models,
+            &train_training_examples,
+            burn_config,
+        )?,
+        DirectBasisOracleBackendArg::Cuda => super::dense::train_oracle_models_burn_cuda(
+            &mut models,
+            &train_training_examples,
+            burn_config,
+        )?,
         _ => unreachable!("Burn model batch requires WGPU or CUDA backend"),
     };
 
@@ -859,6 +865,7 @@ fn train_burn_dense_direct_basis_oracle(
         motion_scale: oracle_model.config.alpha * oracle_model.config.motion_eps(hashgrid.eps),
         loss_config,
         target2d_loss_backend: Target2dLossBackend::Dense,
+        perception_backend: PerceptionRolloutBackend::Dense,
         per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: oracle_config.learning_rate,
@@ -887,11 +894,13 @@ fn train_burn_dense_direct_basis_oracle(
         update_base: false,
         ..burn_config
     };
+    let mut train_training_examples = super::direct_basis_training_examples(&train_examples);
+    let mut holdout_training_examples = super::direct_basis_training_examples(&holdout_examples);
     let burn_report = match backend {
         DirectBasisOracleBackendArg::Wgpu => super::dense::train_direct_basis_burn_wgpu(
             &mut oracle_model,
-            &mut train_examples,
-            &mut holdout_examples,
+            &mut train_training_examples,
+            &mut holdout_training_examples,
             burn_config,
             no_phase_config,
             no_phase_config,
@@ -899,8 +908,8 @@ fn train_burn_dense_direct_basis_oracle(
         )?,
         DirectBasisOracleBackendArg::Cuda => super::dense::train_direct_basis_burn_cuda(
             &mut oracle_model,
-            &mut train_examples,
-            &mut holdout_examples,
+            &mut train_training_examples,
+            &mut holdout_training_examples,
             burn_config,
             no_phase_config,
             no_phase_config,
@@ -908,6 +917,8 @@ fn train_burn_dense_direct_basis_oracle(
         )?,
         _ => unreachable!("dense Burn oracle backend must be WGPU or CUDA"),
     };
+    super::sync_direct_basis_training_examples(&mut train_examples, &train_training_examples);
+    super::sync_direct_basis_training_examples(&mut holdout_examples, &holdout_training_examples);
     let final_loss = evaluate_direct_basis_example(
         &oracle_model,
         &train_examples[0],

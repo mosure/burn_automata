@@ -3,12 +3,13 @@ use crate::cli::commands::hyper_support::load_condition_image_2d;
 use crate::cli::commands::hyper_support::write_pretty_json;
 use crate::cli::prelude::*;
 use crate::hyper::condition::DINO_VITS_EMBED_DIMS;
+use crate::hyper::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
+use crate::hyper::e2e_training::dense::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
+use crate::hyper::e2e_training::{
+    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
+};
 use std::time::Instant;
 
-use super::direct_basis::{
-    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
-    Target2dLossBackend, train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
-};
 use super::sources::{
     Hyper2dScratchSource, OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources,
 };
@@ -124,6 +125,7 @@ struct RolloutTrainingConfig {
     tbptt_chunk_steps: Option<usize>,
     loss_on_final_chunk_only: Option<bool>,
     target2d_loss_backend: Option<String>,
+    perception_backend: Option<String>,
     max_dense_train_particles: Option<usize>,
     system_memory_budget_gb: Option<f32>,
     gpu_memory_budget_gb: Option<f32>,
@@ -334,6 +336,7 @@ struct E2eRolloutTrainingReport {
     tbptt_chunk_steps: usize,
     loss_on_final_chunk_only: bool,
     target2d_loss_backend: String,
+    perception_backend: String,
     max_dense_train_particles: usize,
     system_memory_budget_gb: Option<f32>,
     gpu_memory_budget_gb: Option<f32>,
@@ -784,6 +787,13 @@ fn build_e2e_rollout_report(
         .map(Target2dLossBackend::parse)
         .transpose()?
         .unwrap_or_default();
+    let perception_backend = config
+        .training
+        .perception_backend
+        .as_deref()
+        .map(PerceptionRolloutBackend::parse)
+        .transpose()?
+        .unwrap_or_default();
     let weight_decay = config.optimizer.weight_decay.unwrap_or(0.0);
     let base_weight_decay = config.optimizer.base_weight_decay.unwrap_or(weight_decay);
     let generator_weight_decay = config
@@ -959,6 +969,7 @@ fn build_e2e_rollout_report(
             tbptt_chunk_steps,
             loss_on_final_chunk_only: config.training.loss_on_final_chunk_only.unwrap_or(false),
             target2d_loss_backend: target2d_loss_backend.as_str().to_string(),
+            perception_backend: perception_backend.as_str().to_string(),
             max_dense_train_particles,
             system_memory_budget_gb: config.training.system_memory_budget_gb,
             gpu_memory_budget_gb: config.training.gpu_memory_budget_gb,
@@ -1115,6 +1126,7 @@ fn run_burn_e2e_rollout_training(
         motion_scale: npa_config.alpha * npa_config.motion_eps(hashgrid.eps),
         loss_config,
         target2d_loss_backend: Target2dLossBackend::parse(&report.training.target2d_loss_backend)?,
+        perception_backend: PerceptionRolloutBackend::parse(&report.training.perception_backend)?,
         per_parameter_grad_normalization: report.optimizer.per_parameter_grad_normalization,
         shared_base_trainable: report.model.shared_base_trainable,
         shared_base_train_start_step: report.model.shared_base_train_start_step,
@@ -1704,7 +1716,7 @@ mod tests {
                 3000,
                 500,
                 Some(8),
-                "dense",
+                "tiled-adjoint",
             ),
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1722,6 +1734,7 @@ mod tests {
                 config.training.target2d_loss_backend.as_deref(),
                 Some(expected_backend)
             );
+            assert_eq!(config.training.perception_backend.as_deref(), Some("dense"));
             assert_eq!(config.model.shared_base_train_start_step, Some(0));
             assert_eq!(
                 config.validation.interval,
@@ -1763,6 +1776,7 @@ mod tests {
             example_batch_size = 1
             loss_on_final_chunk_only = true
             target2d_loss_backend = "tiled-adjoint"
+            perception_backend = "tiled-adjoint"
 
             [gpu]
             backend = "burn-wgpu"
@@ -1787,6 +1801,7 @@ mod tests {
         assert!(report.rollout.sampled_training_steps);
         assert!(report.training.loss_on_final_chunk_only);
         assert_eq!(report.training.target2d_loss_backend, "tiled-adjoint");
+        assert_eq!(report.training.perception_backend, "tiled-adjoint");
     }
 
     #[test]
