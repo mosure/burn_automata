@@ -12,10 +12,34 @@ readme = "../../README.md"
 
 [features]
 default = ["serde"]
-cubecl = []
+cubecl = [
+  "dep:burn",
+  "dep:burn-cubecl",
+  "dep:burn-fusion",
+  "dep:burn-ir",
+  "dep:cubecl",
+]
+cubecl_cuda = [
+  "cubecl",
+  "burn/cuda",
+  "burn/fusion",
+  "burn/autodiff",
+]
+cubecl_wgpu = [
+  "cubecl",
+  "burn/wgpu",
+  "burn/webgpu",
+  "burn/fusion",
+  "burn/autodiff",
+]
 serde = ["dep:serde"]
 
 [dependencies]
+burn = { workspace = true, features = ["std"], optional = true }
+burn-cubecl = { version = "0.21", default-features = false, features = ["std", "fusion"], optional = true }
+burn-fusion = { version = "0.21", default-features = false, features = ["std"], optional = true }
+burn-ir = { version = "0.21", default-features = false, features = ["std"], optional = true }
+cubecl = { version = "0.10", default-features = false, features = ["std", "stdlib"], optional = true }
 rayon.workspace = true
 serde = { workspace = true, optional = true }
 thiserror.workspace = true

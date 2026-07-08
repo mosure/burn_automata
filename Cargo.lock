@@ -2672,6 +2672,11 @@ dependencies = [
 name = "burn_automata_kernels"
 version = "0.1.0"
 dependencies = [
+ "burn",
+ "burn-cubecl",
+ "burn-fusion",
+ "burn-ir",
+ "cubecl",
  "rayon",
  "serde",
  "thiserror 2.0.18",

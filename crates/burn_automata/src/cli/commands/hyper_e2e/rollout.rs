@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use super::direct_basis::{
     BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
-    train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
+    Target2dLossBackend, train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
 };
 use super::sources::{
     Hyper2dScratchSource, OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources,
@@ -122,6 +122,8 @@ struct RolloutTrainingConfig {
     report_interval: Option<usize>,
     example_batch_size: Option<usize>,
     tbptt_chunk_steps: Option<usize>,
+    loss_on_final_chunk_only: Option<bool>,
+    target2d_loss_backend: Option<String>,
     max_dense_train_particles: Option<usize>,
     system_memory_budget_gb: Option<f32>,
     gpu_memory_budget_gb: Option<f32>,
@@ -153,6 +155,7 @@ struct RolloutAdapterConfig {
 #[serde(default, deny_unknown_fields)]
 struct RolloutRuntimeConfig {
     particles: Option<usize>,
+    step_min: Option<usize>,
     steps: Option<usize>,
     update_prob: Option<f32>,
     seed: Option<u64>,
@@ -329,6 +332,8 @@ struct E2eRolloutTrainingReport {
     report_interval: usize,
     example_batch_size: usize,
     tbptt_chunk_steps: usize,
+    loss_on_final_chunk_only: bool,
+    target2d_loss_backend: String,
     max_dense_train_particles: usize,
     system_memory_budget_gb: Option<f32>,
     gpu_memory_budget_gb: Option<f32>,
@@ -355,7 +360,9 @@ struct E2eRolloutAdapterReport {
 #[derive(Clone, Debug, Serialize)]
 struct E2eRolloutRuntimeReport {
     particles: usize,
+    step_min: usize,
     steps: usize,
+    sampled_training_steps: bool,
     update_prob: f32,
     seed: u64,
     seed_scale: Option<f32>,
@@ -729,6 +736,14 @@ fn build_e2e_rollout_report(
         .unwrap_or(DEFAULT_MAX_DENSE_TRAIN_PARTICLES);
     let rollout_particles = config.rollout.particles.unwrap_or(512).max(1);
     let rollout_steps = config.rollout.steps.unwrap_or(32).max(1);
+    let rollout_step_min = config.rollout.step_min.unwrap_or(rollout_steps).max(1);
+    if rollout_step_min > rollout_steps {
+        return Err(std::io::Error::other(format!(
+            "rollout.step_min={rollout_step_min} must be <= rollout.steps={rollout_steps}"
+        ))
+        .into());
+    }
+    let sampled_training_steps = rollout_step_min != rollout_steps;
     if steps > 0 && rollout_particles > max_dense_train_particles {
         return Err(std::io::Error::other(format!(
             "rollout.particles={rollout_particles} exceeds training.max_dense_train_particles={max_dense_train_particles}; keep 2048-particle runs validation-only until the tiled/fused backward path lands"
@@ -762,6 +777,13 @@ fn build_e2e_rollout_report(
         .optimizer
         .generator_learning_rate
         .unwrap_or(learning_rate);
+    let target2d_loss_backend = config
+        .training
+        .target2d_loss_backend
+        .as_deref()
+        .map(Target2dLossBackend::parse)
+        .transpose()?
+        .unwrap_or_default();
     let weight_decay = config.optimizer.weight_decay.unwrap_or(0.0);
     let base_weight_decay = config.optimizer.base_weight_decay.unwrap_or(weight_decay);
     let generator_weight_decay = config
@@ -813,7 +835,7 @@ fn build_e2e_rollout_report(
     }
     if steps > 0 && (rollout_particles < 512 || rollout_steps < 16) {
         warnings.push(format!(
-            "training rollout scale is curriculum/diagnostic only: particles={rollout_particles}, steps={rollout_steps}; use high-particle validation for quality claims"
+            "training rollout scale is curriculum/diagnostic only: particles={rollout_particles}, step_min={rollout_step_min}, steps={rollout_steps}; use high-particle validation for quality claims"
         ));
     }
     if steps > 0 && validation_particles > max_dense_train_particles {
@@ -935,6 +957,8 @@ fn build_e2e_rollout_report(
             report_interval,
             example_batch_size,
             tbptt_chunk_steps,
+            loss_on_final_chunk_only: config.training.loss_on_final_chunk_only.unwrap_or(false),
+            target2d_loss_backend: target2d_loss_backend.as_str().to_string(),
             max_dense_train_particles,
             system_memory_budget_gb: config.training.system_memory_budget_gb,
             gpu_memory_budget_gb: config.training.gpu_memory_budget_gb,
@@ -962,7 +986,9 @@ fn build_e2e_rollout_report(
         },
         rollout: E2eRolloutRuntimeReport {
             particles: rollout_particles,
+            step_min: rollout_step_min,
             steps: rollout_steps,
+            sampled_training_steps,
             update_prob: config.rollout.update_prob.unwrap_or(0.5),
             seed: config.rollout.seed.unwrap_or(42),
             seed_scale: config.rollout.seed_scale,
@@ -1074,7 +1100,9 @@ fn run_burn_e2e_rollout_training(
         report_interval: report.training.report_interval,
         example_batch_size: report.training.example_batch_size,
         tbptt_chunk_steps: report.training.tbptt_chunk_steps,
+        loss_on_final_chunk_only: report.training.loss_on_final_chunk_only,
         rollout_particles: report.rollout.particles,
+        rollout_step_min: report.rollout.step_min,
         rollout_steps: report.rollout.steps,
         update_prob: report.rollout.update_prob,
         seed: report.training.seed,
@@ -1086,6 +1114,7 @@ fn run_burn_e2e_rollout_training(
         grid_eps: hashgrid.eps,
         motion_scale: npa_config.alpha * npa_config.motion_eps(hashgrid.eps),
         loss_config,
+        target2d_loss_backend: Target2dLossBackend::parse(&report.training.target2d_loss_backend)?,
         per_parameter_grad_normalization: report.optimizer.per_parameter_grad_normalization,
         shared_base_trainable: report.model.shared_base_trainable,
         shared_base_train_start_step: report.model.shared_base_train_start_step,
@@ -1654,10 +1683,29 @@ mod tests {
 
     #[test]
     fn verified_rollout_configs_parse() {
-        for (name, expected_steps, expected_validation_interval) in [
-            ("smoke_lizard_dino_online.toml", 1, 1),
-            ("bench_omnisvg_8_b4_p128.toml", 200, 200),
-            ("scale_omnisvg_10k_rank16_cuda.toml", 3000, 500),
+        for (
+            name,
+            expected_steps,
+            expected_validation_interval,
+            expected_step_min,
+            expected_backend,
+        ) in [
+            ("smoke_lizard_dino_online.toml", 1, 1, None, "dense"),
+            ("bench_omnisvg_8_b4_p128.toml", 200, 200, None, "dense"),
+            (
+                "bench_omnisvg_8_b4_p128_tiled.toml",
+                200,
+                200,
+                None,
+                "tiled-adjoint",
+            ),
+            (
+                "scale_omnisvg_10k_rank16_cuda.toml",
+                3000,
+                500,
+                Some(8),
+                "dense",
+            ),
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -1670,11 +1718,16 @@ mod tests {
                 Some("dino-vits-full-tokens")
             );
             assert_eq!(config.training.steps, Some(expected_steps));
+            assert_eq!(
+                config.training.target2d_loss_backend.as_deref(),
+                Some(expected_backend)
+            );
             assert_eq!(config.model.shared_base_train_start_step, Some(0));
             assert_eq!(
                 config.validation.interval,
                 Some(expected_validation_interval)
             );
+            assert_eq!(config.rollout.step_min, expected_step_min);
             assert_eq!(
                 config.gpu.condition_device_cache_max_bytes,
                 Some(DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES)
@@ -1687,6 +1740,94 @@ mod tests {
             assert_eq!(config.adapter.flow_source_scale, Some(1.0));
             assert_eq!(config.adapter.init_scale, Some(1.0e-3));
         }
+    }
+
+    #[test]
+    fn rollout_report_records_sampled_training_steps() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/catalog_thumbnails/lizard.png"]
+
+            [condition]
+            encoder = "dino-vits-full-tokens"
+            online = true
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 10
+            report_interval = 5
+            example_batch_size = 1
+            loss_on_final_chunk_only = true
+            target2d_loss_backend = "tiled-adjoint"
+
+            [gpu]
+            backend = "burn-wgpu"
+
+            [rollout]
+            particles = 512
+            step_min = 8
+            steps = 16
+
+            [validation]
+            examples = 1
+            interval = 10
+            particles = 512
+            steps = 16
+            "#,
+        )
+        .unwrap();
+
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert_eq!(report.rollout.step_min, 8);
+        assert_eq!(report.rollout.steps, 16);
+        assert!(report.rollout.sampled_training_steps);
+        assert!(report.training.loss_on_final_chunk_only);
+        assert_eq!(report.training.target2d_loss_backend, "tiled-adjoint");
+    }
+
+    #[test]
+    fn rollout_report_rejects_step_min_above_steps() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/catalog_thumbnails/lizard.png"]
+
+            [condition]
+            encoder = "dino-vits-full-tokens"
+            online = true
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 10
+            report_interval = 5
+            example_batch_size = 1
+
+            [gpu]
+            backend = "burn-wgpu"
+
+            [rollout]
+            particles = 512
+            step_min = 17
+            steps = 16
+            "#,
+        )
+        .unwrap();
+
+        let err = match build_e2e_rollout_report(Path::new("inline.toml"), &config) {
+            Ok(_) => panic!("rollout.step_min above rollout.steps should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("rollout.step_min"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

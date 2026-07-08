@@ -25,7 +25,7 @@ pub use condition::{
 pub use dino::DinoVitsConditionEncoder;
 pub use e2e::{
     E2eConditionedNpa2d, E2eHyperNpa2d, E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights,
-    generate_e2e_conditioned_npa_2d, load_e2e_hyper_npa_2d,
+    Target2dLossBackend, generate_e2e_conditioned_npa_2d, load_e2e_hyper_npa_2d,
 };
 pub use hypernet::{
     HyperNpa2d, HyperNpa2dConfig, HyperNpa2dFlow, HyperNpa2dFlowActivation, HyperNpa2dFlowConfig,

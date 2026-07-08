@@ -19,7 +19,7 @@ holdout_stride = 4
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_e2e_rollout_bench_omnisvg_8_steps200_b4_p128s4"
+output_dir = "artifacts/hyper2d_e2e_rollout_bench_omnisvg_8_steps200_b4_p128s4_tiled"
 
 [condition]
 encoder = "dino-vits-full-tokens"
@@ -44,7 +44,7 @@ steps = 200
 report_interval = 50
 example_batch_size = 4
 tbptt_chunk_steps = 2
-target2d_loss_backend = "dense"
+target2d_loss_backend = "tiled-adjoint"
 max_dense_train_particles = 512
 system_memory_budget_gb = 12.0
 gpu_memory_budget_gb = 8.0

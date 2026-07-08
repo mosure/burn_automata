@@ -15,8 +15,19 @@ categories = ["science", "simulation", "computer-vision"]
 [features]
 default = ["cli", "backend_ndarray", "backend_wgpu"]
 backend_ndarray = ["burn/ndarray"]
-backend_cuda = ["burn/cuda", "burn/fusion", "burn/autodiff"]
-backend_wgpu = ["burn/wgpu", "burn/webgpu", "burn/fusion", "burn/autodiff"]
+backend_cuda = [
+  "burn_automata_kernels/cubecl_cuda",
+  "burn/cuda",
+  "burn/fusion",
+  "burn/autodiff",
+]
+backend_wgpu = [
+  "burn_automata_kernels/cubecl_wgpu",
+  "burn/wgpu",
+  "burn/webgpu",
+  "burn/fusion",
+  "burn/autodiff",
+]
 cli = ["dep:base64", "dep:clap", "dep:image", "dep:toml", "dep:ureq"]
 dino = ["dep:burn_dino", "dep:image", "backend_ndarray"]
 gpu_wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]

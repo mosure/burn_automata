@@ -17,6 +17,7 @@ mod dense;
 mod oracle;
 mod psnr_gate;
 
+pub(in crate::cli::commands::hyper_e2e) use crate::hyper::e2e::Target2dLossBackend;
 pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
 pub(super) use dense::{
     BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
@@ -68,6 +69,7 @@ struct DirectBasisTrainConfig {
     grid_eps: f32,
     motion_scale: f32,
     loss_config: Target2dLossConfig,
+    target2d_loss_backend: Target2dLossBackend,
     per_parameter_grad_normalization: bool,
     base_sgd: SgdConfig,
     adapter_sgd: SgdConfig,
@@ -1151,6 +1153,7 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         grid_eps: hashgrid.eps,
         motion_scale,
         loss_config,
+        target2d_loss_backend: Target2dLossBackend::Dense,
         per_parameter_grad_normalization,
         base_sgd,
         adapter_sgd,
@@ -1675,6 +1678,7 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         grid_eps: hashgrid.eps,
         motion_scale: base.config.alpha * base.config.motion_eps(hashgrid.eps),
         loss_config,
+        target2d_loss_backend: Target2dLossBackend::Dense,
         per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: 0.0,
@@ -2125,6 +2129,7 @@ fn run_burn_wgpu_direct_basis(
         grid_eps: request.hashgrid.eps,
         motion_scale: base.config.alpha * base.config.motion_eps(request.hashgrid.eps),
         loss_config: request.loss_config,
+        target2d_loss_backend: Target2dLossBackend::Dense,
         per_parameter_grad_normalization: request.per_parameter_grad_normalization,
         base_sgd: request.base_sgd,
         adapter_sgd: request.adapter_sgd,
@@ -2665,6 +2670,7 @@ pub(crate) fn train_target_2d_burn_oracle(
         grid_eps: hashgrid.eps,
         motion_scale: model.config.alpha * model.config.motion_eps(hashgrid.eps),
         loss_config,
+        target2d_loss_backend: Target2dLossBackend::Dense,
         per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: training_config.optimizer.learning_rate,
@@ -3796,6 +3802,7 @@ mod tests {
                 image_size: 32,
                 ..Target2dLossConfig::default()
             },
+            target2d_loss_backend: Target2dLossBackend::Dense,
             per_parameter_grad_normalization: true,
             base_sgd: SgdConfig {
                 learning_rate: 1.0e-4,

@@ -132,6 +132,8 @@ pub enum KernelError {
     StateShape { states: usize, expected: usize },
     #[error("output buffer length {actual} does not match expected {expected}")]
     OutputShape { actual: usize, expected: usize },
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

@@ -1,6 +1,10 @@
 # Scale diagnostic for the canonical online HyperNPA path. This is not a
 # quality-parity production model until the report passes the high-particle
 # oracle/PSNR gates documented in configs/verified/2d/README.md.
+#
+# The rollout curriculum intentionally mirrors the Burn oracle path more closely
+# than the older 128p/4-step diagnostic: sampled longer rollouts, TBPTT detach,
+# and final-chunk image loss.
 preset = "growing-2d"
 
 [source]
@@ -22,7 +26,7 @@ holdout_stride = 20
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda"
+output_dir = "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b4_p256s8to16_finalchunk_rank16_cosine_cuda"
 
 [condition]
 encoder = "dino-vits-full-tokens"
@@ -45,8 +49,10 @@ backend = "gpu"
 objective = "target2d-rollout-image-loss"
 steps = 3000
 report_interval = 100
-example_batch_size = 16
+example_batch_size = 4
 tbptt_chunk_steps = 2
+loss_on_final_chunk_only = true
+target2d_loss_backend = "dense"
 max_dense_train_particles = 512
 system_memory_budget_gb = 88.0
 gpu_memory_budget_gb = 72.0
@@ -68,14 +74,15 @@ flow_source_scale = 1.0
 init_scale = 1.0e-3
 
 [rollout]
-particles = 128
-steps = 4
+particles = 256
+step_min = 8
+steps = 16
 update_prob = 0.5
 seed = 42
 seed_mode = "uniform-circle"
 
 [target]
-points = 512
+points = 1024
 threshold = 0.05
 loss_image_size = 64
 splat_sigma = 1.0
@@ -106,8 +113,8 @@ min_lr_scale = 0.1
 [validation]
 examples = 32
 interval = 500
-particles = 128
-steps = 4
+particles = 256
+steps = 16
 update_prob = 0.5
 seed = 42
 psnr_threshold_db = 8.0

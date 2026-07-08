@@ -9,6 +9,8 @@ pub mod hashgrid;
 pub mod reference;
 pub mod spatial;
 pub mod splat;
+#[cfg(feature = "cubecl")]
+pub mod target2d_cube;
 pub mod tile;
 
 pub use config::{Boundary, HashGridConfig, HashGridMode, KernelError, KernelResult};
@@ -20,6 +22,10 @@ pub use reference::{
 };
 pub use spatial::{SpatialStrategyKind, SpatialStrategyReport, analyze_spatial_strategy};
 pub use splat::{Splat2dConfig, splat_particles_2d};
+#[cfg(feature = "cubecl")]
+pub use target2d_cube::{
+    Target2dCubeAdjointBackend, Target2dCubeLossConfig, Target2dCubeLossOutput,
+};
 pub use tile::{TileAssignment, TileGridConfig, assign_tiles, tile_for_position};
 
 #[cfg(test)]

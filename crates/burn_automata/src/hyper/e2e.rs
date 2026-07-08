@@ -4,6 +4,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AutomataError, AutomataResult, NpaConfig, NpaLowRankAdapter, NpaModel};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Target2dLossBackend {
+    #[default]
+    Dense,
+    TiledAdjoint,
+    Auto,
+}
+
+impl Target2dLossBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dense => "dense",
+            Self::TiledAdjoint => "tiled-adjoint",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(value: &str) -> AutomataResult<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dense" | "burn-dense" | "autodiff-dense" => Ok(Self::Dense),
+            "tiled-adjoint" | "tiled_adjoint" | "cpu-adjoint" | "cpu_adjoint" => {
+                Ok(Self::TiledAdjoint)
+            }
+            "auto" => Ok(Self::Auto),
+            other => Err(AutomataError::InvalidArgument(format!(
+                "unknown target2d loss backend `{other}`; expected dense, tiled-adjoint, or auto"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct E2eHyperNpa2d {
     #[serde(default)]

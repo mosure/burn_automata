@@ -1,8 +1,8 @@
 use crate::cli::prelude::*;
 
 use super::{
-    DirectBasisExample, DirectBasisOracleConfig, DirectBasisTrainConfig, EvalConfig, eval_indices,
-    evaluate_direct_basis_example,
+    DirectBasisExample, DirectBasisOracleConfig, DirectBasisTrainConfig, EvalConfig,
+    Target2dLossBackend, eval_indices, evaluate_direct_basis_example,
 };
 
 #[derive(Clone)]
@@ -328,6 +328,7 @@ fn train_burn_model_batch_direct_basis_oracles(
         grid_eps: hashgrid.eps,
         motion_scale: models[0].config.alpha * models[0].config.motion_eps(hashgrid.eps),
         loss_config: eval_config.loss_config,
+        target2d_loss_backend: Target2dLossBackend::Dense,
         per_parameter_grad_normalization: eval_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: oracle_config.learning_rate,
@@ -857,6 +858,7 @@ fn train_burn_dense_direct_basis_oracle(
         grid_eps: hashgrid.eps,
         motion_scale: oracle_model.config.alpha * oracle_model.config.motion_eps(hashgrid.eps),
         loss_config,
+        target2d_loss_backend: Target2dLossBackend::Dense,
         per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: oracle_config.learning_rate,

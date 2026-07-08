@@ -25,4 +25,13 @@ Canonical HyperNPA configs should set `[validation].interval` separately from
 settings even when they match the global defaults. They should also include
 `[gates]`: smoke gates should prove the command path works, bench gates should
 bound throughput and validation overhead, and quality configs should add a PSNR
-gate only when the validation scale is sufficient for the claim.
+gate only when the validation scale is sufficient for the claim. Scale configs
+should train on an oracle-shaped rollout curriculum (`rollout.step_min` plus
+`rollout.steps`) and may use `training.loss_on_final_chunk_only = true` when
+the goal is matching long-horizon oracle dynamics instead of optimizing every
+short TBPTT chunk independently. They should also set
+`training.target2d_loss_backend` explicitly. `dense` remains the conservative
+default, while `tiled-adjoint` is the parity-gated device-side Target2D adjoint
+path for throughput benchmarking and staged promotion.
+`hyper_e2e/bench_omnisvg_8_b4_p128_tiled.toml` mirrors the dense bench shape
+but exercises the real device-side tiled Target2D adjoint path.

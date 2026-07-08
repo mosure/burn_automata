@@ -1,169 +1,17 @@
-pub(super) struct BurnWgpuDirectBasisOutput {
-    pub(super) backend: &'static str,
-    pub(super) device: String,
-    pub(super) metrics: serde_json::Value,
-    pub(super) history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) train_refine_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) holdout_history: Vec<super::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) best_train_loss: Option<f32>,
-    pub(super) best_train_step: usize,
-}
+mod backends;
+mod types;
 
-pub(super) struct BurnDenseOracleBatchOutput {
-    pub(super) backend: &'static str,
-    pub(super) device: String,
-    pub(super) metrics: serde_json::Value,
-    pub(super) history: Vec<crate::cli::reports::CliHyper2dDirectBasisHistoryEntry>,
-    pub(super) per_model_history: Vec<Vec<crate::cli::reports::CliHyper2dDirectBasisHistoryEntry>>,
-    pub(super) best_train_loss: Vec<Option<f32>>,
-    pub(super) best_train_step: Vec<usize>,
-}
-
-#[allow(dead_code)]
-pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutExample {
-    pub(in crate::cli::commands::hyper_e2e) slug: String,
-    pub(in crate::cli::commands::hyper_e2e) target: crate::TargetImage2d,
-    pub(in crate::cli::commands::hyper_e2e) condition_features: Vec<f32>,
-    pub(in crate::cli::commands::hyper_e2e) token_count: usize,
-    pub(in crate::cli::commands::hyper_e2e) embed_dims: usize,
-    pub(in crate::cli::commands::hyper_e2e) particle_count: usize,
-    pub(in crate::cli::commands::hyper_e2e) update_prob: f32,
-    pub(in crate::cli::commands::hyper_e2e) seed_scale: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(in crate::cli::commands::hyper_e2e) enum E2eLrSchedule {
-    #[default]
-    Constant,
-    Cosine,
-    Linear,
-}
-
-impl E2eLrSchedule {
-    pub(in crate::cli::commands::hyper_e2e) fn as_str(self) -> &'static str {
-        match self {
-            Self::Constant => "constant",
-            Self::Cosine => "cosine",
-            Self::Linear => "linear",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutTrainConfig {
-    pub(in crate::cli::commands::hyper_e2e) steps: usize,
-    pub(in crate::cli::commands::hyper_e2e) report_interval: usize,
-    pub(in crate::cli::commands::hyper_e2e) example_batch_size: usize,
-    pub(in crate::cli::commands::hyper_e2e) tbptt_chunk_steps: usize,
-    pub(in crate::cli::commands::hyper_e2e) rollout_particles: usize,
-    pub(in crate::cli::commands::hyper_e2e) rollout_steps: usize,
-    pub(in crate::cli::commands::hyper_e2e) update_prob: f32,
-    pub(in crate::cli::commands::hyper_e2e) seed: u64,
-    pub(in crate::cli::commands::hyper_e2e) seed_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) seed_mode: crate::ParticleSeed,
-    pub(in crate::cli::commands::hyper_e2e) grid_eps: f32,
-    pub(in crate::cli::commands::hyper_e2e) motion_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) loss_config: crate::Target2dLossConfig,
-    pub(in crate::cli::commands::hyper_e2e) per_parameter_grad_normalization: bool,
-    pub(in crate::cli::commands::hyper_e2e) shared_base_trainable: bool,
-    pub(in crate::cli::commands::hyper_e2e) shared_base_train_start_step: usize,
-    pub(in crate::cli::commands::hyper_e2e) base_optimizer: crate::AdamWConfig,
-    pub(in crate::cli::commands::hyper_e2e) generator_optimizer: crate::AdamWConfig,
-    pub(in crate::cli::commands::hyper_e2e) lr_schedule: E2eLrSchedule,
-    pub(in crate::cli::commands::hyper_e2e) min_lr_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) adapter_rank: usize,
-    pub(in crate::cli::commands::hyper_e2e) adapter_alpha: f32,
-    pub(in crate::cli::commands::hyper_e2e) generator_hidden_dims: usize,
-    pub(in crate::cli::commands::hyper_e2e) token_attention_heads: usize,
-    pub(in crate::cli::commands::hyper_e2e) generator_sample_steps: usize,
-    pub(in crate::cli::commands::hyper_e2e) generator_output_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) generator_init_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) stopgrad_pos: bool,
-    pub(in crate::cli::commands::hyper_e2e) stopgrad_state: bool,
-    pub(in crate::cli::commands::hyper_e2e) system_memory_budget_gb: Option<f32>,
-    pub(in crate::cli::commands::hyper_e2e) gpu_memory_budget_gb: Option<f32>,
-    pub(in crate::cli::commands::hyper_e2e) max_dense_train_particles: usize,
-    pub(in crate::cli::commands::hyper_e2e) max_dense_chunk_floats: usize,
-    pub(in crate::cli::commands::hyper_e2e) max_splat_chunk_floats: usize,
-    pub(in crate::cli::commands::hyper_e2e) condition_device_cache_max_bytes: usize,
-    pub(in crate::cli::commands::hyper_e2e) validation_examples: usize,
-    pub(in crate::cli::commands::hyper_e2e) validation_interval: usize,
-    pub(in crate::cli::commands::hyper_e2e) validation_particles: usize,
-    pub(in crate::cli::commands::hyper_e2e) validation_steps: usize,
-    pub(in crate::cli::commands::hyper_e2e) validation_update_prob: f32,
-    pub(in crate::cli::commands::hyper_e2e) validation_seed: u64,
-    pub(in crate::cli::commands::hyper_e2e) validation_psnr_threshold_db: f32,
-}
-
-#[derive(Clone, serde::Serialize)]
-pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutHistoryEntry {
-    pub(in crate::cli::commands::hyper_e2e) step: usize,
-    pub(in crate::cli::commands::hyper_e2e) loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) learning_rate_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) base_learning_rate: f32,
-    pub(in crate::cli::commands::hyper_e2e) generator_learning_rate: f32,
-    pub(in crate::cli::commands::hyper_e2e) holdout_mean_psnr_db: Option<f32>,
-    pub(in crate::cli::commands::hyper_e2e) holdout_mean_loss: Option<f32>,
-    pub(in crate::cli::commands::hyper_e2e) base_grad_norm: f32,
-    pub(in crate::cli::commands::hyper_e2e) base_grad_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) generator_grad_norm: f32,
-    pub(in crate::cli::commands::hyper_e2e) generator_grad_scale: f32,
-    pub(in crate::cli::commands::hyper_e2e) examples_seen: usize,
-    pub(in crate::cli::commands::hyper_e2e) particle_steps_per_sec: f64,
-    pub(in crate::cli::commands::hyper_e2e) dense_pair_interactions_per_sec: f64,
-    pub(in crate::cli::commands::hyper_e2e) elapsed_ms: f64,
-}
-
-#[derive(Clone, serde::Serialize)]
-pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutQualityEntry {
-    pub(in crate::cli::commands::hyper_e2e) slug: String,
-    pub(in crate::cli::commands::hyper_e2e) total_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) splat_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) color_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) density_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) render_rgb_mse: f32,
-    pub(in crate::cli::commands::hyper_e2e) render_rgb_psnr_db: f32,
-    pub(in crate::cli::commands::hyper_e2e) passed: bool,
-}
-
-#[derive(Clone, serde::Serialize)]
-pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutQualityReport {
-    pub(in crate::cli::commands::hyper_e2e) split: &'static str,
-    pub(in crate::cli::commands::hyper_e2e) examples: usize,
-    pub(in crate::cli::commands::hyper_e2e) particle_count: usize,
-    pub(in crate::cli::commands::hyper_e2e) rollout_steps: usize,
-    pub(in crate::cli::commands::hyper_e2e) update_prob: f32,
-    pub(in crate::cli::commands::hyper_e2e) seed: u64,
-    pub(in crate::cli::commands::hyper_e2e) psnr_threshold_db: f32,
-    pub(in crate::cli::commands::hyper_e2e) passed: bool,
-    pub(in crate::cli::commands::hyper_e2e) mean_passed: bool,
-    pub(in crate::cli::commands::hyper_e2e) all_examples_passed: bool,
-    pub(in crate::cli::commands::hyper_e2e) elapsed_ms: f64,
-    pub(in crate::cli::commands::hyper_e2e) particle_steps: f64,
-    pub(in crate::cli::commands::hyper_e2e) particle_steps_per_sec: f64,
-    pub(in crate::cli::commands::hyper_e2e) dense_pair_interactions_per_sec: f64,
-    pub(in crate::cli::commands::hyper_e2e) adapter_batches: usize,
-    pub(in crate::cli::commands::hyper_e2e) mean_total_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) mean_splat_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) mean_color_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) mean_density_loss: f32,
-    pub(in crate::cli::commands::hyper_e2e) mean_render_rgb_mse: f32,
-    pub(in crate::cli::commands::hyper_e2e) mean_render_rgb_psnr_db: f32,
-    pub(in crate::cli::commands::hyper_e2e) min_render_rgb_psnr_db: f32,
-    pub(in crate::cli::commands::hyper_e2e) max_render_rgb_psnr_db: f32,
-    pub(in crate::cli::commands::hyper_e2e) entries: Vec<BurnE2eRolloutQualityEntry>,
-}
-
-pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutOutput {
-    pub(in crate::cli::commands::hyper_e2e) backend: String,
-    pub(in crate::cli::commands::hyper_e2e) device: String,
-    pub(in crate::cli::commands::hyper_e2e) metrics: serde_json::Value,
-    pub(in crate::cli::commands::hyper_e2e) history: Vec<BurnE2eRolloutHistoryEntry>,
-    pub(in crate::cli::commands::hyper_e2e) final_loss: Option<f32>,
-    pub(in crate::cli::commands::hyper_e2e) generator: serde_json::Value,
-    pub(in crate::cli::commands::hyper_e2e) quality_validation: Option<BurnE2eRolloutQualityReport>,
-}
+pub(super) use backends::{
+    train_direct_basis_burn_cuda, train_direct_basis_burn_wgpu, train_oracle_models_burn_cuda,
+    train_oracle_models_burn_wgpu,
+};
+pub(in crate::cli::commands::hyper_e2e) use backends::{
+    train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu,
+};
+pub(super) use types::{BurnDenseOracleBatchOutput, BurnWgpuDirectBasisOutput};
+pub(in crate::cli::commands::hyper_e2e) use types::{
+    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
+};
 
 macro_rules! dense_direct_basis_backend {
     (
@@ -188,11 +36,15 @@ mod $module {
     use serde_json::json;
 
     use super::{
-        BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutHistoryEntry,
-        BurnE2eRolloutOutput, BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport,
+        BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
         BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput, E2eLrSchedule,
     };
-    use super::super::{DirectBasisExample, DirectBasisStepStats, DirectBasisTrainConfig};
+    use super::types::{
+        BurnE2eRolloutHistoryEntry, BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport,
+    };
+    use super::super::{
+        DirectBasisExample, DirectBasisStepStats, DirectBasisTrainConfig, Target2dLossBackend,
+    };
     use crate::cli::reports::{
         CliHyper2dDirectBasisHistoryEntry, CliHyper2dDirectBasisLossSummary,
     };
@@ -202,7 +54,10 @@ mod $module {
         SgdConfig,
         rollout::{seed_particles_scaled, stochastic_mask},
         target2d::{render_target_2d_splat, target_2d_foreground_mask},
+        TargetImage2d,
     };
+    #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+    use burn_automata_kernels::{Target2dCubeAdjointBackend, Target2dCubeLossConfig};
 
     type InnerBackend = $inner_backend;
     type BurnBackend = Autodiff<InnerBackend>;
@@ -337,6 +192,7 @@ mod $module {
         particle_count: usize,
         update_prob: f32,
         seed_scale: f32,
+        target_cpu: TargetImage2d,
     }
 
     struct BurnPoolBatch {
@@ -602,6 +458,9 @@ mod $module {
             ),
             "holdout_adapter_update_coverage": holdout_phase.sample_updates,
         });
+        metrics["target2d_loss_backend"] = json!(train_config.target2d_loss_backend.as_str());
+        metrics["target2d_loss_backend_effective"] =
+            json!(target2d_loss_backend_effective(train_config).as_str());
         metrics["model_checkpoints"] = checkpoint_state
             .as_ref()
             .map(BurnDenseCheckpointState::report_json)
@@ -943,6 +802,10 @@ mod $module {
             json!(config.example_batch_size),
         );
         metrics.insert("rollout_particles".to_string(), json!(config.rollout_particles));
+        metrics.insert(
+            "rollout_step_min".to_string(),
+            json!(config.rollout_step_min),
+        );
         metrics.insert("rollout_steps".to_string(), json!(config.rollout_steps));
         metrics.insert(
             "tbptt_chunk_steps".to_string(),
@@ -962,7 +825,15 @@ mod $module {
         );
         metrics.insert(
             "loss_on_final_chunk_only".to_string(),
-            json!(false),
+            json!(config.loss_on_final_chunk_only),
+        );
+        metrics.insert(
+            "target2d_loss_backend".to_string(),
+            json!(config.target2d_loss_backend.as_str()),
+        );
+        metrics.insert(
+            "target2d_loss_backend_effective".to_string(),
+            json!(target2d_loss_backend_effective(direct_config_view(config)).as_str()),
         );
         metrics.insert(
             "max_dense_train_particles".to_string(),
@@ -2114,7 +1985,8 @@ mod $module {
         );
         let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
         let chunk_steps = tbptt_chunk_steps(direct_config);
-        let chunk_count = direct_config.rollout_steps.div_ceil(chunk_steps).max(1);
+        let rollout_steps = sampled_training_rollout_steps(direct_config, step_seed);
+        let chunk_count = rollout_steps.div_ceil(chunk_steps).max(1);
         let mut loss_sum = collect_metrics.then_some(0.0_f32);
         let mut base_grad_norm_sum = 0.0_f32;
         let mut base_grad_scale_sum = 0.0_f32;
@@ -2123,9 +1995,10 @@ mod $module {
         let mut grad_metric_chunks = 0usize;
         let mut particle_steps = 0.0_f64;
         let condition = conditions.select(indices)?;
-        let mut remaining_steps = direct_config.rollout_steps;
+        let mut remaining_steps = rollout_steps;
         while remaining_steps > 0 {
             let steps = remaining_steps.min(chunk_steps);
+            let final_chunk = remaining_steps <= chunk_steps;
             let adapter_batch = generator.adapter_batch(condition.clone(), npa_config, config);
             let displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
             let (next_x, next_s, displacement) = rollout_batch_chunk(
@@ -2141,7 +2014,14 @@ mod $module {
                 steps,
                 displacement,
             );
-            let loss = target_splat_loss_batch_vector(
+            if config.loss_on_final_chunk_only && !final_chunk {
+                x = detach3(next_x);
+                s = detach3(next_s);
+                particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
+                remaining_steps -= steps;
+                continue;
+            }
+            let loss = target_splat_loss_batch_vector_selected(
                 &next_x,
                 &next_s,
                 targets,
@@ -2149,7 +2029,7 @@ mod $module {
                 direct_config,
                 &adapter_batch,
                 displacement,
-            );
+            )?;
             if let Some(loss_sum) = loss_sum.as_mut() {
                 for scalars in loss_vector_scalars(loss.clone())? {
                     *loss_sum += scalars.total;
@@ -2188,12 +2068,17 @@ mod $module {
         }
         let elapsed = started.elapsed();
         let grad_metric_chunks = grad_metric_chunks.max(1);
+        let loss_chunk_count = if config.loss_on_final_chunk_only {
+            1
+        } else {
+            chunk_count
+        };
         let particle_steps_per_sec =
             particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
         Ok(BurnE2eRolloutHistoryEntry {
             step: 0,
             loss: loss_sum.map_or(0.0, |value| {
-                value / indices.len() as f32 / chunk_count as f32
+                value / indices.len() as f32 / loss_chunk_count as f32
             }),
             learning_rate_scale: 1.0,
             base_learning_rate: config.base_optimizer.learning_rate,
@@ -3131,7 +3016,7 @@ mod $module {
                 displacement = detach1(displacement);
             }
         }
-        Ok(target_splat_loss_batch_vector(
+        Ok(target_splat_loss_batch_vector_selected(
             &x,
             &s,
             targets,
@@ -3139,7 +3024,7 @@ mod $module {
             config,
             &adapter_batch,
             displacement,
-        ))
+        )?)
     }
 
     fn batch_example_geometry(
@@ -3924,6 +3809,271 @@ mod $module {
             color: color_loss,
             density: density_loss,
         }
+    }
+
+    fn target_splat_loss_batch_vector_selected(
+        x: &Tensor3,
+        s: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        adapter: &BurnAdapterBatch,
+        displacement: Tensor1,
+    ) -> AutomataResult<BurnLossBatchTensors> {
+        match target2d_loss_backend_effective(config) {
+            Target2dLossBackend::Dense => Ok(target_splat_loss_batch_vector(
+                x,
+                s,
+                targets,
+                indices,
+                config,
+                adapter,
+                displacement,
+            )),
+            Target2dLossBackend::TiledAdjoint => target_splat_loss_batch_vector_tiled_adjoint(
+                x,
+                s,
+                targets,
+                indices,
+                config,
+                adapter,
+                displacement,
+            ),
+            Target2dLossBackend::Auto => unreachable!("auto target2d backend must be resolved"),
+        }
+    }
+
+    fn target2d_loss_backend_effective(config: DirectBasisTrainConfig) -> Target2dLossBackend {
+        match config.target2d_loss_backend {
+            Target2dLossBackend::Auto | Target2dLossBackend::Dense => Target2dLossBackend::Dense,
+            Target2dLossBackend::TiledAdjoint => Target2dLossBackend::TiledAdjoint,
+        }
+    }
+
+    #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+    fn target2d_cube_loss_config(value: crate::Target2dLossConfig) -> Target2dCubeLossConfig {
+        Target2dCubeLossConfig {
+            image_size: value.image_size,
+            sigma: value.sigma,
+            lo: value.lo,
+            hi: value.hi,
+            splat_loss_weight: value.splat_loss_weight,
+            color_loss_weight: value.color_loss_weight,
+            density_loss_weight: value.density_loss_weight,
+            background_density_loss_weight: value.background_density_loss_weight,
+            foreground_density_loss_weight: value.foreground_density_loss_weight,
+            center: value.center,
+        }
+    }
+
+    fn target_splat_loss_batch_vector_tiled_adjoint(
+        x: &Tensor3,
+        s: &Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        adapter: &BurnAdapterBatch,
+        displacement: Tensor1,
+    ) -> AutomataResult<BurnLossBatchTensors> {
+        if indices.is_empty() {
+            return Err(AutomataError::InvalidArgument(
+                "tiled target2d loss requires at least one target index".to_string(),
+            ));
+        }
+        let dims = x.shape().dims::<3>();
+        let batches = dims[0];
+        let particle_count = dims[1];
+        let state_dims = s.shape().dims::<3>()[2];
+        if batches != indices.len() {
+            return Err(AutomataError::InvalidArgument(format!(
+                "tiled target2d batch mismatch: tensor batch={batches} indices={}",
+                indices.len()
+            )));
+        }
+        let device = &x.device();
+        #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+        if config.loss_config.shape_chamfer_loss_weight == 0.0 {
+            if let Some(device_loss) = InnerBackend::target2d_cube_adjoint(
+                x.clone().inner(),
+                {
+                    let x_inner = x.clone().inner();
+                    if config.loss_config.center {
+                        let target_mean = stack_target_mean(targets, indices).inner();
+                        x_inner.clone()
+                            - x_inner.clone().mean_dim(1).expand([batches, particle_count, 2])
+                            + target_mean.expand([batches, particle_count, 2])
+                    } else {
+                        x_inner
+                    }
+                },
+                s.clone().inner(),
+                stack_target_rgb(targets, indices).inner(),
+                stack_target_density(targets, indices).inner(),
+                stack_target_foreground(targets, indices).inner(),
+                stack_target_foreground_scales(targets, indices).inner(),
+                stack_pixel_sizes(targets, indices).inner(),
+                stack_target_point_counts(targets, indices).inner(),
+                target2d_cube_loss_config(config.loss_config),
+            ) {
+                let device_loss = device_loss?;
+                let position_grad = Tensor::<BurnBackend, 3>::from_inner(device_loss.position_grad);
+                let state_grad = Tensor::<BurnBackend, 3>::from_inner(device_loss.state_grad);
+                let position_term = x
+                    .clone()
+                    .mul(position_grad)
+                    .reshape([batches, particle_count * 2])
+                    .sum_dim(1)
+                    .squeeze_dim::<1>(1);
+                let state_term = s
+                    .clone()
+                    .mul(state_grad)
+                    .reshape([batches, particle_count * state_dims])
+                    .sum_dim(1)
+                    .squeeze_dim::<1>(1);
+                let mut total = position_term
+                    + state_term
+                    + Tensor::<BurnBackend, 1>::from_inner(device_loss.constant);
+                if config.loss_config.bound_regularizer_weight > 0.0 {
+                    let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
+                        .reshape([batches, particle_count * 2])
+                        .mean_dim(1)
+                        .squeeze_dim::<1>(1);
+                    total = total
+                        + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight);
+                }
+                if config.loss_config.overflow_regularizer_weight > 0.0 {
+                    let overflow_loss = relu(s.clone().abs().add_scalar(-1.0))
+                        .reshape([batches, particle_count * state_dims])
+                        .mean_dim(1)
+                        .squeeze_dim::<1>(1);
+                    total = total
+                        + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
+                }
+                if config.loss_config.displacement_regularizer_weight > 0.0 {
+                    total = total
+                        + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight);
+                }
+                if config.adapter_l2_weight > 0.0 {
+                    total = total
+                        + adapter
+                            .l2_loss_vector()
+                            .mul_scalar(config.adapter_l2_weight);
+                }
+                return Ok(BurnLossBatchTensors {
+                    total,
+                    splat: Tensor::<BurnBackend, 1>::from_inner(device_loss.splat),
+                    color: Tensor::<BurnBackend, 1>::from_inner(device_loss.color),
+                    density: Tensor::<BurnBackend, 1>::from_inner(device_loss.density),
+                });
+            }
+        }
+        let x_values = tensor3_vec(x.clone().inner())?;
+        let s_values = tensor3_vec(s.clone().inner())?;
+        let displacement_values = tensor1_vec(displacement.clone().inner())?;
+        if displacement_values.len() != batches {
+            return Err(AutomataError::InvalidArgument(format!(
+                "tiled target2d displacement batch mismatch: displacement={} batches={batches}",
+                displacement_values.len()
+            )));
+        }
+
+        let mut position_grad_values = vec![0.0_f32; batches * particle_count * 2];
+        let mut state_grad_values = vec![0.0_f32; batches * particle_count * state_dims];
+        let mut total_values = Vec::with_capacity(batches);
+        let mut splat_values = Vec::with_capacity(batches);
+        let mut color_values = Vec::with_capacity(batches);
+        let mut density_values = Vec::with_capacity(batches);
+        let mut constant_values = Vec::with_capacity(batches);
+
+        for (batch, target_idx) in indices.iter().copied().enumerate() {
+            let target = targets.get(target_idx).ok_or_else(|| {
+                AutomataError::InvalidArgument(format!(
+                    "tiled target2d target index {target_idx} is out of bounds"
+                ))
+            })?;
+            let x_offset = batch * particle_count * 2;
+            let s_offset = batch * particle_count * state_dims;
+            let mut positions = Vec::with_capacity(particle_count);
+            for particle in 0..particle_count {
+                let base = x_offset + particle * 2;
+                positions.push([x_values[base], x_values[base + 1], 0.0, 0.0]);
+            }
+            let states =
+                &s_values[s_offset..s_offset + particle_count.saturating_mul(state_dims)];
+            let reference = crate::target_2d_loss_with_adjoint(
+                &positions,
+                states,
+                1,
+                particle_count,
+                state_dims,
+                &target.target_cpu,
+                config.loss_config,
+                0.0,
+                0,
+            )?;
+
+            let total = reference.report.total_loss;
+            total_values.push(total);
+            splat_values.push(reference.report.splat_loss);
+            color_values.push(reference.report.color_loss);
+            density_values.push(reference.report.density_loss);
+
+            let mut dot = 0.0_f32;
+            for particle in 0..particle_count {
+                let pos_base = x_offset + particle * 2;
+                let reference_position = reference.position_gradients[particle];
+                position_grad_values[pos_base] = reference_position[0];
+                position_grad_values[pos_base + 1] = reference_position[1];
+                dot += x_values[pos_base] * reference_position[0]
+                    + x_values[pos_base + 1] * reference_position[1];
+
+                let state_base = s_offset + particle * state_dims;
+                let reference_state = &reference.state_gradients
+                    [particle * state_dims..(particle + 1) * state_dims];
+                for dim in 0..state_dims {
+                    state_grad_values[state_base + dim] = reference_state[dim];
+                    dot += s_values[state_base + dim] * reference_state[dim];
+                }
+            }
+            constant_values.push(total - dot);
+        }
+
+        let position_grad = tensor3(position_grad_values, [batches, particle_count, 2], device);
+        let state_grad = tensor3(
+            state_grad_values,
+            [batches, particle_count, state_dims],
+            device,
+        );
+        let position_term = x
+            .clone()
+            .mul(position_grad)
+            .reshape([batches, particle_count * 2])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1);
+        let state_term = s
+            .clone()
+            .mul(state_grad)
+            .reshape([batches, particle_count * state_dims])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1);
+        let mut total = position_term + state_term + tensor1(constant_values, [batches], device);
+        if config.loss_config.displacement_regularizer_weight > 0.0 {
+            total = total
+                + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight);
+        }
+        if config.adapter_l2_weight > 0.0 {
+            total = total
+                + adapter
+                    .l2_loss_vector()
+                    .mul_scalar(config.adapter_l2_weight);
+        }
+
+        Ok(BurnLossBatchTensors {
+            total,
+            splat: tensor1(splat_values, [batches], device),
+            color: tensor1(color_values, [batches], device),
+            density: tensor1(density_values, [batches], device),
+        })
     }
 
     fn target_splat_quality_batch_vector(
@@ -5689,6 +5839,7 @@ mod $module {
                     particle_count: example.source.particles.unwrap_or(config.rollout_particles),
                     update_prob: example.source.update_prob.unwrap_or(config.update_prob),
                     seed_scale: example.source.seed_scale.unwrap_or(config.seed_scale),
+                    target_cpu: example.target.clone(),
                 })
             })
             .collect()
@@ -5774,6 +5925,7 @@ mod $module {
                     particle_count: particle_count.unwrap_or(example.particle_count).max(1),
                     update_prob: update_prob.unwrap_or(example.update_prob),
                     seed_scale: example.seed_scale,
+                    target_cpu: example.target.clone(),
                 })
             })
             .collect()
@@ -5785,7 +5937,7 @@ mod $module {
             report_interval: config.report_interval,
             example_batch_size: config.example_batch_size,
             tbptt_chunk_steps: config.tbptt_chunk_steps,
-            loss_on_final_chunk_only: false,
+            loss_on_final_chunk_only: config.loss_on_final_chunk_only,
             use_particle_pool: false,
             pool_size: 0,
             inject_seed_interval: 0,
@@ -5793,7 +5945,7 @@ mod $module {
             stopgrad_pos: config.stopgrad_pos,
             stopgrad_state: config.stopgrad_state,
             rollout_particles: config.rollout_particles,
-            rollout_step_min: config.rollout_steps,
+            rollout_step_min: config.rollout_step_min,
             rollout_steps: config.rollout_steps,
             update_prob: config.update_prob,
             seed: config.seed,
@@ -5802,6 +5954,7 @@ mod $module {
             grid_eps: config.grid_eps,
             motion_scale: config.motion_scale,
             loss_config: config.loss_config,
+            target2d_loss_backend: config.target2d_loss_backend,
             per_parameter_grad_normalization: config.per_parameter_grad_normalization,
             base_sgd: SgdConfig {
                 learning_rate: config.base_optimizer.learning_rate,
@@ -5830,6 +5983,7 @@ mod $module {
     fn validation_direct_config(config: BurnE2eRolloutTrainConfig) -> DirectBasisTrainConfig {
         let mut direct = direct_config_view(config);
         direct.rollout_particles = config.validation_particles.max(1);
+        direct.rollout_step_min = config.validation_steps.max(1);
         direct.rollout_steps = config.validation_steps.max(1);
         direct.update_prob = config.validation_update_prob;
         direct.seed = config.validation_seed;
@@ -6703,6 +6857,10 @@ mod $module {
         Tensor::<BurnBackend, 3>::from_data(TensorData::new(values, shape), device)
     }
 
+    fn tensor1(values: Vec<f32>, shape: [usize; 1], device: &BurnDevice) -> Tensor1 {
+        Tensor::<BurnBackend, 1>::from_data(TensorData::new(values, shape), device)
+    }
+
     fn detach1(tensor: Tensor1) -> Tensor1 {
         Tensor::<BurnBackend, 1>::from_inner(tensor.inner())
     }
@@ -6927,6 +7085,7 @@ mod $module {
                 grid_eps: grid.eps,
                 motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
                 loss_config: crate::Target2dLossConfig::default(),
+                target2d_loss_backend: Target2dLossBackend::Dense,
                 per_parameter_grad_normalization: false,
                 base_sgd: SgdConfig {
                     learning_rate: 0.0,
@@ -7042,6 +7201,7 @@ mod $module {
                 particle_count: 4,
                 update_prob: 1.0,
                 seed_scale: 0.3,
+                target_cpu: target.clone(),
             };
             let model = NpaModel::upstream_seeded(npa_config.clone(), 29);
             let adapter = BurnAdapterParams::from_adapter(
@@ -7072,6 +7232,7 @@ mod $module {
                 grid_eps: grid.eps,
                 motion_scale: npa_config.alpha * npa_config.motion_eps(grid.eps),
                 loss_config,
+                target2d_loss_backend: Target2dLossBackend::Dense,
                 per_parameter_grad_normalization: false,
                 base_sgd: SgdConfig {
                     learning_rate: 0.0,
@@ -7103,7 +7264,7 @@ mod $module {
                 [4, 2],
                 &device,
             );
-            let s = tracked_tensor(states, [4, npa_config.state_dims], &device);
+            let s = tracked_tensor(states.clone(), [4, npa_config.state_dims], &device);
             let loss = target_splat_loss(
                 &x,
                 &s,
@@ -7172,6 +7333,93 @@ mod $module {
             assert!(
                 max_state_grad_diff < 2.0e-3,
                 "Burn target2d state gradient diverged from CPU reference: max_abs_diff={max_state_grad_diff}"
+            );
+
+            let x3 = tensor3(
+                positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect(),
+                [1, 4, 2],
+                &device,
+            )
+            .require_grad();
+            let s3 = tensor3(states, [1, 4, npa_config.state_dims], &device).require_grad();
+            let adapter_batch = BurnAdapterBatch::from_indices(std::slice::from_ref(&adapter), &[0]);
+            let tiled_config = DirectBasisTrainConfig {
+                target2d_loss_backend: Target2dLossBackend::TiledAdjoint,
+                ..config
+            };
+            let tiled_loss = target_splat_loss_batch_vector_selected(
+                &x3,
+                &s3,
+                &[target],
+                &[0],
+                tiled_config,
+                &adapter_batch,
+                Tensor::<BurnBackend, 1>::zeros([1], &device),
+            )
+            .unwrap();
+            let tiled_scalars = loss_vector_scalars(tiled_loss.clone()).unwrap();
+            let tiled_scalar = tiled_scalars[0];
+            assert!(
+                (tiled_scalar.total - reference.total_loss).abs() < 1.0e-4,
+                "tiled-adjoint total target2d loss diverged from CPU reference: tiled={} reference={}",
+                tiled_scalar.total,
+                reference.total_loss
+            );
+            assert!(
+                (tiled_scalar.splat - reference.splat_loss).abs() < 1.0e-4,
+                "tiled-adjoint splat target2d loss diverged from CPU reference: tiled={} reference={}",
+                tiled_scalar.splat,
+                reference.splat_loss
+            );
+            assert!(
+                (tiled_scalar.color - reference.color_loss).abs() < 1.0e-4,
+                "tiled-adjoint color target2d loss diverged from CPU reference: tiled={} reference={}",
+                tiled_scalar.color,
+                reference.color_loss
+            );
+            assert!(
+                (tiled_scalar.density - reference.density_loss).abs() < 1.0e-4,
+                "tiled-adjoint density target2d loss diverged from CPU reference: tiled={} reference={}",
+                tiled_scalar.density,
+                reference.density_loss
+            );
+
+            let mut grads = tiled_loss.total.sum().backward();
+            let tiled_x_grad = tensor3_vec(
+                x3.grad_remove(&mut grads)
+                    .unwrap_or_else(|| x3.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let tiled_s_grad = tensor3_vec(
+                s3.grad_remove(&mut grads)
+                    .unwrap_or_else(|| s3.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let max_position_grad_diff = tiled_x_grad
+                .chunks_exact(2)
+                .zip(&reference_output.position_gradients)
+                .flat_map(|(burn, reference)| {
+                    [
+                        (burn[0] - reference[0]).abs(),
+                        (burn[1] - reference[1]).abs(),
+                    ]
+                })
+                .fold(0.0_f32, f32::max);
+            let max_state_grad_diff = tiled_s_grad
+                .iter()
+                .zip(&reference_output.state_gradients)
+                .map(|(burn, reference)| (burn - reference).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_position_grad_diff < 1.0e-6,
+                "tiled-adjoint target2d position gradient diverged from CPU reference: max_abs_diff={max_position_grad_diff}"
+            );
+            assert!(
+                max_state_grad_diff < 1.0e-6,
+                "tiled-adjoint target2d state gradient diverged from CPU reference: max_abs_diff={max_state_grad_diff}"
             );
         }
 
@@ -7270,165 +7518,3 @@ dense_direct_basis_backend!(
     "cuda-default",
     "burn-cuda"
 );
-
-#[cfg(feature = "backend_wgpu")]
-pub(super) fn train_direct_basis_burn_wgpu(
-    base: &mut super::NpaModel,
-    train_examples: &mut [super::DirectBasisExample],
-    holdout_examples: &mut [super::DirectBasisExample],
-    train_config: super::DirectBasisTrainConfig,
-    train_refine_config: super::DirectBasisTrainConfig,
-    holdout_config: super::DirectBasisTrainConfig,
-    checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
-) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
-    wgpu_imp::train_direct_basis_burn_dense(
-        base,
-        train_examples,
-        holdout_examples,
-        train_config,
-        train_refine_config,
-        holdout_config,
-        checkpoint,
-    )
-}
-
-#[cfg(feature = "backend_wgpu")]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_wgpu(
-    base: &mut super::NpaModel,
-    train_examples: &mut [BurnE2eRolloutExample],
-    holdout_examples: &mut [BurnE2eRolloutExample],
-    train_config: BurnE2eRolloutTrainConfig,
-) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
-    wgpu_imp::train_e2e_rollout_burn_dense(base, train_examples, holdout_examples, train_config)
-}
-
-#[cfg(not(feature = "backend_wgpu"))]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_wgpu(
-    _base: &mut super::NpaModel,
-    _train_examples: &mut [BurnE2eRolloutExample],
-    _holdout_examples: &mut [BurnE2eRolloutExample],
-    _train_config: BurnE2eRolloutTrainConfig,
-) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
-    Err(std::io::Error::other(
-        "Burn/WGPU HyperNPA e2e rollout training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
-    )
-    .into())
-}
-
-#[cfg(not(feature = "backend_wgpu"))]
-pub(super) fn train_direct_basis_burn_wgpu(
-    _base: &mut super::NpaModel,
-    _train_examples: &mut [super::DirectBasisExample],
-    _holdout_examples: &mut [super::DirectBasisExample],
-    _train_config: super::DirectBasisTrainConfig,
-    _train_refine_config: super::DirectBasisTrainConfig,
-    _holdout_config: super::DirectBasisTrainConfig,
-    _checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
-) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
-    Err(std::io::Error::other(
-        "Burn/WGPU direct-basis training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu or choose the Burn/CUDA backend in a CUDA build",
-    )
-    .into())
-}
-
-#[cfg(feature = "backend_wgpu")]
-pub(super) fn train_oracle_models_burn_wgpu(
-    models: &mut [super::NpaModel],
-    examples: &[super::DirectBasisExample],
-    train_config: super::DirectBasisTrainConfig,
-) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    wgpu_imp::train_oracle_models_burn_dense(models, examples, train_config)
-}
-
-#[cfg(not(feature = "backend_wgpu"))]
-pub(super) fn train_oracle_models_burn_wgpu(
-    _models: &mut [super::NpaModel],
-    _examples: &[super::DirectBasisExample],
-    _train_config: super::DirectBasisTrainConfig,
-) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    Err(std::io::Error::other(
-        "Burn/WGPU vectorized oracle training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
-    )
-    .into())
-}
-
-#[cfg(feature = "backend_cuda")]
-pub(super) fn train_direct_basis_burn_cuda(
-    base: &mut super::NpaModel,
-    train_examples: &mut [super::DirectBasisExample],
-    holdout_examples: &mut [super::DirectBasisExample],
-    train_config: super::DirectBasisTrainConfig,
-    train_refine_config: super::DirectBasisTrainConfig,
-    holdout_config: super::DirectBasisTrainConfig,
-    checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
-) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
-    cuda_imp::train_direct_basis_burn_dense(
-        base,
-        train_examples,
-        holdout_examples,
-        train_config,
-        train_refine_config,
-        holdout_config,
-        checkpoint,
-    )
-}
-
-#[cfg(feature = "backend_cuda")]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_cuda(
-    base: &mut super::NpaModel,
-    train_examples: &mut [BurnE2eRolloutExample],
-    holdout_examples: &mut [BurnE2eRolloutExample],
-    train_config: BurnE2eRolloutTrainConfig,
-) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
-    cuda_imp::train_e2e_rollout_burn_dense(base, train_examples, holdout_examples, train_config)
-}
-
-#[cfg(not(feature = "backend_cuda"))]
-pub(in crate::cli::commands::hyper_e2e) fn train_e2e_rollout_burn_cuda(
-    _base: &mut super::NpaModel,
-    _train_examples: &mut [BurnE2eRolloutExample],
-    _holdout_examples: &mut [BurnE2eRolloutExample],
-    _train_config: BurnE2eRolloutTrainConfig,
-) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
-    Err(std::io::Error::other(
-        "Burn/CUDA HyperNPA e2e rollout training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",
-    )
-    .into())
-}
-
-#[cfg(not(feature = "backend_cuda"))]
-pub(super) fn train_direct_basis_burn_cuda(
-    _base: &mut super::NpaModel,
-    _train_examples: &mut [super::DirectBasisExample],
-    _holdout_examples: &mut [super::DirectBasisExample],
-    _train_config: super::DirectBasisTrainConfig,
-    _train_refine_config: super::DirectBasisTrainConfig,
-    _holdout_config: super::DirectBasisTrainConfig,
-    _checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
-) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
-    Err(std::io::Error::other(
-        "Burn/CUDA dense direct-basis training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",
-    )
-    .into())
-}
-
-#[cfg(feature = "backend_cuda")]
-pub(super) fn train_oracle_models_burn_cuda(
-    models: &mut [super::NpaModel],
-    examples: &[super::DirectBasisExample],
-    train_config: super::DirectBasisTrainConfig,
-) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    cuda_imp::train_oracle_models_burn_dense(models, examples, train_config)
-}
-
-#[cfg(not(feature = "backend_cuda"))]
-pub(super) fn train_oracle_models_burn_cuda(
-    _models: &mut [super::NpaModel],
-    _examples: &[super::DirectBasisExample],
-    _train_config: super::DirectBasisTrainConfig,
-) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    Err(std::io::Error::other(
-        "Burn/CUDA vectorized oracle training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",
-    )
-    .into())
-}
