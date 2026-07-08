@@ -36,6 +36,7 @@ struct RolloutExperimentConfig {
     target: RolloutTargetConfig,
     optimizer: RolloutOptimizerConfig,
     validation: RolloutValidationConfig,
+    gates: RolloutGateConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -106,6 +107,7 @@ struct RolloutConditionConfig {
 struct RolloutModelConfig {
     shared_base: Option<PathBuf>,
     shared_base_trainable: Option<bool>,
+    shared_base_train_start_step: Option<usize>,
     shared_base_init: Option<String>,
     hidden_dims: Option<usize>,
     output_activation: Option<String>,
@@ -132,6 +134,7 @@ struct RolloutGpuConfig {
     backend: Option<String>,
     max_dense_chunk_floats: Option<usize>,
     max_splat_chunk_floats: Option<usize>,
+    condition_device_cache_max_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -177,8 +180,14 @@ struct RolloutTargetConfig {
 #[serde(default, deny_unknown_fields)]
 struct RolloutOptimizerConfig {
     learning_rate: Option<f32>,
+    base_learning_rate: Option<f32>,
+    generator_learning_rate: Option<f32>,
     weight_decay: Option<f32>,
+    base_weight_decay: Option<f32>,
+    generator_weight_decay: Option<f32>,
     grad_clip_norm: Option<f32>,
+    base_grad_clip_norm: Option<f32>,
+    generator_grad_clip_norm: Option<f32>,
     adam_beta1: Option<f32>,
     adam_beta2: Option<f32>,
     adam_epsilon: Option<f32>,
@@ -191,12 +200,24 @@ struct RolloutOptimizerConfig {
 #[serde(default, deny_unknown_fields)]
 struct RolloutValidationConfig {
     examples: Option<usize>,
+    interval: Option<usize>,
     particles: Option<usize>,
     steps: Option<usize>,
     update_prob: Option<f32>,
     seed: Option<u64>,
     oracle_report: Option<PathBuf>,
     psnr_threshold_db: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RolloutGateConfig {
+    min_median_particle_steps_per_sec: Option<f64>,
+    max_quality_validation_evaluations: Option<usize>,
+    max_quality_validation_elapsed_fraction: Option<f64>,
+    min_final_mean_render_rgb_psnr_db: Option<f32>,
+    require_validation_interval_at_least_report_interval: Option<bool>,
+    fail_on_violation: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -223,6 +244,7 @@ struct E2eRolloutReport {
     preset: AutomataPreset,
     source: E2eRolloutSourceReport,
     split: E2eRolloutSplitReport,
+    warnings: Vec<String>,
     output: E2eRolloutOutputReport,
     condition: E2eRolloutConditionReport,
     model: E2eRolloutModelReport,
@@ -232,6 +254,7 @@ struct E2eRolloutReport {
     target: E2eRolloutTargetReport,
     optimizer: E2eRolloutOptimizerReport,
     validation: E2eRolloutValidationReport,
+    gates: E2eRolloutGateReport,
     blockers: Vec<String>,
     selected_sources: Vec<E2eRolloutSourceEntry>,
     training_result: Option<E2eRolloutTrainingResultReport>,
@@ -282,6 +305,8 @@ struct E2eRolloutConditionReport {
     dino_batch_input_gib_f32: f64,
     projected_condition_load_peak_bytes_f32: usize,
     projected_condition_load_peak_gib_f32: f64,
+    device_cache_max_bytes: usize,
+    device_cache_max_gib: f64,
     token_attention_heads: usize,
 }
 
@@ -289,6 +314,7 @@ struct E2eRolloutConditionReport {
 struct E2eRolloutModelReport {
     shared_base: Option<String>,
     shared_base_trainable: bool,
+    shared_base_train_start_step: usize,
     shared_base_init: String,
     hidden_dims: usize,
     output_activation: String,
@@ -308,6 +334,7 @@ struct E2eRolloutTrainingReport {
     gpu_memory_budget_gb: Option<f32>,
     max_dense_chunk_floats: usize,
     max_splat_chunk_floats: usize,
+    condition_device_cache_max_bytes: usize,
     seed: u64,
     adapter_vector_mse_primary_objective: bool,
     trains_shared_base_from_step_zero: bool,
@@ -355,8 +382,14 @@ struct E2eRolloutTargetReport {
 #[derive(Clone, Debug, Serialize)]
 struct E2eRolloutOptimizerReport {
     learning_rate: f32,
+    base_learning_rate: f32,
+    generator_learning_rate: f32,
     weight_decay: f32,
+    base_weight_decay: f32,
+    generator_weight_decay: f32,
     grad_clip_norm: f32,
+    base_grad_clip_norm: f32,
+    generator_grad_clip_norm: f32,
     adam_beta1: f32,
     adam_beta2: f32,
     adam_epsilon: f32,
@@ -368,12 +401,34 @@ struct E2eRolloutOptimizerReport {
 #[derive(Clone, Debug, Serialize)]
 struct E2eRolloutValidationReport {
     examples: usize,
+    interval: usize,
     particles: usize,
     steps: usize,
+    quality_scale: bool,
+    training_backward_safe: bool,
     update_prob: f32,
     seed: u64,
     oracle_report: Option<String>,
     psnr_threshold_db: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct E2eRolloutGateReport {
+    min_median_particle_steps_per_sec: Option<f64>,
+    max_quality_validation_evaluations: Option<usize>,
+    max_quality_validation_elapsed_fraction: Option<f64>,
+    min_final_mean_render_rgb_psnr_db: Option<f32>,
+    require_validation_interval_at_least_report_interval: bool,
+    fail_on_violation: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct E2eRolloutGateResultReport {
+    gate: &'static str,
+    passed: bool,
+    observed: serde_json::Value,
+    threshold: serde_json::Value,
+    message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -384,6 +439,8 @@ struct E2eRolloutTrainingResultReport {
     history: serde_json::Value,
     metrics: serde_json::Value,
     quality_validation: Option<serde_json::Value>,
+    gates_passed: bool,
+    gates: Vec<E2eRolloutGateResultReport>,
     shared_base_output: String,
     hyper_output: String,
 }
@@ -412,6 +469,9 @@ pub(crate) fn run_train_hyper_2d_e2e_rollout(
 
     if report.training.steps > 0 {
         let training = run_burn_e2e_rollout_training(&report)?;
+        let gate_results = evaluate_e2e_rollout_gates(&report, &training);
+        let gates_passed = gate_results.iter().all(|gate| gate.passed);
+        let should_fail_on_gate_violation = report.gates.fail_on_violation && !gates_passed;
         let shared_base_output = report.output.shared_base_output.clone();
         let hyper_output = report.output.hyper_output.clone();
         let quality_validation = training
@@ -426,10 +486,19 @@ pub(crate) fn run_train_hyper_2d_e2e_rollout(
             history: serde_json::to_value(training.history)?,
             metrics: training.metrics,
             quality_validation,
+            gates_passed,
+            gates: gate_results,
             shared_base_output,
             hyper_output,
         });
         write_pretty_json(Path::new(&report.output.report_output), &report)?;
+        if should_fail_on_gate_violation {
+            return Err(std::io::Error::other(format!(
+                "HyperNPA e2e rollout gates failed; see {}",
+                report.output.report_output
+            ))
+            .into());
+        }
         eprintln!(
             "hyper2d e2e rollout training wrote {} and {}",
             report.output.shared_base_output, report.output.hyper_output
@@ -687,6 +756,27 @@ fn build_e2e_rollout_report(
     let lr_schedule = parse_e2e_lr_schedule(config.optimizer.lr_schedule.as_deref())?;
     let lr_schedule_label = lr_schedule.as_str().to_string();
     let min_lr_scale = config.optimizer.min_lr_scale.unwrap_or(1.0).clamp(0.0, 1.0);
+    let learning_rate = config.optimizer.learning_rate.unwrap_or(1.0e-4);
+    let base_learning_rate = config.optimizer.base_learning_rate.unwrap_or(learning_rate);
+    let generator_learning_rate = config
+        .optimizer
+        .generator_learning_rate
+        .unwrap_or(learning_rate);
+    let weight_decay = config.optimizer.weight_decay.unwrap_or(0.0);
+    let base_weight_decay = config.optimizer.base_weight_decay.unwrap_or(weight_decay);
+    let generator_weight_decay = config
+        .optimizer
+        .generator_weight_decay
+        .unwrap_or(weight_decay);
+    let grad_clip_norm = config.optimizer.grad_clip_norm.unwrap_or(1.0);
+    let base_grad_clip_norm = config
+        .optimizer
+        .base_grad_clip_norm
+        .unwrap_or(grad_clip_norm);
+    let generator_grad_clip_norm = config
+        .optimizer
+        .generator_grad_clip_norm
+        .unwrap_or(grad_clip_norm);
     let target_report = E2eRolloutTargetReport {
         points: config.target.points.unwrap_or(4096).max(1),
         image_size: config.target.image_size,
@@ -705,7 +795,32 @@ fn build_e2e_rollout_report(
     };
     let validation_particles = config.validation.particles.unwrap_or(2048).max(1);
     let validation_steps = config.validation.steps.unwrap_or(64).max(1);
+    let validation_interval = config.validation.interval.unwrap_or(report_interval).max(1);
+    let validation_quality_scale = validation_particles >= 2048
+        || validation_steps >= 32
+        || config.validation.examples.unwrap_or(16) >= 16;
+    let validation_training_backward_safe = validation_particles <= max_dense_train_particles;
+    let shared_base_train_start_step = config.model.shared_base_train_start_step.unwrap_or(0);
     let blockers = Vec::new();
+    let mut warnings = Vec::new();
+    if steps > 0
+        && validation_quality_scale
+        && config.validation.psnr_threshold_db.unwrap_or(26.0) < 26.0
+    {
+        warnings.push(
+            "validation.psnr_threshold_db is below the 26dB quality-parity target".to_string(),
+        );
+    }
+    if steps > 0 && (rollout_particles < 512 || rollout_steps < 16) {
+        warnings.push(format!(
+            "training rollout scale is curriculum/diagnostic only: particles={rollout_particles}, steps={rollout_steps}; use high-particle validation for quality claims"
+        ));
+    }
+    if steps > 0 && validation_particles > max_dense_train_particles {
+        warnings.push(format!(
+            "validation uses {validation_particles} particles above dense backward cap {max_dense_train_particles}; this is validation-only and must not be used for dense autodiff training"
+        ));
+    }
 
     let dino_batch_size = config.condition.dino_batch_size.unwrap_or(1).max(1);
     let selected_feature_cache_bytes_f32 = sources
@@ -717,8 +832,12 @@ fn build_e2e_rollout_report(
         .saturating_mul(dino_image_size)
         .saturating_mul(3)
         .saturating_mul(std::mem::size_of::<f32>());
+    let condition_device_cache_max_bytes = config
+        .gpu
+        .condition_device_cache_max_bytes
+        .unwrap_or(DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES);
     let projected_condition_load_peak_bytes_f32 =
-        if selected_feature_cache_bytes_f32 > DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES {
+        if selected_feature_cache_bytes_f32 > condition_device_cache_max_bytes {
             selected_feature_cache_bytes_f32.saturating_add(dino_batch_input_bytes_f32)
         } else {
             selected_feature_cache_bytes_f32
@@ -747,6 +866,7 @@ fn build_e2e_rollout_report(
             holdout_stride,
             holdout_offset,
         },
+        warnings,
         output: E2eRolloutOutputReport {
             output_dir: display_path(&output_dir),
             report_output: display_path(&report_output),
@@ -783,6 +903,8 @@ fn build_e2e_rollout_report(
             projected_condition_load_peak_gib_f32: bytes_to_gib(
                 projected_condition_load_peak_bytes_f32,
             ),
+            device_cache_max_bytes: condition_device_cache_max_bytes,
+            device_cache_max_gib: bytes_to_gib(condition_device_cache_max_bytes),
             token_attention_heads: config.condition.token_attention_heads.unwrap_or(4).max(1),
         },
         model: E2eRolloutModelReport {
@@ -792,6 +914,7 @@ fn build_e2e_rollout_report(
                 .as_ref()
                 .map(|path| display_path(path)),
             shared_base_trainable: config.model.shared_base_trainable.unwrap_or(true),
+            shared_base_train_start_step,
             shared_base_init: config
                 .model
                 .shared_base_init
@@ -817,9 +940,11 @@ fn build_e2e_rollout_report(
             gpu_memory_budget_gb: config.training.gpu_memory_budget_gb,
             max_dense_chunk_floats: config.gpu.max_dense_chunk_floats.unwrap_or(1_048_576),
             max_splat_chunk_floats: config.gpu.max_splat_chunk_floats.unwrap_or(1_048_576),
+            condition_device_cache_max_bytes,
             seed: config.training.seed.unwrap_or(42),
             adapter_vector_mse_primary_objective: false,
-            trains_shared_base_from_step_zero: config.model.shared_base_trainable.unwrap_or(true),
+            trains_shared_base_from_step_zero: config.model.shared_base_trainable.unwrap_or(true)
+                && shared_base_train_start_step == 0,
             trains_hypernet_from_step_zero: true,
         },
         adapter: E2eRolloutAdapterReport {
@@ -847,9 +972,15 @@ fn build_e2e_rollout_report(
         },
         target: target_report,
         optimizer: E2eRolloutOptimizerReport {
-            learning_rate: config.optimizer.learning_rate.unwrap_or(1.0e-4),
-            weight_decay: config.optimizer.weight_decay.unwrap_or(0.0),
-            grad_clip_norm: config.optimizer.grad_clip_norm.unwrap_or(1.0),
+            learning_rate,
+            base_learning_rate,
+            generator_learning_rate,
+            weight_decay,
+            base_weight_decay,
+            generator_weight_decay,
+            grad_clip_norm,
+            base_grad_clip_norm,
+            generator_grad_clip_norm,
             adam_beta1: config.optimizer.adam_beta1.unwrap_or(0.9),
             adam_beta2: config.optimizer.adam_beta2.unwrap_or(0.999),
             adam_epsilon: config.optimizer.adam_epsilon.unwrap_or(1.0e-8),
@@ -862,8 +993,11 @@ fn build_e2e_rollout_report(
         },
         validation: E2eRolloutValidationReport {
             examples: config.validation.examples.unwrap_or(16),
+            interval: validation_interval,
             particles: validation_particles,
             steps: validation_steps,
+            quality_scale: validation_quality_scale,
+            training_backward_safe: validation_training_backward_safe,
             update_prob: config.validation.update_prob.unwrap_or(0.5),
             seed: config.validation.seed.unwrap_or(42),
             oracle_report: config
@@ -872,6 +1006,19 @@ fn build_e2e_rollout_report(
                 .as_ref()
                 .map(|path| display_path(path)),
             psnr_threshold_db: config.validation.psnr_threshold_db.unwrap_or(26.0),
+        },
+        gates: E2eRolloutGateReport {
+            min_median_particle_steps_per_sec: config.gates.min_median_particle_steps_per_sec,
+            max_quality_validation_evaluations: config.gates.max_quality_validation_evaluations,
+            max_quality_validation_elapsed_fraction: config
+                .gates
+                .max_quality_validation_elapsed_fraction,
+            min_final_mean_render_rgb_psnr_db: config.gates.min_final_mean_render_rgb_psnr_db,
+            require_validation_interval_at_least_report_interval: config
+                .gates
+                .require_validation_interval_at_least_report_interval
+                .unwrap_or(false),
+            fail_on_violation: config.gates.fail_on_violation.unwrap_or(true),
         },
         blockers,
         selected_sources: source_entries(&sources, &splits),
@@ -941,8 +1088,9 @@ fn run_burn_e2e_rollout_training(
         loss_config,
         per_parameter_grad_normalization: report.optimizer.per_parameter_grad_normalization,
         shared_base_trainable: report.model.shared_base_trainable,
-        base_optimizer: adamw_from_report(report),
-        generator_optimizer: adamw_from_report(report),
+        shared_base_train_start_step: report.model.shared_base_train_start_step,
+        base_optimizer: base_adamw_from_report(report),
+        generator_optimizer: generator_adamw_from_report(report),
         lr_schedule: parse_e2e_lr_schedule(Some(&report.optimizer.lr_schedule))?,
         min_lr_scale: report.optimizer.min_lr_scale,
         adapter_rank: report.adapter.rank,
@@ -959,7 +1107,9 @@ fn run_burn_e2e_rollout_training(
         max_dense_train_particles: report.training.max_dense_train_particles,
         max_dense_chunk_floats: report.training.max_dense_chunk_floats,
         max_splat_chunk_floats: report.training.max_splat_chunk_floats,
+        condition_device_cache_max_bytes: report.training.condition_device_cache_max_bytes,
         validation_examples: report.validation.examples,
+        validation_interval: report.validation.interval,
         validation_particles: report.validation.particles,
         validation_steps: report.validation.steps,
         validation_update_prob: report.validation.update_prob,
@@ -1179,15 +1329,171 @@ fn report_source_split<'a>(report: &'a E2eRolloutReport, slug: &str) -> Option<&
         .map(|entry| entry.split)
 }
 
-fn adamw_from_report(report: &E2eRolloutReport) -> AdamWConfig {
+fn base_adamw_from_report(report: &E2eRolloutReport) -> AdamWConfig {
     AdamWConfig {
-        learning_rate: report.optimizer.learning_rate,
-        weight_decay: report.optimizer.weight_decay,
-        grad_clip_norm: report.optimizer.grad_clip_norm,
+        learning_rate: report.optimizer.base_learning_rate,
+        weight_decay: report.optimizer.base_weight_decay,
+        grad_clip_norm: report.optimizer.base_grad_clip_norm,
         beta1: report.optimizer.adam_beta1,
         beta2: report.optimizer.adam_beta2,
         epsilon: report.optimizer.adam_epsilon,
     }
+}
+
+fn generator_adamw_from_report(report: &E2eRolloutReport) -> AdamWConfig {
+    AdamWConfig {
+        learning_rate: report.optimizer.generator_learning_rate,
+        weight_decay: report.optimizer.generator_weight_decay,
+        grad_clip_norm: report.optimizer.generator_grad_clip_norm,
+        beta1: report.optimizer.adam_beta1,
+        beta2: report.optimizer.adam_beta2,
+        epsilon: report.optimizer.adam_epsilon,
+    }
+}
+
+fn evaluate_e2e_rollout_gates(
+    report: &E2eRolloutReport,
+    training: &BurnE2eRolloutOutput,
+) -> Vec<E2eRolloutGateResultReport> {
+    let mut results = Vec::new();
+
+    if let Some(threshold) = report.gates.min_median_particle_steps_per_sec {
+        let observed = metric_f64(&training.metrics, "median_reported_particle_steps_per_sec");
+        results.push(gate_result(
+            "min_median_particle_steps_per_sec",
+            observed.is_some_and(|value| value >= threshold),
+            json_number_or_null(observed),
+            serde_json::json!(threshold),
+            match observed {
+                Some(value) => format!(
+                    "median reported particle throughput {value:.3} particle-steps/s; required >= {threshold:.3}"
+                ),
+                None => {
+                    "median reported particle throughput was not present in training metrics"
+                        .to_string()
+                }
+            },
+        ));
+    }
+
+    if let Some(threshold) = report.gates.max_quality_validation_evaluations {
+        let observed = metric_usize(&training.metrics, "quality_validation_evaluations");
+        results.push(gate_result(
+            "max_quality_validation_evaluations",
+            observed.is_some_and(|value| value <= threshold),
+            observed
+                .map(|value| serde_json::json!(value))
+                .unwrap_or(serde_json::Value::Null),
+            serde_json::json!(threshold),
+            match observed {
+                Some(value) => {
+                    format!("quality validation ran {value} times; required <= {threshold}")
+                }
+                None => "quality validation evaluation count was not present in training metrics"
+                    .to_string(),
+            },
+        ));
+    }
+
+    if let Some(threshold) = report.gates.max_quality_validation_elapsed_fraction {
+        let elapsed_ms = metric_f64(&training.metrics, "quality_validation_elapsed_ms");
+        let training_ms = metric_f64(&training.metrics, "burn_training_ms");
+        let observed = elapsed_ms
+            .zip(training_ms)
+            .and_then(|(elapsed_ms, training_ms)| {
+                (training_ms > 0.0).then_some(elapsed_ms / training_ms)
+            });
+        results.push(gate_result(
+            "max_quality_validation_elapsed_fraction",
+            observed.is_some_and(|value| value <= threshold),
+            json_number_or_null(observed),
+            serde_json::json!(threshold),
+            match observed {
+                Some(value) => format!(
+                    "quality validation consumed {:.3}% of Burn training time; required <= {:.3}%",
+                    value * 100.0,
+                    threshold * 100.0
+                ),
+                None => "quality validation or Burn training elapsed metrics were not present"
+                    .to_string(),
+            },
+        ));
+    }
+
+    if let Some(threshold) = report.gates.min_final_mean_render_rgb_psnr_db {
+        let observed = training
+            .quality_validation
+            .as_ref()
+            .map(|quality| quality.mean_render_rgb_psnr_db);
+        results.push(gate_result(
+            "min_final_mean_render_rgb_psnr_db",
+            observed.is_some_and(|value| value >= threshold),
+            observed
+                .map(|value| serde_json::json!(value))
+                .unwrap_or(serde_json::Value::Null),
+            serde_json::json!(threshold),
+            match observed {
+                Some(value) => {
+                    format!(
+                        "final mean render RGB PSNR {value:.3} dB; required >= {threshold:.3} dB"
+                    )
+                }
+                None => "final quality validation was not present".to_string(),
+            },
+        ));
+    }
+
+    if report
+        .gates
+        .require_validation_interval_at_least_report_interval
+    {
+        let passed = report.validation.interval >= report.training.report_interval;
+        results.push(gate_result(
+            "require_validation_interval_at_least_report_interval",
+            passed,
+            serde_json::json!(report.validation.interval),
+            serde_json::json!(report.training.report_interval),
+            format!(
+                "validation interval {} must be >= report interval {}",
+                report.validation.interval, report.training.report_interval
+            ),
+        ));
+    }
+
+    results
+}
+
+fn gate_result(
+    gate: &'static str,
+    passed: bool,
+    observed: serde_json::Value,
+    threshold: serde_json::Value,
+    message: String,
+) -> E2eRolloutGateResultReport {
+    E2eRolloutGateResultReport {
+        gate,
+        passed,
+        observed,
+        threshold,
+        message,
+    }
+}
+
+fn metric_f64(metrics: &serde_json::Value, key: &str) -> Option<f64> {
+    metrics.get(key).and_then(serde_json::Value::as_f64)
+}
+
+fn metric_usize(metrics: &serde_json::Value, key: &str) -> Option<usize> {
+    metrics
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+fn json_number_or_null(value: Option<f64>) -> serde_json::Value {
+    value
+        .map(|value| serde_json::json!(value))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn parse_rollout_condition_encoder(
@@ -1348,10 +1654,10 @@ mod tests {
 
     #[test]
     fn verified_rollout_configs_parse() {
-        for (name, expected_steps) in [
-            ("smoke_lizard_dino_online.toml", 1),
-            ("bench_omnisvg_8_b4_p128.toml", 200),
-            ("production_omnisvg_10k_rank16_cuda.toml", 3000),
+        for (name, expected_steps, expected_validation_interval) in [
+            ("smoke_lizard_dino_online.toml", 1, 1),
+            ("bench_omnisvg_8_b4_p128.toml", 200, 200),
+            ("scale_omnisvg_10k_rank16_cuda.toml", 3000, 500),
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -1364,8 +1670,146 @@ mod tests {
                 Some("dino-vits-full-tokens")
             );
             assert_eq!(config.training.steps, Some(expected_steps));
+            assert_eq!(config.model.shared_base_train_start_step, Some(0));
+            assert_eq!(
+                config.validation.interval,
+                Some(expected_validation_interval)
+            );
+            assert_eq!(
+                config.gpu.condition_device_cache_max_bytes,
+                Some(DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES)
+            );
+            assert_eq!(config.gates.fail_on_violation, Some(true));
+            assert!(config.optimizer.base_learning_rate.is_some());
+            assert!(config.optimizer.generator_learning_rate.is_some());
+            assert!(config.optimizer.base_grad_clip_norm.is_some());
+            assert!(config.optimizer.generator_grad_clip_norm.is_some());
             assert_eq!(config.adapter.flow_source_scale, Some(1.0));
             assert_eq!(config.adapter.init_scale, Some(1.0e-3));
         }
+    }
+
+    #[test]
+    fn rollout_report_warns_for_curriculum_training_and_low_quality_gate() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/catalog_thumbnails/lizard.png"]
+
+            [condition]
+            encoder = "dino-vits-full-tokens"
+            online = true
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 10
+            report_interval = 5
+            example_batch_size = 1
+            max_dense_train_particles = 512
+
+            [gpu]
+            backend = "burn-wgpu"
+
+            [rollout]
+            particles = 128
+            steps = 4
+
+            [validation]
+            examples = 16
+            interval = 10
+            particles = 2048
+            steps = 64
+            psnr_threshold_db = 8.0
+            "#,
+        )
+        .unwrap();
+
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert!(report.validation.quality_scale);
+        assert!(!report.validation.training_backward_safe);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("below the 26dB"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("curriculum/diagnostic"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("validation-only"))
+        );
+    }
+
+    #[test]
+    fn rollout_gate_evaluator_reports_configured_passes() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/catalog_thumbnails/lizard.png"]
+
+            [condition]
+            encoder = "dino-vits-full-tokens"
+            online = true
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 10
+            report_interval = 5
+            example_batch_size = 1
+
+            [gpu]
+            backend = "burn-wgpu"
+
+            [rollout]
+            particles = 128
+            steps = 4
+
+            [validation]
+            examples = 1
+            interval = 10
+            particles = 128
+            steps = 4
+
+            [gates]
+            min_median_particle_steps_per_sec = 100.0
+            max_quality_validation_evaluations = 3
+            max_quality_validation_elapsed_fraction = 0.25
+            require_validation_interval_at_least_report_interval = true
+            fail_on_violation = true
+            "#,
+        )
+        .unwrap();
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        let training = BurnE2eRolloutOutput {
+            backend: "test".to_string(),
+            device: "test-device".to_string(),
+            metrics: serde_json::json!({
+                "median_reported_particle_steps_per_sec": 250.0,
+                "quality_validation_evaluations": 2,
+                "quality_validation_elapsed_ms": 10.0,
+                "burn_training_ms": 100.0,
+            }),
+            history: Vec::new(),
+            final_loss: Some(1.0),
+            generator: serde_json::json!({}),
+            quality_validation: None,
+        };
+
+        let gates = evaluate_e2e_rollout_gates(&report, &training);
+        assert_eq!(gates.len(), 4);
+        assert!(gates.iter().all(|gate| gate.passed), "{gates:#?}");
     }
 }

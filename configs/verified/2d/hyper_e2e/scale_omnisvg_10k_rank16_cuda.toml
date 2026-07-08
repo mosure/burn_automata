@@ -1,3 +1,6 @@
+# Scale diagnostic for the canonical online HyperNPA path. This is not a
+# quality-parity production model until the report passes the high-particle
+# oracle/PSNR gates documented in configs/verified/2d/README.md.
 preset = "growing-2d"
 
 [source]
@@ -32,6 +35,7 @@ token_attention_heads = 4
 
 [model]
 shared_base_trainable = true
+shared_base_train_start_step = 0
 shared_base_init = "upstream-seeded"
 hidden_dims = 128
 output_activation = "tanh"
@@ -52,6 +56,7 @@ seed = 42
 backend = "burn-cuda"
 max_dense_chunk_floats = 524288
 max_splat_chunk_floats = 524288
+condition_device_cache_max_bytes = 8589934592
 
 [adapter]
 rank = 16
@@ -83,8 +88,14 @@ bound_regularizer_weight = 100.0
 
 [optimizer]
 learning_rate = 1.0e-4
+base_learning_rate = 1.0e-4
+generator_learning_rate = 1.0e-4
 weight_decay = 0.0
+base_weight_decay = 0.0
+generator_weight_decay = 0.0
 grad_clip_norm = 1.0
+base_grad_clip_norm = 1.0
+generator_grad_clip_norm = 1.0
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 1.0e-8
@@ -94,8 +105,15 @@ min_lr_scale = 0.1
 
 [validation]
 examples = 32
+interval = 500
 particles = 128
 steps = 4
 update_prob = 0.5
 seed = 42
 psnr_threshold_db = 8.0
+
+[gates]
+min_median_particle_steps_per_sec = 1000.0
+max_quality_validation_elapsed_fraction = 0.25
+require_validation_interval_at_least_report_interval = true
+fail_on_violation = true

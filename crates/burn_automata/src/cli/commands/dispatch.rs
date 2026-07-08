@@ -12,23 +12,36 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::ValidateNpa2dParity { .. } => {
             npa2d_parity::run_validate_npa_2d_parity(command)
         }
-        command @ Command::TrainTarget2d { .. } => target2d::run_train_target_2d(command),
+        command @ Command::TrainTarget2d { .. } => {
+            warn_legacy_2d("train-target2d");
+            target2d::run_train_target_2d(command)
+        }
         command @ Command::EvalDynamics2d { .. } => dynamics2d::run_eval_dynamics_2d(command),
-        command @ Command::TrainHyper2d { .. } => hyper::run_train_hyper_2d(command),
-        command @ Command::TrainHyper2dE2e { .. } => hyper_e2e::run_train_hyper_2d_e2e(command),
+        command @ Command::TrainHyper2d { .. } => {
+            warn_legacy_2d("train-hyper2d");
+            hyper::run_train_hyper_2d(command)
+        }
+        command @ Command::TrainHyper2dE2e { .. } => {
+            warn_legacy_2d("train-hyper2d-e2e");
+            hyper_e2e::run_train_hyper_2d_e2e(command)
+        }
         command @ Command::TrainHyper2dE2eRollout { .. } => {
             hyper_e2e::run_train_hyper_2d_e2e_rollout(command)
         }
         command @ Command::TrainHyper2dDirectBasis { .. } => {
+            warn_legacy_2d("train-hyper2d-direct-basis");
             hyper_e2e::run_train_hyper_2d_direct_basis(command)
         }
         command @ Command::TrainHyper2dAdapterBank { .. } => {
+            warn_legacy_2d("train-hyper2d-adapter-bank");
             hyper_e2e::run_train_hyper_2d_adapter_bank(command)
         }
         command @ Command::ValidateHyper2dDirectBasisOracles { .. } => {
+            warn_legacy_2d("validate-hyper2d-direct-basis-oracles");
             hyper_e2e::run_validate_hyper_2d_direct_basis_oracles(command)
         }
         command @ Command::ValidateHyper2dPsnrGate { .. } => {
+            warn_legacy_2d("validate-hyper2d-psnr-gate");
             hyper_e2e::run_validate_hyper_2d_psnr_gate(command)
         }
         command @ Command::ReportHyper2d { .. } => reporting::run_report_hyper_2d(command),
@@ -59,4 +72,10 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         }
         command @ Command::Manifest { .. } => basic::run_manifest(command),
     }
+}
+
+fn warn_legacy_2d(command: &str) {
+    eprintln!(
+        "warning: {command} is a hidden legacy 2D diagnostic. Use train-hyper2d-e2e-rollout / train-hypernpa2d for maintained online HyperNPA training, and validate-npa2d-parity for upstream parity gates."
+    );
 }

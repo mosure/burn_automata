@@ -17,6 +17,7 @@ token_attention_heads = 4
 
 [model]
 shared_base_trainable = true
+shared_base_train_start_step = 0
 shared_base_init = "upstream-seeded"
 hidden_dims = 128
 output_activation = "tanh"
@@ -37,6 +38,7 @@ seed = 42
 backend = "burn-wgpu"
 max_dense_chunk_floats = 262144
 max_splat_chunk_floats = 262144
+condition_device_cache_max_bytes = 8589934592
 
 [adapter]
 rank = 8
@@ -68,8 +70,14 @@ bound_regularizer_weight = 100.0
 
 [optimizer]
 learning_rate = 1.0e-4
+base_learning_rate = 1.0e-4
+generator_learning_rate = 1.0e-4
 weight_decay = 0.0
+base_weight_decay = 0.0
+generator_weight_decay = 0.0
 grad_clip_norm = 1.0
+base_grad_clip_norm = 1.0
+generator_grad_clip_norm = 1.0
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 1.0e-8
@@ -77,8 +85,15 @@ per_parameter_grad_normalization = true
 
 [validation]
 examples = 1
+interval = 1
 particles = 32
 steps = 2
 update_prob = 0.5
 seed = 42
 psnr_threshold_db = 26.0
+
+[gates]
+min_median_particle_steps_per_sec = 1.0
+max_quality_validation_evaluations = 3
+max_quality_validation_elapsed_fraction = 1.0
+fail_on_violation = true

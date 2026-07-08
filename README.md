@@ -113,10 +113,10 @@ cargo run -p burn_automata --features cli --bin burn_automata -- \
   validate-npa2d-parity --config configs/verified/2d/parity/lizard_smoke.toml
 ```
 
-`train-target2d` is deliberately marked experimental until it passes that
-official parity harness with the same target extraction, initialization, rollout,
-loss, gradients, optimizer update, and 4096-particle rollout behavior. Use
-`--experimental` only for diagnostics; do not treat its outputs as oracle
+`train-target2d` is deliberately hidden and marked experimental until it passes
+that official parity harness with the same target extraction, initialization,
+rollout, loss, gradients, optimizer update, and 4096-particle rollout behavior.
+Use `--experimental` only for diagnostics; do not treat its outputs as oracle
 baselines. Burn/GPU `train-target2d` writes viewer-loadable checkpoint BPKs
 during long runs when `--model-output` is set: by default
 `<model>.checkpoint.bpk`, `<model>.best.bpk`, and `<model>.checkpoint.json` are
@@ -124,7 +124,19 @@ updated every `--checkpoint-interval-seconds` seconds, with optional
 `--checkpoint-interval-steps` for step-based checkpointing.
 
 Canonical 2D HyperNPA configs live under `configs/verified/2d/hyper_e2e/`.
-Exploratory TOMLs belong in gitignored `configs/sandbox/`.
+The maintained trainer is `train-hyper2d-e2e-rollout` (alias
+`train-hypernpa2d`), which conditions on online DINO tokens and optimizes the
+generated LoRA plus shared-base NPA rollout image loss directly. Its
+`[validation].interval` is intentionally separate from `[training].report_interval`
+so expensive holdout PSNR checks remain bounded. Use
+`[gpu].condition_device_cache_max_bytes` to cap resident DINO-token cache memory,
+and use `[model].shared_base_train_start_step` plus the base/generator optimizer
+overrides for warmup or different shared-trunk versus hypernetwork learning
+rates. Checked-in HyperNPA TOMLs also include `[gates]` for minimum reported
+particle throughput, bounded validation overhead, and optional PSNR gates; gate
+failures are written into the JSON report and fail the command when
+`fail_on_violation = true`. Exploratory TOMLs belong in gitignored
+`configs/sandbox/`.
 
 The retired built-in 3D mesh commands now default to writing legacy diagnostic
 artifacts under `artifacts/`, not catalog models. Multi-view render-proxy

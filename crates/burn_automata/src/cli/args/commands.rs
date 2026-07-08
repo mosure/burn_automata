@@ -180,7 +180,7 @@ pub(crate) enum Command {
         #[arg(long, default_value = "artifacts/npa2d_parity/report.json")]
         output: PathBuf,
     },
-    #[command(name = "train-target2d", alias = "train-target-2d")]
+    #[command(name = "train-target2d", alias = "train-target-2d", hide = true)]
     TrainTarget2d {
         #[arg(long)]
         config: Option<PathBuf>,
@@ -317,7 +317,7 @@ pub(crate) enum Command {
         #[arg(long, default_value = "/tmp/burn_automata_dynamics2d_eval.json")]
         output: PathBuf,
     },
-    #[command(name = "train-hyper2d", alias = "train-hyper-2d")]
+    #[command(name = "train-hyper2d", alias = "train-hyper-2d", hide = true)]
     TrainHyper2d {
         #[arg(long, default_value = "growing-2d")]
         preset: PresetArg,
@@ -399,7 +399,8 @@ pub(crate) enum Command {
     #[command(
         name = "train-hyper2d-e2e",
         alias = "train-hyper-2d-e2e",
-        alias = "train-hypernpa2d-e2e"
+        alias = "train-hypernpa2d-e2e",
+        hide = true
     )]
     TrainHyper2dE2e {
         #[arg(long, default_value = "growing-2d")]
@@ -632,7 +633,9 @@ pub(crate) enum Command {
     #[command(
         name = "train-hyper2d-e2e-rollout",
         alias = "train-hyper-2d-e2e-rollout",
-        alias = "train-hypernpa2d-e2e-rollout"
+        alias = "train-hypernpa2d-e2e-rollout",
+        alias = "train-hypernpa2d",
+        alias = "train-hyper-npa-2d"
     )]
     TrainHyper2dE2eRollout {
         #[arg(long)]
@@ -641,7 +644,8 @@ pub(crate) enum Command {
     #[command(
         name = "train-hyper2d-direct-basis",
         alias = "train-hyper-2d-direct-basis",
-        alias = "train-hyper2d-image-lora-suite"
+        alias = "train-hyper2d-image-lora-suite",
+        hide = true
     )]
     TrainHyper2dDirectBasis {
         #[arg(long)]
@@ -838,7 +842,8 @@ pub(crate) enum Command {
     #[command(
         name = "train-hyper2d-adapter-bank",
         alias = "train-hyper-2d-adapter-bank",
-        alias = "train-hyper2d-conditioned-adapters"
+        alias = "train-hyper2d-conditioned-adapters",
+        hide = true
     )]
     TrainHyper2dAdapterBank {
         #[arg(long)]
@@ -938,7 +943,8 @@ pub(crate) enum Command {
     },
     #[command(
         name = "validate-hyper2d-direct-basis-oracles",
-        alias = "validate-hyper-2d-direct-basis-oracles"
+        alias = "validate-hyper-2d-direct-basis-oracles",
+        hide = true
     )]
     ValidateHyper2dDirectBasisOracles {
         #[arg(long)]
@@ -1015,7 +1021,8 @@ pub(crate) enum Command {
     },
     #[command(
         name = "validate-hyper2d-psnr-gate",
-        alias = "validate-hyper-2d-psnr-gate"
+        alias = "validate-hyper-2d-psnr-gate",
+        hide = true
     )]
     ValidateHyper2dPsnrGate {
         #[arg(long)]
@@ -1877,4 +1884,61 @@ pub(crate) enum Command {
         #[arg(long, default_value = "/tmp/burn_automata_seed_model.bpk")]
         output: PathBuf,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_help_shows_canonical_hypernpa_trainer_only() {
+        let mut command = <CliArgs as clap::CommandFactory>::command();
+        let help = command.render_long_help().to_string();
+
+        assert!(help.contains("train-hyper2d-e2e-rollout"));
+        assert!(!help.contains("train-target2d"));
+        assert!(!help.contains("train-hyper2d-direct-basis"));
+        assert!(!help.contains("train-hyper2d-adapter-bank"));
+        assert!(!help.contains("validate-hyper2d-direct-basis-oracles"));
+        assert!(!help.contains("validate-hyper2d-psnr-gate"));
+    }
+
+    #[test]
+    fn canonical_hypernpa_alias_parses_to_e2e_rollout_trainer() {
+        let args = CliArgs::try_parse_from([
+            "burn_automata",
+            "train-hypernpa2d",
+            "--config",
+            "configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml",
+        ])
+        .unwrap();
+
+        let Command::TrainHyper2dE2eRollout { config } = args.command else {
+            panic!("train-hypernpa2d should parse to TrainHyper2dE2eRollout");
+        };
+        assert_eq!(
+            config,
+            PathBuf::from("configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml")
+        );
+    }
+
+    #[test]
+    fn hidden_legacy_target2d_command_remains_explicitly_callable() {
+        let args = CliArgs::try_parse_from([
+            "burn_automata",
+            "train-target2d",
+            "--experimental",
+            "--target-image",
+            "assets/catalog_thumbnails/lizard.png",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Command::TrainTarget2d {
+                experimental: true,
+                ..
+            }
+        ));
+    }
 }

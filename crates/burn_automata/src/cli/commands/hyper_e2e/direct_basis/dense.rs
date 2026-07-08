@@ -67,6 +67,7 @@ pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutTrainConfig {
     pub(in crate::cli::commands::hyper_e2e) loss_config: crate::Target2dLossConfig,
     pub(in crate::cli::commands::hyper_e2e) per_parameter_grad_normalization: bool,
     pub(in crate::cli::commands::hyper_e2e) shared_base_trainable: bool,
+    pub(in crate::cli::commands::hyper_e2e) shared_base_train_start_step: usize,
     pub(in crate::cli::commands::hyper_e2e) base_optimizer: crate::AdamWConfig,
     pub(in crate::cli::commands::hyper_e2e) generator_optimizer: crate::AdamWConfig,
     pub(in crate::cli::commands::hyper_e2e) lr_schedule: E2eLrSchedule,
@@ -85,7 +86,9 @@ pub(in crate::cli::commands::hyper_e2e) struct BurnE2eRolloutTrainConfig {
     pub(in crate::cli::commands::hyper_e2e) max_dense_train_particles: usize,
     pub(in crate::cli::commands::hyper_e2e) max_dense_chunk_floats: usize,
     pub(in crate::cli::commands::hyper_e2e) max_splat_chunk_floats: usize,
+    pub(in crate::cli::commands::hyper_e2e) condition_device_cache_max_bytes: usize,
     pub(in crate::cli::commands::hyper_e2e) validation_examples: usize,
+    pub(in crate::cli::commands::hyper_e2e) validation_interval: usize,
     pub(in crate::cli::commands::hyper_e2e) validation_particles: usize,
     pub(in crate::cli::commands::hyper_e2e) validation_steps: usize,
     pub(in crate::cli::commands::hyper_e2e) validation_update_prob: f32,
@@ -369,11 +372,10 @@ mod $module {
         selection_score: f32,
         holdout_mean_psnr_db: Option<f32>,
         holdout_mean_loss: Option<f32>,
+        quality_validation: Option<BurnE2eRolloutQualityReport>,
         params: BurnBaseParams,
         generator: BurnE2eGeneratorParams,
     }
-
-    const DEVICE_CONDITION_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024;
 
     struct BurnLossTensors {
         total: Tensor1,
@@ -651,9 +653,17 @@ mod $module {
         let mut generator = BurnE2eGeneratorParams::seeded(base, train_examples, config, &device)?;
         let mut generator_optimizer = BurnE2eGeneratorAdamWState::new(&generator);
         let train_targets = burn_e2e_targets(train_examples, config, &device)?;
-        let train_conditions = BurnE2eConditionCache::from_examples_drain(train_examples, &device)?;
+        let train_conditions = BurnE2eConditionCache::from_examples_drain(
+            train_examples,
+            &device,
+            config.condition_device_cache_max_bytes,
+        )?;
         let holdout_conditions =
-            BurnE2eConditionCache::from_examples_drain(holdout_examples, &device)?;
+            BurnE2eConditionCache::from_examples_drain(
+                holdout_examples,
+                &device,
+                config.condition_device_cache_max_bytes,
+            )?;
         let train_condition_cache_bytes = train_conditions.feature_bytes();
         let holdout_condition_cache_bytes = holdout_conditions.feature_bytes();
         let condition_cache_bytes =
@@ -677,21 +687,33 @@ mod $module {
                 quality.split, quality.mean_render_rgb_psnr_db, quality.mean_total_loss
             );
         }
+        let mut quality_validation_evaluations = initial_quality_validation
+            .as_ref()
+            .map_or(0usize, |_| 1usize);
+        let mut quality_validation_elapsed_ms = initial_quality_validation
+            .as_ref()
+            .map_or(0.0_f64, |quality| quality.elapsed_ms);
 
         let mut rng = StdRng::seed_from_u64(config.seed);
         let batch_size = normalized_batch_size(config.example_batch_size, train_examples.len());
         let mut history = Vec::new();
         let mut final_loss = None;
         let mut best_checkpoint = None::<BurnE2eSelectedCheckpoint>;
+        let validation_interval = config.validation_interval.max(1);
         for step in 1..=config.steps {
             let indices = sample_indices(train_examples.len(), batch_size, &mut rng);
             let step_seed = config
                 .seed
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-            let collect_metrics =
+            let report_due =
                 step == config.steps || step.is_multiple_of(config.report_interval.max(1));
+            let validation_due = config.validation_examples > 0
+                && (step == config.steps || step.is_multiple_of(validation_interval));
+            let collect_metrics = report_due || validation_due;
             let lr_scale = e2e_lr_scale(config, step);
-            let step_config = e2e_config_with_lr_scale(config, lr_scale);
+            let mut step_config = e2e_config_with_lr_scale(config, lr_scale);
+            step_config.shared_base_trainable =
+                config.shared_base_trainable && step >= config.shared_base_train_start_step;
             let mut stats = train_e2e_homogeneous_step_tbptt(
                 &mut params,
                 &mut generator,
@@ -711,17 +733,26 @@ mod $module {
             stats.generator_learning_rate = step_config.generator_optimizer.learning_rate;
             if collect_metrics {
                 final_loss = Some(stats.loss);
-                let checkpoint_quality = evaluate_e2e_rollout_quality(
-                    &params.detached(),
-                    &generator.detached(),
-                    &npa_config,
-                    train_examples,
-                    holdout_examples,
-                    &train_conditions,
-                    &holdout_conditions,
-                    config,
-                    &device,
-                )?;
+                let checkpoint_quality = if validation_due {
+                    evaluate_e2e_rollout_quality(
+                        &params.detached(),
+                        &generator.detached(),
+                        &npa_config,
+                        train_examples,
+                        holdout_examples,
+                        &train_conditions,
+                        &holdout_conditions,
+                        config,
+                        &device,
+                    )?
+                } else {
+                    None
+                };
+                if let Some(quality) = &checkpoint_quality {
+                    quality_validation_evaluations =
+                        quality_validation_evaluations.saturating_add(1);
+                    quality_validation_elapsed_ms += quality.elapsed_ms;
+                }
                 let (holdout_mean_psnr_db, holdout_mean_loss, selection_score) =
                     if let Some(quality) = &checkpoint_quality {
                         stats.holdout_mean_psnr_db = Some(quality.mean_render_rgb_psnr_db);
@@ -734,16 +765,19 @@ mod $module {
                     } else {
                         (None, None, -stats.loss)
                     };
-                eprintln!(
-                    "hyper2d e2e rollout step {step}/{} loss={:.6e} lr_scale={:.3e} holdout_psnr={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e}",
-                    config.steps,
-                    stats.loss,
-                    stats.learning_rate_scale,
-                    format_optional_f32(holdout_mean_psnr_db),
-                    stats.base_grad_norm,
-                    stats.generator_grad_norm,
-                    stats.particle_steps_per_sec,
-                );
+                if report_due || validation_due {
+                    eprintln!(
+                        "hyper2d e2e rollout step {step}/{} loss={:.6e} lr_scale={:.3e} holdout_psnr={} validation_due={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e}",
+                        config.steps,
+                        stats.loss,
+                        stats.learning_rate_scale,
+                        format_optional_f32(holdout_mean_psnr_db),
+                        validation_due,
+                        stats.base_grad_norm,
+                        stats.generator_grad_norm,
+                        stats.particle_steps_per_sec,
+                    );
+                }
                 if selection_score.is_finite()
                     && best_checkpoint
                         .as_ref()
@@ -755,6 +789,7 @@ mod $module {
                         selection_score,
                         holdout_mean_psnr_db,
                         holdout_mean_loss,
+                        quality_validation: checkpoint_quality.clone(),
                         params: params.detached(),
                         generator: generator.detached(),
                     });
@@ -774,6 +809,9 @@ mod $module {
         let selected_checkpoint_holdout_loss = best_checkpoint
             .as_ref()
             .and_then(|checkpoint| checkpoint.holdout_mean_loss);
+        let selected_checkpoint_quality_validation = best_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.quality_validation.clone());
         let selected_checkpoint_source = if selected_checkpoint_holdout_psnr_db.is_some() {
             "best_reported_holdout_psnr"
         } else if selected_checkpoint_step.is_some() {
@@ -786,17 +824,30 @@ mod $module {
             generator = best_checkpoint.generator;
         }
         params.write_to_model(base)?;
-        let quality_validation = evaluate_e2e_rollout_quality(
-            &params.detached(),
-            &generator.detached(),
-            &npa_config,
-            train_examples,
-            holdout_examples,
-            &train_conditions,
-            &holdout_conditions,
-            config,
-            &device,
-        )?;
+        let final_quality_validation_reused_from_selected_checkpoint =
+            selected_checkpoint_quality_validation.is_some();
+        let quality_validation = if let Some(quality_validation) =
+            selected_checkpoint_quality_validation
+        {
+            Some(quality_validation)
+        } else {
+            let quality_validation = evaluate_e2e_rollout_quality(
+                &params.detached(),
+                &generator.detached(),
+                &npa_config,
+                train_examples,
+                holdout_examples,
+                &train_conditions,
+                &holdout_conditions,
+                config,
+                &device,
+            )?;
+            if let Some(quality) = &quality_validation {
+                quality_validation_evaluations = quality_validation_evaluations.saturating_add(1);
+                quality_validation_elapsed_ms += quality.elapsed_ms;
+            }
+            quality_validation
+        };
         let generator_json = generator.to_json()?;
         let (min_reported_particle_steps_per_sec, median_reported_particle_steps_per_sec, max_reported_particle_steps_per_sec) =
             reported_particle_step_speed_summary(&history);
@@ -861,6 +912,10 @@ mod $module {
             json!(condition_cache_bytes),
         );
         metrics.insert(
+            "condition_device_cache_max_bytes".to_string(),
+            json!(config.condition_device_cache_max_bytes),
+        );
+        metrics.insert(
             "condition_cache_gib_f32".to_string(),
             json!(bytes_to_gib(condition_cache_bytes as u64)),
         );
@@ -894,6 +949,18 @@ mod $module {
             json!(config.tbptt_chunk_steps),
         );
         metrics.insert(
+            "validation_interval".to_string(),
+            json!(config.validation_interval),
+        );
+        metrics.insert(
+            "quality_validation_evaluations".to_string(),
+            json!(quality_validation_evaluations),
+        );
+        metrics.insert(
+            "quality_validation_elapsed_ms".to_string(),
+            json!(quality_validation_elapsed_ms),
+        );
+        metrics.insert(
             "loss_on_final_chunk_only".to_string(),
             json!(false),
         );
@@ -908,6 +975,10 @@ mod $module {
         metrics.insert(
             "shared_base_trainable".to_string(),
             json!(config.shared_base_trainable),
+        );
+        metrics.insert(
+            "shared_base_train_start_step".to_string(),
+            json!(config.shared_base_train_start_step),
         );
         metrics.insert("lr_schedule".to_string(), json!(config.lr_schedule.as_str()));
         metrics.insert("min_lr_scale".to_string(), json!(config.min_lr_scale));
@@ -934,6 +1005,10 @@ mod $module {
         metrics.insert(
             "selected_checkpoint_holdout_loss".to_string(),
             json!(selected_checkpoint_holdout_loss),
+        );
+        metrics.insert(
+            "final_quality_validation_reused_from_selected_checkpoint".to_string(),
+            json!(final_quality_validation_reused_from_selected_checkpoint),
         );
         metrics.insert(
             "min_reported_particle_steps_per_sec".to_string(),
@@ -2493,17 +2568,22 @@ mod $module {
             indices.sort_unstable();
         }
         let eval_config = validation_direct_config(config);
-        let targets = burn_e2e_targets_with_runtime(
+        let targets = burn_e2e_targets_for_indices_with_runtime(
             examples,
+            &indices,
             config,
             device,
             Some(config.validation_particles),
             Some(config.validation_update_prob),
         )?;
+        let target_indices = (0..targets.len()).collect::<Vec<_>>();
         let eval_batch_size = normalized_eval_batch_size(eval_config.eval_batch_size, indices.len());
         let mut entries = Vec::with_capacity(indices.len());
         let mut adapter_batches = 0usize;
-        for chunk in indices.chunks(eval_batch_size) {
+        for (condition_chunk, target_chunk) in indices
+            .chunks(eval_batch_size)
+            .zip(target_indices.chunks(eval_batch_size))
+        {
             adapter_batches += 1;
             let quality = batch_e2e_eval_quality(
                 params,
@@ -2511,7 +2591,8 @@ mod $module {
                 npa_config,
                 conditions,
                 &targets,
-                chunk,
+                condition_chunk,
+                target_chunk,
                 config,
                 eval_config,
                 config.validation_seed,
@@ -2519,13 +2600,13 @@ mod $module {
             )?;
             let losses = loss_vector_scalars(quality.loss)?;
             let mses = tensor1_vec(quality.render_rgb_mse.inner())?;
-            if losses.len() != chunk.len() || mses.len() != chunk.len() {
+            if losses.len() != condition_chunk.len() || mses.len() != condition_chunk.len() {
                 return Err(std::io::Error::other(
                     "HyperNPA e2e quality readback length mismatch",
                 )
                 .into());
             }
-            for ((&idx, loss), render_rgb_mse) in chunk.iter().zip(losses).zip(mses) {
+            for ((&idx, loss), render_rgb_mse) in condition_chunk.iter().zip(losses).zip(mses) {
                 let render_rgb_mse =
                     finite_scalar("HyperNPA e2e render RGB MSE", render_rgb_mse)?;
                 let render_rgb_psnr_db = psnr_db_from_mse(render_rgb_mse);
@@ -2620,27 +2701,41 @@ mod $module {
         npa_config: &NpaConfig,
         conditions: &BurnE2eConditionCache,
         targets: &[BurnTargetExample],
-        indices: &[usize],
+        condition_indices: &[usize],
+        target_indices: &[usize],
         generator_config: BurnE2eRolloutTrainConfig,
         eval_config: DirectBasisTrainConfig,
         seed: u64,
         device: &BurnDevice,
     ) -> Result<BurnE2eQualityBatchTensors, Box<dyn std::error::Error>> {
-        let Some(particle_count) = homogeneous_particle_count(targets, indices) else {
+        if condition_indices.len() != target_indices.len() {
+            return Err(std::io::Error::other(
+                "HyperNPA e2e quality validation condition/target batch length mismatch",
+            )
+            .into());
+        }
+        let Some(particle_count) = homogeneous_particle_count(targets, target_indices) else {
             return Err(std::io::Error::other(
                 "HyperNPA e2e quality validation requires homogeneous particle counts",
             )
             .into());
         };
-        let condition = conditions.select(indices)?;
+        let condition = conditions.select(condition_indices)?;
         let adapter_batch = generator.adapter_batch(condition, npa_config, generator_config);
-        let (mut x, mut s) =
-            seed_batch_tensors(targets, indices, particle_count, eval_config, seed, device);
-        let mut rngs = indices
+        let (mut x, mut s) = seed_batch_tensors_with_seed_indices(
+            targets,
+            target_indices,
+            condition_indices,
+            particle_count,
+            eval_config,
+            seed,
+            device,
+        );
+        let mut rngs = condition_indices
             .iter()
             .map(|idx| StdRng::seed_from_u64(seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
             .collect::<Vec<_>>();
-        let mut displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
+        let mut displacement = Tensor::<BurnBackend, 1>::zeros([target_indices.len()], device);
         let chunk_steps = tbptt_chunk_steps(eval_config);
         let mut remaining_steps = eval_config.rollout_steps;
         while remaining_steps > 0 {
@@ -2649,7 +2744,7 @@ mod $module {
                 params,
                 &adapter_batch,
                 targets,
-                indices,
+                target_indices,
                 x,
                 s,
                 eval_config,
@@ -2669,7 +2764,7 @@ mod $module {
             &x,
             &s,
             targets,
-            indices,
+            target_indices,
             eval_config,
             &adapter_batch,
             displacement,
@@ -5614,6 +5709,25 @@ mod $module {
         particle_count: Option<usize>,
         update_prob: Option<f32>,
     ) -> AutomataResult<Vec<BurnTargetExample>> {
+        let indices = (0..examples.len()).collect::<Vec<_>>();
+        burn_e2e_targets_for_indices_with_runtime(
+            examples,
+            &indices,
+            config,
+            device,
+            particle_count,
+            update_prob,
+        )
+    }
+
+    fn burn_e2e_targets_for_indices_with_runtime(
+        examples: &[BurnE2eRolloutExample],
+        indices: &[usize],
+        config: BurnE2eRolloutTrainConfig,
+        device: &BurnDevice,
+        particle_count: Option<usize>,
+        update_prob: Option<f32>,
+    ) -> AutomataResult<Vec<BurnTargetExample>> {
         let direct_config = direct_config_view(config);
         let pixels = direct_config.loss_config.image_size * direct_config.loss_config.image_size;
         let pixel_xy = tensor(
@@ -5621,8 +5735,17 @@ mod $module {
             [pixels, 2],
             device,
         );
-        examples
+        indices
             .iter()
+            .map(|idx| {
+                examples.get(*idx).ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "HyperNPA e2e target index out of bounds".to_string(),
+                    )
+                })
+            })
+            .collect::<AutomataResult<Vec<_>>>()?
+            .into_iter()
             .map(|example| {
                 let render = render_target_2d_splat(&example.target, direct_config.loss_config)?;
                 let foreground = target_2d_foreground_mask(&example.target, direct_config.loss_config)?;
@@ -5722,6 +5845,7 @@ mod $module {
         fn from_examples_drain(
             examples: &mut [BurnE2eRolloutExample],
             device: &BurnDevice,
+            device_cache_max_bytes: usize,
         ) -> AutomataResult<Self> {
             if examples.is_empty() {
                 return Ok(Self {
@@ -5745,7 +5869,8 @@ mod $module {
                 .len()
                 .saturating_mul(row_len)
                 .saturating_mul(std::mem::size_of::<f32>());
-            let use_device_cache = feature_bytes <= DEVICE_CONDITION_CACHE_MAX_BYTES;
+            let use_device_cache =
+                device_cache_max_bytes > 0 && feature_bytes <= device_cache_max_bytes;
             let mut flat_values = use_device_cache
                 .then(|| Vec::with_capacity(examples.len().saturating_mul(row_len)));
             let mut rows = (!use_device_cache).then(|| Vec::with_capacity(examples.len()));
@@ -5844,17 +5969,38 @@ mod $module {
         step_seed: u64,
         device: &BurnDevice,
     ) -> (Tensor3, Tensor3) {
-        let mut positions = Vec::with_capacity(indices.len() * particle_count * 2);
-        let mut states = Vec::with_capacity(indices.len() * particle_count * 16);
-        for &idx in indices {
+        seed_batch_tensors_with_seed_indices(
+            targets,
+            indices,
+            indices,
+            particle_count,
+            config,
+            step_seed,
+            device,
+        )
+    }
+
+    fn seed_batch_tensors_with_seed_indices(
+        targets: &[BurnTargetExample],
+        target_indices: &[usize],
+        seed_indices: &[usize],
+        particle_count: usize,
+        config: DirectBasisTrainConfig,
+        step_seed: u64,
+        device: &BurnDevice,
+    ) -> (Tensor3, Tensor3) {
+        debug_assert_eq!(target_indices.len(), seed_indices.len());
+        let mut positions = Vec::with_capacity(target_indices.len() * particle_count * 2);
+        let mut states = Vec::with_capacity(target_indices.len() * particle_count * 16);
+        for (&target_idx, &seed_idx) in target_indices.iter().zip(seed_indices) {
             let (example_positions, example_states) = seed_particles_scaled(
                 1,
                 particle_count,
                 16,
                 2,
-                step_seed.wrapping_add(idx as u64),
+                step_seed.wrapping_add(seed_idx as u64),
                 config.seed_mode,
-                targets[idx].seed_scale,
+                targets[target_idx].seed_scale,
             );
             positions.extend(
                 example_positions
@@ -5864,8 +6010,8 @@ mod $module {
             states.extend(example_states);
         }
         (
-            tensor3(positions, [indices.len(), particle_count, 2], device),
-            tensor3(states, [indices.len(), particle_count, 16], device),
+            tensor3(positions, [target_indices.len(), particle_count, 2], device),
+            tensor3(states, [target_indices.len(), particle_count, 16], device),
         )
     }
 
