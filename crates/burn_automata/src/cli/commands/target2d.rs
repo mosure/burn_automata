@@ -25,6 +25,9 @@ struct Target2dTrainSourceConfig {
 struct Target2dTrainOutputConfig {
     report: Option<PathBuf>,
     model: Option<PathBuf>,
+    checkpoint_model: Option<PathBuf>,
+    checkpoint_best_model: Option<PathBuf>,
+    checkpoint_report: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -49,6 +52,8 @@ struct Target2dTrainTrainingConfig {
     seed_mode: Option<String>,
     brush_size: Option<f32>,
     per_parameter_grad_normalization: Option<bool>,
+    checkpoint_interval_seconds: Option<u64>,
+    checkpoint_interval_steps: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -239,6 +244,11 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         training_device,
         gpu_backend,
         model_output,
+        checkpoint_model_output,
+        checkpoint_best_model_output,
+        checkpoint_report_output,
+        checkpoint_interval_seconds,
+        checkpoint_interval_steps,
         reference_model,
         epochs,
         repetitions,
@@ -302,6 +312,18 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
     let reference_model = file_config.source.reference_model.or(reference_model);
     let output = file_config.output.report.unwrap_or(output);
     let model_output = file_config.output.model.or(model_output);
+    let checkpoint_model_output = file_config
+        .output
+        .checkpoint_model
+        .or(checkpoint_model_output);
+    let checkpoint_best_model_output = file_config
+        .output
+        .checkpoint_best_model
+        .or(checkpoint_best_model_output);
+    let checkpoint_report_output = file_config
+        .output
+        .checkpoint_report
+        .or(checkpoint_report_output);
     let training_device = target2d_config_value_enum(
         "training.device",
         file_config.training.device,
@@ -341,6 +363,14 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         .training
         .per_parameter_grad_normalization
         .unwrap_or(per_parameter_grad_normalization);
+    let checkpoint_interval_seconds = file_config
+        .training
+        .checkpoint_interval_seconds
+        .unwrap_or(checkpoint_interval_seconds);
+    let checkpoint_interval_steps = file_config
+        .training
+        .checkpoint_interval_steps
+        .unwrap_or(checkpoint_interval_steps);
     let learning_rate = file_config.optimizer.learning_rate.unwrap_or(learning_rate);
     let weight_decay = file_config.optimizer.weight_decay.unwrap_or(weight_decay);
     let grad_clip_norm = file_config
@@ -470,6 +500,33 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         TrainingDeviceArg::Cpu => TrainingDeviceArg::Cpu,
         TrainingDeviceArg::Gpu => TrainingDeviceArg::Gpu,
     };
+    let checkpoint_config = if actual_training_device == TrainingDeviceArg::Gpu {
+        target2d_burn_checkpoint_config(
+            model_output.as_deref(),
+            checkpoint_model_output,
+            checkpoint_best_model_output,
+            checkpoint_report_output,
+            checkpoint_interval_seconds,
+            checkpoint_interval_steps,
+            NpaConfig::growing_2d(),
+            hashgrid.clone(),
+            format!(
+                "experimental-burn-gpu:{gpu_backend:?}:target2d-diagnostic:{}",
+                target_image.display()
+            ),
+        )?
+    } else {
+        None
+    };
+    let checkpoint_model_output_report = checkpoint_config
+        .as_ref()
+        .map(|config| config.current_model_output.display().to_string());
+    let checkpoint_best_model_output_report = checkpoint_config
+        .as_ref()
+        .map(|config| config.best_model_output.display().to_string());
+    let checkpoint_report_output_report = checkpoint_config
+        .as_ref()
+        .map(|config| config.metadata_output.display().to_string());
     let (training, gpu_training, model_output, model_eval_loss) = match actual_training_device {
         TrainingDeviceArg::Cpu => {
             let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), student_seed);
@@ -508,6 +565,7 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
                 target.clone(),
                 training_config.clone(),
                 loss_config,
+                checkpoint_config.clone(),
             )?;
             if let Some(path) = &model_output {
                 let manifest = BpkModelManifest::from_model(
@@ -581,6 +639,11 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         target_source_height: target.source_height,
         target_points: target.point_count(),
         model_output: model_output.as_ref().map(|path| path.display().to_string()),
+        checkpoint_model_output: checkpoint_model_output_report,
+        checkpoint_best_model_output: checkpoint_best_model_output_report,
+        checkpoint_report_output: checkpoint_report_output_report,
+        checkpoint_interval_seconds,
+        checkpoint_interval_steps,
         model_eval_loss,
         reference_model: reference_model
             .as_ref()
@@ -611,6 +674,61 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
             .unwrap_or_else(|| "none".to_string()),
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn target2d_burn_checkpoint_config(
+    model_output: Option<&Path>,
+    checkpoint_model_output: Option<PathBuf>,
+    checkpoint_best_model_output: Option<PathBuf>,
+    checkpoint_report_output: Option<PathBuf>,
+    checkpoint_interval_seconds: u64,
+    checkpoint_interval_steps: usize,
+    model_config: NpaConfig,
+    hashgrid: burn_automata_kernels::HashGridConfig,
+    source: String,
+) -> Result<Option<super::hyper_e2e::Target2dBurnCheckpointConfig>, Box<dyn std::error::Error>> {
+    if checkpoint_interval_seconds == 0 && checkpoint_interval_steps == 0 {
+        return Ok(None);
+    }
+    let anchor = model_output
+        .map(Path::to_path_buf)
+        .or_else(|| checkpoint_model_output.clone())
+        .or_else(|| checkpoint_best_model_output.clone())
+        .or_else(|| checkpoint_report_output.clone());
+    let Some(anchor) = anchor else {
+        return Ok(None);
+    };
+    let current_model_output = checkpoint_model_output
+        .unwrap_or_else(|| sibling_path_with_suffix(&anchor, "checkpoint", "bpk"));
+    let best_model_output = checkpoint_best_model_output
+        .unwrap_or_else(|| sibling_path_with_suffix(&anchor, "best", "bpk"));
+    let metadata_output = checkpoint_report_output
+        .unwrap_or_else(|| sibling_path_with_suffix(&anchor, "checkpoint", "json"));
+    Ok(Some(super::hyper_e2e::Target2dBurnCheckpointConfig {
+        current_model_output,
+        best_model_output,
+        metadata_output,
+        model_config,
+        hashgrid,
+        source,
+        interval_steps: checkpoint_interval_steps,
+        interval_duration: (checkpoint_interval_seconds > 0)
+            .then(|| std::time::Duration::from_secs(checkpoint_interval_seconds)),
+    }))
+}
+
+fn sibling_path_with_suffix(anchor: &Path, suffix: &str, extension: &str) -> PathBuf {
+    let stem = anchor
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("model");
+    let file_name = if extension.is_empty() {
+        format!("{stem}.{suffix}")
+    } else {
+        format!("{stem}.{suffix}.{extension}")
+    };
+    anchor.with_file_name(file_name)
 }
 
 fn load_target2d_train_config(
@@ -1555,6 +1673,13 @@ mod tests {
             [training]
             experimental = true
             device = "gpu"
+            checkpoint_interval_seconds = 120
+            checkpoint_interval_steps = 25
+
+            [output]
+            checkpoint_model = "artifacts/lizard/checkpoint.bpk"
+            checkpoint_best_model = "artifacts/lizard/best.bpk"
+            checkpoint_report = "artifacts/lizard/checkpoint.json"
 
             [loss]
             background_density_loss_weight = 0.0
@@ -1568,6 +1693,74 @@ mod tests {
         );
         assert_eq!(config.training.experimental, Some(true));
         assert_eq!(config.training.device.as_deref(), Some("gpu"));
+        assert_eq!(config.training.checkpoint_interval_seconds, Some(120));
+        assert_eq!(config.training.checkpoint_interval_steps, Some(25));
+        assert_eq!(
+            config.output.checkpoint_model.as_deref(),
+            Some(Path::new("artifacts/lizard/checkpoint.bpk"))
+        );
+        assert_eq!(
+            config.output.checkpoint_best_model.as_deref(),
+            Some(Path::new("artifacts/lizard/best.bpk"))
+        );
+        assert_eq!(
+            config.output.checkpoint_report.as_deref(),
+            Some(Path::new("artifacts/lizard/checkpoint.json"))
+        );
         assert_eq!(config.loss.background_density_loss_weight, Some(0.0));
+    }
+
+    #[test]
+    fn target2d_checkpoint_defaults_follow_model_output() {
+        let model_output = Path::new("artifacts/lizard/model.bpk");
+        let config = target2d_burn_checkpoint_config(
+            Some(model_output),
+            None,
+            None,
+            None,
+            900,
+            0,
+            NpaConfig::growing_2d(),
+            upstream_growing_2d_hashgrid(),
+            "test-source".to_string(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            config.current_model_output,
+            PathBuf::from("artifacts/lizard/model.checkpoint.bpk")
+        );
+        assert_eq!(
+            config.best_model_output,
+            PathBuf::from("artifacts/lizard/model.best.bpk")
+        );
+        assert_eq!(
+            config.metadata_output,
+            PathBuf::from("artifacts/lizard/model.checkpoint.json")
+        );
+        assert_eq!(
+            config.interval_duration.map(|duration| duration.as_secs()),
+            Some(900)
+        );
+        assert_eq!(config.interval_steps, 0);
+    }
+
+    #[test]
+    fn target2d_checkpoint_can_be_disabled() {
+        let config = target2d_burn_checkpoint_config(
+            Some(Path::new("artifacts/lizard/model.bpk")),
+            None,
+            None,
+            None,
+            0,
+            0,
+            NpaConfig::growing_2d(),
+            upstream_growing_2d_hashgrid(),
+            "test-source".to_string(),
+        )
+        .unwrap();
+
+        assert!(config.is_none());
     }
 }

@@ -24,7 +24,7 @@ mod shared_basis;
 mod sources;
 
 pub(crate) use direct_basis::{
-    run_train_hyper_2d_adapter_bank, run_train_hyper_2d_direct_basis,
+    Target2dBurnCheckpointConfig, run_train_hyper_2d_adapter_bank, run_train_hyper_2d_direct_basis,
     run_validate_hyper_2d_direct_basis_oracles, run_validate_hyper_2d_psnr_gate,
     train_target_2d_burn_oracle,
 };

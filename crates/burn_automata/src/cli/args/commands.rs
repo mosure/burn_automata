@@ -202,6 +202,16 @@ pub(crate) enum Command {
         #[arg(long)]
         model_output: Option<PathBuf>,
         #[arg(long)]
+        checkpoint_model_output: Option<PathBuf>,
+        #[arg(long)]
+        checkpoint_best_model_output: Option<PathBuf>,
+        #[arg(long)]
+        checkpoint_report_output: Option<PathBuf>,
+        #[arg(long, default_value_t = 900)]
+        checkpoint_interval_seconds: u64,
+        #[arg(long, default_value_t = 0)]
+        checkpoint_interval_steps: usize,
+        #[arg(long)]
         reference_model: Option<PathBuf>,
         #[arg(long, default_value_t = 10000)]
         epochs: usize,

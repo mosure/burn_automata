@@ -117,7 +117,11 @@ cargo run -p burn_automata --features cli --bin burn_automata -- \
 official parity harness with the same target extraction, initialization, rollout,
 loss, gradients, optimizer update, and 4096-particle rollout behavior. Use
 `--experimental` only for diagnostics; do not treat its outputs as oracle
-baselines.
+baselines. Burn/GPU `train-target2d` writes viewer-loadable checkpoint BPKs
+during long runs when `--model-output` is set: by default
+`<model>.checkpoint.bpk`, `<model>.best.bpk`, and `<model>.checkpoint.json` are
+updated every `--checkpoint-interval-seconds` seconds, with optional
+`--checkpoint-interval-steps` for step-based checkpointing.
 
 Canonical 2D HyperNPA configs live under `configs/verified/2d/hyper_e2e/`.
 Exploratory TOMLs belong in gitignored `configs/sandbox/`.

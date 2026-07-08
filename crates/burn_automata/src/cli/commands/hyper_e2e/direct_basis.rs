@@ -10,7 +10,7 @@ use super::sources::{
 };
 use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 mod conditioned;
 mod dense;
@@ -82,6 +82,19 @@ struct DirectBasisTrainConfig {
     max_dense_train_particles: usize,
     max_dense_chunk_floats: usize,
     max_splat_chunk_floats: usize,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct Target2dBurnCheckpointConfig {
+    pub(crate) current_model_output: PathBuf,
+    pub(crate) best_model_output: PathBuf,
+    pub(crate) metadata_output: PathBuf,
+    pub(crate) model_config: NpaConfig,
+    pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
+    pub(crate) source: String,
+    pub(crate) interval_steps: usize,
+    pub(crate) interval_duration: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2197,6 +2210,7 @@ fn run_burn_wgpu_direct_basis(
         train_config,
         train_refine_config,
         holdout_config,
+        None,
     )?;
     if let Some(metrics) = burn_report.metrics.as_object_mut() {
         metrics.insert(
@@ -2555,6 +2569,7 @@ pub(crate) fn train_target_2d_burn_oracle(
     target: TargetImage2d,
     training_config: Target2dTrainingConfig,
     loss_config: Target2dLossConfig,
+    checkpoint_config: Option<Target2dBurnCheckpointConfig>,
 ) -> Result<BurnTarget2dOracleTrainingOutput, Box<dyn std::error::Error>> {
     if backend == DirectBasisOracleBackendArg::Cpu {
         return Err(std::io::Error::other(
@@ -2686,6 +2701,7 @@ pub(crate) fn train_target_2d_burn_oracle(
             train_config,
             no_phase_config,
             no_phase_config,
+            checkpoint_config.as_ref(),
         )?,
         DirectBasisOracleBackendArg::Cuda => dense::train_direct_basis_burn_cuda(
             model,
@@ -2694,6 +2710,7 @@ pub(crate) fn train_target_2d_burn_oracle(
             train_config,
             no_phase_config,
             no_phase_config,
+            checkpoint_config.as_ref(),
         )?,
         DirectBasisOracleBackendArg::Cpu => unreachable!("CPU backend rejected above"),
     };

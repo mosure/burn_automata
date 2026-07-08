@@ -430,6 +430,7 @@ mod $module {
         train_config: DirectBasisTrainConfig,
         train_refine_config: DirectBasisTrainConfig,
         holdout_config: DirectBasisTrainConfig,
+        checkpoint: Option<&super::super::Target2dBurnCheckpointConfig>,
     ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
         if base.config.spatial_dims != 2 {
             return Err(std::io::Error::other(
@@ -456,6 +457,7 @@ mod $module {
             "after_train_tensor_cache",
             train_config,
         )?);
+        let mut checkpoint_state = checkpoint.map(BurnDenseCheckpointState::new);
         let train_phase = run_phase(
             &mut params,
             &mut train_adapters,
@@ -463,6 +465,7 @@ mod $module {
             train_config,
             true,
             "train",
+            checkpoint_state.as_mut(),
         )?;
         memory_snapshots.push(check_process_memory_budget(
             "after_train_phase",
@@ -477,6 +480,7 @@ mod $module {
             train_refine_config,
             false,
             "train-refine",
+            checkpoint_state.as_mut(),
         )?;
         memory_snapshots.push(check_process_memory_budget(
             "after_train_refine_phase",
@@ -508,6 +512,7 @@ mod $module {
             holdout_config,
             false,
             "holdout",
+            checkpoint_state.as_mut(),
         )?;
         memory_snapshots.push(check_process_memory_budget(
             "after_holdout_phase",
@@ -533,7 +538,7 @@ mod $module {
             },
             "train_best_geometry_score": train_phase.best_geometry_score,
         });
-        let metrics = json!({
+        let mut metrics = json!({
             "backend": format!("{BACKEND}_e2e_rollout"),
             "device": DEVICE_LABEL,
             "objective": "target2d_pixel_splat_loss_full_image",
@@ -595,6 +600,10 @@ mod $module {
             ),
             "holdout_adapter_update_coverage": holdout_phase.sample_updates,
         });
+        metrics["model_checkpoints"] = checkpoint_state
+            .as_ref()
+            .map(BurnDenseCheckpointState::report_json)
+            .unwrap_or(serde_json::Value::Null);
         let (best_train_loss, best_train_step) =
             best_training_checkpoint(train_config.steps, &train_phase, &train_refine_phase);
         Ok(BurnWgpuDirectBasisOutput {
@@ -1163,6 +1172,199 @@ mod $module {
         sample_updates: SampleUpdateStats,
     }
 
+    #[derive(Clone, Serialize)]
+    struct BurnDenseCheckpointEvent {
+        kind: &'static str,
+        phase: String,
+        step: usize,
+        elapsed_seconds: f64,
+        train_loss: Option<f32>,
+        eval_loss: Option<f32>,
+        geometry_score: Option<f32>,
+        model_output: String,
+        sha256: Option<String>,
+    }
+
+    struct BurnDenseCheckpointWrite {
+        kind: &'static str,
+        output: std::path::PathBuf,
+        phase: String,
+        step: usize,
+        train_loss: Option<f32>,
+        eval_loss: Option<f32>,
+        geometry_score: Option<f32>,
+    }
+
+    struct BurnDenseCheckpointState<'a> {
+        config: &'a super::super::Target2dBurnCheckpointConfig,
+        started: Instant,
+        last_current_write: Instant,
+        current_writes: usize,
+        best_writes: usize,
+        events: Vec<BurnDenseCheckpointEvent>,
+    }
+
+    impl<'a> BurnDenseCheckpointState<'a> {
+        fn new(config: &'a super::super::Target2dBurnCheckpointConfig) -> Self {
+            let now = Instant::now();
+            Self {
+                config,
+                started: now,
+                last_current_write: now,
+                current_writes: 0,
+                best_writes: 0,
+                events: Vec::new(),
+            }
+        }
+
+        fn should_write_current(&self, step: usize) -> bool {
+            let step_due =
+                self.config.interval_steps > 0 && step.is_multiple_of(self.config.interval_steps);
+            let time_due = self
+                .config
+                .interval_duration
+                .is_some_and(|interval| self.last_current_write.elapsed() >= interval);
+            step_due || time_due
+        }
+
+        fn write_current(
+            &mut self,
+            params: &BurnBaseParams,
+            phase: &str,
+            step: usize,
+            train_loss: Option<f32>,
+            eval_loss: Option<f32>,
+            geometry_score: Option<f32>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.write_model(params, BurnDenseCheckpointWrite {
+                kind: "current",
+                output: self.config.current_model_output.clone(),
+                phase: phase.to_string(),
+                step,
+                train_loss,
+                eval_loss,
+                geometry_score,
+            })?;
+            self.current_writes = self.current_writes.saturating_add(1);
+            self.last_current_write = Instant::now();
+            self.write_metadata()?;
+            Ok(())
+        }
+
+        fn write_best(
+            &mut self,
+            params: &BurnBaseParams,
+            phase: &str,
+            step: usize,
+            train_loss: Option<f32>,
+            eval_loss: Option<f32>,
+            geometry_score: Option<f32>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.write_model(params, BurnDenseCheckpointWrite {
+                kind: "best",
+                output: self.config.best_model_output.clone(),
+                phase: phase.to_string(),
+                step,
+                train_loss,
+                eval_loss,
+                geometry_score,
+            })?;
+            self.best_writes = self.best_writes.saturating_add(1);
+            self.write_metadata()?;
+            Ok(())
+        }
+
+        fn write_model(
+            &mut self,
+            params: &BurnBaseParams,
+            request: BurnDenseCheckpointWrite,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let mut model = NpaModel {
+                config: self.config.model_config.clone(),
+                weights: NpaWeights::zeros(&self.config.model_config),
+            };
+            params.write_to_model(&mut model)?;
+            let source = Some(format!(
+                "{}:checkpoint:{}:phase={}:step={}",
+                self.config.source, request.kind, request.phase, request.step
+            ));
+            let manifest =
+                crate::import::BpkModelManifest::from_model(&model, self.config.hashgrid.clone(), source);
+            let sha256 = atomic_save_manifest(&request.output, &manifest)?;
+            let event = BurnDenseCheckpointEvent {
+                kind: request.kind,
+                phase: request.phase.clone(),
+                step: request.step,
+                elapsed_seconds: self.started.elapsed().as_secs_f64(),
+                train_loss: request.train_loss,
+                eval_loss: request.eval_loss,
+                geometry_score: request.geometry_score,
+                model_output: request.output.display().to_string(),
+                sha256,
+            };
+            self.events.push(event.clone());
+            println!(
+                "{LOG_BACKEND} direct-basis checkpoint {} phase={} step={} model={}",
+                request.kind,
+                request.phase,
+                request.step,
+                request.output.display()
+            );
+            Ok(())
+        }
+
+        fn write_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+            let report = self.report_json();
+            atomic_write_json(&self.config.metadata_output, &report)
+        }
+
+        fn report_json(&self) -> serde_json::Value {
+            json!({
+                "current_model_output": self.config.current_model_output.display().to_string(),
+                "best_model_output": self.config.best_model_output.display().to_string(),
+                "metadata_output": self.config.metadata_output.display().to_string(),
+                "interval_steps": self.config.interval_steps,
+                "interval_seconds": self.config.interval_duration.map(|duration| duration.as_secs()),
+                "current_writes": self.current_writes,
+                "best_writes": self.best_writes,
+                "elapsed_seconds": self.started.elapsed().as_secs_f64(),
+                "events": &self.events,
+            })
+        }
+    }
+
+    fn atomic_save_manifest(
+        path: &std::path::Path,
+        manifest: &crate::import::BpkModelManifest,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let tmp_path = atomic_temp_path(path);
+        let sha256 = crate::import::save_manifest(&tmp_path, manifest)?;
+        fs::rename(&tmp_path, path)?;
+        Ok(sha256)
+    }
+
+    fn atomic_write_json(
+        path: &std::path::Path,
+        value: &serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp_path = atomic_temp_path(path);
+        fs::write(&tmp_path, serde_json::to_string_pretty(value)?)?;
+        fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    fn atomic_temp_path(path: &std::path::Path) -> std::path::PathBuf {
+        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("json");
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("checkpoint");
+        path.with_file_name(format!(".{file_name}.tmp.{extension}"))
+    }
+
     #[derive(Clone, Copy, Debug, Serialize)]
     struct BurnGeometrySummary {
         examples: usize,
@@ -1183,6 +1385,7 @@ mod $module {
         config: DirectBasisTrainConfig,
         update_base: bool,
         phase_label: &str,
+        mut checkpoint_state: Option<&mut BurnDenseCheckpointState<'_>>,
     ) -> Result<BurnPhaseReport, Box<dyn std::error::Error>> {
         if targets.is_empty() || config.steps == 0 {
             return Ok(BurnPhaseReport {
@@ -1253,6 +1456,24 @@ mod $module {
             };
             best_params = update_base.then(|| params.clone());
             best_adapters = Some(adapters.to_vec());
+            if let Some(checkpoint_state) = checkpoint_state.as_deref_mut() {
+                checkpoint_state.write_best(
+                    params,
+                    phase_label,
+                    0,
+                    None,
+                    Some(eval_loss.mean_total_loss),
+                    best_geometry_score,
+                )?;
+                checkpoint_state.write_current(
+                    params,
+                    phase_label,
+                    0,
+                    None,
+                    Some(eval_loss.mean_total_loss),
+                    best_geometry_score,
+                )?;
+            }
         }
         let mut base_optimizer = BurnBaseAdamWState::zeros_like(params);
         let mut adapter_optimizers = adapters
@@ -1372,6 +1593,16 @@ mod $module {
                         }
                         best_params = update_base.then(|| params.clone());
                         best_adapters = Some(adapters.to_vec());
+                        if let Some(checkpoint_state) = checkpoint_state.as_deref_mut() {
+                            checkpoint_state.write_best(
+                                params,
+                                phase_label,
+                                step,
+                                Some(stats.loss),
+                                Some(eval_loss.mean_total_loss),
+                                best_geometry_score,
+                            )?;
+                        }
                     }
                     println!(
                         "{LOG_BACKEND} direct-basis {phase_label} step {step}/{} loss={:.6} eval_mean={:.6} examples={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
@@ -1422,6 +1653,19 @@ mod $module {
                 )?;
                 let _ =
                     check_gpu_memory_budget(&format!("{phase_label}:report_step:{step}"), config)?;
+            }
+            if let Some(checkpoint_state) = checkpoint_state.as_deref_mut()
+                && step != config.steps
+                && checkpoint_state.should_write_current(step)
+            {
+                checkpoint_state.write_current(
+                    params,
+                    phase_label,
+                    step,
+                    Some(stats.loss),
+                    None,
+                    best_geometry_score,
+                )?;
             }
         }
         if let Some(saved) = best_params {
@@ -6889,6 +7133,7 @@ pub(super) fn train_direct_basis_burn_wgpu(
     train_config: super::DirectBasisTrainConfig,
     train_refine_config: super::DirectBasisTrainConfig,
     holdout_config: super::DirectBasisTrainConfig,
+    checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     wgpu_imp::train_direct_basis_burn_dense(
         base,
@@ -6897,6 +7142,7 @@ pub(super) fn train_direct_basis_burn_wgpu(
         train_config,
         train_refine_config,
         holdout_config,
+        checkpoint,
     )
 }
 
@@ -6931,6 +7177,7 @@ pub(super) fn train_direct_basis_burn_wgpu(
     _train_config: super::DirectBasisTrainConfig,
     _train_refine_config: super::DirectBasisTrainConfig,
     _holdout_config: super::DirectBasisTrainConfig,
+    _checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/WGPU direct-basis training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu or choose the Burn/CUDA backend in a CUDA build",
@@ -6967,6 +7214,7 @@ pub(super) fn train_direct_basis_burn_cuda(
     train_config: super::DirectBasisTrainConfig,
     train_refine_config: super::DirectBasisTrainConfig,
     holdout_config: super::DirectBasisTrainConfig,
+    checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     cuda_imp::train_direct_basis_burn_dense(
         base,
@@ -6975,6 +7223,7 @@ pub(super) fn train_direct_basis_burn_cuda(
         train_config,
         train_refine_config,
         holdout_config,
+        checkpoint,
     )
 }
 
@@ -7009,6 +7258,7 @@ pub(super) fn train_direct_basis_burn_cuda(
     _train_config: super::DirectBasisTrainConfig,
     _train_refine_config: super::DirectBasisTrainConfig,
     _holdout_config: super::DirectBasisTrainConfig,
+    _checkpoint: Option<&super::Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/CUDA dense direct-basis training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",

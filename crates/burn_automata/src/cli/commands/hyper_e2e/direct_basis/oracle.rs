@@ -893,6 +893,7 @@ fn train_burn_dense_direct_basis_oracle(
             burn_config,
             no_phase_config,
             no_phase_config,
+            None,
         )?,
         DirectBasisOracleBackendArg::Cuda => super::dense::train_direct_basis_burn_cuda(
             &mut oracle_model,
@@ -901,6 +902,7 @@ fn train_burn_dense_direct_basis_oracle(
             burn_config,
             no_phase_config,
             no_phase_config,
+            None,
         )?,
         _ => unreachable!("dense Burn oracle backend must be WGPU or CUDA"),
     };
