@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
+use super::e2e::{E2eHyperNpa2d, PerceptionRolloutBackend, Target2dLossBackend};
 use crate::{
     AdamWConfig, NpaConfig, NpaLowRankAdapter, ParticleSeed, SgdConfig, Target2dLossConfig,
     TargetImage2d,
@@ -195,6 +195,7 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) use_particle_pool: bool,
     pub(crate) pool_slots_per_example: usize,
     pub(crate) inject_seed_interval: usize,
+    pub(crate) brush_size: f32,
     pub(crate) pre_rollout_steps: usize,
     pub(crate) rollout_particles: usize,
     pub(crate) rollout_step_min: usize,
@@ -217,6 +218,8 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) min_lr_scale: f32,
     pub(crate) adapter_rank: usize,
     pub(crate) adapter_alpha: f32,
+    pub(crate) spatial_token_generator: bool,
+    pub(crate) adapter_chunk_size: usize,
     pub(crate) generator_hidden_dims: usize,
     pub(crate) token_attention_heads: usize,
     pub(crate) generator_sample_steps: usize,
@@ -296,6 +299,8 @@ pub(crate) struct BurnE2eRolloutQualityReport {
     pub(crate) mean_render_rgb_psnr_db: f32,
     pub(crate) min_render_rgb_psnr_db: f32,
     pub(crate) max_render_rgb_psnr_db: f32,
+    pub(crate) mean_condition_shuffle_render_rgb_psnr_db: Option<f32>,
+    pub(crate) condition_shuffle_psnr_gap_db: Option<f32>,
     pub(crate) entries: Vec<BurnE2eRolloutQualityEntry>,
 }
 
@@ -305,6 +310,6 @@ pub(crate) struct BurnE2eRolloutOutput {
     pub(crate) metrics: serde_json::Value,
     pub(crate) history: Vec<BurnE2eRolloutHistoryEntry>,
     pub(crate) final_loss: Option<f32>,
-    pub(crate) generator: serde_json::Value,
+    pub(crate) generator: E2eHyperNpa2d,
     pub(crate) quality_validation: Option<BurnE2eRolloutQualityReport>,
 }

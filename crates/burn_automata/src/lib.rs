@@ -43,7 +43,7 @@ pub use hyper::{
     ParticlePriorConfig, condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
     generate_conditioned_npa_2d, generate_e2e_conditioned_npa_2d, hyper_adapter_regression_loss,
     hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
-    hyper_rectified_flow_train_step, load_e2e_hyper_npa_2d,
+    hyper_rectified_flow_train_step, load_e2e_hyper_npa_2d, save_e2e_hyper_npa_2d,
 };
 pub use import::{
     BpkAdapterManifest, BpkModelManifest, ExportedCheckpoint, ImportReport,

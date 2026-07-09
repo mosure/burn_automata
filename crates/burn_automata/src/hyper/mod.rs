@@ -10,6 +10,7 @@ pub mod dino;
 pub mod e2e;
 #[cfg(feature = "cli")]
 pub mod e2e_rollout;
+#[cfg(feature = "cli")]
 pub(crate) mod e2e_training;
 pub mod hypernet;
 pub mod inference;
@@ -29,7 +30,7 @@ pub use dino::DinoVitsConditionEncoder;
 pub use e2e::{
     E2eConditionedNpa2d, E2eHyperNpa2d, E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights,
     PerceptionRolloutBackend, Target2dLossBackend, generate_e2e_conditioned_npa_2d,
-    load_e2e_hyper_npa_2d,
+    load_e2e_hyper_npa_2d, save_e2e_hyper_npa_2d,
 };
 #[cfg(feature = "cli")]
 pub use e2e_rollout::run_train_hyper_2d_e2e_rollout_config_path;

@@ -58,6 +58,23 @@ impl DinoVitsConditionEncoder {
         token_grid_width: usize,
         token_grid_height: usize,
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        self.encode_batch_with_options(
+            conditions,
+            encoder,
+            token_grid_width,
+            token_grid_height,
+            true,
+        )
+    }
+
+    pub fn encode_batch_with_options(
+        &self,
+        conditions: &[ConditionImage2d],
+        encoder: ConditionEncoder2d,
+        token_grid_width: usize,
+        token_grid_height: usize,
+        l2_normalize_features: bool,
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
         if conditions.is_empty() {
             return Ok(Vec::new());
         }
@@ -111,7 +128,9 @@ impl DinoVitsConditionEncoder {
                     );
                 }
             };
-            l2_normalize(&mut features);
+            if l2_normalize_features {
+                l2_normalize(&mut features);
+            }
             encoded.push(features);
         }
         Ok(encoded)

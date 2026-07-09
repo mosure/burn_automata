@@ -50,7 +50,10 @@ mod $module {
         Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
         Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
     };
-    use crate::hyper::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
+    use crate::hyper::e2e::{
+        E2E_HYPER_ARCH_POOLED_FLOW, E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW, E2eHyperNpa2d,
+        E2eHyperNpa2dWeights, PerceptionRolloutBackend, Target2dLossBackend,
+    };
     use crate::{
         AdamWConfig, AutomataError, AutomataResult, NpaConfig, NpaLowRankAdapter, NpaModel,
         NpaWeights,
@@ -158,6 +161,7 @@ mod $module {
 
     #[derive(Clone)]
     struct BurnE2eGeneratorParams {
+        kind: BurnE2eGeneratorKind,
         token_w: Tensor2,
         token_b: Tensor2,
         token_gate_w: Tensor2,
@@ -171,6 +175,23 @@ mod $module {
         output_dims: usize,
         output_scale: f32,
         sample_steps: usize,
+        adapter_chunk_size: usize,
+        output_chunks: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum BurnE2eGeneratorKind {
+        PooledFlow,
+        SpatialTokenFlow,
+    }
+
+    impl BurnE2eGeneratorKind {
+        const fn artifact_architecture(self) -> &'static str {
+            match self {
+                Self::PooledFlow => E2E_HYPER_ARCH_POOLED_FLOW,
+                Self::SpatialTokenFlow => E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW,
+            }
+        }
     }
 
     struct BurnE2eGeneratorAdamWState {
@@ -794,7 +815,7 @@ mod $module {
             }
             quality_validation
         };
-        let generator_json = generator.to_json()?;
+        let generator_hyper = generator.to_hyper(config)?;
         let (min_reported_particle_steps_per_sec, median_reported_particle_steps_per_sec, max_reported_particle_steps_per_sec) =
             reported_particle_step_speed_summary(&history);
         let (first_reported_loss, best_reported_loss, best_reported_step, final_reported_loss) =
@@ -816,10 +837,14 @@ mod $module {
         );
         metrics.insert(
             "conditioner".to_string(),
-            json!("token_attention_pool_rectified_flow_generated_lora"),
+            json!(generator.kind.artifact_architecture()),
         );
         metrics.insert("adapter_rank".to_string(), json!(config.adapter_rank));
         metrics.insert("adapter_alpha".to_string(), json!(config.adapter_alpha));
+        metrics.insert(
+            "adapter_chunk_size".to_string(),
+            json!(generator.adapter_chunk_size),
+        );
         metrics.insert(
             "generator_hidden_dims".to_string(),
             json!(config.generator_hidden_dims),
@@ -1085,7 +1110,7 @@ mod $module {
             metrics,
             history,
             final_loss,
-            generator: generator_json,
+            generator: generator_hyper,
             quality_validation,
         })
     }
@@ -2306,7 +2331,7 @@ mod $module {
             return max_steps;
         }
         let mut rng = StdRng::seed_from_u64(seed ^ 0x6d2b_79f5);
-        rng.random_range(min_steps..max_steps)
+        rng.random_range(min_steps..=max_steps)
     }
 
     fn e2e_chunk_loss_weight(config: BurnE2eRolloutTrainConfig, final_chunk: bool) -> f32 {
@@ -2727,6 +2752,39 @@ mod $module {
                 });
             }
         }
+        let mean_condition_shuffle_render_rgb_psnr_db = if indices.len() > 1 {
+            let mut shuffled_condition_indices = indices.clone();
+            shuffled_condition_indices.rotate_left(1);
+            let mut psnr_sum = 0.0_f32;
+            let mut psnr_count = 0usize;
+            for (condition_chunk, target_chunk) in shuffled_condition_indices
+                .chunks(eval_batch_size)
+                .zip(target_indices.chunks(eval_batch_size))
+            {
+                let quality = batch_e2e_eval_quality(
+                    params,
+                    generator,
+                    npa_config,
+                    conditions,
+                    &targets,
+                    condition_chunk,
+                    target_chunk,
+                    config,
+                    eval_config,
+                    config.validation_seed,
+                    device,
+                )?;
+                for render_rgb_mse in tensor1_vec(quality.render_rgb_mse.inner())? {
+                    let render_rgb_mse =
+                        finite_scalar("HyperNPA e2e shuffled-condition render RGB MSE", render_rgb_mse)?;
+                    psnr_sum += psnr_db_from_mse(render_rgb_mse);
+                    psnr_count += 1;
+                }
+            }
+            (psnr_count > 0).then_some(psnr_sum / psnr_count as f32)
+        } else {
+            None
+        };
         let examples_count = entries.len();
         if examples_count == 0 {
             return Ok(None);
@@ -2756,6 +2814,8 @@ mod $module {
         mean_density_loss *= scale;
         mean_render_rgb_mse *= scale;
         mean_render_rgb_psnr_db *= scale;
+        let condition_shuffle_psnr_gap_db =
+            mean_condition_shuffle_render_rgb_psnr_db.map(|shuffle| mean_render_rgb_psnr_db - shuffle);
         let mean_passed = mean_render_rgb_psnr_db >= config.validation_psnr_threshold_db;
         let all_examples_passed = entries.iter().all(|entry| entry.passed);
         let passed = mean_passed;
@@ -2790,6 +2850,8 @@ mod $module {
             mean_render_rgb_psnr_db,
             min_render_rgb_psnr_db,
             max_render_rgb_psnr_db,
+            mean_condition_shuffle_render_rgb_psnr_db,
+            condition_shuffle_psnr_gap_db,
             entries,
         }))
     }
@@ -2830,13 +2892,13 @@ mod $module {
         let (mut x, mut s) = seed_batch_tensors_with_seed_indices(
             targets,
             target_indices,
-            condition_indices,
+            target_indices,
             particle_count,
             eval_config,
             seed,
             device,
         );
-        let mut rngs = condition_indices
+        let mut rngs = target_indices
             .iter()
             .map(|idx| StdRng::seed_from_u64(seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
             .collect::<Vec<_>>();
@@ -5776,8 +5838,22 @@ mod $module {
             }
             let output_dims =
                 NpaLowRankAdapter::parameter_count_for_config(&base.config, config.adapter_rank);
+            let kind = if config.spatial_token_generator {
+                BurnE2eGeneratorKind::SpatialTokenFlow
+            } else {
+                BurnE2eGeneratorKind::PooledFlow
+            };
             let hidden_dims = config.generator_hidden_dims.max(1);
             let token_attention_heads = config.token_attention_heads.max(1);
+            let adapter_chunk_size = match kind {
+                BurnE2eGeneratorKind::PooledFlow => output_dims,
+                BurnE2eGeneratorKind::SpatialTokenFlow => config
+                    .adapter_chunk_size
+                    .max(1)
+                    .min(output_dims)
+                    .max(1),
+            };
+            let output_chunks = output_dims.div_ceil(adapter_chunk_size);
             let mut rng = StdRng::seed_from_u64(config.seed ^ 0xa11c_e2e0_7a5e);
             let token_w = tracked_tensor(
                 seeded_values(
@@ -5789,45 +5865,113 @@ mod $module {
                 device,
             );
             let token_b = tracked_tensor(vec![0.0; hidden_dims], [1, hidden_dims], device);
-            let token_gate_w = tracked_tensor(
-                seeded_values(
-                    token_attention_heads * hidden_dims,
-                    config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
-                    &mut rng,
+            let (token_gate_w, token_gate_b, state_w) = match kind {
+                BurnE2eGeneratorKind::PooledFlow => (
+                    tracked_tensor(
+                        seeded_values(
+                            token_attention_heads * hidden_dims,
+                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            &mut rng,
+                        ),
+                        [token_attention_heads, hidden_dims],
+                        device,
+                    ),
+                    tracked_tensor(
+                        vec![0.0; token_attention_heads],
+                        [1, token_attention_heads],
+                        device,
+                    ),
+                    tracked_tensor(
+                        seeded_values(
+                            hidden_dims * output_dims,
+                            config.generator_init_scale / (output_dims as f32).sqrt().max(1.0),
+                            &mut rng,
+                        ),
+                        [hidden_dims, output_dims],
+                        device,
+                    ),
                 ),
-                [token_attention_heads, hidden_dims],
-                device,
-            );
-            let token_gate_b = tracked_tensor(
-                vec![0.0; token_attention_heads],
-                [1, token_attention_heads],
-                device,
-            );
-            let state_w = tracked_tensor(
-                seeded_values(
-                    hidden_dims * output_dims,
-                    config.generator_init_scale / (output_dims as f32).sqrt().max(1.0),
-                    &mut rng,
+                BurnE2eGeneratorKind::SpatialTokenFlow => (
+                    tracked_tensor(
+                        seeded_values(
+                            output_chunks * hidden_dims,
+                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            &mut rng,
+                        ),
+                        [output_chunks, hidden_dims],
+                        device,
+                    ),
+                    tracked_tensor(
+                        vec![0.0; output_chunks * hidden_dims],
+                        [output_chunks, hidden_dims],
+                        device,
+                    ),
+                    tracked_tensor(
+                        seeded_values(
+                            hidden_dims * adapter_chunk_size,
+                            config.generator_init_scale
+                                / (adapter_chunk_size as f32).sqrt().max(1.0),
+                            &mut rng,
+                        ),
+                        [hidden_dims, adapter_chunk_size],
+                        device,
+                    ),
                 ),
-                [hidden_dims, output_dims],
-                device,
-            );
+            };
             let time_w = tracked_tensor(
                 seeded_values(hidden_dims, config.generator_init_scale, &mut rng),
                 [hidden_dims, 1],
                 device,
             );
-            let output_w = tracked_tensor(
-                seeded_values(
-                    output_dims * hidden_dims,
-                    config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
-                    &mut rng,
+            let (output_w, output_b) = match kind {
+                BurnE2eGeneratorKind::PooledFlow => (
+                    tracked_tensor(
+                        seeded_values(
+                            output_dims * hidden_dims,
+                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            &mut rng,
+                        ),
+                        [output_dims, hidden_dims],
+                        device,
+                    ),
+                    tracked_tensor(
+                        seeded_zero_delta_output_bias(
+                            &base.config,
+                            config.adapter_rank,
+                            config.adapter_alpha,
+                            config.seed ^ 0x5eed_10da,
+                            config.generator_output_scale,
+                        ),
+                        [1, output_dims],
+                        device,
+                    ),
                 ),
-                [output_dims, hidden_dims],
-                device,
-            );
-            let output_b = tracked_tensor(vec![0.0; output_dims], [1, output_dims], device);
+                BurnE2eGeneratorKind::SpatialTokenFlow => (
+                    tracked_tensor(
+                        seeded_values(
+                            adapter_chunk_size * hidden_dims,
+                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            &mut rng,
+                        ),
+                        [adapter_chunk_size, hidden_dims],
+                        device,
+                    ),
+                    tracked_tensor(
+                        seeded_zero_delta_chunk_output_bias(
+                            &base.config,
+                            config.adapter_rank,
+                            config.adapter_alpha,
+                            config.seed ^ 0x5eed_10da,
+                            adapter_chunk_size,
+                            output_chunks,
+                        ),
+                        [output_chunks, adapter_chunk_size],
+                        device,
+                    ),
+                ),
+            };
             Ok(Self {
+                kind,
                 token_w,
                 token_b,
                 token_gate_w,
@@ -5841,6 +5985,8 @@ mod $module {
                 output_dims,
                 output_scale: config.generator_output_scale,
                 sample_steps: config.generator_sample_steps.max(1),
+                adapter_chunk_size,
+                output_chunks,
             })
         }
 
@@ -5850,6 +5996,9 @@ mod $module {
             npa_config: &NpaConfig,
             config: BurnE2eRolloutTrainConfig,
         ) -> BurnAdapterBatch {
+            if self.kind == BurnE2eGeneratorKind::SpatialTokenFlow {
+                return self.spatial_token_adapter_batch(condition, npa_config, config);
+            }
             let dims = condition.shape().dims::<3>();
             let batches = dims[0];
             let tokens = dims[1];
@@ -5923,6 +6072,112 @@ mod $module {
                 vector = vector + velocity.div_scalar(self.sample_steps as f32);
             }
             let vector = vector.tanh().mul_scalar(self.output_scale);
+            BurnAdapterBatch::from_parameter_vector(
+                vector,
+                npa_config,
+                config.adapter_rank,
+                config.adapter_alpha,
+            )
+        }
+
+        fn spatial_token_adapter_batch(
+            &self,
+            condition: Tensor3,
+            npa_config: &NpaConfig,
+            config: BurnE2eRolloutTrainConfig,
+        ) -> BurnAdapterBatch {
+            let dims = condition.shape().dims::<3>();
+            let batches = dims[0];
+            let tokens = dims[1];
+            let embed_dims = dims[2];
+            let device = condition.device();
+            let token_w = self
+                .token_w
+                .clone()
+                .transpose()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, embed_dims, self.hidden_dims]);
+            let token_b = self
+                .token_b
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, tokens, self.hidden_dims]);
+            let token_hidden = relu(condition.matmul(token_w) + token_b);
+            let mut chunks = Tensor::<BurnBackend, 3>::zeros(
+                [batches, self.output_chunks, self.adapter_chunk_size],
+                &device,
+            );
+            let query_base = self
+                .token_gate_w
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, self.output_chunks, self.hidden_dims])
+                + self
+                    .token_gate_b
+                    .clone()
+                    .unsqueeze_dim::<3>(0)
+                    .expand([batches, self.output_chunks, self.hidden_dims]);
+            let shared_bias = self
+                .token_b
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, self.output_chunks, self.hidden_dims]);
+            let state_w = self
+                .state_w
+                .clone()
+                .transpose()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, self.adapter_chunk_size, self.hidden_dims]);
+            let output_w = self
+                .output_w
+                .clone()
+                .transpose()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, self.hidden_dims, self.adapter_chunk_size]);
+            let output_b = self
+                .output_b
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, self.output_chunks, self.adapter_chunk_size]);
+            let attention_scale = 1.0 / (self.hidden_dims as f32).sqrt().max(1.0);
+            for step in 0..self.sample_steps {
+                let t = if self.sample_steps <= 1 {
+                    0.0
+                } else {
+                    step as f32 / (self.sample_steps - 1) as f32
+                };
+                let time_hidden = self
+                    .time_w
+                    .clone()
+                    .transpose()
+                    .mul_scalar(t)
+                    .unsqueeze_dim::<3>(0)
+                    .expand([batches, self.output_chunks, self.hidden_dims]);
+                let state_hidden = chunks.clone().matmul(state_w.clone());
+                let query_hidden = relu(
+                    query_base.clone() + shared_bias.clone() + state_hidden + time_hidden,
+                );
+                let attention_logits =
+                    query_hidden.clone().matmul(token_hidden.clone().swap_dims(1, 2));
+                let attention_weights = attention_logits.mul_scalar(attention_scale).tanh().exp();
+                let attention_denominator = attention_weights
+                    .clone()
+                    .sum_dim(2)
+                    .add_scalar(EPSILON)
+                    .expand([batches, self.output_chunks, tokens]);
+                let attended = attention_weights
+                    .div(attention_denominator)
+                    .matmul(token_hidden.clone());
+                let hidden = relu(query_hidden + attended);
+                let velocity = hidden.matmul(output_w.clone()) + output_b.clone();
+                chunks = chunks
+                    + velocity
+                        .mul_scalar(self.output_scale)
+                        .div_scalar(self.sample_steps as f32);
+            }
+            let vector = chunks
+                .reshape([batches, self.output_chunks * self.adapter_chunk_size])
+                .narrow(1, 0, self.output_dims);
             BurnAdapterBatch::from_parameter_vector(
                 vector,
                 npa_config,
@@ -6043,32 +6298,41 @@ mod $module {
             Ok((norm, scale))
         }
 
-        fn to_json(&self) -> AutomataResult<serde_json::Value> {
-            Ok(json!({
-                "version": 1,
-                "architecture": "token_attention_pool_rectified_flow_generated_lora",
-                "backend": format!("{BACKEND}_e2e_rollout"),
-                "device": DEVICE_LABEL,
-                "hidden_dims": self.hidden_dims,
-                "token_attention_heads": self.token_attention_heads,
-                "output_dims": self.output_dims,
-                "sample_steps": self.sample_steps,
-                "output_scale": self.output_scale,
-                "weights": {
-                    "token_w": tensor_vec(self.token_w.clone().inner())?,
-                    "token_b": tensor_vec(self.token_b.clone().inner())?,
-                    "token_gate_w": tensor_vec(self.token_gate_w.clone().inner())?,
-                    "token_gate_b": tensor_vec(self.token_gate_b.clone().inner())?,
-                    "state_w": tensor_vec(self.state_w.clone().inner())?,
-                    "time_w": tensor_vec(self.time_w.clone().inner())?,
-                    "output_w": tensor_vec(self.output_w.clone().inner())?,
-                    "output_b": tensor_vec(self.output_b.clone().inner())?,
-                }
-            }))
+        fn to_hyper(&self, config: BurnE2eRolloutTrainConfig) -> AutomataResult<E2eHyperNpa2d> {
+            Ok(E2eHyperNpa2d {
+                version: 1,
+                architecture: self.kind.artifact_architecture().to_string(),
+                backend: Some(format!("{BACKEND}_e2e_rollout")),
+                condition_encoder: None,
+                condition_token_count: None,
+                condition_embed_dims: None,
+                condition_token_grid_width: None,
+                condition_token_grid_height: None,
+                hidden_dims: self.hidden_dims,
+                token_attention_heads: self.token_attention_heads,
+                output_dims: self.output_dims,
+                sample_steps: self.sample_steps,
+                output_scale: self.output_scale,
+                adapter_rank: Some(config.adapter_rank),
+                adapter_alpha: Some(config.adapter_alpha),
+                adapter_chunk_size: (self.kind == BurnE2eGeneratorKind::SpatialTokenFlow)
+                    .then_some(self.adapter_chunk_size),
+                weights: E2eHyperNpa2dWeights {
+                    token_w: tensor_vec(self.token_w.clone().inner())?,
+                    token_b: tensor_vec(self.token_b.clone().inner())?,
+                    token_gate_w: tensor_vec(self.token_gate_w.clone().inner())?,
+                    token_gate_b: tensor_vec(self.token_gate_b.clone().inner())?,
+                    state_w: tensor_vec(self.state_w.clone().inner())?,
+                    time_w: tensor_vec(self.time_w.clone().inner())?,
+                    output_w: tensor_vec(self.output_w.clone().inner())?,
+                    output_b: tensor_vec(self.output_b.clone().inner())?,
+                },
+            })
         }
 
         fn detached(&self) -> Self {
             Self {
+                kind: self.kind,
                 token_w: detach2(self.token_w.clone()),
                 token_b: detach2(self.token_b.clone()),
                 token_gate_w: detach2(self.token_gate_w.clone()),
@@ -6082,6 +6346,8 @@ mod $module {
                 output_dims: self.output_dims,
                 output_scale: self.output_scale,
                 sample_steps: self.sample_steps,
+                adapter_chunk_size: self.adapter_chunk_size,
+                output_chunks: self.output_chunks,
             }
         }
     }
@@ -6726,7 +6992,7 @@ mod $module {
             use_particle_pool: config.use_particle_pool,
             pool_size: config.pool_slots_per_example.max(1),
             inject_seed_interval: config.inject_seed_interval,
-            brush_size: 0.0,
+            brush_size: config.brush_size,
             stopgrad_pos: config.stopgrad_pos,
             stopgrad_state: config.stopgrad_state,
             rollout_particles: config.rollout_particles,
@@ -7235,6 +7501,37 @@ mod $module {
             .collect::<Vec<_>>()
     }
 
+    fn seeded_zero_delta_output_bias(
+        config: &NpaConfig,
+        rank: usize,
+        alpha: f32,
+        seed: u64,
+        output_scale: f32,
+    ) -> Vec<f32> {
+        let scale = output_scale.abs().max(EPSILON);
+        let adapter = NpaLowRankAdapter::seeded_zero_delta(config, rank, alpha, seed);
+        let mut values = adapter.to_parameter_vector();
+        for value in &mut values {
+            let normalized = (*value / scale).clamp(-0.95, 0.95);
+            *value = normalized.atanh();
+        }
+        values
+    }
+
+    fn seeded_zero_delta_chunk_output_bias(
+        config: &NpaConfig,
+        rank: usize,
+        alpha: f32,
+        seed: u64,
+        chunk_size: usize,
+        output_chunks: usize,
+    ) -> Vec<f32> {
+        let adapter = NpaLowRankAdapter::seeded_zero_delta(config, rank, alpha, seed);
+        let mut values = adapter.to_parameter_vector();
+        values.resize(output_chunks.saturating_mul(chunk_size), 0.0);
+        values
+    }
+
     fn seed_tensors(
         particle_count: usize,
         config: DirectBasisTrainConfig,
@@ -7491,6 +7788,10 @@ mod $module {
                 seed_replacements = 1;
             }
 
+            if config.brush_size > 0.0 {
+                self.apply_brush_damage(&positions, &mut states, batch_size, config.brush_size, rng);
+            }
+
             BurnE2ePoolBatch {
                 keys,
                 x: tensor3(positions, [batch_size, self.particle_count, 2], device),
@@ -7500,6 +7801,34 @@ mod $module {
                     device,
                 ),
                 seed_replacements,
+            }
+        }
+
+        fn apply_brush_damage(
+            &self,
+            positions: &[f32],
+            states: &mut [f32],
+            batch_size: usize,
+            brush_size: f32,
+            rng: &mut StdRng,
+        ) {
+            for batch in 0..batch_size {
+                let center_idx =
+                    batch * self.particle_count + rng.random_range(0..self.particle_count);
+                let center_base = center_idx * 2;
+                let center_x = positions[center_base];
+                let center_y = positions[center_base + 1];
+                let brush2 = brush_size * brush_size;
+                for particle in 0..self.particle_count {
+                    let row = batch * self.particle_count + particle;
+                    let position_base = row * 2;
+                    let dx = positions[position_base] - center_x;
+                    let dy = positions[position_base + 1] - center_y;
+                    if dx * dx + dy * dy < brush2 {
+                        let state_base = row * self.state_dims;
+                        states[state_base..state_base + self.state_dims].fill(0.0);
+                    }
+                }
             }
         }
 
@@ -8075,6 +8404,57 @@ mod $module {
             assert_eq!(
                 perception_backend_effective(training_scale),
                 PerceptionRolloutBackend::Dense
+            );
+        }
+
+        #[test]
+        fn stochastic_rollout_step_sampler_can_emit_configured_maximum() {
+            let mut config = test_direct_config(4);
+            config.rollout_step_min = 2;
+            config.rollout_steps = 4;
+            let samples = (0..512)
+                .map(|seed| sampled_training_rollout_steps(config, seed))
+                .collect::<Vec<_>>();
+            assert!(
+                samples.iter().all(|steps| (2..=4).contains(steps)),
+                "sampled rollout steps escaped configured inclusive range: {samples:?}"
+            );
+            assert!(
+                samples.contains(&4),
+                "sampled rollout steps never reached configured maximum: {samples:?}"
+            );
+        }
+
+        #[test]
+        fn e2e_generator_zero_delta_lora_init_keeps_adapter_trainable() {
+            let config = NpaConfig::growing_2d();
+            let rank = 4;
+            let output_scale = 1.0;
+            let bias = seeded_zero_delta_output_bias(&config, rank, rank as f32, 123, output_scale);
+            let vector = bias
+                .iter()
+                .map(|value| value.tanh() * output_scale)
+                .collect::<Vec<_>>();
+            let adapter =
+                NpaLowRankAdapter::from_parameter_vector(&config, rank, rank as f32, vector)
+                    .unwrap();
+            assert!(
+                adapter
+                    .w1_down
+                    .iter()
+                    .chain(adapter.w2_down.iter())
+                    .any(|value| value.abs() > 1.0e-6),
+                "zero-delta LoRA init must seed one side of each low-rank product"
+            );
+            assert!(
+                adapter
+                    .w1_up
+                    .iter()
+                    .chain(adapter.w2_up.iter())
+                    .chain(adapter.b1_delta.iter())
+                    .chain(adapter.b2_delta.iter())
+                    .all(|value| value.abs() <= 1.0e-6),
+                "zero-delta LoRA init must not perturb the base model initially"
             );
         }
 

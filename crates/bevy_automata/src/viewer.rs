@@ -167,7 +167,7 @@ impl Default for AutomataSettings {
             ),
             hyper_model_path: env_or_workspace_path(
                 "BURN_AUTOMATA_HYPER_E2E_MODEL",
-                "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/hyper_2d.json",
+                "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/hyper_2d.bpk",
             ),
             hyper_dino_model_path: env_or_workspace_path(
                 "BURN_AUTOMATA_DINO_MODEL",

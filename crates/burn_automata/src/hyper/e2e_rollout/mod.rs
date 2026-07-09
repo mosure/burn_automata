@@ -3,7 +3,11 @@ use crate::ConditionEncoder2d;
 use crate::hyper::condition::DINO_VITS_EMBED_DIMS;
 #[cfg(feature = "dino")]
 use crate::hyper::dino::DinoVitsConditionEncoder;
-use crate::hyper::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
+use crate::hyper::e2e::{
+    DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE, E2E_HYPER_ARCH_POOLED_FLOW,
+    E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW, PerceptionRolloutBackend, Target2dLossBackend,
+    save_e2e_hyper_npa_2d,
+};
 use crate::hyper::e2e_training::dense::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 use crate::hyper::e2e_training::{
     BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
@@ -205,6 +209,7 @@ struct RolloutTrainingConfig {
     use_particle_pool: Option<bool>,
     pool_slots_per_example: Option<usize>,
     inject_seed_interval: Option<usize>,
+    brush_size: Option<f32>,
     pre_rollout_steps: Option<usize>,
     target2d_loss_backend: Option<String>,
     perception_backend: Option<String>,
@@ -233,6 +238,7 @@ struct RolloutAdapterConfig {
     flow_sample_steps: Option<usize>,
     flow_source_scale: Option<f32>,
     init_scale: Option<f32>,
+    adapter_chunk_size: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -312,6 +318,7 @@ struct RolloutGateConfig {
 enum RolloutConditionEncoder {
     DinoVitsFullTokens,
     DinoVitsTokenGrid,
+    SampleIdOneHot,
 }
 
 impl RolloutConditionEncoder {
@@ -319,6 +326,7 @@ impl RolloutConditionEncoder {
         match self {
             Self::DinoVitsFullTokens => "dino-vits-full-tokens",
             Self::DinoVitsTokenGrid => "dino-vits-token-grid",
+            Self::SampleIdOneHot => "sample-id-onehot",
         }
     }
 }
@@ -395,6 +403,7 @@ struct E2eRolloutConditionReport {
     device_cache_max_bytes: usize,
     device_cache_max_gib: f64,
     token_attention_heads: usize,
+    feature_normalization: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -423,6 +432,7 @@ struct E2eRolloutTrainingReport {
     use_particle_pool: bool,
     pool_slots_per_example: usize,
     inject_seed_interval: usize,
+    brush_size: f32,
     pre_rollout_steps: usize,
     target2d_loss_backend: String,
     perception_backend: String,
@@ -447,6 +457,7 @@ struct E2eRolloutAdapterReport {
     flow_sample_steps: usize,
     flow_source_scale: f32,
     init_scale: f32,
+    adapter_chunk_size: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -657,7 +668,14 @@ fn build_e2e_rollout_report(
         .output
         .hyper_output
         .clone()
-        .unwrap_or_else(|| output_dir.join("hyper_2d.json"));
+        .unwrap_or_else(|| output_dir.join("hyper_2d.bpk"));
+    if has_json_extension(&hyper_output) {
+        return Err(std::io::Error::other(format!(
+            "trained E2E HyperNPA artifacts are binary; use a .bpk hyper_output path instead of {}",
+            hyper_output.display()
+        ))
+        .into());
+    }
     let checkpoint_dir = config
         .output
         .checkpoint_dir
@@ -680,22 +698,29 @@ fn build_e2e_rollout_report(
             config.condition.token_grid_width.unwrap_or(patch_grid),
             config.condition.token_grid_height.unwrap_or(patch_grid),
         ),
+        RolloutConditionEncoder::SampleIdOneHot => (1, 1),
     };
-    if token_grid_width == 0 || token_grid_height == 0 {
-        return Err(std::io::Error::other("DINO token grid dimensions must be positive").into());
+    if !matches!(encoder, RolloutConditionEncoder::SampleIdOneHot) {
+        if token_grid_width == 0 || token_grid_height == 0 {
+            return Err(
+                std::io::Error::other("DINO token grid dimensions must be positive").into(),
+            );
+        }
+        if token_grid_width > patch_grid || token_grid_height > patch_grid {
+            return Err(std::io::Error::other(format!(
+                "DINO token grid {token_grid_width}x{token_grid_height} exceeds full patch grid {patch_grid}x{patch_grid}"
+            ))
+            .into());
+        }
     }
-    if token_grid_width > patch_grid || token_grid_height > patch_grid {
-        return Err(std::io::Error::other(format!(
-            "DINO token grid {token_grid_width}x{token_grid_height} exceeds full patch grid {patch_grid}x{patch_grid}"
-        ))
-        .into());
-    }
-    let token_count = 1 + token_grid_width * token_grid_height;
-    let flattened_feature_dims = token_count * DINO_VITS_EMBED_DIMS;
-    let online_dino = config.condition.online.unwrap_or(true);
-    if !online_dino {
+    let online_dino = match encoder {
+        RolloutConditionEncoder::SampleIdOneHot => false,
+        RolloutConditionEncoder::DinoVitsFullTokens
+        | RolloutConditionEncoder::DinoVitsTokenGrid => config.condition.online.unwrap_or(true),
+    };
+    if !online_dino && !matches!(encoder, RolloutConditionEncoder::SampleIdOneHot) {
         return Err(std::io::Error::other(
-            "train-hyper2d-e2e-rollout requires condition.online = true; cached feature-vector regression belongs in train-hyper2d-adapter-bank",
+            "train-hyper2d-e2e-rollout requires condition.online = true for DINO encoders; cached feature-vector regression belongs in train-hyper2d-adapter-bank",
         )
         .into());
     }
@@ -814,6 +839,15 @@ fn build_e2e_rollout_report(
     let splits = resolve_e2e_splits(&sources, &holdout_targets, holdout_stride, holdout_offset)?;
     let train_examples = splits.iter().filter(|split| split.is_train()).count();
     let holdout_examples = splits.len() - train_examples;
+    let (token_count, embed_dims) = match encoder {
+        RolloutConditionEncoder::DinoVitsFullTokens
+        | RolloutConditionEncoder::DinoVitsTokenGrid => (
+            1 + token_grid_width * token_grid_height,
+            DINO_VITS_EMBED_DIMS,
+        ),
+        RolloutConditionEncoder::SampleIdOneHot => (1, sources.len().max(1)),
+    };
+    let flattened_feature_dims = token_count * embed_dims;
 
     let steps = config.training.steps.unwrap_or(0);
     let report_interval = config.training.report_interval.unwrap_or(25).max(1);
@@ -846,6 +880,7 @@ fn build_e2e_rollout_report(
     let use_particle_pool = config.training.use_particle_pool.unwrap_or(false);
     let pool_slots_per_example = config.training.pool_slots_per_example.unwrap_or(1).max(1);
     let inject_seed_interval = config.training.inject_seed_interval.unwrap_or(64).max(1);
+    let brush_size = config.training.brush_size.unwrap_or(0.0).max(0.0);
     let pre_rollout_steps = config.training.pre_rollout_steps.unwrap_or(0);
     let max_dense_train_particles = config
         .training
@@ -991,6 +1026,19 @@ fn build_e2e_rollout_report(
                 .saturating_mul(2)
                 .saturating_add(dino_batch_input_bytes_f32)
         };
+    let adapter_generator =
+        parse_e2e_adapter_generator(config.adapter.generator.as_deref())?.to_string();
+    let adapter_chunk_size = config
+        .adapter
+        .adapter_chunk_size
+        .unwrap_or(DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE)
+        .max(1);
+    let condition_feature_normalization = if adapter_generator == E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
+    {
+        "per-token-preserved"
+    } else {
+        "flattened-l2"
+    };
 
     Ok(E2eRolloutReport {
         experiment_config: config_path.display().to_string(),
@@ -1040,7 +1088,7 @@ fn build_e2e_rollout_report(
             patch_grid_width: token_grid_width,
             patch_grid_height: token_grid_height,
             token_count,
-            embed_dims: DINO_VITS_EMBED_DIMS,
+            embed_dims,
             flattened_feature_dims,
             selected_feature_cache_bytes_f32,
             selected_feature_cache_gib_f32: bytes_to_gib(selected_feature_cache_bytes_f32),
@@ -1053,6 +1101,7 @@ fn build_e2e_rollout_report(
             device_cache_max_bytes: condition_device_cache_max_bytes,
             device_cache_max_gib: bytes_to_gib(condition_device_cache_max_bytes),
             token_attention_heads: config.condition.token_attention_heads.unwrap_or(4).max(1),
+            feature_normalization: condition_feature_normalization,
         },
         model: E2eRolloutModelReport {
             shared_base: config
@@ -1089,6 +1138,7 @@ fn build_e2e_rollout_report(
             use_particle_pool,
             pool_slots_per_example,
             inject_seed_interval,
+            brush_size,
             pre_rollout_steps,
             target2d_loss_backend: target2d_loss_backend.as_str().to_string(),
             perception_backend: perception_backend.as_str().to_string(),
@@ -1107,15 +1157,12 @@ fn build_e2e_rollout_report(
         adapter: E2eRolloutAdapterReport {
             rank: adapter_rank,
             alpha: adapter_alpha,
-            generator: config
-                .adapter
-                .generator
-                .clone()
-                .unwrap_or_else(|| "token-aware-rectified-flow".to_string()),
+            generator: adapter_generator,
             flow_hidden: config.adapter.flow_hidden.unwrap_or(512).max(1),
             flow_sample_steps: config.adapter.flow_sample_steps.unwrap_or(16).max(1),
             flow_source_scale: config.adapter.flow_source_scale.unwrap_or(1.0),
             init_scale: config.adapter.init_scale.unwrap_or(1.0e-3),
+            adapter_chunk_size,
         },
         rollout: E2eRolloutRuntimeReport {
             particles: rollout_particles,
@@ -1243,6 +1290,7 @@ fn run_burn_e2e_rollout_training(
         use_particle_pool: report.training.use_particle_pool,
         pool_slots_per_example: report.training.pool_slots_per_example,
         inject_seed_interval: report.training.inject_seed_interval,
+        brush_size: report.training.brush_size,
         pre_rollout_steps: report.training.pre_rollout_steps,
         rollout_particles: report.rollout.particles,
         rollout_step_min: report.rollout.step_min,
@@ -1268,6 +1316,8 @@ fn run_burn_e2e_rollout_training(
         min_lr_scale: report.optimizer.min_lr_scale,
         adapter_rank: report.adapter.rank,
         adapter_alpha: report.adapter.alpha,
+        spatial_token_generator: report.adapter.generator == E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW,
+        adapter_chunk_size: report.adapter.adapter_chunk_size,
         generator_hidden_dims: report.adapter.flow_hidden,
         token_attention_heads: report.condition.token_attention_heads,
         generator_sample_steps: report.adapter.flow_sample_steps,
@@ -1304,6 +1354,12 @@ fn run_burn_e2e_rollout_training(
             train_config,
         )?,
     };
+    output.generator.condition_encoder = Some(report.condition.encoder.to_string());
+    output.generator.condition_token_count = Some(report.condition.token_count);
+    output.generator.condition_embed_dims = Some(report.condition.embed_dims);
+    output.generator.condition_token_grid_width = Some(report.condition.patch_grid_width);
+    output.generator.condition_token_grid_height = Some(report.condition.patch_grid_height);
+    output.generator.adapter_chunk_size = Some(report.adapter.adapter_chunk_size);
     let burn_training_ms = train_started.elapsed().as_secs_f64() * 1000.0;
     if let Some(metrics) = output.metrics.as_object_mut() {
         metrics.insert(
@@ -1329,7 +1385,22 @@ fn run_burn_e2e_rollout_training(
         )),
     );
     crate::import::save_manifest(&report.output.shared_base_output, &manifest)?;
-    write_pretty_json(Path::new(&report.output.hyper_output), &output.generator)?;
+    let hyper_sha256 = save_e2e_hyper_npa_2d(&report.output.hyper_output, &output.generator)?;
+    let hyper_artifact_bytes = std::fs::metadata(&report.output.hyper_output)?.len();
+    if let Some(metrics) = output.metrics.as_object_mut() {
+        metrics.insert(
+            "hyper_artifact_format".to_string(),
+            serde_json::json!("bpk"),
+        );
+        metrics.insert(
+            "hyper_artifact_bytes".to_string(),
+            serde_json::json!(hyper_artifact_bytes),
+        );
+        metrics.insert(
+            "hyper_artifact_sha256".to_string(),
+            serde_json::json!(hyper_sha256),
+        );
+    }
     Ok(output)
 }
 
@@ -1395,7 +1466,78 @@ fn check_condition_preload_memory_budget(
 fn load_burn_e2e_rollout_examples(
     report: &E2eRolloutReport,
 ) -> Result<Vec<BurnE2eRolloutExample>, Box<dyn std::error::Error>> {
-    load_burn_e2e_rollout_examples_with_online_dino(report)
+    match parse_rollout_condition_encoder(Some(report.condition.encoder))? {
+        RolloutConditionEncoder::DinoVitsFullTokens
+        | RolloutConditionEncoder::DinoVitsTokenGrid => {
+            load_burn_e2e_rollout_examples_with_online_dino(report)
+        }
+        RolloutConditionEncoder::SampleIdOneHot => {
+            load_burn_e2e_rollout_examples_with_sample_ids(report)
+        }
+    }
+}
+
+#[cfg(feature = "dino")]
+fn load_burn_e2e_rollout_examples_with_sample_ids(
+    report: &E2eRolloutReport,
+) -> Result<Vec<BurnE2eRolloutExample>, Box<dyn std::error::Error>> {
+    if report.condition.token_count != 1 {
+        return Err(std::io::Error::other(format!(
+            "sample-id-onehot condition expects token_count=1, got {}",
+            report.condition.token_count
+        ))
+        .into());
+    }
+    let embed_dims = report.condition.embed_dims;
+    if embed_dims < report.selected_sources.len() {
+        return Err(std::io::Error::other(format!(
+            "sample-id-onehot embed_dims={} is smaller than selected_sources={}",
+            embed_dims,
+            report.selected_sources.len()
+        ))
+        .into());
+    }
+    let mut examples = Vec::with_capacity(report.selected_sources.len());
+    eprintln!(
+        "building {} sample-id one-hot HyperNPA conditions (embed_dims={embed_dims})",
+        report.selected_sources.len()
+    );
+    for (idx, entry) in report.selected_sources.iter().enumerate() {
+        let mut condition_features = vec![0.0_f32; embed_dims];
+        condition_features[idx] = 1.0;
+        let target = load_target_image_2d_adaptive(
+            Path::new(&entry.condition_path),
+            report.target.threshold,
+            report.target.points,
+            report.target.image_size,
+        )?;
+        examples.push(BurnE2eRolloutExample {
+            slug: entry.slug.clone(),
+            target,
+            condition_features,
+            token_count: report.condition.token_count,
+            embed_dims,
+            particle_count: entry.particles.unwrap_or(report.rollout.particles),
+            update_prob: entry.update_prob.unwrap_or(report.rollout.update_prob),
+            seed_scale: entry.seed_scale.unwrap_or_else(|| {
+                report
+                    .rollout
+                    .seed_scale
+                    .unwrap_or_else(|| NpaConfig::seed_scale_for_preset(report.preset))
+            }),
+        });
+    }
+    Ok(examples)
+}
+
+#[cfg(not(feature = "dino"))]
+fn load_burn_e2e_rollout_examples_with_sample_ids(
+    _report: &E2eRolloutReport,
+) -> Result<Vec<BurnE2eRolloutExample>, Box<dyn std::error::Error>> {
+    Err(std::io::Error::other(
+        "sample-id-onehot HyperNPA e2e training currently requires the dino feature for image loading",
+    )
+    .into())
 }
 
 #[cfg(feature = "dino")]
@@ -1427,11 +1569,12 @@ fn load_burn_e2e_rollout_examples_with_online_dino(
             .iter()
             .map(|entry| load_condition_image_2d(Path::new(&entry.condition_path)))
             .collect::<Result<Vec<_>, _>>()?;
-        let features = encoder.encode_batch(
+        let features = encoder.encode_batch_with_options(
             &conditions,
             ConditionEncoder2d::DinoVitsTokenGrid,
             report.condition.patch_grid_width,
             report.condition.patch_grid_height,
+            report.condition.feature_normalization != "per-token-preserved",
         )?;
         if features.len() != entries.len() {
             return Err(
@@ -1677,8 +1820,31 @@ fn parse_rollout_condition_encoder(
         "dino-vits-token-grid" | "dino-token-grid" | "dino-tokens" => {
             Ok(RolloutConditionEncoder::DinoVitsTokenGrid)
         }
+        "sample-id-onehot" | "sample-id" | "onehot-sample-id" | "learned-id" => {
+            Ok(RolloutConditionEncoder::SampleIdOneHot)
+        }
         other => Err(std::io::Error::other(format!(
-            "unknown condition.encoder {other:?}; expected dino-vits-full-tokens or dino-vits-token-grid"
+            "unknown condition.encoder {other:?}; expected dino-vits-full-tokens, dino-vits-token-grid, or sample-id-onehot"
+        ))
+        .into()),
+    }
+}
+
+fn parse_e2e_adapter_generator(
+    value: Option<&str>,
+) -> Result<&'static str, Box<dyn std::error::Error>> {
+    let normalized = value.unwrap_or("token-aware-rectified-flow").trim();
+    match normalized {
+        "token-aware-rectified-flow"
+        | "token-attention-pool"
+        | "pooled-token-flow"
+        | E2E_HYPER_ARCH_POOLED_FLOW => Ok(E2E_HYPER_ARCH_POOLED_FLOW),
+        "spatial-token-flow"
+        | "spatial-token-rectified-flow"
+        | "spatial-token-chunked-flow"
+        | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW => Ok(E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW),
+        other => Err(std::io::Error::other(format!(
+            "unknown adapter.generator {other:?}; expected token-aware-rectified-flow or spatial-token-flow"
         ))
         .into()),
     }
@@ -2140,6 +2306,12 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn has_json_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+}
+
 fn bytes_to_gib(bytes: usize) -> f64 {
     bytes as f64 / 1024.0 / 1024.0 / 1024.0
 }
@@ -2147,6 +2319,38 @@ fn bytes_to_gib(bytes: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hyper::e2e::{E2eHyperNpa2d, E2eHyperNpa2dWeights};
+
+    fn tiny_test_hyper() -> E2eHyperNpa2d {
+        E2eHyperNpa2d {
+            version: 1,
+            architecture: "token_attention_pool_rectified_flow_generated_lora".to_string(),
+            backend: Some("test".to_string()),
+            condition_encoder: Some("sample-id-onehot".to_string()),
+            condition_token_count: Some(1),
+            condition_embed_dims: Some(1),
+            condition_token_grid_width: Some(1),
+            condition_token_grid_height: Some(1),
+            hidden_dims: 1,
+            token_attention_heads: 1,
+            output_dims: 1,
+            sample_steps: 1,
+            output_scale: 1.0,
+            adapter_rank: None,
+            adapter_alpha: None,
+            adapter_chunk_size: None,
+            weights: E2eHyperNpa2dWeights {
+                token_w: vec![0.0],
+                token_b: vec![0.0],
+                token_gate_w: vec![0.0],
+                token_gate_b: vec![0.0],
+                state_w: vec![0.0],
+                time_w: vec![0.0],
+                output_w: vec![0.0],
+                output_b: vec![0.0],
+            },
+        }
+    }
 
     #[test]
     fn dino_full_token_dims_match_vits_518() {
@@ -2343,6 +2547,7 @@ mod tests {
             use_particle_pool = true
             pool_slots_per_example = 2
             inject_seed_interval = 64
+            brush_size = 0.1
             pre_rollout_steps = 3
             target2d_loss_backend = "tiled-adjoint"
             perception_backend = "tiled-adjoint"
@@ -2375,9 +2580,126 @@ mod tests {
         assert!(report.training.use_particle_pool);
         assert_eq!(report.training.pool_slots_per_example, 2);
         assert_eq!(report.training.inject_seed_interval, 64);
+        assert_eq!(report.training.brush_size, 0.1);
         assert_eq!(report.training.pre_rollout_steps, 3);
         assert_eq!(report.training.target2d_loss_backend, "tiled-adjoint");
         assert_eq!(report.training.perception_backend, "tiled-adjoint");
+    }
+
+    #[test]
+    fn rollout_report_supports_sample_id_onehot_conditioning() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = [
+                "assets/catalog_thumbnails/lizard.png",
+                "assets/catalog_thumbnails/turtle.png",
+            ]
+
+            [condition]
+            encoder = "sample-id-onehot"
+            online = false
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 0
+            example_batch_size = 2
+
+            [gpu]
+            backend = "burn-wgpu"
+            "#,
+        )
+        .unwrap();
+
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert_eq!(report.condition.encoder, "sample-id-onehot");
+        assert!(!report.condition.online_dino);
+        assert_eq!(report.condition.token_count, 1);
+        assert_eq!(report.condition.embed_dims, 2);
+        assert_eq!(report.condition.flattened_feature_dims, 2);
+        assert_eq!(report.source.train_examples, 2);
+        assert!(report.output.hyper_output.ends_with("hyper_2d.bpk"));
+    }
+
+    #[test]
+    fn rollout_report_supports_spatial_token_flow_generator() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/catalog_thumbnails/lizard.png"]
+
+            [condition]
+            encoder = "dino-vits-full-tokens"
+            dino_model = "assets/models/dino_vits14.mpk"
+            dino_image_size = 518
+            dino_patch_size = 14
+            online = true
+
+            [adapter]
+            generator = "spatial-token-flow"
+            adapter_chunk_size = 32
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 0
+
+            [gpu]
+            backend = "burn-wgpu"
+            "#,
+        )
+        .unwrap();
+
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert_eq!(report.adapter.generator, E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW);
+        assert_eq!(report.adapter.adapter_chunk_size, 32);
+        assert_eq!(report.condition.token_count, 1370);
+        assert_eq!(
+            report.condition.feature_normalization,
+            "per-token-preserved"
+        );
+    }
+
+    #[test]
+    fn rollout_report_rejects_json_hyper_weight_output() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/catalog_thumbnails/lizard.png"]
+
+            [output]
+            hyper_output = "artifacts/sandbox/hyper_2d.json"
+
+            [condition]
+            encoder = "sample-id-onehot"
+            online = false
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 0
+
+            [gpu]
+            backend = "burn-wgpu"
+            "#,
+        )
+        .unwrap();
+
+        let err = match build_e2e_rollout_report(Path::new("inline.toml"), &config) {
+            Ok(_) => panic!("json hyper output should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("artifacts are binary"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2536,7 +2858,7 @@ mod tests {
             }),
             history: Vec::new(),
             final_loss: Some(1.0),
-            generator: serde_json::json!({}),
+            generator: tiny_test_hyper(),
             quality_validation: None,
         };
 
