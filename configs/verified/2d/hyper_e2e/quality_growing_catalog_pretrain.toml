@@ -1,0 +1,120 @@
+preset = "growing-2d"
+
+[source]
+target_image_dirs = [".cache/selforg_npa/targets/growing"]
+image_extensions = ["png"]
+
+[output]
+output_dir = "artifacts/hyper2d_verified_growing_catalog_pretrain"
+
+[condition]
+encoder = "dino-vits-full-tokens"
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 224
+dino_patch_size = 14
+dino_batch_size = 10
+online = true
+token_attention_heads = 4
+alpha_channel = true
+
+[model]
+shared_base = "models/catalog/growing/lizard.bpk"
+oracle_model_dir = "models/catalog/growing"
+shared_base_trainable = false
+shared_base_train_start_step = 0
+hidden_dims = 128
+output_activation = "identity"
+
+[training]
+backend = "gpu"
+objective = "target2d-rollout-image-loss"
+steps = 2000
+report_interval = 100
+example_batch_size = 10
+credit_assignment = "full-bptt"
+max_full_bptt_particle_steps = 10240
+use_particle_pool = false
+rollouts_per_example = 1
+adapter_teacher_weight = 1000.0
+task_loss_weight = 0.0
+target2d_loss_backend = "tiled-adjoint"
+perception_backend = "auto"
+max_dense_train_particles = 32
+system_memory_budget_gb = 12.0
+gpu_memory_budget_gb = 16.0
+seed = 42
+
+[gpu]
+backend = "burn-wgpu"
+max_dense_chunk_floats = 524288
+max_splat_chunk_floats = 524288
+condition_device_cache_max_bytes = 1073741824
+
+[adapter]
+rank = 82
+alpha = 82.0
+generator = "token-attention-pool"
+adapter_chunk_size = 64
+flow_hidden = 128
+flow_sample_steps = 1
+flow_source_scale = 2.0
+init_scale = 1.0e-3
+
+[rollout]
+particles = 32
+step_min = 1
+steps = 1
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "uniform-circle"
+
+[target]
+points = 4096
+threshold = 0.05
+loss_image_size = 32
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+learning_rate = 1.0e-3
+base_learning_rate = 0.0
+generator_learning_rate = 1.0e-3
+weight_decay = 0.0
+base_weight_decay = 0.0
+generator_weight_decay = 0.0
+grad_clip_norm = 10.0
+base_grad_clip_norm = 0.0
+generator_grad_clip_norm = 10.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1.0e-8
+per_parameter_grad_normalization = false
+base_per_parameter_grad_normalization = false
+generator_per_parameter_grad_normalization = false
+lr_schedule = "constant"
+min_lr_scale = 1.0
+
+[validation]
+initial_examples = 0
+examples = 2
+interval = 1000
+particles = 1024
+steps = 256
+horizons = [96, 256]
+selection_horizon_min_steps = 256
+update_prob = 0.5
+seed = 42
+psnr_threshold_db = 26.0
+
+[gates]
+min_median_particle_steps_per_sec = 1.0
+max_quality_validation_evaluations = 6
+max_quality_validation_elapsed_fraction = 0.8
+require_validation_interval_at_least_report_interval = true
+fail_on_violation = false

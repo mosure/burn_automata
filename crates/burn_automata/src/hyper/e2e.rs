@@ -11,14 +11,82 @@ const E2E_HYPER_BPK_CONTAINER_VERSION: u32 = 1;
 const E2E_HYPER_MODEL_KIND: &str = "e2e-hypernpa-2d";
 pub const E2E_HYPER_ARCH_POOLED_FLOW: &str = "token_attention_pool_rectified_flow_generated_lora";
 pub const E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW: &str = "spatial_token_chunked_rectified_flow_lora_v1";
+pub const E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2: &str = "module_token_cross_attention_lora_v2";
+pub const E2E_HYPER_ARCH_MODULE_TOKEN_DECODER: &str =
+    "module_token_multihead_cross_attention_lora_v3";
+pub const E2E_HYPER_ARCH_SAMPLE_ID_TABLE: &str = "sample_id_adapter_table_v1";
+pub const E2E_HYPER_ATTENTION_TANH_EXP: &str = "tanh-exp";
+pub const E2E_HYPER_ATTENTION_SOFTMAX: &str = "softmax";
+pub const E2E_HYPER_ADAPTER_FACTORIZED: &str = "factorized";
+pub const E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK: &str = "canonical-full-rank";
 pub const DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum E2eHyperGeneratorKind {
+    PooledFlow,
+    SpatialTokenFlow,
+    ModuleTokenDecoderV2,
+    ModuleTokenDecoder,
+    SampleIdTable,
+}
+
+impl E2eHyperGeneratorKind {
+    pub const fn artifact_architecture(self) -> &'static str {
+        match self {
+            Self::PooledFlow => E2E_HYPER_ARCH_POOLED_FLOW,
+            Self::SpatialTokenFlow => E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW,
+            Self::ModuleTokenDecoderV2 => E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2,
+            Self::ModuleTokenDecoder => E2E_HYPER_ARCH_MODULE_TOKEN_DECODER,
+            Self::SampleIdTable => E2E_HYPER_ARCH_SAMPLE_ID_TABLE,
+        }
+    }
+
+    pub const fn is_module_token_decoder(self) -> bool {
+        matches!(self, Self::ModuleTokenDecoderV2 | Self::ModuleTokenDecoder)
+    }
+
+    pub const fn is_chunked(self) -> bool {
+        matches!(
+            self,
+            Self::SpatialTokenFlow | Self::ModuleTokenDecoderV2 | Self::ModuleTokenDecoder
+        )
+    }
+
+    pub fn parse(value: Option<&str>) -> AutomataResult<Self> {
+        let normalized = value.unwrap_or("module-token-decoder").trim();
+        match normalized {
+            "token-aware-rectified-flow"
+            | "token-attention-pool"
+            | "pooled-token-flow"
+            | E2E_HYPER_ARCH_POOLED_FLOW => Ok(Self::PooledFlow),
+            "spatial-token-flow"
+            | "spatial-token-rectified-flow"
+            | "spatial-token-chunked-flow"
+            | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW => Ok(Self::SpatialTokenFlow),
+            "module-token-decoder-v2" | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2 => {
+                Ok(Self::ModuleTokenDecoderV2)
+            }
+            "module-token-decoder"
+            | "module-token-cross-attention"
+            | "structured-token-decoder"
+            | "module-token-decoder-v3"
+            | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER => Ok(Self::ModuleTokenDecoder),
+            "sample-id-table" | "adapter-table" | E2E_HYPER_ARCH_SAMPLE_ID_TABLE => {
+                Ok(Self::SampleIdTable)
+            }
+            other => Err(AutomataError::InvalidArgument(format!(
+                "unknown HyperNPA adapter generator {other:?}; expected module-token-decoder, module-token-decoder-v2, sample-id-table, spatial-token-flow, or pooled-token-flow"
+            ))),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Target2dLossBackend {
-    #[default]
     Dense,
     TiledAdjoint,
+    #[default]
     Auto,
 }
 
@@ -48,9 +116,9 @@ impl Target2dLossBackend {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PerceptionRolloutBackend {
-    #[default]
     Dense,
     TiledAdjoint,
+    #[default]
     Auto,
 }
 
@@ -94,8 +162,30 @@ pub struct E2eHyperNpa2d {
     pub condition_token_grid_width: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition_token_grid_height: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_image_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_alpha_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_rgb_channels: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_rgb_channel_scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_alpha_channel: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_alpha_channel_scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_l2_normalize_features: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_resize_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_application: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_base_sha256: Option<String>,
     pub hidden_dims: usize,
     pub token_attention_heads: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_normalization: Option<String>,
     pub output_dims: usize,
     pub sample_steps: usize,
     pub output_scale: f32,
@@ -104,7 +194,17 @@ pub struct E2eHyperNpa2d {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_alpha: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_parameterization: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_chunk_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_condition_control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_condition_control_scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_condition_control_sigma: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_condition_state_control: Option<bool>,
     pub weights: E2eHyperNpa2dWeights,
 }
 
@@ -118,6 +218,12 @@ pub struct E2eHyperNpa2dWeights {
     pub time_w: Vec<f32>,
     pub output_w: Vec<f32>,
     pub output_b: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condition_control_w: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condition_control_b: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condition_control_state_w: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,19 +238,50 @@ struct E2eHyperNpa2dBinaryMetadata {
     condition_embed_dims: Option<usize>,
     condition_token_grid_width: Option<usize>,
     condition_token_grid_height: Option<usize>,
+    #[serde(default)]
+    condition_image_size: Option<usize>,
+    #[serde(default)]
+    condition_alpha_mode: Option<String>,
+    #[serde(default)]
+    condition_rgb_channels: Option<bool>,
+    #[serde(default)]
+    condition_rgb_channel_scale: Option<f32>,
+    #[serde(default)]
+    condition_alpha_channel: Option<bool>,
+    condition_alpha_channel_scale: Option<f32>,
+    #[serde(default)]
+    condition_l2_normalize_features: Option<bool>,
+    #[serde(default)]
+    condition_resize_mode: Option<String>,
+    #[serde(default)]
+    condition_application: Option<String>,
+    #[serde(default)]
+    shared_base_sha256: Option<String>,
     hidden_dims: usize,
     token_attention_heads: usize,
+    #[serde(default)]
+    attention_normalization: Option<String>,
     output_dims: usize,
     sample_steps: usize,
     output_scale: f32,
     adapter_rank: Option<usize>,
     adapter_alpha: Option<f32>,
     #[serde(default)]
+    adapter_parameterization: Option<String>,
+    #[serde(default)]
     adapter_chunk_size: Option<usize>,
+    #[serde(default)]
+    spatial_condition_control: Option<bool>,
+    #[serde(default)]
+    spatial_condition_control_scale: Option<f32>,
+    #[serde(default)]
+    spatial_condition_control_sigma: Option<f32>,
+    #[serde(default)]
+    spatial_condition_state_control: Option<bool>,
     weight_lens: E2eHyperNpa2dWeightLens,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 struct E2eHyperNpa2dWeightLens {
     token_w: usize,
     token_b: usize,
@@ -154,6 +291,12 @@ struct E2eHyperNpa2dWeightLens {
     time_w: usize,
     output_w: usize,
     output_b: usize,
+    #[serde(default)]
+    condition_control_w: usize,
+    #[serde(default)]
+    condition_control_b: usize,
+    #[serde(default)]
+    condition_control_state_w: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -311,7 +454,11 @@ impl E2eHyperNpa2d {
         }
         if !matches!(
             self.architecture.as_str(),
-            E2E_HYPER_ARCH_POOLED_FLOW | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
+            E2E_HYPER_ARCH_POOLED_FLOW
+                | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
+                | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2
+                | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER
+                | E2E_HYPER_ARCH_SAMPLE_ID_TABLE
         ) {
             return Err(AutomataError::InvalidFormat(format!(
                 "unsupported E2E HyperNPA architecture {:?}",
@@ -328,6 +475,24 @@ impl E2eHyperNpa2d {
             return Err(AutomataError::InvalidModel(format!(
                 "E2E HyperNPA token_attention_heads={} sample_steps={} must be positive",
                 self.token_attention_heads, self.sample_steps
+            )));
+        }
+        if self.is_multihead_module_token_decoder()
+            && !self.hidden_dims.is_multiple_of(self.token_attention_heads)
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "multi-head module-token HyperNPA hidden_dims={} must be divisible by token_attention_heads={}",
+                self.hidden_dims, self.token_attention_heads
+            )));
+        }
+        if let Some(normalization) = self.attention_normalization.as_deref()
+            && !matches!(
+                normalization,
+                E2E_HYPER_ATTENTION_TANH_EXP | E2E_HYPER_ATTENTION_SOFTMAX
+            )
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "unsupported E2E HyperNPA attention_normalization {normalization:?}"
             )));
         }
         if !self.output_scale.is_finite() {
@@ -349,6 +514,24 @@ impl E2eHyperNpa2d {
                 "E2E HyperNPA adapter_alpha must be positive and finite, got {alpha}"
             )));
         }
+        if let Some(parameterization) = self.adapter_parameterization.as_deref()
+            && !matches!(
+                parameterization,
+                E2E_HYPER_ADAPTER_FACTORIZED | E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+            )
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "unsupported E2E HyperNPA adapter_parameterization {parameterization:?}"
+            )));
+        }
+        if self.uses_canonical_full_rank_lora()
+            && (self.adapter_rank.is_none() || self.adapter_alpha.is_none())
+        {
+            return Err(AutomataError::InvalidModel(
+                "canonical-full-rank HyperNPA artifacts require adapter_rank and adapter_alpha"
+                    .to_string(),
+            ));
+        }
         if let Some(chunk_size) = self.adapter_chunk_size
             && chunk_size == 0
         {
@@ -356,11 +539,143 @@ impl E2eHyperNpa2d {
                 "E2E HyperNPA adapter_chunk_size must be positive".to_string(),
             ));
         }
+        let has_condition_control = self.has_spatial_condition_control();
+        if has_condition_control {
+            if !self
+                .weights
+                .condition_control_w
+                .len()
+                .is_multiple_of(self.hidden_dims)
+            {
+                return Err(AutomataError::InvalidModel(format!(
+                    "E2E HyperNPA condition_control_w len {} is not divisible by hidden_dims {}",
+                    self.weights.condition_control_w.len(),
+                    self.hidden_dims
+                )));
+            }
+            let update_dims = self.weights.condition_control_w.len() / self.hidden_dims;
+            if update_dims == 0 || self.weights.condition_control_b.len() != update_dims {
+                return Err(AutomataError::InvalidModel(format!(
+                    "E2E HyperNPA condition control update dims {update_dims} do not match condition_control_b len {}",
+                    self.weights.condition_control_b.len()
+                )));
+            }
+            if let Some(scale) = self.spatial_condition_control_scale
+                && !scale.is_finite()
+            {
+                return Err(AutomataError::InvalidModel(
+                    "E2E HyperNPA spatial_condition_control_scale must be finite".to_string(),
+                ));
+            }
+            if let Some(sigma) = self.spatial_condition_control_sigma
+                && (!sigma.is_finite() || sigma <= 0.0)
+            {
+                return Err(AutomataError::InvalidModel(
+                    "E2E HyperNPA spatial_condition_control_sigma must be positive and finite"
+                        .to_string(),
+                ));
+            }
+            if self.spatial_condition_state_control.unwrap_or(false) {
+                if self.weights.condition_control_state_w.is_empty()
+                    || !self
+                        .weights
+                        .condition_control_state_w
+                        .len()
+                        .is_multiple_of(self.hidden_dims)
+                {
+                    return Err(AutomataError::InvalidModel(format!(
+                        "E2E HyperNPA condition_control_state_w len {} must be a non-zero multiple of hidden_dims {}",
+                        self.weights.condition_control_state_w.len(),
+                        self.hidden_dims,
+                    )));
+                }
+            } else if !self.weights.condition_control_state_w.is_empty() {
+                return Err(AutomataError::InvalidModel(
+                    "E2E HyperNPA condition_control_state_w requires spatial_condition_state_control=true"
+                        .to_string(),
+                ));
+            }
+        } else if !self.weights.condition_control_w.is_empty()
+            || !self.weights.condition_control_b.is_empty()
+            || !self.weights.condition_control_state_w.is_empty()
+        {
+            return Err(AutomataError::InvalidModel(
+                "E2E HyperNPA condition control weights require spatial_condition_control=true"
+                    .to_string(),
+            ));
+        }
         if let Some(token_count) = self.condition_token_count
             && token_count == 0
         {
             return Err(AutomataError::InvalidModel(
                 "E2E HyperNPA condition_token_count must be positive".to_string(),
+            ));
+        }
+        if self.is_sample_id_table()
+            && (self.condition_token_count != Some(1)
+                || self.condition_encoder.as_deref() != Some("sample-id-onehot"))
+        {
+            return Err(AutomataError::InvalidModel(
+                "sample-ID adapter table requires condition_encoder=sample-id-onehot and one condition token"
+                    .to_string(),
+            ));
+        }
+        if let Some(image_size) = self.condition_image_size
+            && image_size == 0
+        {
+            return Err(AutomataError::InvalidModel(
+                "E2E HyperNPA condition_image_size must be positive".to_string(),
+            ));
+        }
+        if let Some(alpha_mode) = &self.condition_alpha_mode
+            && alpha_mode != "composite-white"
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "unsupported E2E HyperNPA condition_alpha_mode {alpha_mode:?}"
+            )));
+        }
+        if let Some(scale) = self.condition_alpha_channel_scale
+            && (!scale.is_finite() || scale <= 0.0)
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "E2E HyperNPA condition_alpha_channel_scale must be positive and finite, got {scale}"
+            )));
+        }
+        if let Some(scale) = self.condition_rgb_channel_scale
+            && (!scale.is_finite() || scale <= 0.0)
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "E2E HyperNPA condition_rgb_channel_scale must be positive and finite, got {scale}"
+            )));
+        }
+        if let Some(resize_mode) = &self.condition_resize_mode
+            && resize_mode != "stretch"
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "unsupported E2E HyperNPA condition_resize_mode {resize_mode:?}"
+            )));
+        }
+        if let Some(application) = &self.condition_application
+            && !matches!(application.as_str(), "static-adapter" | "per-step-field")
+        {
+            return Err(AutomataError::InvalidModel(format!(
+                "unsupported E2E HyperNPA condition_application {application:?}"
+            )));
+        }
+        if self.condition_application.as_deref() == Some("static-adapter")
+            && self.has_spatial_condition_control()
+        {
+            return Err(AutomataError::InvalidModel(
+                "static-adapter HyperNPA cannot contain per-step condition-field weights"
+                    .to_string(),
+            ));
+        }
+        if let Some(digest) = &self.shared_base_sha256
+            && (digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(AutomataError::InvalidModel(
+                "E2E HyperNPA shared_base_sha256 must be a 64-character hexadecimal digest"
+                    .to_string(),
             ));
         }
         if let Some(embed_dims) = self.condition_embed_dims
@@ -372,9 +687,25 @@ impl E2eHyperNpa2d {
             )));
         }
         let embed_dims = self.embed_dims()?;
-        let expected = if self.is_spatial_token_flow() {
+        let expected = if self.is_sample_id_table() {
+            [
+                ("token_b", 1, self.weights.token_b.len()),
+                ("token_gate_w", 1, self.weights.token_gate_w.len()),
+                ("token_gate_b", 1, self.weights.token_gate_b.len()),
+                ("state_w", 1, self.weights.state_w.len()),
+                ("time_w", 1, self.weights.time_w.len()),
+                ("output_w", 1, self.weights.output_w.len()),
+                ("output_b", 1, self.weights.output_b.len()),
+            ]
+        } else if self.is_chunked_token_generator() {
             let chunk_size = self.adapter_chunk_size_value();
-            let chunks = self.spatial_chunk_count();
+            if !self.weights.output_b.len().is_multiple_of(chunk_size) {
+                return Err(AutomataError::InvalidModel(format!(
+                    "E2E HyperNPA output_b len {} is not divisible by chunk size {chunk_size}",
+                    self.weights.output_b.len()
+                )));
+            }
+            let chunks = self.weights.output_b.len() / chunk_size;
             [
                 ("token_b", self.hidden_dims, self.weights.token_b.len()),
                 (
@@ -439,14 +770,19 @@ impl E2eHyperNpa2d {
     }
 
     pub fn embed_dims(&self) -> AutomataResult<usize> {
-        if self.hidden_dims == 0 || !self.weights.token_w.len().is_multiple_of(self.hidden_dims) {
+        let projection_rows = if self.is_sample_id_table() {
+            self.output_dims
+        } else {
+            self.hidden_dims
+        };
+        if projection_rows == 0 || !self.weights.token_w.len().is_multiple_of(projection_rows) {
             return Err(AutomataError::InvalidModel(format!(
-                "E2E HyperNPA token_w len {} is not divisible by hidden_dims {}",
+                "E2E HyperNPA token_w len {} is not divisible by projection rows {}",
                 self.weights.token_w.len(),
-                self.hidden_dims
+                projection_rows
             )));
         }
-        let embed_dims = self.weights.token_w.len() / self.hidden_dims;
+        let embed_dims = self.weights.token_w.len() / projection_rows;
         if embed_dims == 0 {
             return Err(AutomataError::InvalidModel(
                 "E2E HyperNPA embed_dims must be positive".to_string(),
@@ -510,6 +846,64 @@ impl E2eHyperNpa2d {
         self.architecture == E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
     }
 
+    pub fn is_module_token_decoder(&self) -> bool {
+        matches!(
+            self.architecture.as_str(),
+            E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2 | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER
+        )
+    }
+
+    pub fn is_multihead_module_token_decoder(&self) -> bool {
+        self.architecture == E2E_HYPER_ARCH_MODULE_TOKEN_DECODER
+    }
+
+    pub fn is_sample_id_table(&self) -> bool {
+        self.architecture == E2E_HYPER_ARCH_SAMPLE_ID_TABLE
+    }
+
+    pub fn is_chunked_token_generator(&self) -> bool {
+        self.is_spatial_token_flow() || self.is_module_token_decoder()
+    }
+
+    pub fn uses_softmax_attention(&self) -> bool {
+        self.attention_normalization.as_deref() == Some(E2E_HYPER_ATTENTION_SOFTMAX)
+    }
+
+    pub fn uses_canonical_full_rank_lora(&self) -> bool {
+        self.adapter_parameterization.as_deref() == Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK)
+    }
+
+    fn normalized_attention_weights(&self, logits: &[f32]) -> AutomataResult<Vec<f32>> {
+        if logits.is_empty() || !logits.iter().all(|value| value.is_finite()) {
+            return Err(AutomataError::InvalidModel(
+                "E2E HyperNPA attention logits must be non-empty and finite".to_string(),
+            ));
+        }
+        let mut weights = Vec::with_capacity(logits.len());
+        if self.uses_softmax_attention() {
+            let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            weights.extend(logits.iter().map(|logit| (*logit - max_logit).exp()));
+        } else {
+            weights.extend(logits.iter().map(|logit| logit.tanh().exp()));
+        }
+        let denominator = weights.iter().sum::<f32>();
+        if !denominator.is_finite() || denominator <= 0.0 {
+            return Err(AutomataError::InvalidModel(
+                "E2E HyperNPA attention normalization is not finite".to_string(),
+            ));
+        }
+        for weight in &mut weights {
+            *weight /= denominator;
+        }
+        Ok(weights)
+    }
+
+    pub fn has_spatial_condition_control(&self) -> bool {
+        self.spatial_condition_control.unwrap_or(false)
+            || !self.weights.condition_control_w.is_empty()
+            || !self.weights.condition_control_b.is_empty()
+    }
+
     pub fn adapter_chunk_size_value(&self) -> usize {
         self.adapter_chunk_size
             .unwrap_or(DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE)
@@ -526,7 +920,15 @@ impl E2eHyperNpa2d {
         condition_tokens: &[f32],
     ) -> AutomataResult<NpaLowRankAdapter> {
         self.validate()?;
-        if self.is_spatial_token_flow() {
+        if self.has_spatial_condition_control() {
+            return Err(AutomataError::InvalidModel(
+                "E2E HyperNPA artifact uses spatial condition control and cannot be collapsed to a static LoRA adapter".to_string(),
+            ));
+        }
+        if self.is_sample_id_table() {
+            return self.predict_sample_id_table_adapter(config, condition_tokens);
+        }
+        if self.is_chunked_token_generator() {
             return self.predict_spatial_token_adapter(config, condition_tokens);
         }
         let embed_dims = self.embed_dims()?;
@@ -568,31 +970,22 @@ impl E2eHyperNpa2d {
             }
         }
 
-        let mut attention_weights = vec![0.0_f32; token_count * heads];
-        let mut attention_denominator = vec![0.0_f32; heads];
-        for token in 0..token_count {
-            let token_base = token * hidden_dims;
-            for head in 0..heads {
+        let mut attended = vec![0.0_f32; hidden_dims];
+        for head in 0..heads {
+            let mut logits = Vec::with_capacity(token_count);
+            for token in 0..token_count {
+                let token_base = token * hidden_dims;
                 let mut logit = self.weights.token_gate_b[head];
                 let weight_base = head * hidden_dims;
                 for hidden in 0..hidden_dims {
                     logit += token_hidden[token_base + hidden]
                         * self.weights.token_gate_w[weight_base + hidden];
                 }
-                let value = logit.tanh().exp();
-                attention_weights[token * heads + head] = value;
-                attention_denominator[head] += value;
+                logits.push(logit);
             }
-        }
-        for denominator in &mut attention_denominator {
-            *denominator = (*denominator).max(f32::MIN_POSITIVE);
-        }
-
-        let mut attended = vec![0.0_f32; hidden_dims];
-        for token in 0..token_count {
-            let token_base = token * hidden_dims;
-            for head in 0..heads {
-                let weight = attention_weights[token * heads + head] / attention_denominator[head];
+            let weights = self.normalized_attention_weights(&logits)?;
+            for (token, weight) in weights.into_iter().enumerate() {
+                let token_base = token * hidden_dims;
                 for hidden in 0..hidden_dims {
                     attended[hidden] += token_hidden[token_base + hidden] * weight;
                 }
@@ -637,8 +1030,36 @@ impl E2eHyperNpa2d {
             *value = value.tanh() * self.output_scale;
         }
 
-        let spec = self.adapter_spec(config)?;
-        NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, vector)
+        self.adapter_from_generated_vector(config, vector)
+    }
+
+    fn predict_sample_id_table_adapter(
+        &self,
+        config: &NpaConfig,
+        condition_tokens: &[f32],
+    ) -> AutomataResult<NpaLowRankAdapter> {
+        let embed_dims = self.embed_dims()?;
+        if condition_tokens.len() != embed_dims {
+            return Err(AutomataError::InvalidArgument(format!(
+                "sample-ID adapter table requires one condition token with {embed_dims} values, got {}",
+                condition_tokens.len()
+            )));
+        }
+        if !condition_tokens.iter().all(|value| value.is_finite()) {
+            return Err(AutomataError::InvalidArgument(
+                "sample-ID adapter table condition contains non-finite values".to_string(),
+            ));
+        }
+        let mut vector = vec![0.0; self.output_dims];
+        for (output, value) in vector.iter_mut().enumerate() {
+            let row = &self.weights.token_w[output * embed_dims..(output + 1) * embed_dims];
+            *value = row
+                .iter()
+                .zip(condition_tokens.iter())
+                .map(|(weight, condition)| weight * condition)
+                .sum();
+        }
+        self.adapter_from_generated_vector(config, vector)
     }
 
     fn predict_spatial_token_adapter(
@@ -662,7 +1083,24 @@ impl E2eHyperNpa2d {
         let token_count = condition_tokens.len() / embed_dims;
         let hidden_dims = self.hidden_dims;
         let chunk_size = self.adapter_chunk_size_value();
-        let chunks = self.spatial_chunk_count();
+        let module_layout = if self.is_module_token_decoder() {
+            let spec = self.adapter_spec(config)?;
+            Some(crate::hyper::adapter_layout::AdapterParameterLayout2d::new(
+                config, spec.rank, chunk_size,
+            )?)
+        } else {
+            None
+        };
+        let chunks = module_layout
+            .as_ref()
+            .map_or_else(|| self.spatial_chunk_count(), |layout| layout.chunk_count);
+        if self.weights.output_b.len() != chunks * chunk_size {
+            return Err(AutomataError::InvalidModel(format!(
+                "E2E HyperNPA chunk output count {} does not match expected {}",
+                self.weights.output_b.len(),
+                chunks * chunk_size
+            )));
+        }
         let mut token_hidden = vec![0.0_f32; token_count * hidden_dims];
         for token in 0..token_count {
             let condition = &condition_tokens[token * embed_dims..(token + 1) * embed_dims];
@@ -678,7 +1116,13 @@ impl E2eHyperNpa2d {
 
         let mut chunk_state = vec![0.0_f32; chunks * chunk_size];
         let inv_steps = 1.0 / self.sample_steps as f32;
-        let attention_scale = 1.0 / (hidden_dims as f32).sqrt().max(1.0);
+        let attention_heads = if self.is_multihead_module_token_decoder() {
+            self.token_attention_heads
+        } else {
+            1
+        };
+        let head_dims = hidden_dims / attention_heads;
+        let attention_scale = 1.0 / (head_dims as f32).sqrt().max(1.0);
         for step in 0..self.sample_steps {
             let t = if self.sample_steps <= 1 {
                 0.0
@@ -700,25 +1144,26 @@ impl E2eHyperNpa2d {
                     *hidden_value = value.max(0.0);
                 }
 
-                let mut attention_denominator = f32::MIN_POSITIVE;
-                let mut attention_weights = vec![0.0_f32; token_count];
-                for (token, attention_weight) in attention_weights.iter_mut().enumerate() {
-                    let token_base = token * hidden_dims;
-                    let mut logit = 0.0_f32;
-                    for hidden in 0..hidden_dims {
-                        logit += query_hidden[hidden] * token_hidden[token_base + hidden];
-                    }
-                    let weight = (logit * attention_scale).tanh().exp();
-                    *attention_weight = weight;
-                    attention_denominator += weight;
-                }
-
                 let mut attended = vec![0.0_f32; hidden_dims];
-                for (token, attention_weight) in attention_weights.iter().enumerate() {
-                    let weight = *attention_weight / attention_denominator;
-                    let token_base = token * hidden_dims;
-                    for hidden in 0..hidden_dims {
-                        attended[hidden] += token_hidden[token_base + hidden] * weight;
+                for head in 0..attention_heads {
+                    let hidden_start = head * head_dims;
+                    let hidden_end = hidden_start + head_dims;
+                    let mut attention_logits = vec![0.0_f32; token_count];
+                    for (token, attention_logit) in attention_logits.iter_mut().enumerate() {
+                        let token_base = token * hidden_dims;
+                        let mut logit = 0.0_f32;
+                        for hidden in hidden_start..hidden_end {
+                            logit += query_hidden[hidden] * token_hidden[token_base + hidden];
+                        }
+                        *attention_logit = logit * attention_scale;
+                    }
+                    let attention_weights = self.normalized_attention_weights(&attention_logits)?;
+                    for (token, attention_weight) in attention_weights.iter().enumerate() {
+                        let token_base = token * hidden_dims;
+                        for hidden in hidden_start..hidden_end {
+                            attended[hidden] +=
+                                token_hidden[token_base + hidden] * *attention_weight;
+                        }
                     }
                 }
                 for hidden in 0..hidden_dims {
@@ -737,10 +1182,29 @@ impl E2eHyperNpa2d {
             }
             chunk_state = next_state;
         }
-        chunk_state.truncate(self.output_dims);
+        let chunk_state = if let Some(layout) = module_layout {
+            layout.unpack(&chunk_state)?
+        } else {
+            chunk_state.truncate(self.output_dims);
+            chunk_state
+        };
 
+        self.adapter_from_generated_vector(config, chunk_state)
+    }
+
+    fn adapter_from_generated_vector(
+        &self,
+        config: &NpaConfig,
+        mut vector: Vec<f32>,
+    ) -> AutomataResult<NpaLowRankAdapter> {
         let spec = self.adapter_spec(config)?;
-        NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, chunk_state)
+        if self.uses_canonical_full_rank_lora() {
+            vector = crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
+                config, spec.rank, spec.alpha,
+            )?
+            .apply(&vector)?;
+        }
+        NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, vector)
     }
 }
 
@@ -755,6 +1219,12 @@ impl E2eHyperNpa2dWeights {
             ("time_w", self.time_w.as_slice()),
             ("output_w", self.output_w.as_slice()),
             ("output_b", self.output_b.as_slice()),
+            ("condition_control_w", self.condition_control_w.as_slice()),
+            ("condition_control_b", self.condition_control_b.as_slice()),
+            (
+                "condition_control_state_w",
+                self.condition_control_state_w.as_slice(),
+            ),
         ];
         for (name, values) in checks {
             if !values.iter().all(|value| value.is_finite()) {
@@ -776,6 +1246,9 @@ impl E2eHyperNpa2dWeights {
             time_w: self.time_w.len(),
             output_w: self.output_w.len(),
             output_b: self.output_b.len(),
+            condition_control_w: self.condition_control_w.len(),
+            condition_control_b: self.condition_control_b.len(),
+            condition_control_state_w: self.condition_control_state_w.len(),
         }
     }
 
@@ -787,7 +1260,10 @@ impl E2eHyperNpa2dWeights {
             + self.state_w.len()
             + self.time_w.len()
             + self.output_w.len()
-            + self.output_b.len();
+            + self.output_b.len()
+            + self.condition_control_w.len()
+            + self.condition_control_b.len()
+            + self.condition_control_state_w.len();
         let mut bytes = Vec::with_capacity(value_count * 4);
         for values in [
             self.token_w.as_slice(),
@@ -798,6 +1274,9 @@ impl E2eHyperNpa2dWeights {
             self.time_w.as_slice(),
             self.output_w.as_slice(),
             self.output_b.as_slice(),
+            self.condition_control_w.as_slice(),
+            self.condition_control_b.as_slice(),
+            self.condition_control_state_w.as_slice(),
         ] {
             for value in values {
                 bytes.extend_from_slice(&value.to_le_bytes());
@@ -820,14 +1299,30 @@ impl E2eHyperNpa2dBinaryMetadata {
             condition_embed_dims: hyper.condition_embed_dims,
             condition_token_grid_width: hyper.condition_token_grid_width,
             condition_token_grid_height: hyper.condition_token_grid_height,
+            condition_image_size: hyper.condition_image_size,
+            condition_alpha_mode: hyper.condition_alpha_mode.clone(),
+            condition_rgb_channels: hyper.condition_rgb_channels,
+            condition_rgb_channel_scale: hyper.condition_rgb_channel_scale,
+            condition_alpha_channel: hyper.condition_alpha_channel,
+            condition_alpha_channel_scale: hyper.condition_alpha_channel_scale,
+            condition_l2_normalize_features: hyper.condition_l2_normalize_features,
+            condition_resize_mode: hyper.condition_resize_mode.clone(),
+            condition_application: hyper.condition_application.clone(),
+            shared_base_sha256: hyper.shared_base_sha256.clone(),
             hidden_dims: hyper.hidden_dims,
             token_attention_heads: hyper.token_attention_heads,
+            attention_normalization: hyper.attention_normalization.clone(),
             output_dims: hyper.output_dims,
             sample_steps: hyper.sample_steps,
             output_scale: hyper.output_scale,
             adapter_rank: hyper.adapter_rank,
             adapter_alpha: hyper.adapter_alpha,
+            adapter_parameterization: hyper.adapter_parameterization.clone(),
             adapter_chunk_size: hyper.adapter_chunk_size,
+            spatial_condition_control: hyper.spatial_condition_control,
+            spatial_condition_control_scale: hyper.spatial_condition_control_scale,
+            spatial_condition_control_sigma: hyper.spatial_condition_control_sigma,
+            spatial_condition_state_control: hyper.spatial_condition_state_control,
             weight_lens: hyper.weights.lens(),
         }
     }
@@ -855,6 +1350,14 @@ impl E2eHyperNpa2dBinaryMetadata {
             time_w: cursor.take("time_w", self.weight_lens.time_w)?,
             output_w: cursor.take("output_w", self.weight_lens.output_w)?,
             output_b: cursor.take("output_b", self.weight_lens.output_b)?,
+            condition_control_w: cursor
+                .take("condition_control_w", self.weight_lens.condition_control_w)?,
+            condition_control_b: cursor
+                .take("condition_control_b", self.weight_lens.condition_control_b)?,
+            condition_control_state_w: cursor.take(
+                "condition_control_state_w",
+                self.weight_lens.condition_control_state_w,
+            )?,
         };
         cursor.finish()?;
         let hyper = E2eHyperNpa2d {
@@ -866,14 +1369,30 @@ impl E2eHyperNpa2dBinaryMetadata {
             condition_embed_dims: self.condition_embed_dims,
             condition_token_grid_width: self.condition_token_grid_width,
             condition_token_grid_height: self.condition_token_grid_height,
+            condition_image_size: self.condition_image_size,
+            condition_alpha_mode: self.condition_alpha_mode,
+            condition_rgb_channels: self.condition_rgb_channels,
+            condition_rgb_channel_scale: self.condition_rgb_channel_scale,
+            condition_alpha_channel: self.condition_alpha_channel,
+            condition_alpha_channel_scale: self.condition_alpha_channel_scale,
+            condition_l2_normalize_features: self.condition_l2_normalize_features,
+            condition_resize_mode: self.condition_resize_mode,
+            condition_application: self.condition_application,
+            shared_base_sha256: self.shared_base_sha256,
             hidden_dims: self.hidden_dims,
             token_attention_heads: self.token_attention_heads,
+            attention_normalization: self.attention_normalization,
             output_dims: self.output_dims,
             sample_steps: self.sample_steps,
             output_scale: self.output_scale,
             adapter_rank: self.adapter_rank,
             adapter_alpha: self.adapter_alpha,
+            adapter_parameterization: self.adapter_parameterization,
             adapter_chunk_size: self.adapter_chunk_size,
+            spatial_condition_control: self.spatial_condition_control,
+            spatial_condition_control_scale: self.spatial_condition_control_scale,
+            spatial_condition_control_sigma: self.spatial_condition_control_sigma,
+            spatial_condition_state_control: self.spatial_condition_state_control,
             weights,
         };
         hyper.validate()?;
@@ -942,8 +1461,6 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::{AutomataPreset, NpaConfig};
 
@@ -960,14 +1477,30 @@ mod tests {
             condition_embed_dims: None,
             condition_token_grid_width: None,
             condition_token_grid_height: None,
+            condition_image_size: None,
+            condition_alpha_mode: None,
+            condition_rgb_channels: None,
+            condition_rgb_channel_scale: None,
+            condition_alpha_channel: None,
+            condition_alpha_channel_scale: None,
+            condition_l2_normalize_features: None,
+            condition_resize_mode: None,
+            condition_application: None,
+            shared_base_sha256: None,
             hidden_dims,
             token_attention_heads: 1,
+            attention_normalization: None,
             output_dims,
             sample_steps: 1,
             output_scale: 1.0,
             adapter_rank: None,
             adapter_alpha: None,
+            adapter_parameterization: None,
             adapter_chunk_size: None,
+            spatial_condition_control: None,
+            spatial_condition_control_scale: None,
+            spatial_condition_control_sigma: None,
+            spatial_condition_state_control: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.01; hidden_dims * embed_dims],
                 token_b: vec![0.0; hidden_dims],
@@ -977,6 +1510,9 @@ mod tests {
                 time_w: vec![0.0; hidden_dims],
                 output_w: vec![0.001; output_dims * hidden_dims],
                 output_b: vec![0.0; output_dims],
+                condition_control_w: Vec::new(),
+                condition_control_b: Vec::new(),
+                condition_control_state_w: Vec::new(),
             },
         }
     }
@@ -998,14 +1534,30 @@ mod tests {
             condition_embed_dims: Some(embed_dims),
             condition_token_grid_width: Some(1),
             condition_token_grid_height: Some(1),
+            condition_image_size: Some(224),
+            condition_alpha_mode: Some("composite-white".to_string()),
+            condition_rgb_channels: Some(false),
+            condition_rgb_channel_scale: Some(1.0),
+            condition_alpha_channel: Some(false),
+            condition_alpha_channel_scale: Some(1.0),
+            condition_l2_normalize_features: Some(false),
+            condition_resize_mode: Some("stretch".to_string()),
+            condition_application: Some("static-adapter".to_string()),
+            shared_base_sha256: None,
             hidden_dims,
             token_attention_heads: 1,
+            attention_normalization: None,
             output_dims,
             sample_steps: 1,
             output_scale: 1.0,
             adapter_rank: Some(rank),
             adapter_alpha: Some(rank as f32),
+            adapter_parameterization: None,
             adapter_chunk_size: Some(chunk_size),
+            spatial_condition_control: None,
+            spatial_condition_control_scale: None,
+            spatial_condition_control_sigma: None,
+            spatial_condition_state_control: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.0; hidden_dims * embed_dims],
                 token_b: vec![0.0; hidden_dims],
@@ -1015,6 +1567,132 @@ mod tests {
                 time_w: vec![0.0; hidden_dims],
                 output_w: vec![0.0; chunk_size * hidden_dims],
                 output_b,
+                condition_control_w: Vec::new(),
+                condition_control_b: Vec::new(),
+                condition_control_state_w: Vec::new(),
+            },
+        }
+    }
+
+    fn tiny_module_hyper(config: &NpaConfig, rank: usize, chunk_size: usize) -> E2eHyperNpa2d {
+        let hidden_dims = 2;
+        let embed_dims = 3;
+        let layout =
+            crate::hyper::adapter_layout::AdapterParameterLayout2d::new(config, rank, chunk_size)
+                .unwrap();
+        let output_dims = layout.parameter_count;
+        let output_b = layout
+            .pack(
+                &NpaLowRankAdapter::seeded_zero_delta(config, rank, rank as f32, 19)
+                    .to_parameter_vector(),
+            )
+            .unwrap();
+        E2eHyperNpa2d {
+            version: 1,
+            architecture: E2E_HYPER_ARCH_MODULE_TOKEN_DECODER.to_string(),
+            backend: None,
+            condition_encoder: Some("dino-vits-full-tokens".to_string()),
+            condition_token_count: Some(2),
+            condition_embed_dims: Some(embed_dims),
+            condition_token_grid_width: Some(1),
+            condition_token_grid_height: Some(1),
+            condition_image_size: Some(224),
+            condition_alpha_mode: Some("composite-white".to_string()),
+            condition_rgb_channels: Some(false),
+            condition_rgb_channel_scale: Some(1.0),
+            condition_alpha_channel: Some(false),
+            condition_alpha_channel_scale: Some(1.0),
+            condition_l2_normalize_features: Some(false),
+            condition_resize_mode: Some("stretch".to_string()),
+            condition_application: Some("static-adapter".to_string()),
+            shared_base_sha256: None,
+            hidden_dims,
+            token_attention_heads: 1,
+            attention_normalization: None,
+            output_dims,
+            sample_steps: 1,
+            output_scale: 1.0,
+            adapter_rank: Some(rank),
+            adapter_alpha: Some(rank as f32),
+            adapter_parameterization: None,
+            adapter_chunk_size: Some(chunk_size),
+            spatial_condition_control: None,
+            spatial_condition_control_scale: None,
+            spatial_condition_control_sigma: None,
+            spatial_condition_state_control: None,
+            weights: E2eHyperNpa2dWeights {
+                token_w: vec![0.0; hidden_dims * embed_dims],
+                token_b: vec![0.0; hidden_dims],
+                token_gate_w: vec![0.0; layout.chunk_count * hidden_dims],
+                token_gate_b: layout.structured_query_initialization(hidden_dims, 0.01),
+                state_w: vec![0.0; hidden_dims * chunk_size],
+                time_w: vec![0.0; hidden_dims],
+                output_w: vec![0.0; chunk_size * hidden_dims],
+                output_b,
+                condition_control_w: Vec::new(),
+                condition_control_b: Vec::new(),
+                condition_control_state_w: Vec::new(),
+            },
+        }
+    }
+
+    fn tiny_sample_id_table(config: &NpaConfig, rank: usize) -> E2eHyperNpa2d {
+        let embed_dims = 2;
+        let output_dims = NpaLowRankAdapter::parameter_count_for_config(config, rank);
+        let first = NpaLowRankAdapter::seeded_zero_delta(config, rank, rank as f32, 31)
+            .to_parameter_vector();
+        let second = NpaLowRankAdapter::seeded_zero_delta(config, rank, rank as f32, 47)
+            .to_parameter_vector();
+        let mut token_w = vec![0.0; output_dims * embed_dims];
+        for output in 0..output_dims {
+            token_w[output * embed_dims] = first[output];
+            token_w[output * embed_dims + 1] = second[output];
+        }
+        E2eHyperNpa2d {
+            version: 1,
+            architecture: E2E_HYPER_ARCH_SAMPLE_ID_TABLE.to_string(),
+            backend: None,
+            condition_encoder: Some("sample-id-onehot".to_string()),
+            condition_token_count: Some(1),
+            condition_embed_dims: Some(embed_dims),
+            condition_token_grid_width: Some(1),
+            condition_token_grid_height: Some(1),
+            condition_image_size: None,
+            condition_alpha_mode: None,
+            condition_rgb_channels: Some(false),
+            condition_rgb_channel_scale: Some(1.0),
+            condition_alpha_channel: Some(false),
+            condition_alpha_channel_scale: Some(1.0),
+            condition_l2_normalize_features: Some(false),
+            condition_resize_mode: None,
+            condition_application: Some("static-adapter".to_string()),
+            shared_base_sha256: None,
+            hidden_dims: 1,
+            token_attention_heads: 1,
+            attention_normalization: None,
+            output_dims,
+            sample_steps: 1,
+            output_scale: 1.0,
+            adapter_rank: Some(rank),
+            adapter_alpha: Some(rank as f32),
+            adapter_parameterization: None,
+            adapter_chunk_size: None,
+            spatial_condition_control: None,
+            spatial_condition_control_scale: None,
+            spatial_condition_control_sigma: None,
+            spatial_condition_state_control: None,
+            weights: E2eHyperNpa2dWeights {
+                token_w,
+                token_b: vec![0.0],
+                token_gate_w: vec![0.0],
+                token_gate_b: vec![0.0],
+                state_w: vec![0.0],
+                time_w: vec![0.0],
+                output_w: vec![0.0],
+                output_b: vec![0.0],
+                condition_control_w: Vec::new(),
+                condition_control_b: Vec::new(),
+                condition_control_state_w: Vec::new(),
             },
         }
     }
@@ -1086,6 +1764,206 @@ mod tests {
     }
 
     #[test]
+    fn e2e_hyper_spatial_condition_control_round_trips_and_rejects_static_adapter() {
+        let (config, _) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+        let mut hyper = tiny_spatial_hyper(&config, 4, 7);
+        hyper.condition_application = Some("per-step-field".to_string());
+        hyper.spatial_condition_control = Some(true);
+        hyper.spatial_condition_control_scale = Some(0.1);
+        hyper.spatial_condition_control_sigma = Some(0.25);
+        hyper.spatial_condition_state_control = Some(true);
+        hyper.weights.condition_control_w = vec![0.01; config.update_dims() * hyper.hidden_dims];
+        hyper.weights.condition_control_b = vec![0.0; config.update_dims()];
+        hyper.weights.condition_control_state_w = vec![0.0; config.state_dims * hyper.hidden_dims];
+        hyper.validate().unwrap();
+
+        let encoded = encode_e2e_hyper_npa_2d(&hyper).unwrap();
+        let decoded = decode_e2e_hyper_npa_2d(&encoded).unwrap();
+        assert!(decoded.has_spatial_condition_control());
+        assert_eq!(decoded.spatial_condition_control_scale, Some(0.1));
+        assert_eq!(decoded.spatial_condition_state_control, Some(true));
+        assert_eq!(
+            decoded.weights.condition_control_w,
+            hyper.weights.condition_control_w
+        );
+        assert_eq!(
+            decoded.weights.condition_control_state_w,
+            hyper.weights.condition_control_state_w
+        );
+
+        let condition = vec![0.0_f32; 2 * hyper.embed_dims().unwrap()];
+        let err = decoded.predict_adapter(&config, &condition).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot be collapsed to a static LoRA adapter")
+        );
+    }
+
+    #[test]
+    fn e2e_module_token_artifact_round_trips_and_preserves_parameter_layout() {
+        let config = NpaConfig::growing_2d();
+        let mut hyper = tiny_module_hyper(&config, 16, 64);
+        hyper.attention_normalization = Some(E2E_HYPER_ATTENTION_SOFTMAX.to_string());
+        hyper.validate().unwrap();
+        let condition = vec![0.0; 2 * hyper.embed_dims().unwrap()];
+        let adapter = hyper.predict_adapter(&config, &condition).unwrap();
+        assert_eq!(adapter.parameter_count(), hyper.output_dims);
+
+        let encoded = encode_e2e_hyper_npa_2d(&hyper).unwrap();
+        let decoded = decode_e2e_hyper_npa_2d(&encoded).unwrap();
+        assert!(decoded.is_module_token_decoder());
+        assert!(decoded.uses_softmax_attention());
+        assert_eq!(
+            decoded
+                .predict_adapter(&config, &condition)
+                .unwrap()
+                .to_parameter_vector(),
+            adapter.to_parameter_vector()
+        );
+    }
+
+    #[test]
+    fn module_token_decoder_defaults_to_generalized_v3_but_keeps_v2_explicit() {
+        assert_eq!(
+            E2eHyperGeneratorKind::parse(None).unwrap(),
+            E2eHyperGeneratorKind::ModuleTokenDecoder
+        );
+        assert_eq!(
+            E2eHyperGeneratorKind::parse(Some("module-token-decoder")).unwrap(),
+            E2eHyperGeneratorKind::ModuleTokenDecoder
+        );
+        assert_eq!(
+            E2eHyperGeneratorKind::parse(Some("module-token-decoder-v2")).unwrap(),
+            E2eHyperGeneratorKind::ModuleTokenDecoderV2
+        );
+    }
+
+    #[test]
+    fn module_token_v3_requires_even_attention_head_partitions() {
+        let config = NpaConfig::growing_2d();
+        let mut hyper = tiny_module_hyper(&config, 4, 16);
+        hyper.hidden_dims = 2;
+        hyper.token_attention_heads = 3;
+        let error = hyper.validate().unwrap_err();
+        assert!(error.to_string().contains("must be divisible"));
+
+        hyper.architecture = E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2.to_string();
+        hyper.validate().unwrap();
+    }
+
+    #[test]
+    fn e2e_canonical_full_rank_lora_round_trips_with_fixed_identity_factors() {
+        let config = NpaConfig::growing_2d();
+        let rank = config.perception_dims().max(config.update_dims());
+        let mut hyper = tiny_module_hyper(&config, rank, 64);
+        hyper.adapter_parameterization = Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK.to_string());
+        hyper.weights.output_b.fill(0.0);
+        let condition = vec![0.0; 2 * hyper.embed_dims().unwrap()];
+        let adapter = hyper.predict_adapter(&config, &condition).unwrap();
+
+        assert_eq!(adapter.w1_down[0], 1.0);
+        assert_eq!(
+            adapter.w1_down[(config.perception_dims() - 1) * config.perception_dims()
+                + config.perception_dims()
+                - 1],
+            1.0
+        );
+        assert_eq!(adapter.w2_up[0], 1.0);
+        assert!(adapter.w1_up.iter().all(|value| *value == 0.0));
+        assert!(adapter.w2_down.iter().all(|value| *value == 0.0));
+
+        let encoded = encode_e2e_hyper_npa_2d(&hyper).unwrap();
+        let decoded = decode_e2e_hyper_npa_2d(&encoded).unwrap();
+        assert!(decoded.uses_canonical_full_rank_lora());
+        assert_eq!(
+            decoded
+                .predict_adapter(&config, &condition)
+                .unwrap()
+                .to_parameter_vector(),
+            adapter.to_parameter_vector()
+        );
+    }
+
+    #[test]
+    fn e2e_softmax_attention_can_select_a_spatial_token_sharply() {
+        let config = NpaConfig::growing_2d();
+        let mut hyper = tiny_module_hyper(&config, 4, 16);
+        let logits = [8.0, 0.0, 0.0, 0.0];
+        let legacy = hyper.normalized_attention_weights(&logits).unwrap();
+        hyper.attention_normalization = Some(E2E_HYPER_ATTENTION_SOFTMAX.to_string());
+        let softmax = hyper.normalized_attention_weights(&logits).unwrap();
+
+        assert!(legacy[0] < 0.72);
+        assert!(softmax[0] > 0.99);
+        assert!((softmax.iter().sum::<f32>() - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn e2e_module_token_adapter_changes_with_spatial_tokens() {
+        let config = NpaConfig::growing_2d();
+        let mut hyper = tiny_module_hyper(&config, 4, 16);
+        let embed_dims = hyper.embed_dims().unwrap();
+        hyper.weights.token_w = vec![0.0; hyper.hidden_dims * embed_dims];
+        hyper.weights.token_w[0] = 1.0;
+        hyper.weights.token_w[embed_dims + 1] = 1.0;
+        hyper.weights.output_w.fill(0.1);
+
+        let zero_condition = vec![0.0; 2 * embed_dims];
+        let mut spatial_condition = zero_condition.clone();
+        spatial_condition[embed_dims] = 1.0;
+        let zero_adapter = hyper
+            .predict_adapter(&config, &zero_condition)
+            .unwrap()
+            .to_parameter_vector();
+        let spatial_adapter = hyper
+            .predict_adapter(&config, &spatial_condition)
+            .unwrap()
+            .to_parameter_vector();
+        let max_delta = zero_adapter
+            .iter()
+            .zip(spatial_adapter.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max);
+
+        assert!(
+            max_delta > 1.0e-4,
+            "module-token adapter ignored token content"
+        );
+    }
+
+    #[test]
+    fn e2e_sample_id_table_selects_independent_adapters() {
+        let config = NpaConfig::growing_2d();
+        let hyper = tiny_sample_id_table(&config, 4);
+        hyper.validate().unwrap();
+        let first = hyper
+            .predict_adapter(&config, &[1.0, 0.0])
+            .unwrap()
+            .to_parameter_vector();
+        let second = hyper
+            .predict_adapter(&config, &[0.0, 1.0])
+            .unwrap()
+            .to_parameter_vector();
+        assert!(
+            first
+                .iter()
+                .zip(second.iter())
+                .any(|(left, right)| (left - right).abs() > 1.0e-4)
+        );
+
+        let encoded = encode_e2e_hyper_npa_2d(&hyper).unwrap();
+        let decoded = decode_e2e_hyper_npa_2d(&encoded).unwrap();
+        assert!(decoded.is_sample_id_table());
+        assert_eq!(
+            decoded
+                .predict_adapter(&config, &[1.0, 0.0])
+                .unwrap()
+                .to_parameter_vector(),
+            first
+        );
+    }
+
+    #[test]
     fn e2e_hyper_save_refuses_json_weight_artifact() {
         let (config, _) = NpaConfig::for_preset(AutomataPreset::Growing2d);
         let hyper = tiny_hyper(&config, 2);
@@ -1096,33 +1974,5 @@ mod tests {
         let err = save_e2e_hyper_npa_2d(&path, &hyper).unwrap_err();
         assert!(err.to_string().contains("refusing to write"));
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn local_default_e2e_artifacts_load_when_present() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let artifact_dir = workspace.join(
-            "artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda",
-        );
-        let base_path = artifact_dir.join("shared_base.bpk");
-        let hyper_bpk_path = artifact_dir.join("hyper_2d.bpk");
-        let hyper_json_path = artifact_dir.join("hyper_2d.json");
-        let hyper_path = if hyper_bpk_path.exists() {
-            hyper_bpk_path
-        } else {
-            hyper_json_path
-        };
-        if !base_path.exists() || !hyper_path.exists() {
-            return;
-        }
-
-        let base = crate::import::load_manifest(base_path)
-            .unwrap()
-            .into_model();
-        let hyper = load_e2e_hyper_npa_2d(hyper_path).unwrap();
-        let spec = hyper.adapter_spec(&base.config).unwrap();
-        assert_eq!(hyper.embed_dims().unwrap(), crate::DINO_VITS_EMBED_DIMS);
-        assert_eq!(spec.rank, 16);
-        assert_eq!(spec.alpha, 16.0);
     }
 }

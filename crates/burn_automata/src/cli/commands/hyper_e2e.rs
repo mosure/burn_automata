@@ -319,6 +319,7 @@ pub(crate) fn run_train_hyper_2d_e2e(command: Command) -> Result<(), Box<dyn std
         particle_count: target_particles,
         step_min: target_step_min,
         step_max: target_step_max,
+        tbptt_chunk_steps: 0,
         inject_seed_interval: target_inject_seed_interval,
         update_prob: target_update_prob,
         seed: target_seed,

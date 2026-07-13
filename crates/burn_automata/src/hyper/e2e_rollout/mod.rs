@@ -1,42 +1,46 @@
-#[cfg(feature = "dino")]
-use crate::ConditionEncoder2d;
 use crate::hyper::condition::DINO_VITS_EMBED_DIMS;
-#[cfg(feature = "dino")]
-use crate::hyper::dino::DinoVitsConditionEncoder;
 use crate::hyper::e2e::{
-    DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE, E2E_HYPER_ARCH_POOLED_FLOW,
-    E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW, PerceptionRolloutBackend, Target2dLossBackend,
-    save_e2e_hyper_npa_2d,
+    DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE, E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
+    E2E_HYPER_ADAPTER_FACTORIZED, E2E_HYPER_ARCH_MODULE_TOKEN_DECODER,
+    E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2, E2E_HYPER_ARCH_SAMPLE_ID_TABLE,
+    E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW, E2E_HYPER_ATTENTION_SOFTMAX, E2E_HYPER_ATTENTION_TANH_EXP,
+    E2eHyperGeneratorKind, PerceptionRolloutBackend, Target2dLossBackend, save_e2e_hyper_npa_2d,
 };
 use crate::hyper::e2e_training::dense::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 use crate::hyper::e2e_training::{
-    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, E2eLrSchedule,
-    E2eTbpttLossMode,
+    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig,
+    E2eAdapterTeacherObjective, E2eCreditAssignment, E2eLrSchedule, E2eTbpttLossMode,
+    MAX_VALIDATION_HORIZONS,
 };
 use crate::{
-    AdamWConfig, AutomataPreset, BpkModelManifest, NpaConfig, NpaModel, NpaWeights, ParticleSeed,
-    Target2dLossConfig,
+    AdamWConfig, AutomataPreset, BpkModelManifest, NpaConfig, NpaLowRankAdapter, NpaModel,
+    NpaWeights, ParticleSeed, Target2dLossConfig,
 };
 #[cfg(feature = "dino")]
-use crate::{ConditionImage2d, TargetImage2d, TargetImage2dExtractConfig};
+use crate::{TargetImage2d, TargetImage2dExtractConfig};
+#[cfg(feature = "dino")]
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 
-mod sources;
+pub(crate) mod sources;
 
 use sources::{
     Hyper2dScratchSource, OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources,
 };
 
 const DEFAULT_OUTPUT_DIR: &str = "artifacts/hyper2d_e2e_rollout";
-const DEFAULT_DINO_IMAGE_SIZE: usize = 518;
+const DEFAULT_DINO_IMAGE_SIZE: usize = 224;
 const DEFAULT_DINO_PATCH_SIZE: usize = 14;
 const DEFAULT_MAX_DENSE_TRAIN_PARTICLES: usize = 512;
 const DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024;
+const DEFAULT_DEVICE_TARGET_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const UPSTREAM_GROWING_TRAJECTORIES_PER_TARGET: usize = 10_000 * 3 * 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 enum Hyper2dE2eSplit {
@@ -58,14 +62,14 @@ impl Hyper2dE2eSplit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-enum E2eCatalogGroup {
+pub(crate) enum E2eCatalogGroup {
     Growing,
     Texture,
     All,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-enum OmniSvgDataset {
+pub(crate) enum OmniSvgDataset {
     MmsvgIllustration,
     MmsvgIcon,
 }
@@ -165,6 +169,10 @@ struct RolloutOutputConfig {
     shared_base_output: Option<PathBuf>,
     hyper_output: Option<PathBuf>,
     checkpoint_dir: Option<PathBuf>,
+    checkpoint_interval_steps: Option<usize>,
+    checkpoint_interval_seconds: Option<usize>,
+    resume_checkpoint: Option<PathBuf>,
+    auto_resume: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -180,17 +188,25 @@ struct RolloutConditionConfig {
     token_grid_width: Option<usize>,
     token_grid_height: Option<usize>,
     token_attention_heads: Option<usize>,
+    rgb_channels: Option<bool>,
+    rgb_channel_scale: Option<f32>,
+    alpha_channel: Option<bool>,
+    alpha_channel_scale: Option<f32>,
+    sample_id_vocab_size: Option<usize>,
+    sample_ids: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RolloutModelConfig {
     shared_base: Option<PathBuf>,
+    hyper: Option<PathBuf>,
     shared_base_trainable: Option<bool>,
     shared_base_train_start_step: Option<usize>,
     shared_base_init: Option<String>,
     hidden_dims: Option<usize>,
     output_activation: Option<String>,
+    oracle_model_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -206,9 +222,21 @@ struct RolloutTrainingConfig {
     tbptt_loss_mode: Option<String>,
     tbptt_intermediate_loss_weight: Option<f32>,
     tbptt_final_loss_weight: Option<f32>,
+    credit_assignment: Option<String>,
+    max_full_bptt_particle_steps: Option<usize>,
     use_particle_pool: Option<bool>,
     pool_slots_per_example: Option<usize>,
+    rollouts_per_example: Option<usize>,
+    target_mean_trajectories_per_example: Option<u64>,
+    sampling_uniform_fraction: Option<f32>,
+    sampling_priority_ema_beta: Option<f32>,
+    sampling_priority_min_weight: Option<f32>,
+    sampling_priority_max_weight: Option<f32>,
+    sampling_priority_update_interval: Option<usize>,
+    pool_capacity: Option<usize>,
     inject_seed_interval: Option<usize>,
+    seed_replacements_per_interval: Option<usize>,
+    seed_trajectory_interval: Option<usize>,
     brush_size: Option<f32>,
     pre_rollout_steps: Option<usize>,
     target2d_loss_backend: Option<String>,
@@ -217,6 +245,10 @@ struct RolloutTrainingConfig {
     system_memory_budget_gb: Option<f32>,
     gpu_memory_budget_gb: Option<f32>,
     seed: Option<u64>,
+    adapter_teacher_weight: Option<f32>,
+    adapter_teacher_objective: Option<String>,
+    adapter_teacher_probe_rollout_steps: Option<usize>,
+    task_loss_weight: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -226,6 +258,7 @@ struct RolloutGpuConfig {
     max_dense_chunk_floats: Option<usize>,
     max_splat_chunk_floats: Option<usize>,
     condition_device_cache_max_bytes: Option<usize>,
+    target_device_cache_max_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -238,7 +271,15 @@ struct RolloutAdapterConfig {
     flow_sample_steps: Option<usize>,
     flow_source_scale: Option<f32>,
     init_scale: Option<f32>,
+    condition_init_scale: Option<f32>,
+    output_init_scale: Option<f32>,
     adapter_chunk_size: Option<usize>,
+    attention_normalization: Option<String>,
+    parameterization: Option<String>,
+    spatial_condition_control: Option<bool>,
+    spatial_condition_control_scale: Option<f32>,
+    spatial_condition_control_sigma: Option<f32>,
+    spatial_condition_state_control: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -264,6 +305,7 @@ struct RolloutTargetConfig {
     splat_loss_weight: Option<f32>,
     color_loss_weight: Option<f32>,
     density_loss_weight: Option<f32>,
+    composited_rgb_loss_weight: Option<f32>,
     displacement_regularizer_weight: Option<f32>,
     overflow_regularizer_weight: Option<f32>,
     bound_regularizer_weight: Option<f32>,
@@ -285,6 +327,8 @@ struct RolloutOptimizerConfig {
     adam_beta2: Option<f32>,
     adam_epsilon: Option<f32>,
     per_parameter_grad_normalization: Option<bool>,
+    base_per_parameter_grad_normalization: Option<bool>,
+    generator_per_parameter_grad_normalization: Option<bool>,
     lr_schedule: Option<String>,
     min_lr_scale: Option<f32>,
 }
@@ -292,14 +336,22 @@ struct RolloutOptimizerConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RolloutValidationConfig {
+    initial_examples: Option<usize>,
     examples: Option<usize>,
     interval: Option<usize>,
     particles: Option<usize>,
     steps: Option<usize>,
+    horizons: Option<Vec<usize>>,
+    selection_horizon_min_steps: Option<usize>,
     update_prob: Option<f32>,
     seed: Option<u64>,
     oracle_report: Option<PathBuf>,
     psnr_threshold_db: Option<f32>,
+    final_examples: Option<usize>,
+    final_particles: Option<usize>,
+    final_steps: Option<usize>,
+    final_horizons: Option<Vec<usize>>,
+    final_selection_horizon_min_steps: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -378,6 +430,10 @@ struct E2eRolloutOutputReport {
     shared_base_output: String,
     hyper_output: String,
     checkpoint_dir: String,
+    checkpoint_interval_steps: usize,
+    checkpoint_interval_seconds: usize,
+    resume_checkpoint: Option<String>,
+    auto_resume: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -402,18 +458,27 @@ struct E2eRolloutConditionReport {
     projected_condition_load_peak_gib_f32: f64,
     device_cache_max_bytes: usize,
     device_cache_max_gib: f64,
+    device_cache_plan: &'static str,
     token_attention_heads: usize,
     feature_normalization: &'static str,
+    rgb_channels: bool,
+    rgb_channel_scale: f32,
+    alpha_channel: bool,
+    alpha_channel_scale: f32,
+    sample_id_vocab_size: Option<usize>,
+    sample_ids: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct E2eRolloutModelReport {
     shared_base: Option<String>,
+    hyper: Option<String>,
     shared_base_trainable: bool,
     shared_base_train_start_step: usize,
     shared_base_init: String,
     hidden_dims: usize,
     output_activation: String,
+    oracle_model_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -429,9 +494,25 @@ struct E2eRolloutTrainingReport {
     tbptt_loss_mode: String,
     tbptt_intermediate_loss_weight: f32,
     tbptt_final_loss_weight: f32,
+    credit_assignment: String,
+    max_full_bptt_particle_steps: usize,
     use_particle_pool: bool,
     pool_slots_per_example: usize,
+    rollouts_per_example: usize,
+    target_mean_trajectories_per_example: Option<u64>,
+    sampling_uniform_fraction: f32,
+    sampling_priority_ema_beta: f32,
+    sampling_priority_min_weight: f32,
+    sampling_priority_max_weight: f32,
+    sampling_priority_update_interval: usize,
+    planned_rollout_trajectories: usize,
+    planned_mean_trajectories_per_train_example: f64,
+    upstream_growing_reference_trajectories_per_target: usize,
+    upstream_growing_trajectory_exposure_fraction: f64,
+    pool_capacity: usize,
     inject_seed_interval: usize,
+    seed_replacements_per_interval: usize,
+    seed_trajectory_interval: usize,
     brush_size: f32,
     pre_rollout_steps: usize,
     target2d_loss_backend: String,
@@ -442,8 +523,12 @@ struct E2eRolloutTrainingReport {
     max_dense_chunk_floats: usize,
     max_splat_chunk_floats: usize,
     condition_device_cache_max_bytes: usize,
+    target_device_cache_max_bytes: usize,
     seed: u64,
-    adapter_vector_mse_primary_objective: bool,
+    adapter_teacher_weight: f32,
+    adapter_teacher_objective: String,
+    adapter_teacher_probe_rollout_steps: usize,
+    task_loss_weight: f32,
     trains_shared_base_from_step_zero: bool,
     trains_hypernet_from_step_zero: bool,
 }
@@ -457,7 +542,15 @@ struct E2eRolloutAdapterReport {
     flow_sample_steps: usize,
     flow_source_scale: f32,
     init_scale: f32,
+    condition_init_scale: f32,
+    output_init_scale: f32,
     adapter_chunk_size: usize,
+    attention_normalization: String,
+    parameterization: String,
+    spatial_condition_control: bool,
+    spatial_condition_control_scale: f32,
+    spatial_condition_control_sigma: f32,
+    spatial_condition_state_control: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -484,6 +577,7 @@ struct E2eRolloutTargetReport {
     splat_loss_weight: f32,
     color_loss_weight: f32,
     density_loss_weight: f32,
+    composited_rgb_loss_weight: f32,
     displacement_regularizer_weight: f32,
     overflow_regularizer_weight: f32,
     bound_regularizer_weight: f32,
@@ -504,22 +598,32 @@ struct E2eRolloutOptimizerReport {
     adam_beta2: f32,
     adam_epsilon: f32,
     per_parameter_grad_normalization: bool,
+    base_per_parameter_grad_normalization: bool,
+    generator_per_parameter_grad_normalization: bool,
     lr_schedule: String,
     min_lr_scale: f32,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct E2eRolloutValidationReport {
+    initial_examples: usize,
     examples: usize,
     interval: usize,
     particles: usize,
     steps: usize,
+    horizons: Vec<usize>,
+    selection_horizon_min_steps: usize,
     quality_scale: bool,
     training_backward_safe: bool,
     update_prob: f32,
     seed: u64,
     oracle_report: Option<String>,
     psnr_threshold_db: f32,
+    final_examples: usize,
+    final_particles: usize,
+    final_steps: usize,
+    final_horizons: Vec<usize>,
+    final_selection_horizon_min_steps: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -839,17 +943,86 @@ fn build_e2e_rollout_report(
     let splits = resolve_e2e_splits(&sources, &holdout_targets, holdout_stride, holdout_offset)?;
     let train_examples = splits.iter().filter(|split| split.is_train()).count();
     let holdout_examples = splits.len() - train_examples;
+    let alpha_channel = config
+        .condition
+        .alpha_channel
+        .unwrap_or(!matches!(encoder, RolloutConditionEncoder::SampleIdOneHot));
+    let rgb_channels = config.condition.rgb_channels.unwrap_or(false);
+    let rgb_channel_scale = config.condition.rgb_channel_scale.unwrap_or(1.0);
+    if !rgb_channel_scale.is_finite() || rgb_channel_scale <= 0.0 {
+        return Err(std::io::Error::other(
+            "condition.rgb_channel_scale must be positive and finite",
+        )
+        .into());
+    }
+    let alpha_channel_scale = config.condition.alpha_channel_scale.unwrap_or(1.0);
+    if !alpha_channel_scale.is_finite() || alpha_channel_scale <= 0.0 {
+        return Err(std::io::Error::other(
+            "condition.alpha_channel_scale must be positive and finite",
+        )
+        .into());
+    }
+    let (sample_id_vocab_size, sample_ids) = if encoder == RolloutConditionEncoder::SampleIdOneHot {
+        let vocab_size = config
+            .condition
+            .sample_id_vocab_size
+            .unwrap_or_else(|| sources.len().max(1));
+        if vocab_size == 0 {
+            return Err(
+                std::io::Error::other("condition.sample_id_vocab_size must be positive").into(),
+            );
+        }
+        let ids = if config.condition.sample_ids.is_empty() {
+            (0..sources.len()).collect::<Vec<_>>()
+        } else {
+            if config.condition.sample_ids.len() != sources.len() {
+                return Err(std::io::Error::other(format!(
+                    "condition.sample_ids has {} entries but the resolved source set has {}",
+                    config.condition.sample_ids.len(),
+                    sources.len()
+                ))
+                .into());
+            }
+            config.condition.sample_ids.clone()
+        };
+        if let Some(id) = ids.iter().copied().find(|id| *id >= vocab_size) {
+            return Err(std::io::Error::other(format!(
+                "condition sample ID {id} is outside sample_id_vocab_size={vocab_size}"
+            ))
+            .into());
+        }
+        if ids.iter().copied().collect::<BTreeSet<_>>().len() != ids.len() {
+            return Err(std::io::Error::other(
+                "condition.sample_ids must contain unique adapter-table columns",
+            )
+            .into());
+        }
+        (Some(vocab_size), ids)
+    } else {
+        if config.condition.sample_id_vocab_size.is_some()
+            || !config.condition.sample_ids.is_empty()
+        {
+            return Err(std::io::Error::other(
+                "condition.sample_id_vocab_size/sample_ids require encoder=sample-id-onehot",
+            )
+            .into());
+        }
+        (None, Vec::new())
+    };
     let (token_count, embed_dims) = match encoder {
         RolloutConditionEncoder::DinoVitsFullTokens
         | RolloutConditionEncoder::DinoVitsTokenGrid => (
             1 + token_grid_width * token_grid_height,
-            DINO_VITS_EMBED_DIMS,
+            DINO_VITS_EMBED_DIMS + 3 * usize::from(rgb_channels) + usize::from(alpha_channel),
         ),
-        RolloutConditionEncoder::SampleIdOneHot => (1, sources.len().max(1)),
+        RolloutConditionEncoder::SampleIdOneHot => (
+            1,
+            sample_id_vocab_size.expect("sample-ID encoder has a vocabulary"),
+        ),
     };
     let flattened_feature_dims = token_count * embed_dims;
 
-    let steps = config.training.steps.unwrap_or(0);
+    let mut steps = config.training.steps.unwrap_or(0);
     let report_interval = config.training.report_interval.unwrap_or(25).max(1);
     let example_batch_size = config.training.example_batch_size.unwrap_or(1).max(1);
     let tbptt_chunk_steps = config.training.tbptt_chunk_steps.unwrap_or(8).max(1);
@@ -868,6 +1041,39 @@ fn build_e2e_rollout_report(
         .tbptt_final_loss_weight
         .unwrap_or(1.0)
         .max(0.0);
+    let credit_assignment =
+        parse_e2e_credit_assignment(config.training.credit_assignment.as_deref())?;
+    let adapter_teacher_weight = config.training.adapter_teacher_weight.unwrap_or(0.0);
+    let adapter_teacher_objective =
+        parse_e2e_adapter_teacher_objective(config.training.adapter_teacher_objective.as_deref())?;
+    let task_loss_weight = config.training.task_loss_weight.unwrap_or(1.0);
+    if !adapter_teacher_weight.is_finite()
+        || adapter_teacher_weight < 0.0
+        || !task_loss_weight.is_finite()
+        || task_loss_weight < 0.0
+    {
+        return Err(std::io::Error::other(
+            "training task/adapter-teacher loss weights must be finite and non-negative",
+        )
+        .into());
+    }
+    if adapter_teacher_weight > 0.0 && config.model.oracle_model_dir.is_none() {
+        return Err(std::io::Error::other(
+            "training.adapter_teacher_weight requires model.oracle_model_dir",
+        )
+        .into());
+    }
+    if adapter_teacher_weight > 0.0 && credit_assignment != E2eCreditAssignment::FullBptt {
+        return Err(std::io::Error::other(
+            "adapter teacher supervision currently requires credit_assignment=full-bptt",
+        )
+        .into());
+    }
+    let max_full_bptt_particle_steps = config
+        .training
+        .max_full_bptt_particle_steps
+        .unwrap_or(1_048_576)
+        .max(1);
     if tbptt_loss_mode == E2eTbpttLossMode::EndpointWeighted
         && tbptt_intermediate_loss_weight == 0.0
         && tbptt_final_loss_weight == 0.0
@@ -879,7 +1085,78 @@ fn build_e2e_rollout_report(
     }
     let use_particle_pool = config.training.use_particle_pool.unwrap_or(false);
     let pool_slots_per_example = config.training.pool_slots_per_example.unwrap_or(1).max(1);
+    let rollouts_per_example = config.training.rollouts_per_example.unwrap_or(1).max(1);
+    let sampling_uniform_fraction = config.training.sampling_uniform_fraction.unwrap_or(0.75);
+    if !sampling_uniform_fraction.is_finite() || !(0.0..=1.0).contains(&sampling_uniform_fraction) {
+        return Err(std::io::Error::other(
+            "training.sampling_uniform_fraction must be finite and in 0..=1",
+        )
+        .into());
+    }
+    let sampling_priority_ema_beta = config.training.sampling_priority_ema_beta.unwrap_or(0.95);
+    if !sampling_priority_ema_beta.is_finite() || !(0.0..1.0).contains(&sampling_priority_ema_beta)
+    {
+        return Err(std::io::Error::other(
+            "training.sampling_priority_ema_beta must be finite and in 0..1",
+        )
+        .into());
+    }
+    let sampling_priority_min_weight = config.training.sampling_priority_min_weight.unwrap_or(0.5);
+    let sampling_priority_max_weight = config.training.sampling_priority_max_weight.unwrap_or(4.0);
+    if !sampling_priority_min_weight.is_finite()
+        || !sampling_priority_max_weight.is_finite()
+        || sampling_priority_min_weight <= 0.0
+        || sampling_priority_max_weight < sampling_priority_min_weight
+    {
+        return Err(std::io::Error::other(
+            "training priority weights must be finite, positive, and max >= min",
+        )
+        .into());
+    }
+    let sampling_priority_update_interval = config
+        .training
+        .sampling_priority_update_interval
+        .unwrap_or(32)
+        .max(1);
+    let pool_capacity = config.training.pool_capacity.unwrap_or(2048).max(1);
+    let rollout_replicas = rollouts_per_example;
+    let effective_rollout_batch_size = example_batch_size.saturating_mul(rollout_replicas);
+    let target_mean_trajectories_per_example = config.training.target_mean_trajectories_per_example;
+    if let Some(target_exposure) = target_mean_trajectories_per_example {
+        if config.training.steps.is_some() {
+            return Err(std::io::Error::other(
+                "configure either training.steps or training.target_mean_trajectories_per_example, not both",
+            )
+            .into());
+        }
+        steps = optimizer_steps_for_exposure(
+            target_exposure,
+            train_examples,
+            effective_rollout_batch_size,
+        )?;
+    }
+    let planned_rollout_trajectories = steps.saturating_mul(effective_rollout_batch_size);
+    let planned_mean_trajectories_per_train_example =
+        planned_rollout_trajectories as f64 / train_examples.max(1) as f64;
+    let upstream_growing_trajectory_exposure_fraction = planned_mean_trajectories_per_train_example
+        / UPSTREAM_GROWING_TRAJECTORIES_PER_TARGET as f64;
+    if use_particle_pool && pool_capacity < effective_rollout_batch_size {
+        return Err(std::io::Error::other(format!(
+            "training.pool_capacity={pool_capacity} must be at least example_batch_size*rollouts_per_example={effective_rollout_batch_size}"
+        ))
+        .into());
+    }
     let inject_seed_interval = config.training.inject_seed_interval.unwrap_or(64).max(1);
+    let seed_replacements_per_interval = config
+        .training
+        .seed_replacements_per_interval
+        .unwrap_or(1)
+        .min(effective_rollout_batch_size);
+    let seed_trajectory_interval = config
+        .training
+        .seed_trajectory_interval
+        .unwrap_or(128)
+        .max(1);
     let brush_size = config.training.brush_size.unwrap_or(0.0).max(0.0);
     let pre_rollout_steps = config.training.pre_rollout_steps.unwrap_or(0);
     let max_dense_train_particles = config
@@ -892,6 +1169,30 @@ fn build_e2e_rollout_report(
     if rollout_step_min > rollout_steps {
         return Err(std::io::Error::other(format!(
             "rollout.step_min={rollout_step_min} must be <= rollout.steps={rollout_steps}"
+        ))
+        .into());
+    }
+    let configured_full_bptt_particle_steps = effective_rollout_batch_size
+        .saturating_mul(rollout_particles)
+        .saturating_mul(rollout_steps);
+    if steps > 0
+        && credit_assignment == E2eCreditAssignment::FullBptt
+        && configured_full_bptt_particle_steps > max_full_bptt_particle_steps
+    {
+        return Err(std::io::Error::other(format!(
+            "full-bptt preflight rejected batch*particles*steps={configured_full_bptt_particle_steps}, above training.max_full_bptt_particle_steps={max_full_bptt_particle_steps}; lower batch/particles/horizon or raise the cap only after profiling memory"
+        ))
+        .into());
+    }
+    let configured_tbptt_chunk_particle_steps = effective_rollout_batch_size
+        .saturating_mul(rollout_particles)
+        .saturating_mul(tbptt_chunk_steps.min(rollout_steps));
+    if steps > 0
+        && credit_assignment == E2eCreditAssignment::DetachedTbptt
+        && configured_tbptt_chunk_particle_steps > max_full_bptt_particle_steps
+    {
+        return Err(std::io::Error::other(format!(
+            "detached-tbptt preflight rejected batch*particles*chunk_steps={configured_tbptt_chunk_particle_steps}, above training.max_full_bptt_particle_steps={max_full_bptt_particle_steps}; lower batch/particles/chunk size or raise the cap only after profiling memory"
         ))
         .into());
     }
@@ -962,6 +1263,7 @@ fn build_e2e_rollout_report(
         splat_loss_weight: config.target.splat_loss_weight.unwrap_or(2.0),
         color_loss_weight: config.target.color_loss_weight.unwrap_or(5.0),
         density_loss_weight: config.target.density_loss_weight.unwrap_or(1.0),
+        composited_rgb_loss_weight: config.target.composited_rgb_loss_weight.unwrap_or(0.0),
         displacement_regularizer_weight: config
             .target
             .displacement_regularizer_weight
@@ -970,11 +1272,79 @@ fn build_e2e_rollout_report(
         bound_regularizer_weight: config.target.bound_regularizer_weight.unwrap_or(100.0),
     };
     let validation_particles = config.validation.particles.unwrap_or(2048).max(1);
-    let validation_steps = config.validation.steps.unwrap_or(64).max(1);
+    let requested_validation_steps = config.validation.steps.unwrap_or(64).max(1);
+    let validation_horizons = normalize_validation_horizons(
+        config.validation.horizons.as_deref(),
+        requested_validation_steps,
+    )?;
+    let validation_steps = *validation_horizons
+        .last()
+        .expect("normalized validation horizons are non-empty");
+    let validation_selection_horizon_min_steps = config
+        .validation
+        .selection_horizon_min_steps
+        .unwrap_or(validation_steps);
+    if validation_selection_horizon_min_steps == 0
+        || validation_selection_horizon_min_steps > validation_steps
+    {
+        return Err(std::io::Error::other(format!(
+            "validation.selection_horizon_min_steps must be in 1..={validation_steps}"
+        ))
+        .into());
+    }
+    let final_validation_particles = config
+        .validation
+        .final_particles
+        .unwrap_or(validation_particles)
+        .max(1);
+    let requested_final_validation_steps = config
+        .validation
+        .final_steps
+        .unwrap_or(validation_steps)
+        .max(1);
+    let final_validation_horizons = normalize_validation_horizons(
+        config.validation.final_horizons.as_deref(),
+        requested_final_validation_steps,
+    )?;
+    let final_validation_steps = *final_validation_horizons
+        .last()
+        .expect("normalized final validation horizons are non-empty");
+    let final_validation_selection_horizon_min_steps = config
+        .validation
+        .final_selection_horizon_min_steps
+        .unwrap_or(validation_selection_horizon_min_steps);
+    if final_validation_selection_horizon_min_steps == 0
+        || final_validation_selection_horizon_min_steps > final_validation_steps
+    {
+        return Err(std::io::Error::other(format!(
+            "validation.final_selection_horizon_min_steps must be in 1..={final_validation_steps}"
+        ))
+        .into());
+    }
     let validation_interval = config.validation.interval.unwrap_or(report_interval).max(1);
+    let checkpoint_interval_steps = config
+        .output
+        .checkpoint_interval_steps
+        .unwrap_or(validation_interval)
+        .max(1);
+    let checkpoint_interval_seconds = config
+        .output
+        .checkpoint_interval_seconds
+        .unwrap_or(1800)
+        .max(1);
+    let validation_examples = config.validation.examples.unwrap_or(16);
+    let final_validation_examples = config
+        .validation
+        .final_examples
+        .unwrap_or(validation_examples);
+    let initial_validation_examples = config
+        .validation
+        .initial_examples
+        .unwrap_or(validation_examples);
     let validation_quality_scale = validation_particles >= 2048
         || validation_steps >= 32
-        || config.validation.examples.unwrap_or(16) >= 16;
+        || validation_examples >= 16
+        || initial_validation_examples >= 16;
     let validation_training_backward_safe = validation_particles <= max_dense_train_particles;
     let shared_base_train_start_step = config.model.shared_base_train_start_step.unwrap_or(0);
     let blockers = Vec::new();
@@ -992,11 +1362,11 @@ fn build_e2e_rollout_report(
             "training rollout scale is curriculum/diagnostic only: particles={rollout_particles}, step_min={rollout_step_min}, steps={rollout_steps}; use high-particle validation for quality claims"
         ));
     }
-    if steps > 0 && rollout_steps >= 32 && !use_particle_pool {
-        warnings.push(
-            "oracle-shaped HyperNPA rollouts should enable training.use_particle_pool so long-horizon states are reused instead of cold-started every batch"
-                .to_string(),
-        );
+    if steps > 0 && upstream_growing_trajectory_exposure_fraction < 0.1 {
+        warnings.push(format!(
+            "planned mean trajectory exposure is {planned_mean_trajectories_per_train_example:.1} per training image ({:.3}% of the upstream growing reference {UPSTREAM_GROWING_TRAJECTORIES_PER_TARGET}); treat this as a curriculum/ablation run, not per-target parity evidence",
+            upstream_growing_trajectory_exposure_fraction * 100.0,
+        ));
     }
     if steps > 0 && validation_particles > max_dense_train_particles {
         warnings.push(format!(
@@ -1018,27 +1388,148 @@ fn build_e2e_rollout_report(
         .gpu
         .condition_device_cache_max_bytes
         .unwrap_or(DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES);
-    let projected_condition_load_peak_bytes_f32 =
-        if selected_feature_cache_bytes_f32 > condition_device_cache_max_bytes {
-            selected_feature_cache_bytes_f32.saturating_add(dino_batch_input_bytes_f32)
-        } else {
-            selected_feature_cache_bytes_f32
-                .saturating_mul(2)
-                .saturating_add(dino_batch_input_bytes_f32)
-        };
-    let adapter_generator =
-        parse_e2e_adapter_generator(config.adapter.generator.as_deref())?.to_string();
+    let target_device_cache_max_bytes = config
+        .gpu
+        .target_device_cache_max_bytes
+        .unwrap_or(DEFAULT_DEVICE_TARGET_CACHE_MAX_BYTES);
+    let uses_on_demand_dino =
+        online_dino && !matches!(encoder, RolloutConditionEncoder::SampleIdOneHot);
+    let cache_complete_condition_set_on_device = uses_on_demand_dino
+        && condition_device_cache_max_bytes > 0
+        && selected_feature_cache_bytes_f32 <= condition_device_cache_max_bytes;
+    let projected_condition_load_peak_bytes_f32 = if cache_complete_condition_set_on_device {
+        selected_feature_cache_bytes_f32.saturating_add(dino_batch_input_bytes_f32)
+    } else if uses_on_demand_dino {
+        dino_batch_input_bytes_f32
+    } else if selected_feature_cache_bytes_f32 > condition_device_cache_max_bytes {
+        selected_feature_cache_bytes_f32.saturating_add(dino_batch_input_bytes_f32)
+    } else {
+        selected_feature_cache_bytes_f32
+            .saturating_mul(2)
+            .saturating_add(dino_batch_input_bytes_f32)
+    };
+    let adapter_generator_kind = E2eHyperGeneratorKind::parse(config.adapter.generator.as_deref())?;
+    let adapter_generator = adapter_generator_kind.artifact_architecture().to_string();
+    match adapter_generator_kind {
+        E2eHyperGeneratorKind::SampleIdTable => warnings.push(
+            "sample-id-table is a memorization/substrate control and cannot support unseen-image HyperNPA generalization claims"
+                .to_string(),
+        ),
+        E2eHyperGeneratorKind::ModuleTokenDecoderV2 => warnings.push(
+            "module-token-decoder-v2 is retained for artifact compatibility; use module-token-decoder for the maintained multi-head generalized path"
+                .to_string(),
+        ),
+        _ => {}
+    }
+    let attention_normalization = match config.adapter.attention_normalization.as_deref() {
+        None if adapter_generator_kind == E2eHyperGeneratorKind::ModuleTokenDecoder => {
+            E2E_HYPER_ATTENTION_SOFTMAX
+        }
+        None | Some(E2E_HYPER_ATTENTION_TANH_EXP) => E2E_HYPER_ATTENTION_TANH_EXP,
+        Some(E2E_HYPER_ATTENTION_SOFTMAX) => E2E_HYPER_ATTENTION_SOFTMAX,
+        Some(other) => {
+            return Err(std::io::Error::other(format!(
+                "unsupported adapter.attention_normalization {other:?}; expected tanh-exp or softmax"
+            ))
+            .into());
+        }
+    };
+    let adapter_parameterization = match config.adapter.parameterization.as_deref() {
+        None | Some(E2E_HYPER_ADAPTER_FACTORIZED) => E2E_HYPER_ADAPTER_FACTORIZED,
+        Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK) => E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
+        Some(other) => {
+            return Err(std::io::Error::other(format!(
+                "unsupported adapter.parameterization {other:?}; expected factorized or canonical-full-rank"
+            ))
+            .into());
+        }
+    };
+    if adapter_parameterization == E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK {
+        let (adapter_npa_config, _) = NpaConfig::for_preset(preset);
+        crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
+            &adapter_npa_config,
+            adapter_rank,
+            adapter_alpha,
+        )?;
+    }
+    let adapter_init_scale = config.adapter.init_scale.unwrap_or(1.0e-3);
+    let adapter_condition_init_scale = config
+        .adapter
+        .condition_init_scale
+        .unwrap_or(adapter_init_scale);
+    let adapter_output_init_scale = config
+        .adapter
+        .output_init_scale
+        .unwrap_or(adapter_init_scale);
+    let token_attention_heads = config.condition.token_attention_heads.unwrap_or(4).max(1);
+    let generator_hidden_dims = config.adapter.flow_hidden.unwrap_or(512).max(1);
+    if adapter_generator_kind == E2eHyperGeneratorKind::ModuleTokenDecoder
+        && !generator_hidden_dims.is_multiple_of(token_attention_heads)
+    {
+        return Err(std::io::Error::other(format!(
+            "adapter.flow_hidden={generator_hidden_dims} must be divisible by condition.token_attention_heads={token_attention_heads} for module-token-decoder"
+        ))
+        .into());
+    }
+    if !adapter_condition_init_scale.is_finite()
+        || adapter_condition_init_scale <= 0.0
+        || !adapter_output_init_scale.is_finite()
+        || adapter_output_init_scale < 0.0
+    {
+        return Err(std::io::Error::other(
+            "adapter condition_init_scale must be positive and output_init_scale must be non-negative; both must be finite",
+        )
+        .into());
+    }
+    if adapter_generator == E2E_HYPER_ARCH_SAMPLE_ID_TABLE
+        && encoder != RolloutConditionEncoder::SampleIdOneHot
+    {
+        return Err(std::io::Error::other(
+            "adapter.generator = sample-id-table requires condition.encoder = sample-id-onehot",
+        )
+        .into());
+    }
+    if adapter_generator == E2E_HYPER_ARCH_SAMPLE_ID_TABLE
+        && config.adapter.spatial_condition_control.unwrap_or(false)
+    {
+        return Err(std::io::Error::other(
+            "sample-ID adapter tables do not support per-step spatial condition control",
+        )
+        .into());
+    }
+    if config
+        .adapter
+        .spatial_condition_state_control
+        .unwrap_or(false)
+        && !config.adapter.spatial_condition_control.unwrap_or(false)
+    {
+        return Err(std::io::Error::other(
+            "adapter.spatial_condition_state_control requires spatial_condition_control=true",
+        )
+        .into());
+    }
     let adapter_chunk_size = config
         .adapter
         .adapter_chunk_size
         .unwrap_or(DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE)
         .max(1);
-    let condition_feature_normalization = if adapter_generator == E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
-    {
+    let condition_feature_normalization = if encoder == RolloutConditionEncoder::SampleIdOneHot {
+        "sample-id-onehot"
+    } else if matches!(
+        adapter_generator.as_str(),
+        E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
+            | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2
+            | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER
+    ) {
         "per-token-preserved"
     } else {
         "flattened-l2"
     };
+    let auto_resume = config.output.auto_resume.unwrap_or(false);
+    let effective_resume_checkpoint = config.output.resume_checkpoint.clone().or_else(|| {
+        let state = checkpoint_dir.join("current_training_state.mpk");
+        (auto_resume && state.is_file()).then_some(checkpoint_dir.clone())
+    });
 
     Ok(E2eRolloutReport {
         experiment_config: config_path.display().to_string(),
@@ -1047,7 +1538,7 @@ fn build_e2e_rollout_report(
         } else {
             "blocked"
         },
-        implementation_status: "burn_generated_adapter_rollout_loss_v2_oracle_shaped_tbptt_pool",
+        implementation_status: "burn_static_adapter_full_bptt_alpha_aware_v4_multihead",
         preset,
         source: E2eRolloutSourceReport {
             requested_source_limit: source_limit,
@@ -1068,6 +1559,12 @@ fn build_e2e_rollout_report(
             shared_base_output: display_path(&shared_base_output),
             hyper_output: display_path(&hyper_output),
             checkpoint_dir: display_path(&checkpoint_dir),
+            checkpoint_interval_steps,
+            checkpoint_interval_seconds,
+            resume_checkpoint: effective_resume_checkpoint
+                .as_ref()
+                .map(|path| display_path(path)),
+            auto_resume,
         },
         condition: E2eRolloutConditionReport {
             encoder: encoder.label(),
@@ -1100,8 +1597,21 @@ fn build_e2e_rollout_report(
             ),
             device_cache_max_bytes: condition_device_cache_max_bytes,
             device_cache_max_gib: bytes_to_gib(condition_device_cache_max_bytes),
-            token_attention_heads: config.condition.token_attention_heads.unwrap_or(4).max(1),
+            device_cache_plan: if cache_complete_condition_set_on_device {
+                "complete-set-device-resident"
+            } else if uses_on_demand_dino {
+                "on-demand-device-encode"
+            } else {
+                "precomputed-feature-input"
+            },
+            token_attention_heads,
             feature_normalization: condition_feature_normalization,
+            rgb_channels,
+            rgb_channel_scale,
+            alpha_channel,
+            alpha_channel_scale,
+            sample_id_vocab_size,
+            sample_ids,
         },
         model: E2eRolloutModelReport {
             shared_base: config
@@ -1109,6 +1619,7 @@ fn build_e2e_rollout_report(
                 .shared_base
                 .as_ref()
                 .map(|path| display_path(path)),
+            hyper: config.model.hyper.as_ref().map(|path| display_path(path)),
             shared_base_trainable: config.model.shared_base_trainable.unwrap_or(true),
             shared_base_train_start_step,
             shared_base_init: config
@@ -1122,6 +1633,11 @@ fn build_e2e_rollout_report(
                 .output_activation
                 .clone()
                 .unwrap_or_else(|| "tanh".to_string()),
+            oracle_model_dir: config
+                .model
+                .oracle_model_dir
+                .as_ref()
+                .map(|path| display_path(path)),
         },
         training: E2eRolloutTrainingReport {
             backend,
@@ -1135,9 +1651,26 @@ fn build_e2e_rollout_report(
             tbptt_loss_mode: tbptt_loss_mode.as_str().to_string(),
             tbptt_intermediate_loss_weight,
             tbptt_final_loss_weight,
+            credit_assignment: credit_assignment.as_str().to_string(),
+            max_full_bptt_particle_steps,
             use_particle_pool,
             pool_slots_per_example,
+            rollouts_per_example,
+            target_mean_trajectories_per_example,
+            sampling_uniform_fraction,
+            sampling_priority_ema_beta,
+            sampling_priority_min_weight,
+            sampling_priority_max_weight,
+            sampling_priority_update_interval,
+            planned_rollout_trajectories,
+            planned_mean_trajectories_per_train_example,
+            upstream_growing_reference_trajectories_per_target:
+                UPSTREAM_GROWING_TRAJECTORIES_PER_TARGET,
+            upstream_growing_trajectory_exposure_fraction,
+            pool_capacity,
             inject_seed_interval,
+            seed_replacements_per_interval,
+            seed_trajectory_interval,
             brush_size,
             pre_rollout_steps,
             target2d_loss_backend: target2d_loss_backend.as_str().to_string(),
@@ -1148,8 +1681,15 @@ fn build_e2e_rollout_report(
             max_dense_chunk_floats: config.gpu.max_dense_chunk_floats.unwrap_or(1_048_576),
             max_splat_chunk_floats: config.gpu.max_splat_chunk_floats.unwrap_or(1_048_576),
             condition_device_cache_max_bytes,
+            target_device_cache_max_bytes,
             seed: config.training.seed.unwrap_or(42),
-            adapter_vector_mse_primary_objective: false,
+            adapter_teacher_weight,
+            adapter_teacher_objective: adapter_teacher_objective.as_str().to_string(),
+            adapter_teacher_probe_rollout_steps: config
+                .training
+                .adapter_teacher_probe_rollout_steps
+                .unwrap_or(0),
+            task_loss_weight,
             trains_shared_base_from_step_zero: config.model.shared_base_trainable.unwrap_or(true)
                 && shared_base_train_start_step == 0,
             trains_hypernet_from_step_zero: true,
@@ -1158,11 +1698,28 @@ fn build_e2e_rollout_report(
             rank: adapter_rank,
             alpha: adapter_alpha,
             generator: adapter_generator,
-            flow_hidden: config.adapter.flow_hidden.unwrap_or(512).max(1),
+            flow_hidden: generator_hidden_dims,
             flow_sample_steps: config.adapter.flow_sample_steps.unwrap_or(16).max(1),
             flow_source_scale: config.adapter.flow_source_scale.unwrap_or(1.0),
-            init_scale: config.adapter.init_scale.unwrap_or(1.0e-3),
+            init_scale: adapter_init_scale,
+            condition_init_scale: adapter_condition_init_scale,
+            output_init_scale: adapter_output_init_scale,
             adapter_chunk_size,
+            attention_normalization: attention_normalization.to_string(),
+            parameterization: adapter_parameterization.to_string(),
+            spatial_condition_control: config.adapter.spatial_condition_control.unwrap_or(false),
+            spatial_condition_control_scale: config
+                .adapter
+                .spatial_condition_control_scale
+                .unwrap_or(0.1),
+            spatial_condition_control_sigma: config
+                .adapter
+                .spatial_condition_control_sigma
+                .unwrap_or(0.25),
+            spatial_condition_state_control: config
+                .adapter
+                .spatial_condition_state_control
+                .unwrap_or(false),
         },
         rollout: E2eRolloutRuntimeReport {
             particles: rollout_particles,
@@ -1194,14 +1751,30 @@ fn build_e2e_rollout_report(
                 .optimizer
                 .per_parameter_grad_normalization
                 .unwrap_or(true),
+            base_per_parameter_grad_normalization: config
+                .optimizer
+                .base_per_parameter_grad_normalization
+                .unwrap_or_else(|| {
+                    config
+                        .optimizer
+                        .per_parameter_grad_normalization
+                        .unwrap_or(true)
+                }),
+            generator_per_parameter_grad_normalization: config
+                .optimizer
+                .generator_per_parameter_grad_normalization
+                .unwrap_or(false),
             lr_schedule: lr_schedule_label,
             min_lr_scale,
         },
         validation: E2eRolloutValidationReport {
-            examples: config.validation.examples.unwrap_or(16),
+            initial_examples: initial_validation_examples,
+            examples: validation_examples,
             interval: validation_interval,
             particles: validation_particles,
             steps: validation_steps,
+            horizons: validation_horizons,
+            selection_horizon_min_steps: validation_selection_horizon_min_steps,
             quality_scale: validation_quality_scale,
             training_backward_safe: validation_training_backward_safe,
             update_prob: config.validation.update_prob.unwrap_or(0.5),
@@ -1212,6 +1785,11 @@ fn build_e2e_rollout_report(
                 .as_ref()
                 .map(|path| display_path(path)),
             psnr_threshold_db: config.validation.psnr_threshold_db.unwrap_or(26.0),
+            final_examples: final_validation_examples,
+            final_particles: final_validation_particles,
+            final_steps: final_validation_steps,
+            final_horizons: final_validation_horizons,
+            final_selection_horizon_min_steps: final_validation_selection_horizon_min_steps,
         },
         gates: E2eRolloutGateReport {
             min_median_particle_steps_per_sec: config.gates.min_median_particle_steps_per_sec,
@@ -1262,6 +1840,44 @@ fn run_burn_e2e_rollout_training(
         }
     };
     base.validate()?;
+    let teacher_train_examples =
+        if let Some(oracle_model_dir) = report.model.oracle_model_dir.as_deref() {
+            attach_exact_oracle_adapters(
+                &base,
+                &mut train_examples,
+                Path::new(oracle_model_dir),
+                report.adapter.rank,
+                report.adapter.alpha,
+            )?;
+            train_examples.len()
+        } else {
+            0
+        };
+    ensure_holdout_teacher_free(&holdout_examples)?;
+    let initial_generator = report
+        .model
+        .hyper
+        .as_deref()
+        .map(crate::load_e2e_hyper_npa_2d)
+        .transpose()?;
+    if let Some(expected) = initial_generator
+        .as_ref()
+        .and_then(|generator| generator.shared_base_sha256.as_deref())
+    {
+        let shared_base_path = report.model.shared_base.as_deref().ok_or_else(|| {
+            std::io::Error::other(
+                "model.hyper warm start carries a shared-base checksum, so model.shared_base must point to its paired BPK",
+            )
+        })?;
+        let shared_base_bytes = std::fs::read(shared_base_path)?;
+        let actual = crate::import::bpk_payload_sha256(&shared_base_bytes)?;
+        if actual != expected {
+            return Err(std::io::Error::other(format!(
+                "model.hyper shared-base checksum {expected} does not match model.shared_base {actual}"
+            ))
+            .into());
+        }
+    }
     let loss_config = target2d_loss_config(
         report.target.loss_image_size,
         report.target.splat_sigma,
@@ -1271,10 +1887,24 @@ fn run_burn_e2e_rollout_training(
         report.target.density_loss_weight,
         Target2dLossConfig::default().background_density_loss_weight,
         Target2dLossConfig::default().foreground_density_loss_weight,
+        report.target.composited_rgb_loss_weight,
         report.target.displacement_regularizer_weight,
         report.target.overflow_regularizer_weight,
         report.target.bound_regularizer_weight,
     )?;
+    let checkpoint_dir: &'static str =
+        Box::leak(report.output.checkpoint_dir.clone().into_boxed_str());
+    let resume_checkpoint: Option<&'static str> = report
+        .output
+        .resume_checkpoint
+        .clone()
+        .map(|path| &*Box::leak(path.into_boxed_str()));
+    let mut validation_horizons = [0usize; MAX_VALIDATION_HORIZONS];
+    validation_horizons[..report.validation.horizons.len()]
+        .copy_from_slice(&report.validation.horizons);
+    let mut final_validation_horizons = [0usize; MAX_VALIDATION_HORIZONS];
+    final_validation_horizons[..report.validation.final_horizons.len()]
+        .copy_from_slice(&report.validation.final_horizons);
     let train_config = BurnE2eRolloutTrainConfig {
         steps: report.training.steps,
         report_interval: report.training.report_interval,
@@ -1287,9 +1917,20 @@ fn run_burn_e2e_rollout_training(
         )?,
         tbptt_intermediate_loss_weight: report.training.tbptt_intermediate_loss_weight,
         tbptt_final_loss_weight: report.training.tbptt_final_loss_weight,
+        credit_assignment: parse_e2e_credit_assignment(Some(&report.training.credit_assignment))?,
+        max_full_bptt_particle_steps: report.training.max_full_bptt_particle_steps,
         use_particle_pool: report.training.use_particle_pool,
         pool_slots_per_example: report.training.pool_slots_per_example,
+        rollouts_per_example: report.training.rollouts_per_example,
+        sampling_uniform_fraction: report.training.sampling_uniform_fraction,
+        sampling_priority_ema_beta: report.training.sampling_priority_ema_beta,
+        sampling_priority_min_weight: report.training.sampling_priority_min_weight,
+        sampling_priority_max_weight: report.training.sampling_priority_max_weight,
+        sampling_priority_update_interval: report.training.sampling_priority_update_interval,
+        pool_capacity: report.training.pool_capacity,
         inject_seed_interval: report.training.inject_seed_interval,
+        seed_replacements_per_interval: report.training.seed_replacements_per_interval,
+        seed_trajectory_interval: report.training.seed_trajectory_interval,
         brush_size: report.training.brush_size,
         pre_rollout_steps: report.training.pre_rollout_steps,
         rollout_particles: report.rollout.particles,
@@ -1308,6 +1949,18 @@ fn run_burn_e2e_rollout_training(
         target2d_loss_backend: Target2dLossBackend::parse(&report.training.target2d_loss_backend)?,
         perception_backend: PerceptionRolloutBackend::parse(&report.training.perception_backend)?,
         per_parameter_grad_normalization: report.optimizer.per_parameter_grad_normalization,
+        base_per_parameter_grad_normalization: report
+            .optimizer
+            .base_per_parameter_grad_normalization,
+        generator_per_parameter_grad_normalization: report
+            .optimizer
+            .generator_per_parameter_grad_normalization,
+        adapter_teacher_weight: report.training.adapter_teacher_weight,
+        adapter_teacher_objective: parse_e2e_adapter_teacher_objective(Some(
+            &report.training.adapter_teacher_objective,
+        ))?,
+        adapter_teacher_probe_rollout_steps: report.training.adapter_teacher_probe_rollout_steps,
+        task_loss_weight: report.training.task_loss_weight,
         shared_base_trainable: report.model.shared_base_trainable,
         shared_base_train_start_step: report.model.shared_base_train_start_step,
         base_optimizer: base_adamw_from_report(report),
@@ -1316,13 +1969,19 @@ fn run_burn_e2e_rollout_training(
         min_lr_scale: report.optimizer.min_lr_scale,
         adapter_rank: report.adapter.rank,
         adapter_alpha: report.adapter.alpha,
-        spatial_token_generator: report.adapter.generator == E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW,
+        generator_kind: E2eHyperGeneratorKind::parse(Some(&report.adapter.generator))?,
         adapter_chunk_size: report.adapter.adapter_chunk_size,
         generator_hidden_dims: report.adapter.flow_hidden,
         token_attention_heads: report.condition.token_attention_heads,
+        softmax_token_attention: report.adapter.attention_normalization
+            == E2E_HYPER_ATTENTION_SOFTMAX,
+        canonical_full_rank_lora: report.adapter.parameterization
+            == E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
         generator_sample_steps: report.adapter.flow_sample_steps,
         generator_output_scale: report.adapter.flow_source_scale,
         generator_init_scale: report.adapter.init_scale,
+        generator_condition_init_scale: report.adapter.condition_init_scale,
+        generator_output_init_scale: report.adapter.output_init_scale,
         stopgrad_pos: npa_config.stopgrad_pos,
         stopgrad_state: npa_config.stopgrad_state,
         system_memory_budget_gb: report.training.system_memory_budget_gb,
@@ -1331,13 +1990,44 @@ fn run_burn_e2e_rollout_training(
         max_dense_chunk_floats: report.training.max_dense_chunk_floats,
         max_splat_chunk_floats: report.training.max_splat_chunk_floats,
         condition_device_cache_max_bytes: report.training.condition_device_cache_max_bytes,
+        target_device_cache_max_bytes: report.training.target_device_cache_max_bytes,
+        dino_image_size: report.condition.dino_image_size,
+        dino_batch_size: report.condition.dino_batch_size,
+        dino_token_grid_width: report.condition.patch_grid_width,
+        dino_token_grid_height: report.condition.patch_grid_height,
+        dino_l2_normalize_features: report.condition.feature_normalization == "flattened-l2",
+        dino_rgb_channels: report.condition.rgb_channels,
+        dino_rgb_channel_scale: report.condition.rgb_channel_scale,
+        dino_alpha_channel: report.condition.alpha_channel,
+        dino_alpha_channel_scale: report.condition.alpha_channel_scale,
+        spatial_condition_control: report.adapter.spatial_condition_control,
+        spatial_condition_control_scale: report.adapter.spatial_condition_control_scale,
+        spatial_condition_control_sigma: report.adapter.spatial_condition_control_sigma,
+        spatial_condition_state_control: report.adapter.spatial_condition_state_control,
+        checkpoint_dir: Some(checkpoint_dir),
+        checkpoint_interval_steps: report.output.checkpoint_interval_steps,
+        checkpoint_interval_seconds: report.output.checkpoint_interval_seconds,
+        resume_checkpoint,
+        checkpoint_condition_encoder: Some(report.condition.encoder),
+        initial_validation_examples: report.validation.initial_examples,
         validation_examples: report.validation.examples,
         validation_interval: report.validation.interval,
         validation_particles: report.validation.particles,
         validation_steps: report.validation.steps,
+        validation_horizons,
+        validation_horizon_count: report.validation.horizons.len(),
+        validation_selection_horizon_min_steps: report.validation.selection_horizon_min_steps,
         validation_update_prob: report.validation.update_prob,
         validation_seed: report.validation.seed,
         validation_psnr_threshold_db: report.validation.psnr_threshold_db,
+        final_validation_examples: report.validation.final_examples,
+        final_validation_particles: report.validation.final_particles,
+        final_validation_steps: report.validation.final_steps,
+        final_validation_horizons,
+        final_validation_horizon_count: report.validation.final_horizons.len(),
+        final_validation_selection_horizon_min_steps: report
+            .validation
+            .final_selection_horizon_min_steps,
     };
     let train_started = Instant::now();
     let mut output = match report.training.gpu_backend.as_str() {
@@ -1346,12 +2036,14 @@ fn run_burn_e2e_rollout_training(
             &mut train_examples,
             &mut holdout_examples,
             train_config,
+            initial_generator.as_ref(),
         )?,
         _ => train_e2e_rollout_burn_wgpu(
             &mut base,
             &mut train_examples,
             &mut holdout_examples,
             train_config,
+            initial_generator.as_ref(),
         )?,
     };
     output.generator.condition_encoder = Some(report.condition.encoder.to_string());
@@ -1374,6 +2066,11 @@ fn run_burn_e2e_rollout_training(
             "end_to_end_training_command_ms".to_string(),
             serde_json::json!(example_condition_load_ms + burn_training_ms),
         );
+        metrics.insert(
+            "teacher_train_examples".to_string(),
+            serde_json::json!(teacher_train_examples),
+        );
+        metrics.insert("teacher_holdout_examples".to_string(), serde_json::json!(0));
     }
     let manifest = BpkModelManifest::from_model(
         &base,
@@ -1402,6 +2099,67 @@ fn run_burn_e2e_rollout_training(
         );
     }
     Ok(output)
+}
+
+fn attach_exact_oracle_adapters(
+    base: &NpaModel,
+    examples: &mut [BurnE2eRolloutExample],
+    oracle_model_dir: &Path,
+    rank: usize,
+    alpha: f32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for example in examples {
+        let path = oracle_model_dir.join(format!("{}.bpk", example.slug));
+        let target = crate::import::load_manifest(&path)?.into_model();
+        let adapter = exact_teacher_adapter(base, &target, rank, alpha)?;
+        example.teacher_adapter = Some(adapter.to_parameter_vector());
+    }
+    Ok(())
+}
+
+fn ensure_holdout_teacher_free(
+    examples: &[BurnE2eRolloutExample],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let leaked = examples
+        .iter()
+        .filter(|example| example.teacher_adapter.is_some())
+        .map(|example| example.slug.as_str())
+        .collect::<Vec<_>>();
+    if leaked.is_empty() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "holdout examples must not carry oracle adapter targets: {}",
+        leaked.join(", ")
+    ))
+    .into())
+}
+
+fn exact_teacher_adapter(
+    base: &NpaModel,
+    target: &NpaModel,
+    rank: usize,
+    alpha: f32,
+) -> crate::AutomataResult<crate::NpaLowRankAdapter> {
+    let mut adapter = crate::NpaLowRankAdapter::exact_model_delta(base, target, rank, alpha)?;
+    adapter.b1_delta = target
+        .weights
+        .b1
+        .iter()
+        .zip(&base.weights.b1)
+        .map(|(target, base)| target - base)
+        .collect();
+    adapter.b2_delta = target
+        .weights
+        .b2
+        .iter()
+        .zip(&base.weights.b2)
+        .map(|(target, base)| target - base)
+        .collect();
+    adapter.b1_delta_correction.clear();
+    adapter.b2_delta_correction.clear();
+    adapter.validate(&base.config)?;
+    Ok(adapter)
 }
 
 fn ensure_training_backend_available(
@@ -1444,21 +2202,74 @@ fn ensure_training_backend_available(
 fn check_condition_preload_memory_budget(
     report: &E2eRolloutReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(budget_gb) = report.training.system_memory_budget_gb else {
-        return Ok(());
+    let pool_state_buffer_bytes = if report.training.use_particle_pool {
+        report
+            .training
+            .pool_capacity
+            .saturating_mul(report.rollout.particles)
+            .saturating_mul(NpaConfig::growing_2d().state_dims)
+            .saturating_mul(std::mem::size_of::<f32>())
+    } else {
+        0
     };
-    let budget_bytes = (budget_gb as f64 * 1024.0 * 1024.0 * 1024.0) as usize;
-    let projected_bytes = report
-        .condition
-        .projected_condition_load_peak_bytes_f32
-        .saturating_add(1024 * 1024 * 1024);
-    if projected_bytes > budget_bytes {
+    const WGPU_MAX_SINGLE_POOL_BUFFER_BYTES: usize = 1usize << 31;
+    if matches!(report.training.gpu_backend.as_str(), "burn-wgpu" | "wgpu")
+        && pool_state_buffer_bytes >= WGPU_MAX_SINGLE_POOL_BUFFER_BYTES
+    {
         return Err(std::io::Error::other(format!(
-            "projected HyperNPA e2e condition preload peak is {:.2} GiB plus 1.00 GiB overhead, above system_memory_budget_gb={:.2}; lower source_limit/dino_batch_size or raise the budget intentionally",
-            report.condition.projected_condition_load_peak_gib_f32,
-            budget_gb,
+            "HyperNPA WGPU particle-pool state requires one {:.2} GiB buffer, but the current monolithic pool must stay below 2.00 GiB; reduce pool_capacity/pool_slots_per_example or implement sharded pool storage",
+            bytes_to_gib(pool_state_buffer_bytes),
         ))
         .into());
+    }
+    let particle_pool_bytes = if report.training.use_particle_pool {
+        report
+            .training
+            .pool_capacity
+            .saturating_mul(report.rollout.particles)
+            .saturating_mul(NpaConfig::growing_2d().state_dims.saturating_add(2))
+            .saturating_mul(std::mem::size_of::<f32>())
+    } else {
+        0
+    };
+    let table_parameter_bytes = if report.adapter.generator == E2E_HYPER_ARCH_SAMPLE_ID_TABLE {
+        let config = NpaConfig::growing_2d();
+        NpaLowRankAdapter::parameter_count_for_config(&config, report.adapter.rank)
+            .saturating_mul(report.source.selected_sources)
+            .saturating_mul(std::mem::size_of::<f32>())
+    } else {
+        0
+    };
+    if let Some(budget_gb) = report.training.system_memory_budget_gb {
+        let budget_bytes = (budget_gb as f64 * 1024.0 * 1024.0 * 1024.0) as usize;
+        let projected_bytes = report
+            .condition
+            .projected_condition_load_peak_bytes_f32
+            .saturating_add(table_parameter_bytes)
+            .saturating_add(particle_pool_bytes)
+            .saturating_add(1024 * 1024 * 1024);
+        if projected_bytes > budget_bytes {
+            return Err(std::io::Error::other(format!(
+                "projected HyperNPA e2e host peak is {:.2} GiB including condition staging, adapter-table weights, {:.2} GiB particle-pool checkpoint readback, and 1.00 GiB overhead, above system_memory_budget_gb={budget_gb:.2}",
+                bytes_to_gib(projected_bytes),
+                bytes_to_gib(particle_pool_bytes),
+            ))
+            .into());
+        }
+    }
+    if let Some(budget_gb) = report.training.gpu_memory_budget_gb {
+        let budget_bytes = (budget_gb as f64 * 1024.0 * 1024.0 * 1024.0) as usize;
+        let table_training_bytes = table_parameter_bytes.saturating_mul(4);
+        let persistent_training_bytes = table_training_bytes.saturating_add(particle_pool_bytes);
+        if persistent_training_bytes > budget_bytes {
+            return Err(std::io::Error::other(format!(
+                "HyperNPA persistent GPU state requires at least {:.2} GiB ({:.2} GiB adapter weights/gradients/AdamW plus {:.2} GiB particle pool), above gpu_memory_budget_gb={budget_gb:.2}; reduce source count/rank/pool depth or raise the budget intentionally",
+                bytes_to_gib(persistent_training_bytes),
+                bytes_to_gib(table_training_bytes),
+                bytes_to_gib(particle_pool_bytes),
+            ))
+            .into());
+        }
     }
     Ok(())
 }
@@ -1489,10 +2300,10 @@ fn load_burn_e2e_rollout_examples_with_sample_ids(
         .into());
     }
     let embed_dims = report.condition.embed_dims;
-    if embed_dims < report.selected_sources.len() {
+    if report.condition.sample_ids.len() != report.selected_sources.len() {
         return Err(std::io::Error::other(format!(
-            "sample-id-onehot embed_dims={} is smaller than selected_sources={}",
-            embed_dims,
+            "sample-id-onehot report has {} mapped IDs for {} selected sources",
+            report.condition.sample_ids.len(),
             report.selected_sources.len()
         ))
         .into());
@@ -1504,7 +2315,13 @@ fn load_burn_e2e_rollout_examples_with_sample_ids(
     );
     for (idx, entry) in report.selected_sources.iter().enumerate() {
         let mut condition_features = vec![0.0_f32; embed_dims];
-        condition_features[idx] = 1.0;
+        let sample_id = report.condition.sample_ids[idx];
+        let value = condition_features.get_mut(sample_id).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "sample ID {sample_id} is outside condition embed_dims={embed_dims}"
+            ))
+        })?;
+        *value = 1.0;
         let target = load_target_image_2d_adaptive(
             Path::new(&entry.condition_path),
             report.target.threshold,
@@ -1514,6 +2331,8 @@ fn load_burn_e2e_rollout_examples_with_sample_ids(
         examples.push(BurnE2eRolloutExample {
             slug: entry.slug.clone(),
             target,
+            condition_path: Some(PathBuf::from(&entry.condition_path)),
+            dino_model_path: None,
             condition_features,
             token_count: report.condition.token_count,
             embed_dims,
@@ -1525,6 +2344,7 @@ fn load_burn_e2e_rollout_examples_with_sample_ids(
                     .seed_scale
                     .unwrap_or_else(|| NpaConfig::seed_scale_for_preset(report.preset))
             }),
+            teacher_adapter: None,
         });
     }
     Ok(examples)
@@ -1544,84 +2364,75 @@ fn load_burn_e2e_rollout_examples_with_sample_ids(
 fn load_burn_e2e_rollout_examples_with_online_dino(
     report: &E2eRolloutReport,
 ) -> Result<Vec<BurnE2eRolloutExample>, Box<dyn std::error::Error>> {
-    let dino_model = report.condition.dino_model.as_ref().ok_or_else(|| {
+    let _dino_model = report.condition.dino_model.as_ref().ok_or_else(|| {
         std::io::Error::other("condition.dino_model is required for e2e DINO training")
     })?;
-    let encoder =
-        DinoVitsConditionEncoder::load(Path::new(dino_model), report.condition.dino_image_size)?;
     let expected_feature_dims = report
         .condition
         .token_count
         .saturating_mul(report.condition.embed_dims);
-    let batch_size = report.condition.dino_batch_size.max(1);
-    let batch_count = report.selected_sources.len().div_ceil(batch_size);
-    let mut examples = Vec::with_capacity(report.selected_sources.len());
-    eprintln!(
-        "encoding {} online DINO conditions in {} batches of up to {} (feature cache {:.2} GiB f32, input batch {:.2} GiB f32)",
-        report.selected_sources.len(),
-        batch_count,
-        batch_size,
-        report.condition.selected_feature_cache_gib_f32,
-        report.condition.dino_batch_input_gib_f32,
-    );
-    for (batch_idx, entries) in report.selected_sources.chunks(batch_size).enumerate() {
-        let conditions = entries
-            .iter()
-            .map(|entry| load_condition_image_2d(Path::new(&entry.condition_path)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let features = encoder.encode_batch_with_options(
-            &conditions,
-            ConditionEncoder2d::DinoVitsTokenGrid,
-            report.condition.patch_grid_width,
-            report.condition.patch_grid_height,
-            report.condition.feature_normalization != "per-token-preserved",
-        )?;
-        if features.len() != entries.len() {
-            return Err(
-                std::io::Error::other("DINO feature count does not match source batch").into(),
-            );
-        }
-        for (entry, condition_features) in entries.iter().zip(features) {
-            if condition_features.len() != expected_feature_dims {
-                return Err(std::io::Error::other(format!(
-                    "DINO feature length for {} is {}; expected {}",
-                    entry.slug,
-                    condition_features.len(),
-                    expected_feature_dims
-                ))
-                .into());
-            }
+    if report.condition.device_cache_plan == "complete-set-device-resident" {
+        eprintln!(
+            "deferring image decode; {} DINO conditions will be streamed through GPU DINO into a {:.2} GiB bounded device token cache",
+            report.selected_sources.len(),
+            report.condition.selected_feature_cache_gib_f32,
+        );
+    } else {
+        eprintln!(
+            "deferring {} DINO conditions to on-demand GPU batches (encoded set {:.2} GiB exceeds the bounded cache plan; input batch {:.2} GiB)",
+            report.selected_sources.len(),
+            report.condition.selected_feature_cache_gib_f32,
+            report.condition.dino_batch_input_gib_f32,
+        );
+    }
+    if expected_feature_dims == 0 {
+        return Err(std::io::Error::other("DINO feature dimensions must be non-zero").into());
+    }
+    let total = report.selected_sources.len();
+    let progress_interval = (total / 100).clamp(1, 1_000);
+    let completed = AtomicUsize::new(0);
+    let default_seed_scale = report
+        .rollout
+        .seed_scale
+        .unwrap_or_else(|| NpaConfig::seed_scale_for_preset(report.preset));
+    let dino_model = report.condition.dino_model.clone();
+    let examples = report
+        .selected_sources
+        .par_iter()
+        .map(|entry| -> Result<BurnE2eRolloutExample, String> {
+            let path = Path::new(&entry.condition_path);
             let target = load_target_image_2d_adaptive(
-                Path::new(&entry.condition_path),
+                path,
                 report.target.threshold,
                 report.target.points,
                 report.target.image_size,
-            )?;
-            examples.push(BurnE2eRolloutExample {
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to extract target image {} for online DINO HyperNPA: {err}",
+                    path.display()
+                )
+            })?;
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done == total || done.is_multiple_of(progress_interval) {
+                eprintln!("loaded online DINO target {done}/{total}");
+            }
+            Ok(BurnE2eRolloutExample {
                 slug: entry.slug.clone(),
                 target,
-                condition_features,
+                condition_path: Some(PathBuf::from(&entry.condition_path)),
+                dino_model_path: dino_model.as_ref().map(PathBuf::from),
+                condition_features: Vec::new(),
                 token_count: report.condition.token_count,
                 embed_dims: report.condition.embed_dims,
                 particle_count: entry.particles.unwrap_or(report.rollout.particles),
                 update_prob: entry.update_prob.unwrap_or(report.rollout.update_prob),
-                seed_scale: entry.seed_scale.unwrap_or_else(|| {
-                    report
-                        .rollout
-                        .seed_scale
-                        .unwrap_or_else(|| NpaConfig::seed_scale_for_preset(report.preset))
-                }),
-            });
-        }
-        if (batch_idx + 1).is_multiple_of(10) || batch_idx + 1 == batch_count {
-            eprintln!(
-                "encoded online DINO batch {}/{} ({} examples)",
-                batch_idx + 1,
-                batch_count,
-                examples.len()
-            );
-        }
-    }
+                seed_scale: entry.seed_scale.unwrap_or(default_seed_scale),
+                teacher_adapter: None,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(std::io::Error::other)?;
     Ok(examples)
 }
 
@@ -1830,24 +2641,41 @@ fn parse_rollout_condition_encoder(
     }
 }
 
-fn parse_e2e_adapter_generator(
-    value: Option<&str>,
-) -> Result<&'static str, Box<dyn std::error::Error>> {
-    let normalized = value.unwrap_or("token-aware-rectified-flow").trim();
-    match normalized {
-        "token-aware-rectified-flow"
-        | "token-attention-pool"
-        | "pooled-token-flow"
-        | E2E_HYPER_ARCH_POOLED_FLOW => Ok(E2E_HYPER_ARCH_POOLED_FLOW),
-        "spatial-token-flow"
-        | "spatial-token-rectified-flow"
-        | "spatial-token-chunked-flow"
-        | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW => Ok(E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW),
-        other => Err(std::io::Error::other(format!(
-            "unknown adapter.generator {other:?}; expected token-aware-rectified-flow or spatial-token-flow"
-        ))
-        .into()),
+fn normalize_validation_horizons(
+    configured: Option<&[usize]>,
+    requested_steps: usize,
+) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    let mut horizons = configured.unwrap_or_default().to_vec();
+    if horizons.contains(&0) {
+        return Err(std::io::Error::other(
+            "validation.horizons must contain only non-zero rollout steps",
+        )
+        .into());
     }
+    horizons.push(requested_steps.max(1));
+    horizons.sort_unstable();
+    horizons.dedup();
+    if horizons.len() > MAX_VALIDATION_HORIZONS {
+        return Err(std::io::Error::other(format!(
+            "validation.horizons supports at most {MAX_VALIDATION_HORIZONS} distinct steps, got {}",
+            horizons.len()
+        ))
+        .into());
+    }
+    Ok(horizons)
+}
+
+fn optimizer_steps_for_exposure(
+    trajectories_per_example: u64,
+    train_examples: usize,
+    effective_batch_size: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let requested = (trajectories_per_example as u128)
+        .checked_mul(train_examples.max(1) as u128)
+        .ok_or_else(|| std::io::Error::other("trajectory exposure count overflowed"))?;
+    let steps = requested.div_ceil(effective_batch_size.max(1) as u128);
+    usize::try_from(steps)
+        .map_err(|_| std::io::Error::other("optimizer step count exceeds usize").into())
 }
 
 fn parse_e2e_lr_schedule(value: Option<&str>) -> Result<E2eLrSchedule, Box<dyn std::error::Error>> {
@@ -1855,8 +2683,9 @@ fn parse_e2e_lr_schedule(value: Option<&str>) -> Result<E2eLrSchedule, Box<dyn s
         "constant" | "none" => Ok(E2eLrSchedule::Constant),
         "cosine" | "cosine_decay" | "cosine-decay" => Ok(E2eLrSchedule::Cosine),
         "linear" | "linear_decay" | "linear-decay" => Ok(E2eLrSchedule::Linear),
+        "upstream-growing" | "upstream_growing" => Ok(E2eLrSchedule::UpstreamGrowing),
         other => Err(std::io::Error::other(format!(
-            "invalid optimizer.lr_schedule `{other}`; use constant, cosine, or linear"
+            "invalid optimizer.lr_schedule `{other}`; use constant, cosine, linear, or upstream-growing"
         ))
         .into()),
     }
@@ -1881,6 +2710,35 @@ fn parse_e2e_tbptt_loss_mode(
         }
         other => Err(std::io::Error::other(format!(
             "invalid training.tbptt_loss_mode `{other}`; use all-chunks, final-only, or endpoint-weighted"
+        ))
+        .into()),
+    }
+}
+
+fn parse_e2e_credit_assignment(
+    value: Option<&str>,
+) -> Result<E2eCreditAssignment, Box<dyn std::error::Error>> {
+    match value.unwrap_or("full-bptt") {
+        "full-bptt" | "full_bptt" | "full" => Ok(E2eCreditAssignment::FullBptt),
+        "detached-tbptt" | "detached_tbptt" | "tbptt" => Ok(E2eCreditAssignment::DetachedTbptt),
+        other => Err(std::io::Error::other(format!(
+            "invalid training.credit_assignment `{other}`; use full-bptt or detached-tbptt"
+        ))
+        .into()),
+    }
+}
+
+fn parse_e2e_adapter_teacher_objective(
+    value: Option<&str>,
+) -> Result<E2eAdapterTeacherObjective, Box<dyn std::error::Error>> {
+    match value.unwrap_or("parameter-mse") {
+        "parameter-mse" | "parameter_mse" => Ok(E2eAdapterTeacherObjective::ParameterMse),
+        "functional-mse" | "functional_mse" => Ok(E2eAdapterTeacherObjective::FunctionalMse),
+        "hybrid" | "functional-plus-parameter-mse" | "functional_plus_parameter_mse" => {
+            Ok(E2eAdapterTeacherObjective::Hybrid)
+        }
+        other => Err(std::io::Error::other(format!(
+            "unsupported training.adapter_teacher_objective {other:?}; expected parameter-mse, functional-mse, or hybrid"
         ))
         .into()),
     }
@@ -2091,6 +2949,7 @@ fn target2d_loss_config(
     density_loss_weight: f32,
     background_density_loss_weight: f32,
     foreground_density_loss_weight: f32,
+    composited_rgb_loss_weight: f32,
     displacement_regularizer_weight: f32,
     overflow_regularizer_weight: f32,
     bound_regularizer_weight: f32,
@@ -2113,6 +2972,7 @@ fn target2d_loss_config(
             "foreground_density_loss_weight",
             foreground_density_loss_weight,
         ),
+        ("composited_rgb_loss_weight", composited_rgb_loss_weight),
         (
             "displacement_regularizer_weight",
             displacement_regularizer_weight,
@@ -2135,6 +2995,7 @@ fn target2d_loss_config(
         density_loss_weight,
         background_density_loss_weight,
         foreground_density_loss_weight,
+        composited_rgb_loss_weight,
         displacement_regularizer_weight,
         overflow_regularizer_weight,
         bound_regularizer_weight,
@@ -2248,22 +3109,6 @@ fn target_from_rgba(
     )?)
 }
 
-#[cfg(feature = "dino")]
-fn load_condition_image_2d(path: &Path) -> Result<ConditionImage2d, Box<dyn std::error::Error>> {
-    let image = image::ImageReader::open(path)?.decode()?.to_rgb8();
-    let (width, height) = image.dimensions();
-    let values = image
-        .as_raw()
-        .iter()
-        .map(|value| *value as f32 / 255.0)
-        .collect::<Vec<_>>();
-    Ok(ConditionImage2d::from_rgb(
-        width as usize,
-        height as usize,
-        values,
-    )?)
-}
-
 fn write_pretty_json<T: Serialize>(
     path: &Path,
     value: &T,
@@ -2331,14 +3176,30 @@ mod tests {
             condition_embed_dims: Some(1),
             condition_token_grid_width: Some(1),
             condition_token_grid_height: Some(1),
+            condition_image_size: None,
+            condition_alpha_mode: None,
+            condition_rgb_channels: None,
+            condition_rgb_channel_scale: None,
+            condition_alpha_channel: None,
+            condition_alpha_channel_scale: None,
+            condition_l2_normalize_features: None,
+            condition_resize_mode: None,
+            condition_application: None,
+            shared_base_sha256: None,
             hidden_dims: 1,
             token_attention_heads: 1,
+            attention_normalization: None,
             output_dims: 1,
             sample_steps: 1,
             output_scale: 1.0,
             adapter_rank: None,
             adapter_alpha: None,
+            adapter_parameterization: None,
             adapter_chunk_size: None,
+            spatial_condition_control: None,
+            spatial_condition_control_scale: None,
+            spatial_condition_control_sigma: None,
+            spatial_condition_state_control: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.0],
                 token_b: vec![0.0],
@@ -2348,17 +3209,97 @@ mod tests {
                 time_w: vec![0.0],
                 output_w: vec![0.0],
                 output_b: vec![0.0],
+                condition_control_w: Vec::new(),
+                condition_control_b: Vec::new(),
+                condition_control_state_w: Vec::new(),
             },
         }
     }
 
+    fn tiny_rollout_example(
+        slug: &str,
+        teacher_adapter: Option<Vec<f32>>,
+    ) -> BurnE2eRolloutExample {
+        BurnE2eRolloutExample {
+            slug: slug.to_string(),
+            target: TargetImage2d {
+                source_width: 1,
+                source_height: 1,
+                positions: vec![[0.0, 0.0]],
+                colors: vec![[1.0, 1.0, 1.0]],
+                pixel_size: 1.0,
+                threshold: 0.05,
+                aabb: [-1.0, -1.0, 1.0, 1.0],
+            },
+            condition_path: None,
+            dino_model_path: None,
+            condition_features: vec![1.0],
+            token_count: 1,
+            embed_dims: 1,
+            particle_count: 1,
+            update_prob: 0.5,
+            seed_scale: 1.0,
+            teacher_adapter,
+        }
+    }
+
     #[test]
-    fn dino_full_token_dims_match_vits_518() {
-        let grid = dino_patch_grid(518, 14).unwrap();
-        assert_eq!(grid, 37);
+    fn dino_full_token_dims_match_vits_224() {
+        let grid = dino_patch_grid(224, 14).unwrap();
+        assert_eq!(grid, 16);
         let token_count = 1 + grid * grid;
-        assert_eq!(token_count, 1370);
-        assert_eq!(token_count * DINO_VITS_EMBED_DIMS, 526_080);
+        assert_eq!(token_count, 257);
+        assert_eq!(token_count * DINO_VITS_EMBED_DIMS, 98_688);
+    }
+
+    #[test]
+    fn adapter_teacher_objective_parser_is_explicit() {
+        assert_eq!(
+            parse_e2e_adapter_teacher_objective(Some("parameter-mse")).unwrap(),
+            E2eAdapterTeacherObjective::ParameterMse
+        );
+        assert_eq!(
+            parse_e2e_adapter_teacher_objective(Some("functional-mse")).unwrap(),
+            E2eAdapterTeacherObjective::FunctionalMse
+        );
+        assert_eq!(
+            parse_e2e_adapter_teacher_objective(Some("hybrid")).unwrap(),
+            E2eAdapterTeacherObjective::Hybrid
+        );
+        assert!(parse_e2e_adapter_teacher_objective(Some("raw-lora")).is_err());
+    }
+
+    #[test]
+    fn exact_teacher_adapter_materializes_target_model() {
+        let config = NpaConfig::growing_2d();
+        let base = NpaModel::upstream_seeded(config.clone(), 7);
+        let target = NpaModel::upstream_seeded(config.clone(), 19);
+        let rank = config.perception_dims().max(config.update_dims());
+        let adapter = exact_teacher_adapter(&base, &target, rank, rank as f32).unwrap();
+        let materialized = adapter.apply_to_model(&base).unwrap();
+        let assert_close = |actual: &[f32], expected: &[f32]| {
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1.0e-6)
+            );
+        };
+        assert_close(&materialized.weights.w1, &target.weights.w1);
+        assert_close(&materialized.weights.b1, &target.weights.b1);
+        assert_close(&materialized.weights.w2, &target.weights.w2);
+        assert_close(&materialized.weights.b2, &target.weights.b2);
+    }
+
+    #[test]
+    fn holdout_examples_reject_oracle_adapter_targets() {
+        let clean = vec![tiny_rollout_example("rose", None)];
+        ensure_holdout_teacher_free(&clean).unwrap();
+
+        let leaked = vec![tiny_rollout_example("tropical_fish", Some(vec![1.0]))];
+        let err = ensure_holdout_teacher_free(&leaked).unwrap_err();
+        assert!(err.to_string().contains("tropical_fish"));
     }
 
     #[test]
@@ -2390,78 +3331,167 @@ mod tests {
     }
 
     #[test]
+    fn validation_horizons_are_sorted_deduplicated_and_include_final_steps() {
+        assert_eq!(normalize_validation_horizons(None, 64).unwrap(), vec![64]);
+        assert_eq!(
+            normalize_validation_horizons(Some(&[512, 96, 512, 256]), 1024).unwrap(),
+            vec![96, 256, 512, 1024]
+        );
+        assert!(normalize_validation_horizons(Some(&[0, 64]), 128).is_err());
+        assert!(normalize_validation_horizons(Some(&[1, 2, 3, 4, 5, 6, 7, 8]), 9).is_err());
+    }
+
+    #[test]
+    fn exposure_targets_resolve_to_optimizer_steps_without_rounding_down() {
+        assert_eq!(
+            optimizer_steps_for_exposure(240_000, 16, 128).unwrap(),
+            30_000
+        );
+        assert_eq!(
+            optimizer_steps_for_exposure(320_000, 16, 128).unwrap(),
+            40_000
+        );
+        assert_eq!(
+            optimizer_steps_for_exposure(40_000, 16, 64).unwrap(),
+            10_000
+        );
+        assert_eq!(
+            optimizer_steps_for_exposure(8_000, 900, 128).unwrap(),
+            56_250
+        );
+        assert_eq!(
+            optimizer_steps_for_exposure(24_000, 900, 64).unwrap(),
+            337_500
+        );
+        assert_eq!(
+            optimizer_steps_for_exposure(8_000, 900, 32).unwrap(),
+            225_000
+        );
+        assert_eq!(optimizer_steps_for_exposure(1, 3, 2).unwrap(), 2);
+    }
+
+    #[test]
+    fn exposure_campaign_configs_are_explicit_and_bundled() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/sandbox/hyper_e2e");
+        for (name, exposure, particles, conditions, replicas, control) in [
+            (
+                "omnisvg_16_upstream_exposure_table.toml",
+                240_000,
+                512,
+                16,
+                8,
+                true,
+            ),
+            (
+                "omnisvg_16_upstream_exposure_dino.toml",
+                240_000,
+                512,
+                16,
+                8,
+                true,
+            ),
+            (
+                "omnisvg_16_upstream_exposure_table_p1024.toml",
+                240_000,
+                1024,
+                16,
+                8,
+                true,
+            ),
+            (
+                "omnisvg_16_upstream_exposure_table_p2048.toml",
+                320_000,
+                2048,
+                16,
+                8,
+                true,
+            ),
+            (
+                "omnisvg_16_upstream_exposure_table_p4096_cycle.toml",
+                40_000,
+                4096,
+                16,
+                4,
+                true,
+            ),
+            (
+                "omnisvg_1k_exposure_stage_a_p256.toml",
+                8_000,
+                256,
+                32,
+                4,
+                false,
+            ),
+            (
+                "omnisvg_1k_exposure_stage_b_p512.toml",
+                24_000,
+                512,
+                16,
+                4,
+                false,
+            ),
+            (
+                "omnisvg_1k_exposure_stage_c_p1024.toml",
+                8_000,
+                1024,
+                8,
+                4,
+                false,
+            ),
+        ] {
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+            assert_eq!(config.training.steps, None);
+            assert_eq!(
+                config.training.target_mean_trajectories_per_example,
+                Some(exposure)
+            );
+            assert_eq!(config.training.example_batch_size, Some(conditions));
+            assert_eq!(config.training.rollouts_per_example, Some(replicas));
+            assert_eq!(config.rollout.particles, Some(particles));
+            assert_eq!(config.target.loss_image_size, Some(256));
+            assert_eq!(config.training.seed_trajectory_interval, Some(128));
+            if control {
+                let (pool_slots, pool_capacity) = if particles == 4_096 {
+                    (256, 4_096)
+                } else {
+                    (512, 8_192)
+                };
+                assert_eq!(config.training.pool_slots_per_example, Some(pool_slots));
+                assert_eq!(config.training.pool_capacity, Some(pool_capacity));
+                assert_eq!(config.validation.horizons.as_deref(), Some(&[512][..]));
+                assert_eq!(config.validation.selection_horizon_min_steps, Some(512));
+            } else {
+                assert_eq!(config.validation.horizons.as_deref(), Some(&[1_024][..]));
+                assert_eq!(config.validation.selection_horizon_min_steps, Some(1_024));
+            }
+            assert_eq!(
+                config.validation.final_examples,
+                Some(if control { 16 } else { 100 })
+            );
+            assert_eq!(config.validation.final_particles, Some(4096));
+        }
+    }
+
+    #[test]
     fn verified_rollout_configs_parse() {
         for (
             name,
             expected_steps,
             expected_validation_interval,
-            expected_step_min,
             expected_backend,
             expected_perception_backend,
-            expected_tbptt_loss_mode,
         ) in [
-            (
-                "smoke_lizard_dino_online.toml",
-                1,
-                1,
-                None,
-                "dense",
-                "dense",
-                None,
-            ),
-            (
-                "bench_omnisvg_8_b4_p128.toml",
-                200,
-                200,
-                None,
-                "dense",
-                "dense",
-                None,
-            ),
+            ("smoke_lizard_dino_online.toml", 1, 1, "dense", "dense"),
+            ("bench_omnisvg_8_b4_p128.toml", 200, 200, "dense", "dense"),
             (
                 "bench_omnisvg_8_b4_p128_tiled.toml",
                 200,
                 200,
-                None,
                 "tiled-adjoint",
                 "dense",
-                None,
-            ),
-            (
-                "oracle_shape_1k_p512_s32_cuda.toml",
-                3000,
-                500,
-                Some(32),
-                "tiled-adjoint",
-                "auto",
-                Some("endpoint-weighted"),
-            ),
-            (
-                "oracle_shape_1k_p1024_s32_cuda.toml",
-                2000,
-                500,
-                Some(32),
-                "tiled-adjoint",
-                "auto",
-                Some("endpoint-weighted"),
-            ),
-            (
-                "oracle_shape_1k_p2048_s32_cuda.toml",
-                500,
-                250,
-                Some(32),
-                "tiled-adjoint",
-                "auto",
-                Some("endpoint-weighted"),
-            ),
-            (
-                "scale_omnisvg_10k_rank16_cuda.toml",
-                3000,
-                500,
-                Some(32),
-                "tiled-adjoint",
-                "auto",
-                Some("endpoint-weighted"),
             ),
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2484,28 +3514,24 @@ mod tests {
                 Some(expected_perception_backend)
             );
             assert_eq!(
-                config.training.tbptt_loss_mode.as_deref(),
-                expected_tbptt_loss_mode
+                config.training.credit_assignment.as_deref(),
+                Some("full-bptt")
+            );
+            assert_eq!(
+                config.training.max_full_bptt_particle_steps,
+                Some(1_048_576)
             );
             assert_eq!(config.model.shared_base_train_start_step, Some(0));
             assert_eq!(
                 config.validation.interval,
                 Some(expected_validation_interval)
             );
-            assert_eq!(config.rollout.step_min, expected_step_min);
-            if expected_tbptt_loss_mode.is_some() {
-                assert_eq!(config.training.use_particle_pool, Some(true));
-                let expected_slots = if name == "oracle_shape_1k_p2048_s32_cuda.toml" {
-                    1
-                } else {
-                    2
-                };
-                assert_eq!(config.training.pool_slots_per_example, Some(expected_slots));
-                assert_eq!(config.target.points, Some(2048));
-                assert_eq!(config.target.loss_image_size, Some(128));
-                assert_eq!(config.validation.particles, Some(2048));
-                assert_eq!(config.validation.steps, Some(64));
-            }
+            assert_ne!(config.training.use_particle_pool, Some(true));
+            assert_eq!(
+                config.adapter.generator.as_deref(),
+                Some("module-token-decoder")
+            );
+            assert_eq!(config.condition.alpha_channel, Some(true));
             assert_eq!(
                 config.gpu.condition_device_cache_max_bytes,
                 Some(DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES)
@@ -2521,13 +3547,97 @@ mod tests {
     }
 
     #[test]
+    fn verified_quality_scale_throughput_config_preserves_hot_path_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/verified/2d/hyper_e2e")
+            .join("throughput_omnisvg_64_b64_p1024_s96_cuda.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+
+        assert_eq!(config.source.source_limit, Some(64));
+        assert_eq!(
+            config.condition.encoder.as_deref(),
+            Some("dino-vits-full-tokens")
+        );
+        assert_eq!(config.condition.dino_batch_size, Some(32));
+        assert_eq!(config.training.example_batch_size, Some(64));
+        assert_eq!(
+            config.training.credit_assignment.as_deref(),
+            Some("full-bptt")
+        );
+        assert_eq!(
+            config.training.max_full_bptt_particle_steps,
+            Some(6_291_456)
+        );
+        assert_eq!(
+            config.training.target2d_loss_backend.as_deref(),
+            Some("tiled-adjoint")
+        );
+        assert_eq!(config.training.perception_backend.as_deref(), Some("auto"));
+        assert_eq!(config.training.use_particle_pool, Some(true));
+        assert_eq!(config.training.pool_capacity, Some(256));
+        assert_eq!(config.gpu.backend.as_deref(), Some("burn-cuda"));
+        assert_eq!(config.rollout.particles, Some(1024));
+        assert_eq!(config.rollout.step_min, Some(96));
+        assert_eq!(config.rollout.steps, Some(96));
+        assert_eq!(
+            config.gates.min_median_particle_steps_per_sec,
+            Some(15_000_000.0)
+        );
+        assert_eq!(config.gates.fail_on_violation, Some(true));
+    }
+
+    #[test]
+    fn verified_catalog_quality_configs_preserve_teacher_and_eval_contracts() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/verified/2d/hyper_e2e");
+        for name in [
+            "quality_growing_catalog_pretrain.toml",
+            "quality_growing_catalog_refine.toml",
+        ] {
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+            assert_eq!(
+                config.model.oracle_model_dir.as_deref(),
+                Some(Path::new("models/catalog/growing"))
+            );
+            assert_eq!(config.training.task_loss_weight, Some(0.0));
+            assert_eq!(config.training.adapter_teacher_weight, Some(1000.0));
+            assert_eq!(config.adapter.rank, Some(82));
+            assert_eq!(config.validation.selection_horizon_min_steps, Some(256));
+            assert_eq!(
+                config.adapter.generator.as_deref(),
+                Some("token-attention-pool")
+            );
+        }
+
+        let text = std::fs::read_to_string(root.join("quality_growing_catalog_nonbase_eval.toml"))
+            .unwrap();
+        let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+        assert_eq!(config.validation.particles, Some(4096));
+        assert_eq!(config.validation.steps, Some(1024));
+        assert_eq!(
+            config.validation.horizons.as_deref(),
+            Some([96, 256, 512, 1024].as_slice())
+        );
+        assert_eq!(config.validation.psnr_threshold_db, Some(26.0));
+        assert_eq!(config.validation.examples, Some(2));
+        assert_eq!(config.validation.selection_horizon_min_steps, Some(256));
+    }
+
+    #[test]
     fn rollout_report_records_sampled_training_steps() {
         let config: RolloutExperimentConfig = toml::from_str(
             r#"
             preset = "growing-2d"
 
             [source]
-            target_images = ["assets/catalog_thumbnails/lizard.png"]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
+
+            [output]
+            checkpoint_interval_steps = 3
 
             [condition]
             encoder = "dino-vits-full-tokens"
@@ -2544,6 +3654,7 @@ mod tests {
             tbptt_loss_mode = "endpoint-weighted"
             tbptt_intermediate_loss_weight = 0.25
             tbptt_final_loss_weight = 1.0
+            credit_assignment = "detached-tbptt"
             use_particle_pool = true
             pool_slots_per_example = 2
             inject_seed_interval = 64
@@ -2577,13 +3688,91 @@ mod tests {
         assert_eq!(report.training.tbptt_loss_mode, "endpoint-weighted");
         assert_eq!(report.training.tbptt_intermediate_loss_weight, 0.25);
         assert_eq!(report.training.tbptt_final_loss_weight, 1.0);
+        assert_eq!(report.training.credit_assignment, "detached-tbptt");
         assert!(report.training.use_particle_pool);
         assert_eq!(report.training.pool_slots_per_example, 2);
+        assert_eq!(report.training.planned_rollout_trajectories, 10);
+        assert_eq!(
+            report.training.planned_mean_trajectories_per_train_example,
+            10.0
+        );
+        assert_eq!(
+            report
+                .training
+                .upstream_growing_reference_trajectories_per_target,
+            240_000
+        );
+        assert!(
+            (report
+                .training
+                .upstream_growing_trajectory_exposure_fraction
+                - 10.0 / 240_000.0)
+                .abs()
+                < f64::EPSILON
+        );
         assert_eq!(report.training.inject_seed_interval, 64);
         assert_eq!(report.training.brush_size, 0.1);
         assert_eq!(report.training.pre_rollout_steps, 3);
+        assert_eq!(report.output.checkpoint_interval_steps, 3);
         assert_eq!(report.training.target2d_loss_backend, "tiled-adjoint");
         assert_eq!(report.training.perception_backend, "tiled-adjoint");
+    }
+
+    #[test]
+    fn full_bptt_preflight_rejects_unbounded_graphs() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+            [source]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
+            [condition]
+            encoder = "sample-id-onehot"
+            [training]
+            steps = 10
+            example_batch_size = 64
+            credit_assignment = "full-bptt"
+            max_full_bptt_particle_steps = 1000
+            [rollout]
+            particles = 512
+            steps = 64
+            "#,
+        )
+        .unwrap();
+        let err = build_e2e_rollout_report(Path::new("inline.toml"), &config)
+            .err()
+            .expect("oversized full-BPTT graph should fail preflight");
+        assert!(err.to_string().contains("full-bptt preflight rejected"));
+    }
+
+    #[test]
+    fn detached_tbptt_preflight_bounds_the_active_chunk_graph() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+            [source]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
+            [condition]
+            encoder = "sample-id-onehot"
+            [training]
+            steps = 10
+            example_batch_size = 64
+            rollouts_per_example = 4
+            credit_assignment = "detached-tbptt"
+            tbptt_chunk_steps = 32
+            max_full_bptt_particle_steps = 1000
+            [rollout]
+            particles = 4096
+            steps = 256
+            "#,
+        )
+        .unwrap();
+        let err = build_e2e_rollout_report(Path::new("inline.toml"), &config)
+            .err()
+            .expect("oversized detached-TBPTT chunk should fail preflight");
+        assert!(
+            err.to_string()
+                .contains("detached-tbptt preflight rejected")
+        );
     }
 
     #[test]
@@ -2594,7 +3783,7 @@ mod tests {
 
             [source]
             target_images = [
-                "assets/catalog_thumbnails/lizard.png",
+                "assets/reference_targets/lizard_upstream_120.png",
                 "assets/catalog_thumbnails/turtle.png",
             ]
 
@@ -2620,8 +3809,105 @@ mod tests {
         assert_eq!(report.condition.token_count, 1);
         assert_eq!(report.condition.embed_dims, 2);
         assert_eq!(report.condition.flattened_feature_dims, 2);
+        assert_eq!(report.condition.sample_id_vocab_size, Some(2));
+        assert_eq!(report.condition.sample_ids, [0, 1]);
         assert_eq!(report.source.train_examples, 2);
         assert!(report.output.hyper_output.ends_with("hyper_2d.bpk"));
+    }
+
+    #[test]
+    fn rollout_report_maps_a_source_subset_to_existing_adapter_table_columns() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = [
+                "assets/reference_targets/lizard_upstream_120.png",
+                "assets/catalog_thumbnails/turtle.png",
+            ]
+
+            [condition]
+            encoder = "sample-id-onehot"
+            sample_id_vocab_size = 16
+            sample_ids = [5, 11]
+
+            [adapter]
+            generator = "sample-id-table"
+
+            [training]
+            steps = 0
+            "#,
+        )
+        .unwrap();
+
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert_eq!(report.condition.embed_dims, 16);
+        assert_eq!(report.condition.sample_id_vocab_size, Some(16));
+        assert_eq!(report.condition.sample_ids, [5, 11]);
+    }
+
+    #[test]
+    fn rollout_report_supports_sample_id_adapter_table_control() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = [
+                "assets/reference_targets/lizard_upstream_120.png",
+                "assets/catalog_thumbnails/turtle.png",
+            ]
+
+            [condition]
+            encoder = "sample-id-onehot"
+            online = false
+
+            [adapter]
+            generator = "sample-id-table"
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 0
+
+            [gpu]
+            backend = "burn-wgpu"
+            "#,
+        )
+        .unwrap();
+
+        let mut report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert_eq!(report.adapter.generator, E2E_HYPER_ARCH_SAMPLE_ID_TABLE);
+        assert_eq!(report.condition.feature_normalization, "sample-id-onehot");
+
+        report.source.selected_sources = 100_000;
+        report.training.gpu_memory_budget_gb = Some(1.0);
+        let err = check_condition_preload_memory_budget(&report)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("persistent GPU state requires"));
+        assert!(err.contains("adapter weights/gradients/AdamW"));
+
+        report.source.selected_sources = 2;
+        report.training.gpu_memory_budget_gb = None;
+        report.training.system_memory_budget_gb = Some(1.0);
+        report.training.use_particle_pool = true;
+        report.training.pool_capacity = 1_024;
+        report.rollout.particles = 1_024;
+        let err = check_condition_preload_memory_budget(&report)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("particle-pool checkpoint readback"));
+
+        report.training.system_memory_budget_gb = None;
+        report.training.pool_capacity = 8_192;
+        report.rollout.particles = 4_096;
+        let err = check_condition_preload_memory_budget(&report)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must stay below 2.00 GiB"));
+        assert!(err.contains("sharded pool storage"));
     }
 
     #[test]
@@ -2631,12 +3917,12 @@ mod tests {
             preset = "growing-2d"
 
             [source]
-            target_images = ["assets/catalog_thumbnails/lizard.png"]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
 
             [condition]
             encoder = "dino-vits-full-tokens"
             dino_model = "assets/models/dino_vits14.mpk"
-            dino_image_size = 518
+            dino_image_size = 224
             dino_patch_size = 14
             online = true
 
@@ -2657,12 +3943,65 @@ mod tests {
 
         let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
         assert_eq!(report.adapter.generator, E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW);
+        assert_eq!(
+            report.adapter.parameterization,
+            E2E_HYPER_ADAPTER_FACTORIZED
+        );
         assert_eq!(report.adapter.adapter_chunk_size, 32);
-        assert_eq!(report.condition.token_count, 1370);
+        assert_eq!(report.condition.token_count, 257);
         assert_eq!(
             report.condition.feature_normalization,
             "per-token-preserved"
         );
+    }
+
+    #[test]
+    fn rollout_report_supports_canonical_full_rank_lora_and_split_initialization() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
+
+            [condition]
+            encoder = "dino-vits-full-tokens"
+            dino_model = "assets/models/dino_vits14.mpk"
+            dino_image_size = 224
+            dino_patch_size = 14
+            online = true
+
+            [adapter]
+            rank = 82
+            alpha = 82.0
+            generator = "module-token-decoder"
+            parameterization = "canonical-full-rank"
+            attention_normalization = "softmax"
+            condition_init_scale = 0.1
+            output_init_scale = 0.001
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 0
+
+            [gpu]
+            backend = "burn-wgpu"
+            "#,
+        )
+        .unwrap();
+
+        let report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        assert_eq!(
+            report.adapter.parameterization,
+            E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+        );
+        assert_eq!(
+            report.adapter.attention_normalization,
+            E2E_HYPER_ATTENTION_SOFTMAX
+        );
+        assert_eq!(report.adapter.condition_init_scale, 0.1);
+        assert_eq!(report.adapter.output_init_scale, 0.001);
     }
 
     #[test]
@@ -2672,7 +4011,7 @@ mod tests {
             preset = "growing-2d"
 
             [source]
-            target_images = ["assets/catalog_thumbnails/lizard.png"]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
 
             [output]
             hyper_output = "artifacts/sandbox/hyper_2d.json"
@@ -2709,7 +4048,7 @@ mod tests {
             preset = "growing-2d"
 
             [source]
-            target_images = ["assets/catalog_thumbnails/lizard.png"]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
 
             [condition]
             encoder = "dino-vits-full-tokens"
@@ -2750,7 +4089,7 @@ mod tests {
             preset = "growing-2d"
 
             [source]
-            target_images = ["assets/catalog_thumbnails/lizard.png"]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
 
             [condition]
             encoder = "dino-vits-full-tokens"
@@ -2811,7 +4150,7 @@ mod tests {
             preset = "growing-2d"
 
             [source]
-            target_images = ["assets/catalog_thumbnails/lizard.png"]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
 
             [condition]
             encoder = "dino-vits-full-tokens"

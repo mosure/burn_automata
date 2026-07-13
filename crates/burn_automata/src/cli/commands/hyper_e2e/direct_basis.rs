@@ -31,9 +31,9 @@ use oracle::evaluate_direct_basis_oracles;
 
 const DEFAULT_WGPU_VRAM_BUDGET_GB: f32 = 64.0;
 const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 160;
-const TARGET2D_BURN_MAX_TRAIN_PARTICLES: usize = 2048;
-const TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD: usize = 2048;
-const TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS: usize = 1;
+const TARGET2D_BURN_MAX_TRAIN_PARTICLES: usize = 4096;
+const TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD: usize = 512;
+const TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS: usize = 32;
 const TARGET2D_BURN_DEFAULT_CHUNK_FLOATS: usize = 16_000_000;
 const TARGET2D_BURN_QUALITY_CHUNK_FLOATS: usize = 512 * 1024;
 
@@ -1125,8 +1125,8 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         grid_eps: hashgrid.eps,
         motion_scale,
         loss_config,
-        target2d_loss_backend: Target2dLossBackend::Dense,
-        perception_backend: PerceptionRolloutBackend::Dense,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
         per_parameter_grad_normalization,
         base_sgd,
         adapter_sgd,
@@ -1651,8 +1651,8 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         grid_eps: hashgrid.eps,
         motion_scale: base.config.alpha * base.config.motion_eps(hashgrid.eps),
         loss_config,
-        target2d_loss_backend: Target2dLossBackend::Dense,
-        perception_backend: PerceptionRolloutBackend::Dense,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
         per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: 0.0,
@@ -2103,8 +2103,8 @@ fn run_burn_wgpu_direct_basis(
         grid_eps: request.hashgrid.eps,
         motion_scale: base.config.alpha * base.config.motion_eps(request.hashgrid.eps),
         loss_config: request.loss_config,
-        target2d_loss_backend: Target2dLossBackend::Dense,
-        perception_backend: PerceptionRolloutBackend::Dense,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
         per_parameter_grad_normalization: request.per_parameter_grad_normalization,
         base_sgd: request.base_sgd,
         adapter_sgd: request.adapter_sgd,
@@ -2563,7 +2563,7 @@ pub(crate) fn train_target_2d_burn_oracle(
     }
     if training_config.particle_count > TARGET2D_BURN_MAX_TRAIN_PARTICLES {
         return Err(std::io::Error::other(format!(
-            "Burn target2d GPU training is capped at {TARGET2D_BURN_MAX_TRAIN_PARTICLES} particles for backward safety; requested {}. Use 4096 particles for bounded eval/export.",
+            "Burn target2d GPU training is capped at {TARGET2D_BURN_MAX_TRAIN_PARTICLES} particles for bounded sparse-backward safety; requested {}.",
             training_config.particle_count
         ))
         .into());
@@ -2615,12 +2615,16 @@ pub(crate) fn train_target_2d_burn_oracle(
         .saturating_add(1)
         .saturating_mul(training_config.repetitions);
     let quality_tiled = training_config.particle_count >= TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD;
-    let tbptt_chunk_steps = if quality_tiled {
-        training_config
-            .step_max
-            .clamp(1, TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS)
+    let automatic_tbptt_chunk_steps = automatic_target2d_tbptt_chunk_steps(
+        training_config.particle_count,
+        training_config.step_max,
+    );
+    let tbptt_chunk_steps = if training_config.tbptt_chunk_steps == 0 {
+        automatic_tbptt_chunk_steps
     } else {
-        training_config.step_max.max(1)
+        training_config
+            .tbptt_chunk_steps
+            .clamp(1, training_config.step_max)
     };
     let chunk_floats = if quality_tiled {
         TARGET2D_BURN_QUALITY_CHUNK_FLOATS
@@ -2649,8 +2653,8 @@ pub(crate) fn train_target_2d_burn_oracle(
         grid_eps: hashgrid.eps,
         motion_scale: model.config.alpha * model.config.motion_eps(hashgrid.eps),
         loss_config,
-        target2d_loss_backend: Target2dLossBackend::Dense,
-        perception_backend: PerceptionRolloutBackend::Dense,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
         per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: training_config.optimizer.learning_rate,
@@ -2717,6 +2721,14 @@ pub(crate) fn train_target_2d_burn_oracle(
         best_train_loss: burn_report.best_train_loss,
         best_train_step: burn_report.best_train_step,
     })
+}
+
+fn automatic_target2d_tbptt_chunk_steps(particle_count: usize, step_max: usize) -> usize {
+    if particle_count >= TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD {
+        step_max.clamp(1, TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS)
+    } else {
+        step_max.max(1)
+    }
 }
 
 fn split_direct_basis_adapter_bank_entries(
@@ -3391,6 +3403,13 @@ mod tests {
         .to_string();
 
         assert!(err.contains("rollout particles"));
+    }
+
+    #[test]
+    fn target2d_quality_auto_tbptt_preserves_32_step_credit() {
+        assert_eq!(automatic_target2d_tbptt_chunk_steps(4096, 96), 32);
+        assert_eq!(automatic_target2d_tbptt_chunk_steps(512, 16), 16);
+        assert_eq!(automatic_target2d_tbptt_chunk_steps(256, 96), 96);
     }
 
     #[test]

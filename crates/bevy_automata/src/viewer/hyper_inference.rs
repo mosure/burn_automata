@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use bevy::{tasks::AsyncComputeTaskPool, window::FileDragAndDrop};
 use burn_automata::{
-    ConditionEncoder2d, ConditionImage2d, DinoVitsConditionEncoder, NpaConfig, NpaModel,
-    generate_e2e_conditioned_npa_2d, import::load_manifest, load_e2e_hyper_npa_2d,
+    DinoVitsConditionEncoder, NpaConfig, NpaModel, decode_condition_image,
+    generate_e2e_conditioned_npa_2d, hyper::DinoVitsConditionContract, import::load_manifest,
+    load_e2e_hyper_npa_2d,
 };
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use image::GenericImageView;
 
 use super::*;
 
@@ -292,34 +292,65 @@ pub(in crate::viewer) fn generate_hyper_npa_model_from_image_path(
 fn generate_model_for_source(
     request: HyperNpaInferenceRequest,
 ) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
-    if !request
-        .dino_image_size
-        .is_multiple_of(request.dino_patch_size)
-    {
-        return Err(std::io::Error::other(format!(
-            "DINO image size {} must be divisible by patch size {}",
-            request.dino_image_size, request.dino_patch_size
-        ))
-        .into());
-    }
     let condition = decode_condition_image(&request.source.bytes)?;
     let image_width = condition.width as u32;
     let image_height = condition.height as u32;
-    let dino = DinoVitsConditionEncoder::load(&request.dino_model_path, request.dino_image_size)?;
-    let token_grid = request.dino_image_size / request.dino_patch_size;
-    let mut encoded = dino.encode_batch(
+    let hyper = load_e2e_hyper_npa_2d(&request.hyper_model_path)?;
+    if hyper.condition_application.as_deref() == Some("per-step-field")
+        || hyper.has_spatial_condition_control()
+    {
+        return Err(std::io::Error::other(
+            "selected artifact is a per-step condition-field NPA, not a static image-to-NPA HyperNPA artifact",
+        )
+        .into());
+    }
+    let dino_image_size = hyper
+        .condition_image_size
+        .unwrap_or(request.dino_image_size);
+    if !dino_image_size.is_multiple_of(request.dino_patch_size) {
+        return Err(std::io::Error::other(format!(
+            "DINO image size {dino_image_size} must be divisible by patch size {}",
+            request.dino_patch_size
+        ))
+        .into());
+    }
+    let default_token_grid = dino_image_size / request.dino_patch_size;
+    let token_grid_width = hyper
+        .condition_token_grid_width
+        .unwrap_or(default_token_grid);
+    let token_grid_height = hyper
+        .condition_token_grid_height
+        .unwrap_or(default_token_grid);
+    let dino = DinoVitsConditionEncoder::load(&request.dino_model_path, dino_image_size)?;
+    let l2_normalize_features = hyper.condition_l2_normalize_features.unwrap_or(true);
+    let mut encoded = dino.encode_batch_with_contract(
         &[condition],
-        ConditionEncoder2d::DinoVitsTokenGrid,
-        token_grid,
-        token_grid,
+        DinoVitsConditionContract::token_grid(
+            token_grid_width,
+            token_grid_height,
+            l2_normalize_features,
+            hyper.condition_rgb_channels.unwrap_or(false),
+            hyper.condition_rgb_channel_scale.unwrap_or(1.0),
+            hyper.condition_alpha_channel.unwrap_or(false),
+            hyper.condition_alpha_channel_scale.unwrap_or(1.0),
+        ),
     )?;
     let condition_tokens = encoded
         .pop()
         .ok_or_else(|| std::io::Error::other("DINO did not return condition tokens"))?;
+    let base_bytes = std::fs::read(&request.base_model_path)?;
+    if let Some(expected) = &hyper.shared_base_sha256 {
+        let actual = burn_automata::import::bpk_payload_sha256(&base_bytes)?;
+        if &actual != expected {
+            return Err(std::io::Error::other(format!(
+                "HyperNPA shared-base checksum mismatch: artifact expects {expected}, loaded {actual}"
+            ))
+            .into());
+        }
+    }
     let manifest = load_manifest(&request.base_model_path)?;
     let hashgrid = manifest.hashgrid.clone();
     let base_model = manifest.into_model();
-    let hyper = load_e2e_hyper_npa_2d(&request.hyper_model_path)?;
     let embed_dims = hyper.embed_dims()?;
     let token_count = condition_tokens.len() / embed_dims;
     let spec = hyper.adapter_spec(&base_model.config)?;
@@ -334,21 +365,6 @@ fn generate_model_for_source(
         token_count,
         embed_dims,
     })
-}
-
-fn decode_condition_image(bytes: &[u8]) -> Result<ConditionImage2d, Box<dyn std::error::Error>> {
-    let image = image::load_from_memory(bytes)?;
-    let (width, height) = image.dimensions();
-    let rgb = image.to_rgb8();
-    let values = rgb
-        .pixels()
-        .flat_map(|pixel| pixel.0.map(|value| value as f32 / 255.0))
-        .collect::<Vec<_>>();
-    Ok(ConditionImage2d::from_rgb(
-        width as usize,
-        height as usize,
-        values,
-    )?)
 }
 
 fn read_image_source_from_path(path: &Path) -> Result<HyperNpaImageSource, String> {

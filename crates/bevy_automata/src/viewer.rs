@@ -173,7 +173,7 @@ impl Default for AutomataSettings {
                 "BURN_AUTOMATA_DINO_MODEL",
                 "models/dino/dino_vits.mpk",
             ),
-            hyper_dino_image_size: 518,
+            hyper_dino_image_size: 224,
             hyper_dino_patch_size: 14,
             revision: 1,
         }

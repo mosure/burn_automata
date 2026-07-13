@@ -1,5 +1,6 @@
 # Rust / build output
 /target/
+/crates/*/target/
 /.cargo/
 
 # Generated experiment outputs and local model stores

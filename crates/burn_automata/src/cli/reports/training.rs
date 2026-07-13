@@ -107,6 +107,7 @@ pub(crate) struct CliTarget2dTrainingReport {
     pub(crate) target_source_width: usize,
     pub(crate) target_source_height: usize,
     pub(crate) target_points: usize,
+    pub(crate) initial_model: Option<String>,
     pub(crate) model_output: Option<String>,
     pub(crate) checkpoint_model_output: Option<String>,
     pub(crate) checkpoint_best_model_output: Option<String>,

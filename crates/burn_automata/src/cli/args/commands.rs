@@ -229,6 +229,9 @@ pub(crate) enum Command {
         step_min: usize,
         #[arg(long, default_value_t = 96)]
         step_max: usize,
+        /// Truncated-BPTT chunk depth; zero uses the bounded-memory backend default.
+        #[arg(long, default_value_t = 0)]
+        tbptt_chunk_steps: usize,
         #[arg(long, default_value_t = 16)]
         inject_seed_interval: usize,
         #[arg(long, default_value_t = 0.5)]
@@ -547,7 +550,7 @@ pub(crate) enum Command {
         condition_encoder: Hyper2dConditionEncoderArg,
         #[arg(long)]
         dino_model: Option<PathBuf>,
-        #[arg(long, default_value_t = 518)]
+        #[arg(long, default_value_t = 224)]
         dino_image_size: usize,
         #[arg(long, default_value_t = 128)]
         shared_fit_steps: usize,
@@ -870,7 +873,7 @@ pub(crate) enum Command {
         condition_encoder: Hyper2dConditionEncoderArg,
         #[arg(long)]
         dino_model: Option<PathBuf>,
-        #[arg(long, default_value_t = 518)]
+        #[arg(long, default_value_t = 224)]
         dino_image_size: usize,
         #[arg(long, default_value_t = crate::DEFAULT_CONDITION_TOKEN_GRID_WIDTH)]
         condition_token_grid_width: usize,
@@ -1929,7 +1932,7 @@ mod tests {
             "train-target2d",
             "--experimental",
             "--target-image",
-            "assets/catalog_thumbnails/lizard.png",
+            "assets/reference_targets/lizard_upstream_120.png",
         ])
         .unwrap();
 

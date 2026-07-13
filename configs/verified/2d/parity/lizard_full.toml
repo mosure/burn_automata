@@ -9,7 +9,7 @@ require_fixture = true
 
 [model]
 bpk = "models/catalog/growing/lizard.bpk"
-target_image = "assets/catalog_thumbnails/lizard.png"
+target_image = "assets/reference_targets/lizard_upstream_120.png"
 
 [validation]
 particles = 4096
@@ -19,6 +19,7 @@ seed = 42
 seed_scale = 0.2
 seed_mode = "uniform-circle"
 target_points = 4096
+target_image_size = 120
 target_threshold = 0.05
 loss_image_size = 256
 splat_sigma = 1.0

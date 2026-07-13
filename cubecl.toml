@@ -1,0 +1,7 @@
+[autotune]
+level = "balanced"
+cache = "target"
+
+[compilation]
+cache = "target"
+check_mode = "auto"

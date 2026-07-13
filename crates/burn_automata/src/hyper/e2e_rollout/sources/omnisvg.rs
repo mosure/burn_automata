@@ -11,19 +11,22 @@ const HF_DATASET_CONFIG: &str = "default";
 const MANIFEST_VERSION: u32 = 1;
 const HTTP_USER_AGENT: &str = "burn_automata/0.1 omnisvg-thumbnail-loader";
 const HTTP_FETCH_ATTEMPTS: usize = 12;
+const HF_ROWS_FETCH_ATTEMPTS: usize = 24;
 const HTTP_FETCH_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const THUMBNAIL_FETCH_PARALLELISM: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::hyper::e2e_rollout) struct OmniSvgSourceConfig<'a> {
-    pub(in crate::hyper::e2e_rollout) dataset: OmniSvgDataset,
-    pub(in crate::hyper::e2e_rollout) split: &'a str,
-    pub(in crate::hyper::e2e_rollout) cache_dir: &'a Path,
-    pub(in crate::hyper::e2e_rollout) offset: usize,
-    pub(in crate::hyper::e2e_rollout) limit: usize,
-    pub(in crate::hyper::e2e_rollout) page_size: usize,
-    pub(in crate::hyper::e2e_rollout) download: bool,
-    pub(in crate::hyper::e2e_rollout) refresh: bool,
-    pub(in crate::hyper::e2e_rollout) token_env: &'a str,
+pub(crate) struct OmniSvgSourceConfig<'a> {
+    pub(crate) dataset: OmniSvgDataset,
+    pub(crate) split: &'a str,
+    pub(crate) cache_dir: &'a Path,
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+    pub(crate) page_size: usize,
+    pub(crate) download: bool,
+    pub(crate) refresh: bool,
+    pub(crate) token_env: &'a str,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,6 +188,13 @@ fn ensure_omnisvg_cache(
                     .is_none_or(|entry| !cached_thumbnail_exists(paths, entry))
             });
         if needs_page {
+            maybe_log_omnisvg_cache_progress(
+                "fetching",
+                page_offset,
+                page_len,
+                config.offset,
+                requested_end,
+            );
             let response_text = fetch_hf_rows_page(
                 config.dataset.dataset_id(),
                 config.split,
@@ -193,41 +203,23 @@ fn ensure_omnisvg_cache(
                 token.as_deref(),
             )?;
             let rows = parse_omnisvg_rows_response(&response_text, page_offset)?;
-            for row in rows {
-                if row.source_offset >= requested_end {
-                    continue;
-                }
-                let thumbnail_file = thumbnail_file_name(row.source_offset, &row.id, &row.image);
-                let thumbnail_path = paths.root.join(&thumbnail_file);
-                if config.refresh || !thumbnail_path.exists() {
-                    let bytes = image_bytes(row.image.clone(), token.as_deref())?;
-                    if bytes.is_empty() {
-                        return Err(std::io::Error::other(format!(
-                            "OmniSVG thumbnail for row {} was empty",
-                            row.source_offset
-                        ))
-                        .into());
-                    }
-                    std::fs::write(&thumbnail_path, bytes)?;
-                }
-                entries_by_offset.insert(
-                    row.source_offset,
-                    OmniSvgCacheEntry {
-                        id: row.id,
-                        slug: row.slug,
-                        title: row.title,
-                        description: row.description,
-                        keywords: row.keywords,
-                        detail: row.detail,
-                        thumbnail_file,
-                        source_offset: row.source_offset,
-                        source_url: row.image.source_url(),
-                        width: row.width,
-                        height: row.height,
-                    },
-                );
+            for entry in cache_omnisvg_page_rows(
+                paths,
+                rows,
+                requested_end,
+                config.refresh,
+                token.as_deref(),
+            )? {
+                entries_by_offset.insert(entry.source_offset, entry);
             }
             save_entries_manifest(paths, config.dataset, config.split, &entries_by_offset)?;
+            maybe_log_omnisvg_cache_progress(
+                "cached",
+                page_offset,
+                page_len,
+                config.offset,
+                requested_end,
+            );
         }
         page_offset += page_len;
     }
@@ -235,6 +227,101 @@ fn ensure_omnisvg_cache(
     let manifest = entries_manifest(config.dataset, config.split, &entries_by_offset);
     save_manifest(paths, &manifest)?;
     Ok(manifest)
+}
+
+fn cache_omnisvg_page_rows(
+    paths: &OmniSvgCachePaths,
+    rows: Vec<ParsedOmniSvgRow>,
+    requested_end: usize,
+    refresh: bool,
+    token: Option<&str>,
+) -> Result<Vec<OmniSvgCacheEntry>, Box<dyn std::error::Error>> {
+    let mut entries = Vec::with_capacity(rows.len());
+    for chunk in rows.chunks(THUMBNAIL_FETCH_PARALLELISM) {
+        let root = &paths.root;
+        let chunk_entries =
+            std::thread::scope(|scope| -> Result<Vec<OmniSvgCacheEntry>, std::io::Error> {
+                let mut handles = Vec::with_capacity(chunk.len());
+                for row in chunk.iter().cloned() {
+                    handles.push(scope.spawn(move || {
+                        cache_omnisvg_row(root, row, requested_end, refresh, token)
+                    }));
+                }
+
+                let mut chunk_entries = Vec::with_capacity(chunk.len());
+                for handle in handles {
+                    if let Some(entry) = handle
+                        .join()
+                        .map_err(|_| std::io::Error::other("OmniSVG thumbnail worker panicked"))??
+                    {
+                        chunk_entries.push(entry);
+                    }
+                }
+                Ok(chunk_entries)
+            })?;
+        entries.extend(chunk_entries);
+    }
+    Ok(entries)
+}
+
+fn cache_omnisvg_row(
+    root: &Path,
+    row: ParsedOmniSvgRow,
+    requested_end: usize,
+    refresh: bool,
+    token: Option<&str>,
+) -> Result<Option<OmniSvgCacheEntry>, std::io::Error> {
+    if row.source_offset >= requested_end {
+        return Ok(None);
+    }
+    let thumbnail_file = thumbnail_file_name(row.source_offset, &row.id, &row.image);
+    let thumbnail_path = root.join(&thumbnail_file);
+    if refresh || !thumbnail_path.exists() {
+        let bytes = image_bytes(row.image.clone(), token)
+            .map_err(|err| std::io::Error::other(format!("{err}")))?;
+        if bytes.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "OmniSVG thumbnail for row {} was empty",
+                row.source_offset
+            )));
+        }
+        let tmp_path = root.join(format!("{thumbnail_file}.part"));
+        std::fs::write(&tmp_path, bytes)?;
+        std::fs::rename(&tmp_path, &thumbnail_path)?;
+    }
+    Ok(Some(OmniSvgCacheEntry {
+        id: row.id,
+        slug: row.slug,
+        title: row.title,
+        description: row.description,
+        keywords: row.keywords,
+        detail: row.detail,
+        thumbnail_file,
+        source_offset: row.source_offset,
+        source_url: row.image.source_url(),
+        width: row.width,
+        height: row.height,
+    }))
+}
+
+fn maybe_log_omnisvg_cache_progress(
+    phase: &str,
+    page_offset: usize,
+    page_len: usize,
+    requested_offset: usize,
+    requested_end: usize,
+) {
+    let page_end = page_offset.saturating_add(page_len);
+    let page_index = page_offset.saturating_sub(requested_offset) / page_len.max(1);
+    let page_count = requested_end
+        .saturating_sub(requested_offset)
+        .div_ceil(page_len.max(1));
+    if page_index == 0 || page_index.is_multiple_of(10) || page_end >= requested_end {
+        eprintln!(
+            "OmniSVG cache {phase} rows {page_offset}..{page_end} ({}/{page_count} pages)",
+            page_index + 1
+        );
+    }
 }
 
 fn load_or_create_manifest(
@@ -271,7 +358,9 @@ fn save_manifest(
     manifest: &OmniSvgCacheManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&paths.root)?;
-    std::fs::write(&paths.manifest, serde_json::to_string_pretty(manifest)?)?;
+    let tmp_manifest = paths.manifest.with_file_name("manifest.json.part");
+    std::fs::write(&tmp_manifest, serde_json::to_string_pretty(manifest)?)?;
+    std::fs::rename(&tmp_manifest, &paths.manifest)?;
     Ok(())
 }
 
@@ -306,7 +395,8 @@ fn fetch_hf_rows_page(
     token: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let url = hf_rows_url(dataset_id, split, offset, length);
-    http_get_text(&url, token)
+    let bytes = http_get_bytes_with_attempts(&url, token, HF_ROWS_FETCH_ATTEMPTS)?;
+    Ok(String::from_utf8(bytes)?)
 }
 
 fn parse_omnisvg_rows_response(
@@ -419,20 +509,24 @@ fn image_bytes(
     }
 }
 
-fn http_get_text(url: &str, token: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
-    let bytes = http_get_bytes(url, token)?;
-    Ok(String::from_utf8(bytes)?)
+fn http_get_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    http_get_bytes_with_attempts(url, token, HTTP_FETCH_ATTEMPTS)
 }
 
-fn http_get_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn http_get_bytes_with_attempts(
+    url: &str,
+    token: Option<&str>,
+    max_attempts: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut delay = Duration::from_millis(500);
-    for attempt in 1..=HTTP_FETCH_ATTEMPTS {
+    for attempt in 1..=max_attempts {
         match http_get_bytes_once(url, token) {
             Ok(bytes) => return Ok(bytes),
-            Err(err) if attempt == HTTP_FETCH_ATTEMPTS => return Err(err),
+            Err(err) if attempt == max_attempts => return Err(err),
             Err(err) => {
+                let log_url = redacted_http_url(url);
                 eprintln!(
-                    "warning: HTTP fetch attempt {attempt}/{HTTP_FETCH_ATTEMPTS} failed for {url}: {err}; retrying in {} ms",
+                    "warning: HTTP fetch attempt {attempt}/{max_attempts} failed for {log_url}: {err}; retrying in {} ms",
                     delay.as_millis()
                 );
                 std::thread::sleep(delay);
@@ -448,6 +542,7 @@ fn http_get_bytes_once(
     token: Option<&str>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut request = ureq::get(url)
+        .timeout(HTTP_REQUEST_TIMEOUT)
         .set("User-Agent", HTTP_USER_AGENT)
         .set("Accept", "*/*");
     let bearer;
@@ -455,15 +550,41 @@ fn http_get_bytes_once(
         bearer = format!("Bearer {token}");
         request = request.set("Authorization", &bearer);
     }
-    let response = request
-        .call()
-        .map_err(|err| std::io::Error::other(format!("HTTP fetch failed for {url}: {err}")))?;
+    let log_url = redacted_http_url(url);
+    let response = request.call().map_err(|err| {
+        std::io::Error::other(format!(
+            "HTTP fetch failed for {log_url}: {}",
+            redacted_http_error(err, url)
+        ))
+    })?;
     let mut bytes = Vec::new();
     response
         .into_reader()
         .read_to_end(&mut bytes)
-        .map_err(|err| std::io::Error::other(format!("HTTP body read failed for {url}: {err}")))?;
+        .map_err(|err| {
+            std::io::Error::other(format!("HTTP body read failed for {log_url}: {err}"))
+        })?;
     Ok(bytes)
+}
+
+fn redacted_http_error(err: ureq::Error, url: &str) -> String {
+    format!("{err}").replace(url, &redacted_http_url(url))
+}
+
+fn redacted_http_url(url: &str) -> String {
+    let mut redacted = url
+        .split_once('?')
+        .map_or(url, |(base, _)| base)
+        .to_string();
+    const MAX_LOG_URL_LEN: usize = 160;
+    if redacted.len() > MAX_LOG_URL_LEN {
+        redacted.truncate(MAX_LOG_URL_LEN);
+        redacted.push_str("...");
+    }
+    if url.contains('?') {
+        redacted.push_str("?...");
+    }
+    redacted
 }
 
 fn decode_base64_image(value: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

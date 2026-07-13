@@ -20,9 +20,12 @@ macro_rules! dense_direct_basis_backend {
 #[allow(dead_code)]
 mod $module {
     use std::{
+        collections::{HashMap, VecDeque},
         fs,
+        path::{Path, PathBuf},
         process::Command,
         sync::atomic::{AtomicUsize, Ordering},
+        thread,
         time::Instant,
     };
 
@@ -35,37 +38,54 @@ mod $module {
                 ops::{Backward, Ops, OpsKind},
             },
         },
-        tensor::{Device, Int, Tensor, TensorData, TensorPrimitive, activation::relu},
+        tensor::{
+            Device, Distribution, IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive,
+            activation::{relu, softmax}, backend::Backend,
+        },
     };
     use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+    use rayon::prelude::*;
     use serde::Serialize;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     use super::super::{
-        BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
+        BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics, BurnE2eNearestTeacherEntry,
+        BurnE2eRolloutExample, BurnE2eRolloutHorizonSummary, BurnE2eRolloutOutput,
         BurnE2eRolloutHistoryEntry, BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport,
-        BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput,
+        BurnE2eRolloutTrainConfig,
+        BurnWgpuDirectBasisOutput,
         DirectBasisStepStats, DirectBasisTrainConfig,
-        DirectBasisTrainingExample as DirectBasisExample, E2eLrSchedule, E2eTbpttLossMode,
+        DirectBasisTrainingExample as DirectBasisExample, E2eAdapterTeacherObjective,
+        E2eCreditAssignment, E2eIdentitySampler, E2eLrSchedule, E2eParticlePoolSnapshot,
+        E2eTbpttLossMode, E2eTensorSnapshot, E2eTrainingCheckpoint,
+        E2E_TRAINING_CHECKPOINT_VERSION,
         Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
         Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
     };
     use crate::hyper::e2e::{
-        E2E_HYPER_ARCH_POOLED_FLOW, E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW, E2eHyperNpa2d,
-        E2eHyperNpa2dWeights, PerceptionRolloutBackend, Target2dLossBackend,
+        E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK, E2E_HYPER_ADAPTER_FACTORIZED,
+        E2eHyperGeneratorKind, E2eHyperNpa2d, E2eHyperNpa2dWeights, PerceptionRolloutBackend,
+        Target2dLossBackend, save_e2e_hyper_npa_2d,
+    };
+    #[cfg(feature = "dino")]
+    use crate::hyper::dino::{
+        DinoVitsConditionContract, DinoVitsConditionEncoderBackend,
+        DinoVitsPreparedConditionBatch,
     };
     use crate::{
-        AdamWConfig, AutomataError, AutomataResult, NpaConfig, NpaLowRankAdapter, NpaModel,
-        NpaWeights,
+        AdamWConfig, AutomataError, AutomataResult, BpkModelManifest, ConditionImage2d, NpaConfig,
+        NpaLowRankAdapter, NpaModel, NpaWeights,
         SgdConfig,
         rollout::{seed_particles_scaled, stochastic_mask},
         target2d::{render_target_2d_splat, target_2d_foreground_mask},
         TargetImage2d,
     };
     #[cfg($perception_cube_feature)]
-    use burn_automata_kernels::{PerceptionCubeAdjointBackend, PerceptionCubeAdjointConfig};
-    #[cfg($perception_cube_feature)]
-    use burn_automata_kernels::PerceptionCubeForwardBackend;
+    use burn_automata_kernels::{
+        PerceptionCubeAdjointBackend, PerceptionCubeAdjointConfig, PerceptionCubeForwardBackend,
+        PerceptionCubePreparedBackend,
+    };
     #[cfg($perception_cube_feature)]
     use burn_automata_kernels::{Target2dCubeAdjointBackend, Target2dCubeLossConfig};
 
@@ -80,18 +100,24 @@ mod $module {
     type Tensor1Inner = Tensor<InnerBackend, 1>;
     type Tensor2Inner = Tensor<InnerBackend, 2>;
     type Tensor3Inner = Tensor<InnerBackend, 3>;
+    type Tensor4Inner = Tensor<InnerBackend, 4>;
+    type Tensor1IntInner = Tensor<InnerBackend, 1, Int>;
+    type Tensor2IntInner = Tensor<InnerBackend, 2, Int>;
 
     const BACKEND: &str = $backend_name;
     const DEVICE_LABEL: &str = $device_label;
     const LOG_BACKEND: &str = $log_backend;
     const EPSILON: f32 = 1.0e-6;
+    const FUNCTIONAL_TEACHER_PARAMETER_AUX_WEIGHT: f32 = 0.01;
     static PERCEPTION_CUBE_ADJOINT_DEVICE_HITS: AtomicUsize = AtomicUsize::new(0);
     static PERCEPTION_CUBE_ADJOINT_FALLBACK_HITS: AtomicUsize = AtomicUsize::new(0);
     static PERCEPTION_CUBE_FORWARD_DEVICE_HITS: AtomicUsize = AtomicUsize::new(0);
     static PERCEPTION_CUBE_FORWARD_FALLBACK_HITS: AtomicUsize = AtomicUsize::new(0);
+    static PERCEPTION_CUBE_PREPARED_REUSE_HITS: AtomicUsize = AtomicUsize::new(0);
     static TARGET2D_CUBE_ADJOINT_DEVICE_HITS: AtomicUsize = AtomicUsize::new(0);
     static TARGET2D_CUBE_ADJOINT_FALLBACK_HITS: AtomicUsize = AtomicUsize::new(0);
     static STOCHASTIC_MASK_UPLOAD_HITS: AtomicUsize = AtomicUsize::new(0);
+    static STOCHASTIC_MASK_DEVICE_HITS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone)]
     struct BurnBaseParams {
@@ -120,6 +146,7 @@ mod $module {
         b2_delta: Tensor2,
     }
 
+    #[derive(Clone)]
     struct BurnAdapterBatch {
         rank: usize,
         alpha: f32,
@@ -161,7 +188,7 @@ mod $module {
 
     #[derive(Clone)]
     struct BurnE2eGeneratorParams {
-        kind: BurnE2eGeneratorKind,
+        kind: E2eHyperGeneratorKind,
         token_w: Tensor2,
         token_b: Tensor2,
         token_gate_w: Tensor2,
@@ -170,28 +197,21 @@ mod $module {
         time_w: Tensor2,
         output_w: Tensor2,
         output_b: Tensor2,
+        condition_control_w: Tensor2,
+        condition_control_b: Tensor2,
+        condition_control_state_w: Tensor2,
         hidden_dims: usize,
         token_attention_heads: usize,
+        softmax_token_attention: bool,
+        canonical_full_rank_lora: bool,
+        adapter_constants: Tensor2,
+        adapter_trainable_mask: Tensor2,
+        adapter_parameter_segments: Vec<(usize, usize)>,
         output_dims: usize,
         output_scale: f32,
         sample_steps: usize,
         adapter_chunk_size: usize,
         output_chunks: usize,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum BurnE2eGeneratorKind {
-        PooledFlow,
-        SpatialTokenFlow,
-    }
-
-    impl BurnE2eGeneratorKind {
-        const fn artifact_architecture(self) -> &'static str {
-            match self {
-                Self::PooledFlow => E2E_HYPER_ARCH_POOLED_FLOW,
-                Self::SpatialTokenFlow => E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW,
-            }
-        }
     }
 
     struct BurnE2eGeneratorAdamWState {
@@ -212,8 +232,15 @@ mod $module {
         output_w_v: Tensor2Inner,
         output_b_m: Tensor2Inner,
         output_b_v: Tensor2Inner,
+        condition_control_w_m: Tensor2Inner,
+        condition_control_w_v: Tensor2Inner,
+        condition_control_b_m: Tensor2Inner,
+        condition_control_b_v: Tensor2Inner,
+        condition_control_state_w_m: Tensor2Inner,
+        condition_control_state_w_v: Tensor2Inner,
     }
 
+    #[derive(Clone)]
     struct BurnTargetExample {
         target_rgb: Tensor2,
         target_density: Tensor2,
@@ -230,64 +257,239 @@ mod $module {
         target_cpu: TargetImage2d,
     }
 
+    struct BurnE2eCpuTargetInput {
+        target: TargetImage2d,
+        particle_count: usize,
+        update_prob: f32,
+        seed_scale: f32,
+    }
+
+    struct BurnE2ePreparedTargetExample {
+        target_rgb: Vec<f32>,
+        target_density: Vec<f32>,
+        target_foreground: Vec<f32>,
+        target_foreground_scale: f32,
+        target_mean: [f32; 2],
+        target_positions: Vec<f32>,
+        pixel_size: f32,
+        target_points: usize,
+        particle_count: usize,
+        update_prob: f32,
+        seed_scale: f32,
+        target_cpu: TargetImage2d,
+    }
+
+    struct BurnE2ePreparedCpuBatch {
+        indices: Vec<usize>,
+        targets: Vec<BurnE2ePreparedTargetExample>,
+        prepared_dino: Option<BurnE2ePreparedDinoBatch>,
+    }
+
+    struct BurnE2eCpuBatchPrefetch {
+        indices: Vec<usize>,
+        handle: thread::JoinHandle<Result<BurnE2ePreparedCpuBatch, String>>,
+    }
+
+    #[cfg(feature = "dino")]
+    type BurnE2ePreparedDinoBatch = DinoVitsPreparedConditionBatch;
+
+    #[cfg(not(feature = "dino"))]
+    struct BurnE2ePreparedDinoBatch;
+
     struct BurnPoolBatch {
         pool_indices: Vec<usize>,
         x: Tensor3,
         s: Tensor3,
     }
 
+    #[derive(Clone)]
+    struct BurnE2eConditionControlBatch {
+        patch_hidden: Tensor3,
+        update_w: Tensor2,
+        update_b: Tensor2,
+        state_w: Option<Tensor2>,
+        grid_width: usize,
+        grid_height: usize,
+        sigma: f32,
+        scale: f32,
+    }
+
+    impl BurnE2eConditionControlBatch {
+        fn update_for_particles(&self, x: &Tensor3, state: &Tensor3) -> Tensor3 {
+            let dims = x.shape().dims::<3>();
+            let batches = dims[0];
+            let particles = dims[1];
+            let patch_tokens = self.grid_width.saturating_mul(self.grid_height);
+            let hidden_dims = self.patch_hidden.shape().dims::<3>()[2];
+            let update_dims = self.update_b.shape().dims::<2>()[1];
+            let device = x.device();
+            let centers = tensor4(
+                condition_patch_centers_values(self.grid_width, self.grid_height),
+                [1, 1, patch_tokens, 2],
+                &device,
+            );
+            let particle_xy = x
+                .clone()
+                .unsqueeze_dim::<4>(2)
+                .expand([batches, particles, patch_tokens, 2]);
+            let center_xy = centers.expand([batches, particles, patch_tokens, 2]);
+            let diff = particle_xy - center_xy;
+            let dist2 = diff
+                .clone()
+                .mul(diff)
+                .sum_dim(3)
+                .squeeze_dim::<3>(3);
+            let weights = dist2
+                .mul_scalar(-1.0 / (self.sigma * self.sigma).max(EPSILON))
+                .exp();
+            let weights = weights.clone().div(
+                weights
+                    .sum_dim(2)
+                    .add_scalar(EPSILON)
+                    .expand([batches, particles, patch_tokens]),
+            );
+            let mut local = weights.matmul(self.patch_hidden.clone());
+            if let Some(state_w) = &self.state_w {
+                let state_dims = state.shape().dims::<3>()[2];
+                let projected = state.clone().matmul(
+                    state_w
+                        .clone()
+                        .transpose()
+                        .unsqueeze_dim::<3>(0)
+                        .expand([batches, state_dims, hidden_dims]),
+                );
+                local = relu(local + projected);
+            }
+            let update_w = self
+                .update_w
+                .clone()
+                .transpose()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, hidden_dims, update_dims]);
+            let update_b = self
+                .update_b
+                .clone()
+                .unsqueeze_dim::<3>(0)
+                .expand([batches, particles, update_dims]);
+            (local.matmul(update_w) + update_b).mul_scalar(self.scale)
+        }
+
+        fn select_rows(self, rows: &[usize]) -> Self {
+            if rows.is_empty() {
+                return self;
+            }
+            let device = self.patch_hidden.device();
+            let indices = Tensor::<BurnBackend, 1, Int>::from_data(
+                TensorData::new(
+                    rows.iter().map(|row| *row as i64).collect::<Vec<_>>(),
+                    [rows.len()],
+                ),
+                &device,
+            );
+            Self {
+                patch_hidden: self.patch_hidden.select(0, indices),
+                ..self
+            }
+        }
+
+        fn select_rows_or_identity(self, rows: Option<&[usize]>) -> Self {
+            match rows {
+                Some(rows) => self.select_rows(rows),
+                None => self,
+            }
+        }
+    }
+
     struct BurnE2ePoolBatch {
-        keys: Vec<BurnE2ePoolKey>,
+        slots: Vec<usize>,
         x: Tensor3,
         s: Tensor3,
         seed_replacements: usize,
     }
 
-    #[derive(Clone, Copy)]
-    struct BurnE2ePoolKey {
-        example: usize,
-        slot: usize,
-    }
-
-    struct BurnHostParticlePool {
-        positions: Vec<f32>,
-        states: Vec<f32>,
+    struct BurnDeviceParticlePool {
+        positions: Tensor3Inner,
+        states: Tensor3Inner,
         pool_size: usize,
         particle_count: usize,
         state_dims: usize,
     }
 
-    struct BurnE2eHostParticlePool {
-        positions: Vec<f32>,
-        states: Vec<f32>,
-        examples: usize,
-        slots_per_example: usize,
+    struct BurnE2eDeviceParticlePool {
+        positions: Tensor3Inner,
+        states: Tensor3Inner,
+        slot_examples: Vec<Option<(usize, usize)>>,
+        example_slots: HashMap<(usize, usize), usize>,
+        next_evict: usize,
+        capacity: usize,
         particle_count: usize,
         state_dims: usize,
+        slots_per_example: usize,
     }
 
     enum BurnE2eConditionValues {
         Device(Tensor3),
         HostRows(Vec<Vec<f32>>),
+        #[cfg(feature = "dino")]
+        DynamicDino(Box<BurnE2eDinoConditionSource>),
     }
 
     struct BurnE2eConditionCache {
         values: BurnE2eConditionValues,
+        teacher_vectors: Option<Tensor2>,
         examples: usize,
         token_count: usize,
         embed_dims: usize,
         device: BurnDevice,
     }
 
+    #[cfg(feature = "dino")]
+    struct BurnE2eDinoConditionSource {
+        paths: Vec<PathBuf>,
+        encoder: DinoVitsConditionEncoderBackend<InnerBackend>,
+        batch_size: usize,
+        token_grid_width: usize,
+        token_grid_height: usize,
+        l2_normalize_features: bool,
+        rgb_channels: bool,
+        rgb_channel_scale: f32,
+        alpha_channel: bool,
+        alpha_channel_scale: f32,
+    }
+
+    #[cfg(feature = "dino")]
+    impl BurnE2eDinoConditionSource {
+        fn contract(&self) -> DinoVitsConditionContract {
+            DinoVitsConditionContract::token_grid(
+                self.token_grid_width,
+                self.token_grid_height,
+                self.l2_normalize_features,
+                self.rgb_channels,
+                self.rgb_channel_scale,
+                self.alpha_channel,
+                self.alpha_channel_scale,
+            )
+        }
+    }
+
     struct BurnE2eSelectedCheckpoint {
         step: usize,
         train_loss: f32,
         selection_score: f32,
+        validation_contract: Option<BurnE2eValidationContract>,
         holdout_mean_psnr_db: Option<f32>,
         holdout_mean_loss: Option<f32>,
         quality_validation: Option<BurnE2eRolloutQualityReport>,
         params: BurnBaseParams,
         generator: BurnE2eGeneratorParams,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct BurnE2eValidationContract {
+        examples: usize,
+        particles: usize,
+        horizons: Vec<usize>,
+        selection_horizon_min_steps: usize,
     }
 
     struct BurnLossTensors {
@@ -315,8 +517,10 @@ mod $module {
 
     struct BurnE2eStepOutput {
         history: BurnE2eRolloutHistoryEntry,
+        particle_steps: u64,
         final_x: Tensor3,
         final_s: Tensor3,
+        per_example_losses: Option<Vec<f32>>,
     }
 
     #[derive(Clone, Serialize)]
@@ -450,6 +654,8 @@ mod $module {
             "size": train_config.pool_size,
             "inject_seed_interval": train_config.inject_seed_interval,
             "brush_size": train_config.brush_size,
+            "representation": "resident_gpu_tensors",
+            "per_step_host_state_transfer": false,
         });
         let checkpoint_selection_metrics = json!({
             "mode": if train_config.use_particle_pool {
@@ -527,6 +733,26 @@ mod $module {
         metrics["perception_backend"] = json!(train_config.perception_backend.as_str());
         metrics["perception_backend_effective"] =
             json!(perception_backend_effective(train_config).as_str());
+        metrics["perception_sparse_grid_effective"] = json!(
+            perception_backend_effective(train_config)
+                == PerceptionRolloutBackend::TiledAdjoint
+                && train_config.rollout_particles >= 512
+                && train_config.stopgrad_pos
+        );
+        metrics["perception_cube_adjoint_device_hits"] =
+            json!(PERCEPTION_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed));
+        metrics["perception_cube_adjoint_fallback_hits"] =
+            json!(PERCEPTION_CUBE_ADJOINT_FALLBACK_HITS.load(Ordering::Relaxed));
+        metrics["perception_cube_forward_device_hits"] =
+            json!(PERCEPTION_CUBE_FORWARD_DEVICE_HITS.load(Ordering::Relaxed));
+        metrics["perception_cube_forward_fallback_hits"] =
+            json!(PERCEPTION_CUBE_FORWARD_FALLBACK_HITS.load(Ordering::Relaxed));
+        metrics["perception_cube_prepared_reuse_hits"] =
+            json!(PERCEPTION_CUBE_PREPARED_REUSE_HITS.load(Ordering::Relaxed));
+        metrics["target2d_cube_adjoint_device_hits"] =
+            json!(TARGET2D_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed));
+        metrics["target2d_cube_adjoint_fallback_hits"] =
+            json!(TARGET2D_CUBE_ADJOINT_FALLBACK_HITS.load(Ordering::Relaxed));
         metrics["model_checkpoints"] = checkpoint_state
             .as_ref()
             .map(BurnDenseCheckpointState::report_json)
@@ -550,14 +776,17 @@ mod $module {
         train_examples: &mut [BurnE2eRolloutExample],
         holdout_examples: &mut [BurnE2eRolloutExample],
         config: BurnE2eRolloutTrainConfig,
+        initial_generator: Option<&E2eHyperNpa2d>,
     ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
         PERCEPTION_CUBE_ADJOINT_DEVICE_HITS.store(0, Ordering::Relaxed);
         PERCEPTION_CUBE_ADJOINT_FALLBACK_HITS.store(0, Ordering::Relaxed);
         PERCEPTION_CUBE_FORWARD_DEVICE_HITS.store(0, Ordering::Relaxed);
         PERCEPTION_CUBE_FORWARD_FALLBACK_HITS.store(0, Ordering::Relaxed);
+        PERCEPTION_CUBE_PREPARED_REUSE_HITS.store(0, Ordering::Relaxed);
         TARGET2D_CUBE_ADJOINT_DEVICE_HITS.store(0, Ordering::Relaxed);
         TARGET2D_CUBE_ADJOINT_FALLBACK_HITS.store(0, Ordering::Relaxed);
         STOCHASTIC_MASK_UPLOAD_HITS.store(0, Ordering::Relaxed);
+        STOCHASTIC_MASK_DEVICE_HITS.store(0, Ordering::Relaxed);
         if base.config.spatial_dims != 2 {
             return Err(std::io::Error::other(
                 "Burn dense HyperNPA e2e rollout training currently supports 2D",
@@ -577,23 +806,65 @@ mod $module {
             ))
             .into());
         }
+        let resume_checkpoint = config
+            .resume_checkpoint
+            .map(|path| load_e2e_training_checkpoint(path, train_examples, &base.config, config))
+            .transpose()?;
+        let mut resumed_generator = None;
+        if let Some(resume_path) = config.resume_checkpoint {
+            let requested = Path::new(resume_path);
+            let checkpoint_dir = if requested.is_dir() {
+                requested
+            } else {
+                requested.parent().ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "training resume checkpoint has no parent directory".to_string(),
+                    )
+                })?
+            };
+            let shared_base_path = checkpoint_dir.join("current_shared_base.bpk");
+            let hyper_path = checkpoint_dir.join("current_hyper_2d.bpk");
+            *base = crate::import::load_manifest(&shared_base_path)?.into_model();
+            resumed_generator = Some(crate::load_e2e_hyper_npa_2d(&hyper_path)?);
+        }
+        let initial_generator = resumed_generator.as_ref().or(initial_generator);
         let started = Instant::now();
         let device = BurnDevice::default();
+        <BurnBackend as Backend>::seed(&device, config.seed);
         let npa_config = base.config.clone();
         let mut params = BurnBaseParams::from_model(base, &device)?;
-        let mut base_optimizer = BurnBaseAdamWState::zeros_like(&params);
-        let mut generator = BurnE2eGeneratorParams::seeded(base, train_examples, config, &device)?;
-        let mut generator_optimizer = BurnE2eGeneratorAdamWState::new(&generator);
-        let train_targets = burn_e2e_targets(train_examples, config, &device)?;
+        let mut base_optimizer = if let Some(checkpoint) = &resume_checkpoint {
+            BurnBaseAdamWState::restore(checkpoint, &device)?
+        } else {
+            BurnBaseAdamWState::zeros_like(&params)
+        };
+        let mut generator = BurnE2eGeneratorParams::from_seed_or_artifact(
+            base,
+            train_examples,
+            config,
+            initial_generator,
+            &device,
+        )?;
+        let mut generator_optimizer = if let Some(checkpoint) = &resume_checkpoint {
+            BurnE2eGeneratorAdamWState::restore(checkpoint, &device)?
+        } else {
+            BurnE2eGeneratorAdamWState::new(&generator)
+        };
         let mut particle_pool = if config.use_particle_pool {
-            Some(BurnE2eHostParticlePool::new(
-                train_targets.len(),
-                config.pool_slots_per_example.max(1),
-                config.rollout_particles,
-                16,
-                config.seed_scale,
-                direct_config_view(config),
-            ))
+            Some(if let Some(snapshot) = resume_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.particle_pool.as_ref())
+            {
+                BurnE2eDeviceParticlePool::restore(snapshot, config, &device)?
+            } else {
+                BurnE2eDeviceParticlePool::new(
+                    config.pool_capacity,
+                    config.rollout_particles,
+                    16,
+                    config.pool_slots_per_example,
+                    &device,
+                )
+            })
         } else {
             None
         };
@@ -601,17 +872,27 @@ mod $module {
             train_examples,
             &device,
             config.condition_device_cache_max_bytes,
+            config,
         )?;
         let holdout_conditions =
             BurnE2eConditionCache::from_examples_drain(
                 holdout_examples,
                 &device,
                 config.condition_device_cache_max_bytes,
+                config,
             )?;
         let train_condition_cache_bytes = train_conditions.feature_bytes();
         let holdout_condition_cache_bytes = holdout_conditions.feature_bytes();
         let condition_cache_bytes =
             train_condition_cache_bytes.saturating_add(holdout_condition_cache_bytes);
+        let train_condition_pairwise_l2 = train_conditions.mean_pairwise_l2()?;
+        let train_teacher_pairwise_l2 = train_conditions.mean_teacher_pairwise_l2()?;
+        eprintln!(
+            "hyper2d condition diagnostics examples={} condition_pairwise_l2={:.6} teacher_pairwise_l2={:.6}",
+            train_conditions.examples,
+            train_condition_pairwise_l2.unwrap_or_default(),
+            train_teacher_pairwise_l2.unwrap_or_default(),
+        );
         check_process_memory_budget("e2e_rollout:start", direct_config_view(config))?;
         check_gpu_memory_budget("e2e_rollout:start", direct_config_view(config))?;
         let initial_quality_validation = evaluate_e2e_rollout_quality(
@@ -622,13 +903,21 @@ mod $module {
             holdout_examples,
             &train_conditions,
             &holdout_conditions,
-            config,
+            BurnE2eRolloutTrainConfig {
+                validation_examples: config.initial_validation_examples,
+                ..config
+            },
             &device,
         )?;
         if let Some(quality) = &initial_quality_validation {
             eprintln!(
-                "hyper2d e2e rollout initial {} quality mean_psnr={:.3}dB mean_loss={:.6e}",
-                quality.split, quality.mean_render_rgb_psnr_db, quality.mean_total_loss
+                "hyper2d e2e rollout initial {} quality composited_psnr={:.3}dB p10={:.3}dB density_psnr={:.3}dB soft_iou={:.3} mean_loss={:.6e}",
+                quality.split,
+                quality.aggregate_composited_rgb_psnr_db,
+                quality.p10_composited_rgb_psnr_db,
+                quality.aggregate_density_psnr_db,
+                quality.mean_density_soft_iou,
+                quality.mean_total_loss,
             );
         }
         let mut quality_validation_evaluations = initial_quality_validation
@@ -638,14 +927,157 @@ mod $module {
             .as_ref()
             .map_or(0.0_f64, |quality| quality.elapsed_ms);
 
-        let mut rng = StdRng::seed_from_u64(config.seed);
-        let batch_size = normalized_batch_size(config.example_batch_size, train_examples.len());
+        let mut sampler_init_rng = StdRng::seed_from_u64(config.seed);
+        let condition_batch_size =
+            normalized_batch_size(config.example_batch_size, train_examples.len());
+        let rollout_replicas = config.rollouts_per_example.max(1);
+        let batch_size = condition_batch_size.saturating_mul(rollout_replicas);
+        let mut identity_sampler = resume_checkpoint.as_ref().map_or_else(
+            || {
+                E2eIdentitySampler::new(
+                    train_examples.len(),
+                    condition_batch_size,
+                    config.sampling_uniform_fraction,
+                    config.sampling_priority_ema_beta,
+                    config.sampling_priority_min_weight,
+                    config.sampling_priority_max_weight,
+                    &mut sampler_init_rng,
+                )
+            },
+            |checkpoint| checkpoint.sampler.clone(),
+        );
+        let mut seed_trajectory_counts = resume_checkpoint.as_ref().map_or_else(
+            || vec![0usize; train_examples.len()],
+            |checkpoint| checkpoint.seed_trajectory_counts.clone(),
+        );
+        let completed_step = resume_checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.completed_step);
+        if completed_step > 0 {
+            eprintln!(
+                "hyper2d resumed exact training state at completed_step={completed_step} optimizer_steps={}/{} pending_batches={}",
+                base_optimizer.step,
+                generator_optimizer.step,
+                resume_checkpoint
+                    .as_ref()
+                    .map_or(0, |checkpoint| checkpoint.pending_batches.len()),
+            );
+        }
+        let train_pixel_xy = burn_e2e_pixel_xy(config, &device);
+        let projected_target_cache_bytes = e2e_target_cache_bytes(train_examples, config);
+        let train_target_cache = if projected_target_cache_bytes
+            <= config.target_device_cache_max_bytes
+        {
+            eprintln!(
+                "hyper2d target cache examples={} bytes={} storage=device-resident",
+                train_examples.len(), projected_target_cache_bytes
+            );
+            Some(burn_e2e_target_cache(
+                train_examples,
+                config,
+                &train_pixel_xy,
+                &device,
+            )?)
+        } else {
+            eprintln!(
+                "hyper2d target cache examples={} bytes={} exceeds limit={}; using CPU prefetch",
+                train_examples.len(),
+                projected_target_cache_bytes,
+                config.target_device_cache_max_bytes,
+            );
+            None
+        };
+        check_process_memory_budget("e2e_rollout:after_target_cache", direct_config_view(config))?;
+        check_gpu_memory_budget("e2e_rollout:after_target_cache", direct_config_view(config))?;
+        let prefetch_depth = e2e_cpu_prefetch_depth(batch_size, config.steps);
+        let mut prefetch_queue = VecDeque::with_capacity(prefetch_depth);
+        for indices in resume_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.pending_batches.as_slice())
+            .unwrap_or_default()
+        {
+            prefetch_queue.push_back(spawn_e2e_cpu_batch_prefetch(
+                train_examples,
+                &train_conditions,
+                indices.clone(),
+                config,
+                train_target_cache.is_some(),
+            )?);
+        }
+        let mut next_prefetch_step = completed_step
+            .saturating_add(prefetch_queue.len())
+            .saturating_add(1);
+        while next_prefetch_step <= config.steps && prefetch_queue.len() < prefetch_depth {
+            let mut sample_rng = e2e_sampling_rng(config.seed, next_prefetch_step);
+            prefetch_queue.push_back(spawn_e2e_cpu_batch_prefetch(
+                train_examples,
+                &train_conditions,
+                sample_rollout_indices(
+                    &mut identity_sampler,
+                    rollout_replicas,
+                    &mut sample_rng,
+                ),
+                config,
+                train_target_cache.is_some(),
+            )?);
+            next_prefetch_step += 1;
+        }
         let mut history = Vec::new();
         let mut final_loss = None;
-        let mut best_checkpoint = None::<BurnE2eSelectedCheckpoint>;
+        let mut best_checkpoint = initial_quality_validation
+            .as_ref()
+            .filter(|_| initial_validation_is_checkpoint_comparable(config))
+            .map(|quality| BurnE2eSelectedCheckpoint {
+                step: completed_step,
+                train_loss: quality.mean_total_loss,
+                selection_score: quality.selection_psnr_db,
+                validation_contract: Some(e2e_validation_contract(
+                    BurnE2eRolloutTrainConfig {
+                        validation_examples: config.initial_validation_examples,
+                        ..config
+                    },
+                )),
+                holdout_mean_psnr_db: Some(quality.aggregate_composited_rgb_psnr_db),
+                holdout_mean_loss: Some(quality.mean_total_loss),
+                quality_validation: Some(quality.clone()),
+                params: params.detached(),
+                generator: generator.detached(),
+            });
+        let mut final_checkpoint_candidate = None::<BurnE2eSelectedCheckpoint>;
+        let mut early_stop_step = None::<usize>;
         let validation_interval = config.validation_interval.max(1);
-        for step in 1..=config.steps {
-            let indices = sample_indices(train_examples.len(), batch_size, &mut rng);
+        let mut last_checkpoint_at = Instant::now();
+        let mut throughput_interval_started = Instant::now();
+        let mut throughput_interval_particle_steps = 0u128;
+        let mut total_optimizer_particle_steps = 0u128;
+        let mut measured_optimizer_training_ms = 0.0_f64;
+        for step in completed_step.saturating_add(1)..=config.steps {
+            let prepared_batch =
+                join_e2e_cpu_batch_prefetch(prefetch_queue.pop_front().ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "HyperNPA e2e CPU prefetch queue was empty".to_string(),
+                    )
+                })?)?;
+            let BurnE2ePreparedCpuBatch {
+                indices,
+                targets: prepared_targets,
+                prepared_dino,
+            } = prepared_batch;
+            while next_prefetch_step <= config.steps && prefetch_queue.len() < prefetch_depth {
+                let mut sample_rng = e2e_sampling_rng(config.seed, next_prefetch_step);
+                prefetch_queue.push_back(spawn_e2e_cpu_batch_prefetch(
+                    train_examples,
+                    &train_conditions,
+                    sample_rollout_indices(
+                        &mut identity_sampler,
+                        rollout_replicas,
+                        &mut sample_rng,
+                    ),
+                    config,
+                    train_target_cache.is_some(),
+                )?);
+                next_prefetch_step += 1;
+            }
             let step_seed = config
                 .seed
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
@@ -653,28 +1085,71 @@ mod $module {
                 step == config.steps || step.is_multiple_of(config.report_interval.max(1));
             let validation_due = config.validation_examples > 0
                 && (step == config.steps || step.is_multiple_of(validation_interval));
-            let collect_metrics = report_due || validation_due;
+            let checkpoint_due = should_write_e2e_checkpoint(step, last_checkpoint_at, config);
+            let priority_due = step
+                .is_multiple_of(config.sampling_priority_update_interval.max(1));
+            let collect_metrics = report_due || validation_due || checkpoint_due;
+            let collect_per_example_losses = collect_metrics || priority_due;
+            if config.lr_schedule == E2eLrSchedule::UpstreamGrowing
+                && step > 1
+                && step.saturating_sub(1).is_multiple_of(10_000)
+            {
+                base_optimizer = BurnBaseAdamWState::zeros_like(&params);
+                generator_optimizer = BurnE2eGeneratorAdamWState::new(&generator);
+                if config.use_particle_pool {
+                    particle_pool = Some(BurnE2eDeviceParticlePool::new(
+                        config.pool_capacity,
+                        config.rollout_particles,
+                        16,
+                        config.pool_slots_per_example,
+                        &device,
+                    ));
+                }
+                seed_trajectory_counts.fill(0);
+                eprintln!(
+                    "hyper2d upstream-growing repetition reset at optimizer step {step}"
+                );
+            }
             let lr_scale = e2e_lr_scale(config, step);
             let mut step_config = e2e_config_with_lr_scale(config, lr_scale);
             step_config.shared_base_trainable =
                 config.shared_base_trainable && step >= config.shared_base_train_start_step;
-            let pool_batch = particle_pool.as_ref().map(|pool| {
-                let replace_seed = step.is_multiple_of(config.inject_seed_interval.max(1));
-                pool.sample_batch(
+            let pool_batch = if let Some(pool) = particle_pool.as_mut() {
+                let mut pool_rng = e2e_pool_rng(config.seed, step);
+                let seed_replacement_rows = per_identity_seed_replacement_rows(
                     &indices,
-                    &mut rng,
-                    replace_seed,
+                    &mut seed_trajectory_counts,
+                    config.seed_trajectory_interval,
+                );
+                Some(pool.sample_batch(
+                    &indices,
+                    &mut pool_rng,
+                    &seed_replacement_rows,
                     step_config.seed_scale,
                     direct_config_view(step_config),
                     &device,
-                )
-            });
+                )?)
+            } else {
+                None
+            };
             let seed_replacements = pool_batch
                 .as_ref()
                 .map_or(0usize, |batch| batch.seed_replacements);
-            let (initial_state, pool_keys) = pool_batch
-                .map(|batch| (Some((batch.x, batch.s)), Some(batch.keys)))
+            let (initial_state, pool_slots) = pool_batch
+                .map(|batch| (Some((batch.x, batch.s)), Some(batch.slots)))
                 .unwrap_or((None, None));
+            let uncached_targets;
+            let (step_targets, target_indices) = if let Some(cache) = train_target_cache.as_ref() {
+                (cache.as_slice(), indices.clone())
+            } else {
+                uncached_targets = burn_e2e_prepared_targets_to_burn(
+                    prepared_targets,
+                    &train_pixel_xy,
+                    &device,
+                )?;
+                let indices = (0..uncached_targets.len()).collect::<Vec<_>>();
+                (uncached_targets.as_slice(), indices)
+            };
             let step_output = train_e2e_homogeneous_step_tbptt(
                 &mut params,
                 &mut generator,
@@ -682,17 +1157,44 @@ mod $module {
                 &mut generator_optimizer,
                 &npa_config,
                 &train_conditions,
-                &train_targets,
                 &indices,
+                prepared_dino.as_ref(),
+                step_targets,
+                &target_indices,
                 step_config,
                 step_seed,
                 collect_metrics,
+                collect_per_example_losses,
                 initial_state,
             )?;
-            if let (Some(pool), Some(pool_keys)) = (particle_pool.as_mut(), pool_keys) {
-                pool.update_batch(&pool_keys, step_output.final_x, step_output.final_s)?;
+            let step_particle_steps = step_output.particle_steps as u128;
+            throughput_interval_particle_steps = throughput_interval_particle_steps
+                .saturating_add(step_particle_steps);
+            total_optimizer_particle_steps =
+                total_optimizer_particle_steps.saturating_add(step_particle_steps);
+            let condition_identities = indices
+                .chunks(rollout_replicas)
+                .filter_map(|replicas| replicas.first().copied())
+                .collect::<Vec<_>>();
+            identity_sampler.record_trajectories(&condition_identities, rollout_replicas);
+            if let Some(per_example_losses) = step_output.per_example_losses.as_deref() {
+                identity_sampler.update_losses(&indices, per_example_losses);
+            }
+            if let (Some(pool), Some(pool_slots)) = (particle_pool.as_mut(), pool_slots) {
+                pool.update_batch(&pool_slots, step_output.final_x, step_output.final_s)?;
             }
             let mut stats = step_output.history;
+            if collect_metrics {
+                sync_training_device(&device)?;
+                let interval_elapsed = throughput_interval_started.elapsed();
+                let interval_elapsed_ms = interval_elapsed.as_secs_f64() * 1_000.0;
+                measured_optimizer_training_ms += interval_elapsed_ms;
+                stats.particle_steps_per_sec = throughput_interval_particle_steps as f64
+                    / interval_elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+                stats.dense_pair_interactions_per_sec =
+                    stats.particle_steps_per_sec * config.rollout_particles as f64;
+                stats.elapsed_ms = interval_elapsed_ms;
+            }
             stats.step = step;
             stats.learning_rate_scale = lr_scale;
             stats.base_learning_rate = step_config.base_optimizer.learning_rate;
@@ -700,7 +1202,14 @@ mod $module {
             stats.pool_seed_replacements = seed_replacements;
             if collect_metrics {
                 final_loss = Some(stats.loss);
-                let checkpoint_quality = if validation_due {
+                let validation_config = validation_due.then(|| {
+                    if step == config.steps {
+                        e2e_final_validation_config(config)
+                    } else {
+                        config
+                    }
+                });
+                let checkpoint_quality = if let Some(validation_config) = validation_config {
                     evaluate_e2e_rollout_quality(
                         &params.detached(),
                         &generator.detached(),
@@ -709,7 +1218,7 @@ mod $module {
                         holdout_examples,
                         &train_conditions,
                         &holdout_conditions,
-                        config,
+                        validation_config,
                         &device,
                     )?
                 } else {
@@ -722,46 +1231,179 @@ mod $module {
                 }
                 let (holdout_mean_psnr_db, holdout_mean_loss, selection_score) =
                     if let Some(quality) = &checkpoint_quality {
-                        stats.holdout_mean_psnr_db = Some(quality.mean_render_rgb_psnr_db);
+                        stats.holdout_mean_psnr_db =
+                            Some(quality.aggregate_composited_rgb_psnr_db);
                         stats.holdout_mean_loss = Some(quality.mean_total_loss);
                         (
-                            Some(quality.mean_render_rgb_psnr_db),
+                            Some(quality.aggregate_composited_rgb_psnr_db),
                             Some(quality.mean_total_loss),
-                            quality.mean_render_rgb_psnr_db,
+                            quality.selection_psnr_db,
                         )
                     } else {
                         (None, None, -stats.loss)
                     };
                 if report_due || validation_due {
+                    let exposure = identity_sampler.exposure_stats();
                     eprintln!(
-                        "hyper2d e2e rollout step {step}/{} loss={:.6e} lr_scale={:.3e} holdout_psnr={} validation_due={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e}",
+                        "hyper2d e2e rollout step {step}/{} loss={:.6e} task={:.6e} teacher={:.6e} lr_scale={:.3e} exposure_min={} exposure_mean={:.1} exposure_p90={} final_horizon_psnr={} worst_horizon_p10={} validation_due={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e} condition_ms={:.2} rollout_loss_ms={:.2} backward_ms={:.2}",
                         config.steps,
                         stats.loss,
+                        stats.task_loss,
+                        stats.adapter_teacher_loss,
                         stats.learning_rate_scale,
+                        exposure.min,
+                        exposure.mean,
+                        exposure.p90,
                         format_optional_f32(holdout_mean_psnr_db),
+                        checkpoint_quality
+                            .as_ref()
+                            .map(|quality| format!("{:.3}", quality.selection_psnr_db))
+                            .unwrap_or_else(|| "n/a".to_string()),
                         validation_due,
                         stats.base_grad_norm,
                         stats.generator_grad_norm,
                         stats.particle_steps_per_sec,
+                        stats.condition_adapter_ms,
+                        stats.rollout_loss_ms,
+                        stats.backward_update_ms,
                     );
                 }
-                if selection_score.is_finite()
-                    && best_checkpoint
-                        .as_ref()
-                        .is_none_or(|checkpoint| selection_score > checkpoint.selection_score)
-                {
-                    best_checkpoint = Some(BurnE2eSelectedCheckpoint {
+                let mut wrote_new_best_checkpoint = false;
+                if selection_score.is_finite() {
+                    let candidate = BurnE2eSelectedCheckpoint {
                         step,
                         train_loss: stats.loss,
                         selection_score,
+                        validation_contract: checkpoint_quality
+                            .as_ref()
+                            .and(validation_config.map(e2e_validation_contract)),
                         holdout_mean_psnr_db,
                         holdout_mean_loss,
                         quality_validation: checkpoint_quality.clone(),
                         params: params.detached(),
                         generator: generator.detached(),
-                    });
+                    };
+                    if step == config.steps && checkpoint_quality.is_some() {
+                        final_checkpoint_candidate = Some(candidate);
+                    } else if best_checkpoint.as_ref().is_none_or(|checkpoint| {
+                        comparable_selection_score_is_better(
+                            candidate.validation_contract.as_ref(),
+                            candidate.selection_score,
+                            checkpoint.validation_contract.as_ref(),
+                            checkpoint.selection_score,
+                        )
+                    }) {
+                        wrote_new_best_checkpoint = checkpoint_quality.is_some();
+                        best_checkpoint = Some(candidate);
+                    }
+                }
+                if checkpoint_due {
+                    let artifact_hashes = write_e2e_rollout_checkpoint(
+                        "current",
+                        step,
+                        &params.detached(),
+                        &generator.detached(),
+                        &npa_config,
+                        &train_conditions,
+                        config,
+                    )?;
+                    write_e2e_training_checkpoint(
+                        step,
+                        &base_optimizer,
+                        &generator_optimizer,
+                        &identity_sampler,
+                        &seed_trajectory_counts,
+                        particle_pool.as_ref(),
+                        prefetch_queue
+                            .iter()
+                            .map(|batch| batch.indices.clone())
+                            .collect(),
+                        artifact_hashes.as_ref(),
+                        train_examples,
+                        config,
+                    )?;
+                    last_checkpoint_at = Instant::now();
+                }
+                if wrote_new_best_checkpoint {
+                    if let Some(checkpoint) = &best_checkpoint {
+                        let _ = write_e2e_rollout_checkpoint(
+                            "best",
+                            checkpoint.step,
+                            &checkpoint.params,
+                            &checkpoint.generator,
+                            &npa_config,
+                            &train_conditions,
+                            config,
+                        )?;
+                    }
                 }
                 history.push(stats);
+                throughput_interval_particle_steps = 0;
+                throughput_interval_started = Instant::now();
+                if step == config.steps
+                    && let Some(quality) = &checkpoint_quality
+                    && quality.passed
+                {
+                    early_stop_step = Some(step);
+                    eprintln!(
+                        "hyper2d e2e rollout reached validation PSNR threshold at step {step}: composited_psnr={:.3}dB p10={:.3}dB threshold={:.3}dB",
+                        quality.aggregate_composited_rgb_psnr_db,
+                        quality.p10_composited_rgb_psnr_db,
+                        config.validation_psnr_threshold_db,
+                    );
+                    break;
+                }
+            }
+        }
+        let final_validation_config = e2e_final_validation_config(config);
+        let final_validation_contract = e2e_validation_contract(final_validation_config);
+        if let Some(final_candidate) = final_checkpoint_candidate {
+            let mut selected = final_candidate;
+            if let Some(mut prior_best) = best_checkpoint.take() {
+                if prior_best.validation_contract.as_ref() != Some(&final_validation_contract) {
+                    let quality = evaluate_e2e_rollout_quality(
+                        &prior_best.params.detached(),
+                        &prior_best.generator.detached(),
+                        &npa_config,
+                        train_examples,
+                        holdout_examples,
+                        &train_conditions,
+                        &holdout_conditions,
+                        final_validation_config,
+                        &device,
+                    )?;
+                    if let Some(quality) = quality {
+                        quality_validation_evaluations =
+                            quality_validation_evaluations.saturating_add(1);
+                        quality_validation_elapsed_ms += quality.elapsed_ms;
+                        prior_best.selection_score = quality.selection_psnr_db;
+                        prior_best.validation_contract = Some(final_validation_contract.clone());
+                        prior_best.holdout_mean_psnr_db =
+                            Some(quality.aggregate_composited_rgb_psnr_db);
+                        prior_best.holdout_mean_loss = Some(quality.mean_total_loss);
+                        prior_best.quality_validation = Some(quality);
+                    }
+                }
+                if comparable_selection_score_is_better(
+                    prior_best.validation_contract.as_ref(),
+                    prior_best.selection_score,
+                    selected.validation_contract.as_ref(),
+                    selected.selection_score,
+                ) {
+                    selected = prior_best;
+                }
+            }
+            best_checkpoint = Some(selected);
+            if let Some(checkpoint) = &best_checkpoint {
+                let _ = write_e2e_rollout_checkpoint(
+                    "best",
+                    checkpoint.step,
+                    &checkpoint.params,
+                    &checkpoint.generator,
+                    &npa_config,
+                    &train_conditions,
+                    config,
+                )?;
             }
         }
         let selected_checkpoint_step = best_checkpoint.as_ref().map(|checkpoint| checkpoint.step);
@@ -778,9 +1420,18 @@ mod $module {
             .and_then(|checkpoint| checkpoint.holdout_mean_loss);
         let selected_checkpoint_quality_validation = best_checkpoint
             .as_ref()
+            .filter(|checkpoint| {
+                checkpoint.validation_contract.as_ref() == Some(&final_validation_contract)
+            })
             .and_then(|checkpoint| checkpoint.quality_validation.clone());
-        let selected_checkpoint_source = if selected_checkpoint_holdout_psnr_db.is_some() {
-            "best_reported_holdout_psnr"
+        let selected_checkpoint_source = if selected_checkpoint_step == Some(0) {
+            "initial_p10_composited_rgb_psnr"
+        } else if selected_checkpoint_step == Some(config.steps)
+            && selected_checkpoint_quality_validation.is_some()
+        {
+            "final_common_contract_p10_composited_rgb_psnr"
+        } else if selected_checkpoint_holdout_psnr_db.is_some() {
+            "best_common_contract_p10_composited_rgb_psnr"
         } else if selected_checkpoint_step.is_some() {
             "best_reported_loss"
         } else {
@@ -806,7 +1457,7 @@ mod $module {
                 holdout_examples,
                 &train_conditions,
                 &holdout_conditions,
-                config,
+                final_validation_config,
                 &device,
             )?;
             if let Some(quality) = &quality_validation {
@@ -826,8 +1477,16 @@ mod $module {
             first_reported_loss.zip(best_reported_loss).map(|(first, best)| best - first);
         let train_condition_cache_storage = train_conditions.storage_label();
         let holdout_condition_cache_storage = holdout_conditions.storage_label();
+        let condition_features_drained_from_examples =
+            train_conditions.drained_cpu_features_from_examples()
+                || holdout_conditions.drained_cpu_features_from_examples();
         let condition_features_uploaded_as_resident_device_cache =
             train_conditions.is_device_resident() && holdout_conditions.is_device_resident();
+        let exposure = identity_sampler.exposure_stats();
+        let upstream_reference_trajectories = 240_000.0_f64;
+        let upstream_reference_particles = 4_096.0_f64;
+        let upstream_equivalent_mean_trajectories =
+            exposure.mean * config.rollout_particles as f64 / upstream_reference_particles;
         let mut metrics = serde_json::Map::new();
         metrics.insert("backend".to_string(), json!(format!("{BACKEND}_e2e_rollout")));
         metrics.insert("device".to_string(), json!(DEVICE_LABEL));
@@ -836,11 +1495,41 @@ mod $module {
             json!("target2d_rollout_image_loss_generated_lora"),
         );
         metrics.insert(
+            "generator_weight_warm_start".to_string(),
+            json!(initial_generator.is_some()),
+        );
+        metrics.insert(
+            "optimizer_state_resumed".to_string(),
+            json!(resume_checkpoint.is_some()),
+        );
+        metrics.insert("resumed_from_step".to_string(), json!(completed_step));
+        metrics.insert(
             "conditioner".to_string(),
             json!(generator.kind.artifact_architecture()),
         );
         metrics.insert("adapter_rank".to_string(), json!(config.adapter_rank));
         metrics.insert("adapter_alpha".to_string(), json!(config.adapter_alpha));
+        metrics.insert(
+            "adapter_parameterization".to_string(),
+            json!(if config.canonical_full_rank_lora {
+                E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+            } else {
+                E2E_HYPER_ADAPTER_FACTORIZED
+            }),
+        );
+        metrics.insert(
+            "adapter_effective_output_dims".to_string(),
+            json!(if config.canonical_full_rank_lora {
+                crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
+                    &npa_config,
+                    config.adapter_rank,
+                    config.adapter_alpha,
+                )?
+                .trainable_parameters
+            } else {
+                generator.output_dims
+            }),
+        );
         metrics.insert(
             "adapter_chunk_size".to_string(),
             json!(generator.adapter_chunk_size),
@@ -861,6 +1550,14 @@ mod $module {
         metrics.insert(
             "generator_output_scale".to_string(),
             json!(config.generator_output_scale),
+        );
+        metrics.insert(
+            "generator_condition_init_scale".to_string(),
+            json!(config.generator_condition_init_scale),
+        );
+        metrics.insert(
+            "generator_output_init_scale".to_string(),
+            json!(config.generator_output_init_scale),
         );
         metrics.insert(
             "condition_token_count".to_string(),
@@ -887,6 +1584,15 @@ mod $module {
             json!(config.condition_device_cache_max_bytes),
         );
         metrics.insert(
+            "target_device_cache".to_string(),
+            json!({
+                "resident": train_target_cache.is_some(),
+                "projected_bytes_f32": projected_target_cache_bytes,
+                "max_bytes": config.target_device_cache_max_bytes,
+                "step_target_upload": train_target_cache.is_none(),
+            }),
+        );
+        metrics.insert(
             "condition_cache_gib_f32".to_string(),
             json!(bytes_to_gib(condition_cache_bytes as u64)),
         );
@@ -900,7 +1606,7 @@ mod $module {
         );
         metrics.insert(
             "cpu_condition_features_drained_from_examples".to_string(),
-            json!(true),
+            json!(condition_features_drained_from_examples),
         );
         metrics.insert(
             "cpu_condition_features_uploaded_as_resident_device_cache".to_string(),
@@ -924,6 +1630,22 @@ mod $module {
         metrics.insert(
             "example_batch_parallel_samples".to_string(),
             json!(batch_size.min(train_examples.len())),
+        );
+        metrics.insert(
+            "identity_sampling".to_string(),
+            json!({
+                "uniform_fraction": config.sampling_uniform_fraction,
+                "priority_fraction": 1.0 - config.sampling_uniform_fraction,
+                "priority_ema_beta": config.sampling_priority_ema_beta,
+                "priority_min_weight": config.sampling_priority_min_weight,
+                "priority_max_weight": config.sampling_priority_max_weight,
+                "priority_update_interval": config.sampling_priority_update_interval,
+                "trajectory_exposure": exposure,
+                "upstream_reference_trajectories_per_identity": upstream_reference_trajectories,
+                "upstream_reference_particles_per_trajectory": upstream_reference_particles,
+                "upstream_equivalent_mean_4096_particle_trajectories_per_identity": upstream_equivalent_mean_trajectories,
+                "upstream_compute_exposure_fraction": upstream_equivalent_mean_trajectories / upstream_reference_trajectories,
+            }),
         );
         metrics.insert("rollout_particles".to_string(), json!(config.rollout_particles));
         metrics.insert(
@@ -964,6 +1686,48 @@ mod $module {
             json!(config.tbptt_final_loss_weight),
         );
         metrics.insert(
+            "credit_assignment".to_string(),
+            json!(config.credit_assignment.as_str()),
+        );
+        metrics.insert(
+            "task_loss_weight".to_string(),
+            json!(config.task_loss_weight),
+        );
+        metrics.insert(
+            "adapter_teacher_weight".to_string(),
+            json!(config.adapter_teacher_weight),
+        );
+        metrics.insert(
+            "adapter_teacher_objective".to_string(),
+            json!(config.adapter_teacher_objective.as_str()),
+        );
+        metrics.insert(
+            "adapter_teacher_probe_rollout_steps".to_string(),
+            json!(config.adapter_teacher_probe_rollout_steps),
+        );
+        metrics.insert(
+            "base_per_parameter_grad_normalization".to_string(),
+            json!(config.base_per_parameter_grad_normalization),
+        );
+        metrics.insert(
+            "generator_per_parameter_grad_normalization".to_string(),
+            json!(config.generator_per_parameter_grad_normalization),
+        );
+        metrics.insert(
+            "sample_id_table_grad_normalization".to_string(),
+            json!(if config.generator_kind == E2eHyperGeneratorKind::SampleIdTable
+                && config.generator_per_parameter_grad_normalization
+            {
+                "per-adapter-component-per-identity"
+            } else {
+                "not-applicable"
+            }),
+        );
+        metrics.insert(
+            "max_full_bptt_particle_steps".to_string(),
+            json!(config.max_full_bptt_particle_steps),
+        );
+        metrics.insert(
             "pre_rollout_steps".to_string(),
             json!(config.pre_rollout_steps),
         );
@@ -971,9 +1735,20 @@ mod $module {
             "particle_pool".to_string(),
             json!({
                 "enabled": config.use_particle_pool,
-                "slots_per_example": config.pool_slots_per_example,
+                "capacity": config.pool_capacity,
+                "storage_bytes_f32": config.pool_capacity
+                    .saturating_mul(config.rollout_particles)
+                    .saturating_mul(npa_config.state_dims.saturating_add(2))
+                    .saturating_mul(std::mem::size_of::<f32>()),
+                "stored_slots_per_example": config.pool_slots_per_example,
+                "rollouts_sampled_per_example": config.rollouts_per_example,
                 "inject_seed_interval": config.inject_seed_interval,
-                "mode": "sample-keyed-host-state-pool",
+                "seed_replacements_per_interval": config.seed_replacements_per_interval,
+                "seed_trajectory_interval_per_identity": config.seed_trajectory_interval,
+                "mode": "bounded-sample-replica-keyed-device-state-pool",
+                "step_readback": false,
+                "position_persistence_clamp": [-1.0, 1.0],
+                "state_finite_safety_clamp": [-32.0, 32.0],
             }),
         );
         metrics.insert(
@@ -1009,6 +1784,24 @@ mod $module {
             json!(PERCEPTION_CUBE_FORWARD_FALLBACK_HITS.load(Ordering::Relaxed)),
         );
         metrics.insert(
+            "perception_cube_prepared_reuse_hits".to_string(),
+            json!(PERCEPTION_CUBE_PREPARED_REUSE_HITS.load(Ordering::Relaxed)),
+        );
+        let retained_perception_state_bytes_per_step = batch_size
+            .saturating_mul(config.rollout_particles)
+            .saturating_mul(npa_config.state_dims.saturating_mul(2).saturating_add(4))
+            .saturating_mul(std::mem::size_of::<f32>());
+        metrics.insert(
+            "perception_cube_prepared_vjp".to_string(),
+            json!({
+                "mode": "retained_raw_state_gradient_and_correction_inverse",
+                "additional_bytes_per_rollout_step_f32": retained_perception_state_bytes_per_step,
+                "additional_bytes_at_max_full_bptt_horizon_f32": retained_perception_state_bytes_per_step
+                    .saturating_mul(config.rollout_steps),
+                "neighbor_recompute_in_backward": false,
+            }),
+        );
+        metrics.insert(
             "target2d_cube_adjoint_device_hits".to_string(),
             json!(TARGET2D_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed)),
         );
@@ -1021,8 +1814,12 @@ mod $module {
             json!(STOCHASTIC_MASK_UPLOAD_HITS.load(Ordering::Relaxed)),
         );
         metrics.insert(
+            "stochastic_mask_device_hits".to_string(),
+            json!(STOCHASTIC_MASK_DEVICE_HITS.load(Ordering::Relaxed)),
+        );
+        metrics.insert(
             "stochastic_mask_backend_effective".to_string(),
-            json!("per-step-host-upload"),
+            json!("device-random-training-host-seeded-eval"),
         );
         metrics.insert(
             "max_dense_train_particles".to_string(),
@@ -1030,7 +1827,14 @@ mod $module {
         );
         metrics.insert(
             "training_graph".to_string(),
-            json!("generated_adapter_tbptt_chunked_rollout_state_detach_with_optional_sample_keyed_pool"),
+            json!(match config.credit_assignment {
+                E2eCreditAssignment::FullBptt => {
+                    "generated_adapter_fixed_full_rollout_single_loss_single_update"
+                }
+                E2eCreditAssignment::DetachedTbptt => {
+                    "generated_adapter_tbptt_chunked_rollout_state_detach_with_optional_sample_keyed_pool"
+                }
+            }),
         );
         metrics.insert(
             "shared_base_trainable".to_string(),
@@ -1070,6 +1874,11 @@ mod $module {
             "final_quality_validation_reused_from_selected_checkpoint".to_string(),
             json!(final_quality_validation_reused_from_selected_checkpoint),
         );
+        metrics.insert("early_stop_step".to_string(), json!(early_stop_step));
+        metrics.insert(
+            "early_stop_reason".to_string(),
+            json!(early_stop_step.map(|_| "validation_psnr_threshold")),
+        );
         metrics.insert(
             "min_reported_particle_steps_per_sec".to_string(),
             json!(min_reported_particle_steps_per_sec),
@@ -1081,6 +1890,19 @@ mod $module {
         metrics.insert(
             "max_reported_particle_steps_per_sec".to_string(),
             json!(max_reported_particle_steps_per_sec),
+        );
+        metrics.insert(
+            "total_optimizer_particle_steps".to_string(),
+            json!(total_optimizer_particle_steps),
+        );
+        metrics.insert(
+            "measured_optimizer_training_ms".to_string(),
+            json!(measured_optimizer_training_ms),
+        );
+        metrics.insert(
+            "measured_optimizer_particle_steps_per_sec".to_string(),
+            json!(total_optimizer_particle_steps as f64
+                / (measured_optimizer_training_ms / 1_000.0).max(f64::MIN_POSITIVE)),
         );
         metrics.insert("first_reported_loss".to_string(), json!(first_reported_loss));
         metrics.insert("best_reported_loss".to_string(), json!(best_reported_loss));
@@ -1113,6 +1935,345 @@ mod $module {
             generator: generator_hyper,
             quality_validation,
         })
+    }
+
+    fn should_write_e2e_checkpoint(
+        step: usize,
+        last_checkpoint_at: Instant,
+        config: BurnE2eRolloutTrainConfig,
+    ) -> bool {
+        config.checkpoint_dir.is_some()
+            && (step == config.steps
+                || step.is_multiple_of(config.checkpoint_interval_steps.max(1))
+                || last_checkpoint_at.elapsed().as_secs()
+                    >= config.checkpoint_interval_seconds.max(1) as u64)
+    }
+
+    fn initial_validation_is_checkpoint_comparable(config: BurnE2eRolloutTrainConfig) -> bool {
+        config.initial_validation_examples == config.validation_examples
+    }
+
+    fn e2e_validation_contract(
+        config: BurnE2eRolloutTrainConfig,
+    ) -> BurnE2eValidationContract {
+        let mut horizons = config.validation_horizons
+            [..config.validation_horizon_count.min(config.validation_horizons.len())]
+            .iter()
+            .copied()
+            .filter(|steps| *steps > 0)
+            .collect::<Vec<_>>();
+        horizons.push(config.validation_steps.max(1));
+        horizons.sort_unstable();
+        horizons.dedup();
+        BurnE2eValidationContract {
+            examples: config.validation_examples,
+            particles: config.validation_particles,
+            horizons,
+            selection_horizon_min_steps: config.validation_selection_horizon_min_steps,
+        }
+    }
+
+    fn comparable_selection_score_is_better(
+        candidate_contract: Option<&BurnE2eValidationContract>,
+        candidate_score: f32,
+        incumbent_contract: Option<&BurnE2eValidationContract>,
+        incumbent_score: f32,
+    ) -> bool {
+        if !candidate_score.is_finite() {
+            return false;
+        }
+        match (candidate_contract, incumbent_contract) {
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (candidate, incumbent) if candidate == incumbent => candidate_score > incumbent_score,
+            (Some(_), Some(_)) => false,
+            (None, None) => unreachable!("equal optional contracts matched above"),
+        }
+    }
+
+    fn e2e_final_validation_config(
+        mut config: BurnE2eRolloutTrainConfig,
+    ) -> BurnE2eRolloutTrainConfig {
+        config.validation_examples = config.final_validation_examples;
+        config.validation_particles = config.final_validation_particles;
+        config.validation_steps = config.final_validation_steps;
+        config.validation_horizons = config.final_validation_horizons;
+        config.validation_horizon_count = config.final_validation_horizon_count;
+        config.validation_selection_horizon_min_steps =
+            config.final_validation_selection_horizon_min_steps;
+        config
+    }
+
+    struct E2eRolloutCheckpointHashes {
+        shared_base_sha256: String,
+        hyper_sha256: String,
+    }
+
+    fn write_e2e_rollout_checkpoint(
+        label: &str,
+        step: usize,
+        params: &BurnBaseParams,
+        generator: &BurnE2eGeneratorParams,
+        npa_config: &NpaConfig,
+        train_conditions: &BurnE2eConditionCache,
+        config: BurnE2eRolloutTrainConfig,
+    ) -> AutomataResult<Option<E2eRolloutCheckpointHashes>> {
+        let Some(checkpoint_dir) = config.checkpoint_dir else {
+            return Ok(None);
+        };
+        let checkpoint_dir = Path::new(checkpoint_dir);
+        fs::create_dir_all(checkpoint_dir)?;
+        let shared_base_output = checkpoint_dir.join(format!("{label}_shared_base.bpk"));
+        let hyper_output = checkpoint_dir.join(format!("{label}_hyper_2d.bpk"));
+        let metadata_output = checkpoint_dir.join(format!("{label}_metadata.json"));
+        let source =
+            format!("checkpoint:{BACKEND}:hyper2d-e2e-rollout:label={label}:step={step}");
+
+        let mut model = NpaModel {
+            config: npa_config.clone(),
+            weights: NpaWeights::zeros(npa_config),
+        };
+        params.write_to_model(&mut model)?;
+        let manifest = BpkModelManifest::from_model(
+            &model,
+            burn_automata_kernels::HashGridConfig::growing_2d(),
+            Some(source.clone()),
+        );
+        let shared_base_sha256 = crate::import::save_manifest(&shared_base_output, &manifest)?
+            .ok_or_else(|| {
+                AutomataError::InvalidFormat(
+                    "HyperNPA checkpoint base path did not use the BPK format".to_string(),
+                )
+            })?;
+
+        let mut hyper = generator.to_hyper(config)?;
+        hyper.condition_encoder = config.checkpoint_condition_encoder.map(str::to_string);
+        hyper.condition_token_count = Some(train_conditions.token_count);
+        hyper.condition_embed_dims = Some(train_conditions.embed_dims);
+        hyper.condition_token_grid_width = Some(config.dino_token_grid_width);
+        hyper.condition_token_grid_height = Some(config.dino_token_grid_height);
+        hyper.shared_base_sha256 = Some(shared_base_sha256.clone());
+        let hyper_sha256 = save_e2e_hyper_npa_2d(&hyper_output, &hyper)?;
+
+        let metadata = json!({
+            "label": label,
+            "step": step,
+            "backend": format!("{BACKEND}_e2e_rollout"),
+            "device": DEVICE_LABEL,
+            "source": source,
+            "shared_base_output": shared_base_output,
+            "shared_base_sha256": shared_base_sha256,
+            "hyper_output": hyper_output,
+            "hyper_sha256": hyper_sha256,
+            "condition_token_count": train_conditions.token_count,
+            "condition_embed_dims": train_conditions.embed_dims,
+            "condition_token_grid_width": config.dino_token_grid_width,
+            "condition_token_grid_height": config.dino_token_grid_height,
+            "condition_image_size": config.dino_image_size,
+            "condition_alpha_mode": "composite-white",
+            "condition_rgb_channels": config.dino_rgb_channels,
+            "condition_rgb_channel_scale": config.dino_rgb_channel_scale,
+            "condition_alpha_channel": config.dino_alpha_channel,
+            "condition_alpha_channel_scale": config.dino_alpha_channel_scale,
+            "condition_l2_normalize_features": config.dino_l2_normalize_features,
+            "condition_resize_mode": "stretch",
+        });
+        fs::write(&metadata_output, serde_json::to_vec_pretty(&metadata)?)?;
+        eprintln!(
+            "hyper2d e2e rollout checkpoint {label} step {step} wrote {} and {}",
+            shared_base_output.display(),
+            hyper_output.display(),
+        );
+        Ok(Some(E2eRolloutCheckpointHashes {
+            shared_base_sha256,
+            hyper_sha256,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn e2e_training_contract_sha256(
+        train_examples: &[BurnE2eRolloutExample],
+        config: BurnE2eRolloutTrainConfig,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        for example in train_examples {
+            hasher.update(example.slug.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.update(
+            format!(
+                "backend={BACKEND};steps={};batch={};replicas={};particles={};step_min={};step_max={};update_prob={:.9};seed={};seed_mode={:?};pool={}:{}:{};seed_interval={};brush={:.9};loss={}:{}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9};adapter={}:{:.9}:{}:{};generator={}:{}:{}:{:.9}:{:.9}:{:.9};optimizer={:?}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9}:{:.9};condition={}:{}:{}:{}:{}:{}",
+                config.steps,
+                config.example_batch_size,
+                config.rollouts_per_example,
+                config.rollout_particles,
+                config.rollout_step_min,
+                config.rollout_steps,
+                config.update_prob,
+                config.seed,
+                config.seed_mode,
+                config.use_particle_pool,
+                config.pool_capacity,
+                config.pool_slots_per_example,
+                config.seed_trajectory_interval,
+                config.brush_size,
+                config.loss_config.image_size,
+                config.loss_config.center,
+                config.loss_config.splat_loss_weight,
+                config.loss_config.color_loss_weight,
+                config.loss_config.density_loss_weight,
+                config.loss_config.composited_rgb_loss_weight,
+                config.loss_config.displacement_regularizer_weight,
+                config.loss_config.overflow_regularizer_weight,
+                config.loss_config.bound_regularizer_weight,
+                config.adapter_rank,
+                config.adapter_alpha,
+                config.canonical_full_rank_lora,
+                config.generator_kind.artifact_architecture(),
+                config.generator_hidden_dims,
+                config.adapter_chunk_size,
+                config.generator_sample_steps,
+                config.generator_output_scale,
+                config.generator_condition_init_scale,
+                config.generator_output_init_scale,
+                config.lr_schedule,
+                config.base_optimizer.learning_rate,
+                config.generator_optimizer.learning_rate,
+                config.base_optimizer.weight_decay,
+                config.generator_optimizer.weight_decay,
+                config.base_optimizer.grad_clip_norm,
+                config.generator_optimizer.grad_clip_norm,
+                config.base_optimizer.beta1,
+                config.base_optimizer.beta2,
+                config.base_optimizer.epsilon,
+                config.dino_image_size,
+                config.dino_token_grid_width,
+                config.dino_token_grid_height,
+                config.dino_rgb_channels,
+                config.dino_alpha_channel,
+                config.condition_device_cache_max_bytes,
+            )
+            .as_bytes(),
+        );
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_e2e_training_checkpoint(
+        step: usize,
+        base_optimizer: &BurnBaseAdamWState,
+        generator_optimizer: &BurnE2eGeneratorAdamWState,
+        sampler: &E2eIdentitySampler,
+        seed_trajectory_counts: &[usize],
+        particle_pool: Option<&BurnE2eDeviceParticlePool>,
+        pending_batches: Vec<Vec<usize>>,
+        artifact_hashes: Option<&E2eRolloutCheckpointHashes>,
+        train_examples: &[BurnE2eRolloutExample],
+        config: BurnE2eRolloutTrainConfig,
+    ) -> AutomataResult<()> {
+        let Some(checkpoint_dir) = config.checkpoint_dir else {
+            return Ok(());
+        };
+        let mut optimizer_tensors = base_optimizer.snapshots()?;
+        optimizer_tensors.extend(generator_optimizer.snapshots()?);
+        let checkpoint = E2eTrainingCheckpoint {
+            version: E2E_TRAINING_CHECKPOINT_VERSION,
+            backend: BACKEND.to_string(),
+            contract_sha256: e2e_training_contract_sha256(train_examples, config),
+            shared_base_sha256: artifact_hashes
+                .map(|hashes| hashes.shared_base_sha256.clone())
+                .unwrap_or_default(),
+            hyper_sha256: artifact_hashes
+                .map(|hashes| hashes.hyper_sha256.clone())
+                .unwrap_or_default(),
+            completed_step: step,
+            train_examples: train_examples.len(),
+            rollout_particles: config.rollout_particles,
+            rollout_step_min: config.rollout_step_min,
+            rollout_steps: config.rollout_steps,
+            rollouts_per_example: config.rollouts_per_example,
+            base_optimizer_step: base_optimizer.step,
+            generator_optimizer_step: generator_optimizer.step,
+            optimizer_tensors,
+            sampler: sampler.clone(),
+            seed_trajectory_counts: seed_trajectory_counts.to_vec(),
+            pending_batches,
+            particle_pool: particle_pool.map(BurnE2eDeviceParticlePool::snapshot).transpose()?,
+        };
+        let path = Path::new(checkpoint_dir).join("current_training_state.mpk");
+        checkpoint.write_atomic(&path)?;
+        eprintln!(
+            "hyper2d e2e rollout checkpoint current step {step} wrote {}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn load_e2e_training_checkpoint(
+        path: &str,
+        train_examples: &[BurnE2eRolloutExample],
+        npa_config: &NpaConfig,
+        config: BurnE2eRolloutTrainConfig,
+    ) -> AutomataResult<E2eTrainingCheckpoint> {
+        let path = Path::new(path);
+        let path = if path.is_dir() {
+            path.join("current_training_state.mpk")
+        } else {
+            path.to_path_buf()
+        };
+        let checkpoint = E2eTrainingCheckpoint::read(&path)?;
+        let checkpoint_dir = path.parent().ok_or_else(|| {
+            AutomataError::InvalidArgument(format!(
+                "training checkpoint {} has no parent directory",
+                path.display()
+            ))
+        })?;
+        if !checkpoint.shared_base_sha256.is_empty() {
+            let artifact = checkpoint_dir.join("current_shared_base.bpk");
+            let actual = crate::import::bpk_payload_sha256(&fs::read(&artifact)?)?;
+            if actual != checkpoint.shared_base_sha256 {
+                return Err(AutomataError::InvalidFormat(format!(
+                    "training checkpoint base BPK hash mismatch for {}; state={} artifact={actual}",
+                    artifact.display(),
+                    checkpoint.shared_base_sha256,
+                )));
+            }
+        }
+        if !checkpoint.hyper_sha256.is_empty() {
+            let artifact = checkpoint_dir.join("current_hyper_2d.bpk");
+            let actual = crate::hyper::e2e::e2e_hyper_bpk_payload_sha256(&fs::read(&artifact)?)?;
+            if actual != checkpoint.hyper_sha256 {
+                return Err(AutomataError::InvalidFormat(format!(
+                    "training checkpoint hyper BPK hash mismatch for {}; state={} artifact={actual}",
+                    artifact.display(),
+                    checkpoint.hyper_sha256,
+                )));
+            }
+        }
+        if checkpoint.backend != BACKEND
+            || (!checkpoint.contract_sha256.is_empty()
+                && checkpoint.contract_sha256
+                    != e2e_training_contract_sha256(train_examples, config))
+            || checkpoint.train_examples != train_examples.len()
+            || checkpoint.rollout_particles != config.rollout_particles
+            || checkpoint.rollout_step_min != config.rollout_step_min
+            || checkpoint.rollout_steps != config.rollout_steps
+            || checkpoint.rollouts_per_example != config.rollouts_per_example
+            || checkpoint.seed_trajectory_counts.len() != train_examples.len()
+            || npa_config.spatial_dims != 2
+        {
+            return Err(AutomataError::InvalidArgument(format!(
+                "training checkpoint {} is incompatible with backend/data/rollout config",
+                path.display()
+            )));
+        }
+        if checkpoint.completed_step >= config.steps {
+            return Err(AutomataError::InvalidArgument(format!(
+                "training checkpoint completed step {} is not below configured total steps {}",
+                checkpoint.completed_step, config.steps
+            )));
+        }
+        Ok(checkpoint)
     }
 
     pub(crate) fn train_oracle_models_burn_dense(
@@ -1550,12 +2711,13 @@ mod $module {
             None
         };
         let mut particle_pool = homogeneous_pool_particle_count.map(|particle_count| {
-            BurnHostParticlePool::new(
+            BurnDeviceParticlePool::new(
                 config.pool_size.max(config.example_batch_size).max(1),
                 particle_count,
                 16,
                 targets[0].seed_scale,
                 config,
+                &targets[0].target_rgb.device(),
             )
         });
         let mut sample_update_counts = vec![0usize; targets.len()];
@@ -1636,7 +2798,7 @@ mod $module {
                     targets[0].seed_scale,
                     config,
                     device,
-                );
+                )?;
                 let indices = (0..pool_batch.pool_indices.len())
                     .map(|local| local % targets.len())
                     .collect::<Vec<_>>();
@@ -1904,7 +3066,7 @@ mod $module {
         update_base: bool,
         collect_metrics: bool,
         initial_state: Option<(Tensor3, Tensor3)>,
-        pool_update: Option<(&mut BurnHostParticlePool, Vec<usize>)>,
+        pool_update: Option<(&mut BurnDeviceParticlePool, Vec<usize>)>,
     ) -> Result<DirectBasisStepStats, Box<dyn std::error::Error>> {
         let started = Instant::now();
         let device = &targets[indices[0]].target_rgb.device();
@@ -1926,6 +3088,31 @@ mod $module {
         while remaining_steps > 0 {
             let steps = remaining_steps.min(chunk_steps);
             let final_chunk = remaining_steps <= chunk_steps;
+            if config.loss_on_final_chunk_only && !final_chunk {
+                let detached_params = params.detached();
+                let adapter_batch =
+                    BurnAdapterBatch::from_indices(adapters, indices).detached();
+                let displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
+                let (next_x, next_s, _) = rollout_batch_chunk(
+                    &detached_params,
+                    &adapter_batch,
+                    targets,
+                    indices,
+                    x,
+                    s,
+                    config,
+                    particle_count,
+                    &mut rng,
+                    steps,
+                    displacement,
+                    None,
+                );
+                x = detach3(next_x);
+                s = detach3(next_s);
+                particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
+                remaining_steps -= steps;
+                continue;
+            }
             let adapter_batch = BurnAdapterBatch::from_indices(adapters, indices);
             let displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
             let (next_x, next_s, displacement) = rollout_batch_chunk(
@@ -1940,14 +3127,8 @@ mod $module {
                 &mut rng,
                 steps,
                 displacement,
+                None,
             );
-            if config.loss_on_final_chunk_only && !final_chunk {
-                x = detach3(next_x);
-                s = detach3(next_s);
-                particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
-                remaining_steps -= steps;
-                continue;
-            }
             let loss = target_splat_loss_batch(
                 &next_x,
                 &next_s,
@@ -1956,7 +3137,7 @@ mod $module {
                 config,
                 &adapter_batch,
                 displacement,
-            );
+            )?;
             if let Some(loss_sum) = loss_sum.as_mut() {
                 *loss_sum += loss_scalars(&loss)?.total * indices.len() as f32;
             }
@@ -2055,6 +3236,27 @@ mod $module {
             while remaining_steps > 0 {
                 let steps = remaining_steps.min(chunk_steps);
                 let final_chunk = remaining_steps <= chunk_steps;
+                if config.loss_on_final_chunk_only && !final_chunk {
+                    let detached_params = params.detached();
+                    let detached_adapter = adapters[idx].detached();
+                    let displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
+                    let (next_x, next_s, _) = rollout_single_chunk(
+                        &detached_params,
+                        &detached_adapter,
+                        target,
+                        x,
+                        s,
+                        config,
+                        &mut rng,
+                        steps,
+                        displacement,
+                    );
+                    x = detach2(next_x);
+                    s = detach2(next_s);
+                    particle_steps += target.particle_count as f64 * steps as f64;
+                    remaining_steps -= steps;
+                    continue;
+                }
                 let displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
                 let (next_x, next_s, displacement) = rollout_single_chunk(
                     params,
@@ -2067,13 +3269,6 @@ mod $module {
                     steps,
                     displacement,
                 );
-                if config.loss_on_final_chunk_only && !final_chunk {
-                    x = detach2(next_x);
-                    s = detach2(next_s);
-                    particle_steps += target.particle_count as f64 * steps as f64;
-                    remaining_steps -= steps;
-                    continue;
-                }
                 let loss = target_splat_loss(
                     &next_x,
                     &next_s,
@@ -2142,6 +3337,38 @@ mod $module {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn select_rollout_conditions(
+        conditions: &BurnE2eConditionCache,
+        condition_indices: &[usize],
+        prepared_dino: Option<&BurnE2ePreparedDinoBatch>,
+        rollouts_per_example: usize,
+    ) -> AutomataResult<(Tensor3, Option<Vec<usize>>)> {
+        let replicas = rollouts_per_example.max(1);
+        if replicas == 1 || prepared_dino.is_some() || !condition_indices.len().is_multiple_of(replicas)
+        {
+            return conditions
+                .select_prepared(condition_indices, prepared_dino)
+                .map(|condition| (condition, None));
+        }
+        let chunks = condition_indices.chunks(replicas).collect::<Vec<_>>();
+        if chunks
+            .iter()
+            .any(|chunk| chunk.iter().any(|identity| *identity != chunk[0]))
+        {
+            return conditions
+                .select_prepared(condition_indices, prepared_dino)
+                .map(|condition| (condition, None));
+        }
+        let unique = chunks.iter().map(|chunk| chunk[0]).collect::<Vec<_>>();
+        let expansion = (0..unique.len())
+            .flat_map(|row| std::iter::repeat_n(row, replicas))
+            .collect::<Vec<_>>();
+        conditions
+            .select(&unique)
+            .map(|condition| (condition, Some(expansion)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn train_e2e_homogeneous_step_tbptt(
         params: &mut BurnBaseParams,
         generator: &mut BurnE2eGeneratorParams,
@@ -2149,14 +3376,43 @@ mod $module {
         generator_optimizer: &mut BurnE2eGeneratorAdamWState,
         npa_config: &NpaConfig,
         conditions: &BurnE2eConditionCache,
+        condition_indices: &[usize],
+        prepared_dino: Option<&BurnE2ePreparedDinoBatch>,
         targets: &[BurnTargetExample],
-        indices: &[usize],
+        target_indices: &[usize],
         config: BurnE2eRolloutTrainConfig,
         step_seed: u64,
         collect_metrics: bool,
+        collect_per_example_losses: bool,
         initial_state: Option<(Tensor3, Tensor3)>,
     ) -> Result<BurnE2eStepOutput, Box<dyn std::error::Error>> {
-        let Some(particle_count) = homogeneous_particle_count(targets, indices) else {
+        if config.credit_assignment == E2eCreditAssignment::FullBptt {
+            return train_e2e_homogeneous_step_full_bptt(
+                params,
+                generator,
+                base_optimizer,
+                generator_optimizer,
+                npa_config,
+                conditions,
+                condition_indices,
+                prepared_dino,
+                targets,
+                target_indices,
+                config,
+                step_seed,
+                collect_metrics,
+                collect_per_example_losses,
+                initial_state,
+            );
+        }
+        if condition_indices.len() != target_indices.len() {
+            return Err(std::io::Error::other(
+                "Burn HyperNPA e2e rollout condition/target batch length mismatch",
+            )
+            .into());
+        }
+        let batch_len = condition_indices.len();
+        let Some(particle_count) = homogeneous_particle_count(targets, target_indices) else {
             return Err(std::io::Error::other(
                 "Burn HyperNPA e2e rollout batches require homogeneous particle counts",
             )
@@ -2164,23 +3420,40 @@ mod $module {
         };
         let started = Instant::now();
         let direct_config = direct_config_view(config);
-        let device = &targets[indices[0]].target_rgb.device();
+        let device = &targets[target_indices[0]].target_rgb.device();
         let (mut x, mut s) = initial_state.unwrap_or_else(|| {
-            seed_batch_tensors(targets, indices, particle_count, direct_config, step_seed, device)
+            seed_batch_tensors(
+                targets,
+                target_indices,
+                particle_count,
+                direct_config,
+                step_seed,
+                device,
+            )
         });
         let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
         let mut particle_steps = 0.0_f64;
         if config.pre_rollout_steps > 0 {
             let detached_params = params.detached();
             let detached_generator = generator.detached();
-            let condition = conditions.select(indices)?;
-            let adapter_batch = detached_generator.adapter_batch(condition, npa_config, config);
-            let displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
+            let (condition, expansion) = select_rollout_conditions(
+                conditions,
+                condition_indices,
+                prepared_dino,
+                config.rollouts_per_example,
+            )?;
+            let adapter_batch = detached_generator
+                .adapter_batch(condition.clone(), npa_config, config)
+                .select_rows_or_identity(expansion.as_deref());
+            let condition_control = detached_generator
+                .condition_control_batch(condition.clone(), config)
+                .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+            let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
             let (next_x, next_s, _) = rollout_batch_chunk(
                 &detached_params,
                 &adapter_batch,
                 targets,
-                indices,
+                target_indices,
                 x,
                 s,
                 direct_config,
@@ -2188,34 +3461,78 @@ mod $module {
                 &mut rng,
                 config.pre_rollout_steps,
                 displacement,
+                condition_control.as_ref(),
             );
             x = detach3(next_x);
             s = detach3(next_s);
-            particle_steps += indices.len() as f64
-                * particle_count as f64
-                * config.pre_rollout_steps as f64;
+            particle_steps +=
+                batch_len as f64 * particle_count as f64 * config.pre_rollout_steps as f64;
         }
         let chunk_steps = tbptt_chunk_steps(direct_config);
         let rollout_steps = sampled_training_rollout_steps(direct_config, step_seed);
         let mut loss_sum = collect_metrics.then_some(0.0_f32);
-        let mut loss_weight_sum = collect_metrics.then_some(0.0_f32);
+        let mut loss_weight_sum =
+            (collect_metrics || collect_per_example_losses).then_some(0.0_f32);
+        let mut per_example_loss_sum =
+            collect_per_example_losses.then(|| vec![0.0_f32; batch_len]);
         let mut base_grad_norm_sum = 0.0_f32;
         let mut base_grad_scale_sum = 0.0_f32;
         let mut generator_grad_norm_sum = 0.0_f32;
         let mut generator_grad_scale_sum = 0.0_f32;
         let mut grad_metric_chunks = 0usize;
-        let condition = conditions.select(indices)?;
+        let (condition, expansion) = select_rollout_conditions(
+            conditions,
+            condition_indices,
+            prepared_dino,
+            config.rollouts_per_example,
+        )?;
         let mut remaining_steps = rollout_steps;
         while remaining_steps > 0 {
             let steps = remaining_steps.min(chunk_steps);
             let final_chunk = remaining_steps <= chunk_steps;
-            let adapter_batch = generator.adapter_batch(condition.clone(), npa_config, config);
-            let displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
+            let loss_weight = e2e_chunk_loss_weight(config, final_chunk);
+            if loss_weight <= 0.0 {
+                let detached_params = params.detached();
+                let detached_generator = generator.detached();
+                let adapter_batch = detached_generator
+                    .adapter_batch(condition.clone(), npa_config, config)
+                    .select_rows_or_identity(expansion.as_deref());
+                let condition_control = detached_generator
+                    .condition_control_batch(condition.clone(), config)
+                    .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+                let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
+                let (next_x, next_s, _) = rollout_batch_chunk(
+                    &detached_params,
+                    &adapter_batch,
+                    targets,
+                    target_indices,
+                    x,
+                    s,
+                    direct_config,
+                    particle_count,
+                    &mut rng,
+                    steps,
+                    displacement,
+                    condition_control.as_ref(),
+                );
+                x = detach3(next_x);
+                s = detach3(next_s);
+                particle_steps += batch_len as f64 * particle_count as f64 * steps as f64;
+                remaining_steps -= steps;
+                continue;
+            }
+            let adapter_batch = generator
+                .adapter_batch(condition.clone(), npa_config, config)
+                .select_rows_or_identity(expansion.as_deref());
+            let condition_control = generator
+                .condition_control_batch(condition.clone(), config)
+                .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+            let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
             let (next_x, next_s, displacement) = rollout_batch_chunk(
                 params,
                 &adapter_batch,
                 targets,
-                indices,
+                target_indices,
                 x,
                 s,
                 direct_config,
@@ -2223,27 +3540,28 @@ mod $module {
                 &mut rng,
                 steps,
                 displacement,
+                condition_control.as_ref(),
             );
-            let loss_weight = e2e_chunk_loss_weight(config, final_chunk);
-            if loss_weight <= 0.0 {
-                x = detach3(next_x);
-                s = detach3(next_s);
-                particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
-                remaining_steps -= steps;
-                continue;
-            }
             let loss = target_splat_loss_batch_vector_selected(
                 &next_x,
                 &next_s,
                 targets,
-                indices,
+                target_indices,
                 direct_config,
                 &adapter_batch,
                 displacement,
             )?;
-            if let Some(loss_sum) = loss_sum.as_mut() {
-                for scalars in loss_vector_scalars(loss.clone())? {
-                    *loss_sum += scalars.total * loss_weight;
+            if collect_metrics || collect_per_example_losses {
+                let scalars = loss_vector_scalars(loss.clone())?;
+                if let Some(loss_sum) = loss_sum.as_mut() {
+                    for value in &scalars {
+                        *loss_sum += value.total * loss_weight;
+                    }
+                }
+                if let Some(per_example_loss_sum) = per_example_loss_sum.as_mut() {
+                    for (sum, value) in per_example_loss_sum.iter_mut().zip(&scalars) {
+                        *sum += value.total * loss_weight;
+                    }
                 }
             }
             if let Some(loss_weight_sum) = loss_weight_sum.as_mut() {
@@ -2253,14 +3571,14 @@ mod $module {
                 .total
                 .sum()
                 .mul_scalar(loss_weight)
-                .div_scalar(indices.len() as f32)
+                .div_scalar(batch_len as f32)
                 .backward();
             let (base_grad_norm, base_grad_scale) = if config.shared_base_trainable {
                 params.apply_adamw(
                     &mut grads,
                     base_optimizer,
                     config.base_optimizer,
-                    config.per_parameter_grad_normalization,
+                    config.base_per_parameter_grad_normalization,
                     collect_metrics,
                 )?
             } else {
@@ -2270,7 +3588,7 @@ mod $module {
                 &mut grads,
                 generator_optimizer,
                 config.generator_optimizer,
-                config.per_parameter_grad_normalization,
+                config.generator_per_parameter_grad_normalization,
                 collect_metrics,
             )?;
             if collect_metrics {
@@ -2282,20 +3600,30 @@ mod $module {
             }
             x = detach3(next_x);
             s = detach3(next_s);
-            particle_steps += indices.len() as f64 * particle_count as f64 * steps as f64;
+            particle_steps += batch_len as f64 * particle_count as f64 * steps as f64;
             remaining_steps -= steps;
         }
         let elapsed = started.elapsed();
         let grad_metric_chunks = grad_metric_chunks.max(1);
         let loss_weight_count = loss_weight_sum.unwrap_or(1.0).max(f32::MIN_POSITIVE);
+        let per_example_losses = per_example_loss_sum.map(|losses| {
+            losses
+                .into_iter()
+                .map(|loss| loss / loss_weight_count)
+                .collect()
+        });
         let particle_steps_per_sec =
             particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
         Ok(BurnE2eStepOutput {
             history: BurnE2eRolloutHistoryEntry {
                 step: 0,
                 loss: loss_sum.map_or(0.0, |value| {
-                    value / indices.len() as f32 / loss_weight_count
+                    value / batch_len as f32 / loss_weight_count
                 }),
+                task_loss: loss_sum.map_or(0.0, |value| {
+                    value / batch_len as f32 / loss_weight_count
+                }),
+                adapter_teacher_loss: 0.0,
                 learning_rate_scale: 1.0,
                 base_learning_rate: config.base_optimizer.learning_rate,
                 generator_learning_rate: config.generator_optimizer.learning_rate,
@@ -2305,14 +3633,329 @@ mod $module {
                 base_grad_scale: base_grad_scale_sum / grad_metric_chunks as f32,
                 generator_grad_norm: generator_grad_norm_sum / grad_metric_chunks as f32,
                 generator_grad_scale: generator_grad_scale_sum / grad_metric_chunks as f32,
-                examples_seen: indices.len(),
+                examples_seen: batch_len,
                 pool_seed_replacements: 0,
                 particle_steps_per_sec,
                 dense_pair_interactions_per_sec: particle_steps_per_sec * particle_count as f64,
                 elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+                condition_adapter_ms: 0.0,
+                rollout_loss_ms: 0.0,
+                backward_update_ms: 0.0,
             },
+            particle_steps: particle_steps.round().max(0.0) as u64,
             final_x: x,
             final_s: s,
+            per_example_losses,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn train_e2e_homogeneous_step_full_bptt(
+        params: &mut BurnBaseParams,
+        generator: &mut BurnE2eGeneratorParams,
+        base_optimizer: &mut BurnBaseAdamWState,
+        generator_optimizer: &mut BurnE2eGeneratorAdamWState,
+        npa_config: &NpaConfig,
+        conditions: &BurnE2eConditionCache,
+        condition_indices: &[usize],
+        prepared_dino: Option<&BurnE2ePreparedDinoBatch>,
+        targets: &[BurnTargetExample],
+        target_indices: &[usize],
+        config: BurnE2eRolloutTrainConfig,
+        step_seed: u64,
+        collect_metrics: bool,
+        collect_per_example_losses: bool,
+        initial_state: Option<(Tensor3, Tensor3)>,
+    ) -> Result<BurnE2eStepOutput, Box<dyn std::error::Error>> {
+        if condition_indices.len() != target_indices.len() {
+            return Err(std::io::Error::other(
+                "Burn HyperNPA full-BPTT condition/target batch length mismatch",
+            )
+            .into());
+        }
+        let batch_len = condition_indices.len();
+        let Some(particle_count) = homogeneous_particle_count(targets, target_indices) else {
+            return Err(std::io::Error::other(
+                "Burn HyperNPA full-BPTT requires homogeneous particle counts",
+            )
+            .into());
+        };
+        let started = Instant::now();
+        let direct_config = direct_config_view(config);
+        let rollout_steps = sampled_training_rollout_steps(direct_config, step_seed);
+        let particle_steps = batch_len
+            .saturating_mul(particle_count)
+            .saturating_mul(rollout_steps);
+        if particle_steps > config.max_full_bptt_particle_steps {
+            return Err(std::io::Error::other(format!(
+                "HyperNPA full-BPTT runtime preflight rejected {particle_steps} particle-steps, above configured cap {}",
+                config.max_full_bptt_particle_steps
+            ))
+            .into());
+        }
+        let device = &targets[target_indices[0]].target_rgb.device();
+        let (mut x, mut s) = initial_state.unwrap_or_else(|| {
+            seed_batch_tensors(
+                targets,
+                target_indices,
+                particle_count,
+                direct_config,
+                step_seed,
+                device,
+            )
+        });
+        let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
+        if config.pre_rollout_steps > 0 {
+            let detached_params = params.detached();
+            let detached_generator = generator.detached();
+            let (condition, expansion) = select_rollout_conditions(
+                conditions,
+                condition_indices,
+                prepared_dino,
+                config.rollouts_per_example,
+            )?;
+            let adapter = detached_generator
+                .adapter_batch(condition.clone(), npa_config, config)
+                .select_rows_or_identity(expansion.as_deref());
+            let condition_control = detached_generator
+                .condition_control_batch(condition, config)
+                .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+            let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
+            let (next_x, next_s, _) = rollout_batch_chunk(
+                &detached_params,
+                &adapter,
+                targets,
+                target_indices,
+                x,
+                s,
+                direct_config,
+                particle_count,
+                &mut rng,
+                config.pre_rollout_steps,
+                displacement,
+                condition_control.as_ref(),
+            );
+            x = detach3(next_x);
+            s = detach3(next_s);
+        }
+
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let condition_started = Instant::now();
+        let (condition, expansion) = select_rollout_conditions(
+            conditions,
+            condition_indices,
+            prepared_dino,
+            config.rollouts_per_example,
+        )?;
+        let adapter = generator
+            .adapter_batch(condition.clone(), npa_config, config)
+            .select_rows_or_identity(expansion.as_deref());
+        let condition_control = generator
+            .condition_control_batch(condition, config)
+            .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+        let teacher_vector = conditions.select_teacher(condition_indices);
+        let teacher_adapter = teacher_vector.clone().map(|teacher| {
+            BurnAdapterBatch::from_parameter_vector(
+                teacher,
+                npa_config,
+                config.adapter_rank,
+                config.adapter_alpha,
+            )
+        });
+        let teacher_probe_features = if config.adapter_teacher_weight > 0.0
+            && config.adapter_teacher_objective != E2eAdapterTeacherObjective::ParameterMse
+        {
+            let teacher_adapter = teacher_adapter
+                .as_ref()
+                .expect("functional teacher objective requires teacher adapters");
+            let max_probe_steps = config.adapter_teacher_probe_rollout_steps;
+            let probe_steps = if max_probe_steps == 0 {
+                0
+            } else {
+                1 + step_seed as usize % max_probe_steps
+            };
+            let (probe_x, probe_s) = if probe_steps == 0 {
+                (detach3(x.clone()), detach3(s.clone()))
+            } else {
+                let mut teacher_rng = rng.clone();
+                let (probe_x, probe_s, _) = rollout_batch_chunk(
+                    &params.detached(),
+                    teacher_adapter,
+                    targets,
+                    target_indices,
+                    detach3(x.clone()),
+                    detach3(s.clone()),
+                    direct_config,
+                    particle_count,
+                    &mut teacher_rng,
+                    probe_steps,
+                    Tensor::<BurnBackend, 1>::zeros([batch_len], device),
+                    None,
+                );
+                (detach3(probe_x), detach3(probe_s))
+            };
+            Some(rollout_dense_perception_batch(
+                &probe_x,
+                &probe_s,
+                direct_config,
+            ))
+        } else {
+            None
+        };
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let condition_adapter_ms = collect_metrics
+            .then(|| condition_started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
+        let rollout_started = Instant::now();
+        let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
+        let (next_x, next_s, displacement) = rollout_batch_chunk(
+            params,
+            &adapter,
+            targets,
+            target_indices,
+            x,
+            s,
+            direct_config,
+            particle_count,
+            &mut rng,
+            rollout_steps,
+            displacement,
+            condition_control.as_ref(),
+        );
+        let loss = target_splat_loss_batch_vector_selected(
+            &next_x,
+            &next_s,
+            targets,
+            target_indices,
+            direct_config,
+            &adapter,
+            displacement.clone(),
+        )?;
+        let task_objective = loss.total.clone().sum().div_scalar(batch_len.max(1) as f32);
+        let teacher_objective = teacher_vector.map(|teacher| {
+            let generated_vector = adapter.to_parameter_vector();
+            let parameter_delta = generated_vector - teacher.clone();
+            let parameter_mse = parameter_delta.clone().mul(parameter_delta).mean();
+            if config.adapter_teacher_objective == E2eAdapterTeacherObjective::ParameterMse {
+                return parameter_mse;
+            }
+
+            let teacher_adapter = teacher_adapter
+                .as_ref()
+                .expect("functional teacher objective requires teacher adapters");
+            let probes = teacher_probe_features
+                .as_ref()
+                .expect("functional teacher objective prepared perception probes")
+                .clone();
+            let generated_update = params.forward_adapter_batch(probes.clone(), &adapter);
+            let teacher_update = detach3(
+                params
+                    .detached()
+                    .forward_adapter_batch(probes, teacher_adapter),
+            );
+            let functional_delta = generated_update - teacher_update;
+            let functional_mse = functional_delta.clone().mul(functional_delta).mean();
+            if config.adapter_teacher_objective == E2eAdapterTeacherObjective::Hybrid {
+                functional_mse
+                    + parameter_mse.mul_scalar(FUNCTIONAL_TEACHER_PARAMETER_AUX_WEIGHT)
+            } else {
+                functional_mse
+            }
+        });
+        let teacher_loss_value = if collect_metrics {
+            teacher_objective
+                .as_ref()
+                .map(|teacher| teacher.clone().inner().into_scalar())
+                .unwrap_or_default()
+        } else {
+            0.0
+        };
+        let weighted_task = task_objective.mul_scalar(config.task_loss_weight.max(0.0));
+        let objective = teacher_objective.map_or(weighted_task.clone(), |teacher| {
+            weighted_task + teacher.mul_scalar(config.adapter_teacher_weight.max(0.0))
+        });
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let rollout_loss_ms = collect_metrics
+            .then(|| rollout_started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
+        let loss_scalars = if collect_per_example_losses {
+            Some(loss_vector_scalars(loss.clone())?)
+        } else {
+            None
+        };
+        let task_loss_value = loss_scalars.as_ref().map_or(0.0, |losses| {
+            losses.iter().map(|value| value.total).sum::<f32>() / batch_len.max(1) as f32
+        });
+        let loss_value = task_loss_value * config.task_loss_weight.max(0.0)
+            + teacher_loss_value * config.adapter_teacher_weight.max(0.0);
+        let backward_started = Instant::now();
+        let mut grads = objective.backward();
+        let (base_grad_norm, base_grad_scale) = if config.shared_base_trainable {
+            params.apply_adamw(
+                &mut grads,
+                base_optimizer,
+                config.base_optimizer,
+                config.base_per_parameter_grad_normalization,
+                collect_metrics,
+            )?
+        } else {
+            (0.0, 1.0)
+        };
+        let (generator_grad_norm, generator_grad_scale) = generator.apply_adamw(
+            &mut grads,
+            generator_optimizer,
+            config.generator_optimizer,
+            config.generator_per_parameter_grad_normalization,
+            collect_metrics,
+        )?;
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let backward_update_ms = collect_metrics
+            .then(|| backward_started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
+        let elapsed = started.elapsed();
+        let measured_particle_steps = batch_len as f64
+            * particle_count as f64
+            * (rollout_steps + config.pre_rollout_steps) as f64;
+        let particle_steps_per_sec =
+            measured_particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+        Ok(BurnE2eStepOutput {
+            history: BurnE2eRolloutHistoryEntry {
+                step: 0,
+                loss: loss_value,
+                task_loss: task_loss_value,
+                adapter_teacher_loss: teacher_loss_value,
+                learning_rate_scale: 1.0,
+                base_learning_rate: config.base_optimizer.learning_rate,
+                generator_learning_rate: config.generator_optimizer.learning_rate,
+                holdout_mean_psnr_db: None,
+                holdout_mean_loss: None,
+                base_grad_norm,
+                base_grad_scale,
+                generator_grad_norm,
+                generator_grad_scale,
+                examples_seen: batch_len,
+                pool_seed_replacements: 0,
+                particle_steps_per_sec,
+                dense_pair_interactions_per_sec: particle_steps_per_sec * particle_count as f64,
+                elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+                condition_adapter_ms,
+                rollout_loss_ms,
+                backward_update_ms,
+            },
+            particle_steps: measured_particle_steps.round().max(0.0) as u64,
+            final_x: detach3(next_x),
+            final_s: detach3(next_s),
+            per_example_losses: loss_scalars.map(|losses| {
+                losses.into_iter().map(|value| value.total).collect()
+            }),
         })
     }
 
@@ -2331,7 +3974,7 @@ mod $module {
             return max_steps;
         }
         let mut rng = StdRng::seed_from_u64(seed ^ 0x6d2b_79f5);
-        rng.random_range(min_steps..=max_steps)
+        rng.random_range(min_steps..max_steps)
     }
 
     fn e2e_chunk_loss_weight(config: BurnE2eRolloutTrainConfig, final_chunk: bool) -> f32 {
@@ -2678,6 +4321,127 @@ mod $module {
         config: BurnE2eRolloutTrainConfig,
         device: &BurnDevice,
     ) -> Result<Option<BurnE2eRolloutQualityReport>, Box<dyn std::error::Error>> {
+        let mut horizons = config.validation_horizons
+            [..config.validation_horizon_count.min(config.validation_horizons.len())]
+            .iter()
+            .copied()
+            .filter(|&steps| steps > 0)
+            .collect::<Vec<_>>();
+        horizons.push(config.validation_steps.max(1));
+        horizons.sort_unstable();
+        horizons.dedup();
+
+        let mut final_report = None::<BurnE2eRolloutQualityReport>;
+        let mut summaries = Vec::with_capacity(horizons.len());
+        let mut total_elapsed_ms = 0.0_f64;
+        let mut total_particle_steps = 0.0_f64;
+        let mut total_adapter_batches = 0usize;
+        for &steps in &horizons {
+            let horizon_config = BurnE2eRolloutTrainConfig {
+                validation_steps: steps,
+                validation_horizon_count: 0,
+                ..config
+            };
+            let Some(report) = evaluate_e2e_rollout_quality_single(
+                params,
+                generator,
+                npa_config,
+                train_examples,
+                holdout_examples,
+                train_conditions,
+                holdout_conditions,
+                horizon_config,
+                device,
+            )? else {
+                return Ok(None);
+            };
+            total_elapsed_ms += report.elapsed_ms;
+            total_particle_steps += report.particle_steps;
+            total_adapter_batches = total_adapter_batches.saturating_add(report.adapter_batches);
+            summaries.push(BurnE2eRolloutHorizonSummary {
+                rollout_steps: steps,
+                aggregate_composited_rgb_psnr_db: report.aggregate_composited_rgb_psnr_db,
+                p10_composited_rgb_psnr_db: report.p10_composited_rgb_psnr_db,
+                min_composited_rgb_psnr_db: report.min_composited_rgb_psnr_db,
+                target_point_splat_p10_composited_rgb_psnr_db: report
+                    .target_point_splat_p10_composited_rgb_psnr_db,
+                p10_gap_to_target_point_splat_db: report.p10_gap_to_target_point_splat_db,
+                aggregate_density_psnr_db: report.aggregate_density_psnr_db,
+                mean_density_soft_iou: report.mean_density_soft_iou,
+                condition_shuffle_composited_psnr_gap_db: report
+                    .condition_shuffle_composited_psnr_gap_db,
+                generated_adapter_composited_psnr_gain_db: report
+                    .generated_adapter_composited_psnr_gain_db,
+                mean_passed: report.mean_passed,
+                all_examples_passed: report.all_examples_passed,
+                conditional_control_passed: report.conditional_control_passed,
+                passed: report.passed,
+            });
+            if steps == config.validation_steps.max(1) {
+                final_report = Some(report);
+            }
+        }
+
+        let mut report = final_report.expect("final validation horizon is always evaluated");
+        let selection_summaries = summaries
+            .iter()
+            .filter(|summary| {
+                summary.rollout_steps >= config.validation_selection_horizon_min_steps
+            })
+            .collect::<Vec<_>>();
+        debug_assert!(!selection_summaries.is_empty());
+        let selection_psnr_db = selection_summaries
+            .iter()
+            .map(|summary| summary.p10_composited_rgb_psnr_db)
+            .fold(f32::INFINITY, f32::min);
+        let peak_horizon_p10_composited_rgb_psnr_db = summaries
+            .iter()
+            .map(|summary| summary.p10_composited_rgb_psnr_db)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let final_horizon_p10_composited_rgb_psnr_db = report.p10_composited_rgb_psnr_db;
+        report.selection_metric = "min-horizon-p10-composited-rgb-psnr";
+        report.selection_psnr_db = selection_psnr_db;
+        report.selection_horizon_min_steps = config.validation_selection_horizon_min_steps;
+        report.passed = selection_summaries.iter().all(|summary| summary.passed)
+            && selection_psnr_db >= config.validation_psnr_threshold_db;
+        report.mean_passed = selection_summaries
+            .iter()
+            .all(|summary| summary.mean_passed);
+        report.all_examples_passed = selection_summaries
+            .iter()
+            .all(|summary| summary.all_examples_passed);
+        report.conditional_control_passed = selection_summaries
+            .iter()
+            .all(|summary| summary.conditional_control_passed);
+        report.elapsed_ms = total_elapsed_ms;
+        report.particle_steps = total_particle_steps;
+        report.particle_steps_per_sec = total_particle_steps
+            / (total_elapsed_ms / 1000.0).max(f64::MIN_POSITIVE);
+        report.dense_pair_interactions_per_sec =
+            report.particle_steps_per_sec * config.validation_particles as f64;
+        report.adapter_batches = total_adapter_batches;
+        report.horizon_summaries = summaries;
+        report.peak_horizon_p10_composited_rgb_psnr_db =
+            peak_horizon_p10_composited_rgb_psnr_db;
+        report.final_horizon_p10_composited_rgb_psnr_db =
+            final_horizon_p10_composited_rgb_psnr_db;
+        report.peak_to_final_p10_drop_db =
+            peak_horizon_p10_composited_rgb_psnr_db - final_horizon_p10_composited_rgb_psnr_db;
+        Ok(Some(report))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_e2e_rollout_quality_single(
+        params: &BurnBaseParams,
+        generator: &BurnE2eGeneratorParams,
+        npa_config: &NpaConfig,
+        train_examples: &[BurnE2eRolloutExample],
+        holdout_examples: &[BurnE2eRolloutExample],
+        train_conditions: &BurnE2eConditionCache,
+        holdout_conditions: &BurnE2eConditionCache,
+        config: BurnE2eRolloutTrainConfig,
+        device: &BurnDevice,
+    ) -> Result<Option<BurnE2eRolloutQualityReport>, Box<dyn std::error::Error>> {
         if config.validation_examples == 0 {
             return Ok(None);
         }
@@ -2709,6 +4473,11 @@ mod $module {
         let target_indices = (0..targets.len()).collect::<Vec<_>>();
         let eval_batch_size = normalized_eval_batch_size(eval_config.eval_batch_size, indices.len());
         let mut entries = Vec::with_capacity(indices.len());
+        let adapter_parameter_count = NpaLowRankAdapter::parameter_count_for_config(
+            npa_config,
+            config.adapter_rank,
+        );
+        let mut adapter_parameter_rows = Vec::with_capacity(indices.len());
         let mut adapter_batches = 0usize;
         for (condition_chunk, target_chunk) in indices
             .chunks(eval_batch_size)
@@ -2727,19 +4496,71 @@ mod $module {
                 eval_config,
                 config.validation_seed,
                 device,
+                E2eEvalConditionMode::Generated,
             )?;
+            let adapter_values = tensor_vec(
+                quality
+                    .adapter_vector
+                    .clone()
+                    .expect("generated quality batch contains adapter vectors")
+                    .inner(),
+            )?;
+            if adapter_values.len() != condition_chunk.len() * adapter_parameter_count {
+                return Err(std::io::Error::other(
+                    "HyperNPA e2e adapter diagnostics readback length mismatch",
+                )
+                .into());
+            }
+            adapter_parameter_rows.extend(
+                adapter_values
+                    .chunks_exact(adapter_parameter_count)
+                    .map(<[f32]>::to_vec),
+            );
             let losses = loss_vector_scalars(quality.loss)?;
-            let mses = tensor1_vec(quality.render_rgb_mse.inner())?;
-            if losses.len() != condition_chunk.len() || mses.len() != condition_chunk.len() {
+            let render_rgb_mses = tensor1_vec(quality.render_rgb_mse.inner())?;
+            let composited_rgb_mses = tensor1_vec(quality.composited_rgb_mse.inner())?;
+            let foreground_rgb_mses = tensor1_vec(quality.foreground_rgb_mse.inner())?;
+            let density_mses = tensor1_vec(quality.density_mse.inner())?;
+            let density_soft_ious = tensor1_vec(quality.density_soft_iou.inner())?;
+            if [
+                losses.len(),
+                render_rgb_mses.len(),
+                composited_rgb_mses.len(),
+                foreground_rgb_mses.len(),
+                density_mses.len(),
+                density_soft_ious.len(),
+            ]
+            .into_iter()
+            .any(|len| len != condition_chunk.len())
+            {
                 return Err(std::io::Error::other(
                     "HyperNPA e2e quality readback length mismatch",
                 )
                 .into());
             }
-            for ((&idx, loss), render_rgb_mse) in condition_chunk.iter().zip(losses).zip(mses) {
+            for local in 0..condition_chunk.len() {
+                let idx = condition_chunk[local];
+                let loss = losses[local];
                 let render_rgb_mse =
-                    finite_scalar("HyperNPA e2e render RGB MSE", render_rgb_mse)?;
+                    finite_scalar("HyperNPA e2e render RGB MSE", render_rgb_mses[local])?;
                 let render_rgb_psnr_db = psnr_db_from_mse(render_rgb_mse);
+                let composited_rgb_mse = finite_scalar(
+                    "HyperNPA e2e composited RGB MSE",
+                    composited_rgb_mses[local],
+                )?;
+                let composited_rgb_psnr_db = psnr_db_from_mse(composited_rgb_mse);
+                let foreground_rgb_mse = finite_scalar(
+                    "HyperNPA e2e foreground RGB MSE",
+                    foreground_rgb_mses[local],
+                )?;
+                let foreground_rgb_psnr_db = psnr_db_from_mse(foreground_rgb_mse);
+                let density_mse =
+                    finite_scalar("HyperNPA e2e density MSE", density_mses[local])?;
+                let density_psnr_db = psnr_db_from_mse(density_mse);
+                let density_soft_iou = finite_scalar(
+                    "HyperNPA e2e density soft IoU",
+                    density_soft_ious[local],
+                )?;
                 entries.push(BurnE2eRolloutQualityEntry {
                     slug: examples[idx].slug.clone(),
                     total_loss: loss.total,
@@ -2748,14 +4569,22 @@ mod $module {
                     density_loss: loss.density,
                     render_rgb_mse,
                     render_rgb_psnr_db,
-                    passed: render_rgb_psnr_db >= config.validation_psnr_threshold_db,
+                    composited_rgb_mse,
+                    composited_rgb_psnr_db,
+                    foreground_rgb_mse,
+                    foreground_rgb_psnr_db,
+                    density_mse,
+                    density_psnr_db,
+                    density_soft_iou,
+                    passed: composited_rgb_psnr_db >= config.validation_psnr_threshold_db,
                 });
             }
         }
-        let mean_condition_shuffle_render_rgb_psnr_db = if indices.len() > 1 {
+        let (mean_condition_shuffle_render_rgb_psnr_db, condition_shuffle_composited_rgb_psnr_db) = if indices.len() > 1 {
             let mut shuffled_condition_indices = indices.clone();
             shuffled_condition_indices.rotate_left(1);
             let mut psnr_sum = 0.0_f32;
+            let mut composited_mse_sum = 0.0_f32;
             let mut psnr_count = 0usize;
             for (condition_chunk, target_chunk) in shuffled_condition_indices
                 .chunks(eval_batch_size)
@@ -2773,22 +4602,169 @@ mod $module {
                     eval_config,
                     config.validation_seed,
                     device,
+                    E2eEvalConditionMode::Generated,
                 )?;
-                for render_rgb_mse in tensor1_vec(quality.render_rgb_mse.inner())? {
+                let render_rgb_mses = tensor1_vec(quality.render_rgb_mse.inner())?;
+                let composited_rgb_mses = tensor1_vec(quality.composited_rgb_mse.inner())?;
+                for (render_rgb_mse, composited_rgb_mse) in
+                    render_rgb_mses.into_iter().zip(composited_rgb_mses)
+                {
                     let render_rgb_mse =
                         finite_scalar("HyperNPA e2e shuffled-condition render RGB MSE", render_rgb_mse)?;
+                    let composited_rgb_mse = finite_scalar(
+                        "HyperNPA e2e shuffled-condition composited RGB MSE",
+                        composited_rgb_mse,
+                    )?;
                     psnr_sum += psnr_db_from_mse(render_rgb_mse);
+                    composited_mse_sum += composited_rgb_mse;
                     psnr_count += 1;
                 }
             }
-            (psnr_count > 0).then_some(psnr_sum / psnr_count as f32)
+            if psnr_count > 0 {
+                (
+                    Some(psnr_sum / psnr_count as f32),
+                    Some(psnr_db_from_mse(composited_mse_sum / psnr_count as f32)),
+                )
+            } else {
+                (None, None)
+            }
         } else {
-            None
+            (None, None)
+        };
+        let mut base_only_composited_mse_sum = 0.0_f32;
+        let mut base_only_density_mse_sum = 0.0_f32;
+        let mut base_only_density_soft_iou_sum = 0.0_f32;
+        let mut base_only_count = 0usize;
+        for (condition_chunk, target_chunk) in indices
+            .chunks(eval_batch_size)
+            .zip(target_indices.chunks(eval_batch_size))
+        {
+            let quality = batch_e2e_eval_quality(
+                params,
+                generator,
+                npa_config,
+                conditions,
+                &targets,
+                condition_chunk,
+                target_chunk,
+                config,
+                eval_config,
+                config.validation_seed,
+                device,
+                E2eEvalConditionMode::BaseOnly,
+            )?;
+            let composited_mses = tensor1_vec(quality.composited_rgb_mse.inner())?;
+            let density_mses = tensor1_vec(quality.density_mse.inner())?;
+            let density_soft_ious = tensor1_vec(quality.density_soft_iou.inner())?;
+            for local in 0..composited_mses.len() {
+                base_only_composited_mse_sum += finite_scalar(
+                    "HyperNPA e2e base-only composited RGB MSE",
+                    composited_mses[local],
+                )?;
+                base_only_density_mse_sum += finite_scalar(
+                    "HyperNPA e2e base-only density MSE",
+                    density_mses[local],
+                )?;
+                base_only_density_soft_iou_sum += finite_scalar(
+                    "HyperNPA e2e base-only density soft IoU",
+                    density_soft_ious[local],
+                )?;
+                base_only_count += 1;
+            }
+        }
+        let mut dino_nearest_teacher_entries = Vec::new();
+        let (
+            dino_nearest_teacher_render_rgb_psnr_db,
+            dino_nearest_teacher_composited_rgb_psnr_db,
+        ) = if split == "holdout" && train_conditions.teacher_vectors.is_some() {
+            let nearest = train_conditions.nearest_rows(conditions, &indices)?;
+            let mut render_psnr_sum = 0.0_f32;
+            let mut composited_mse_sum = 0.0_f32;
+            let mut count = 0usize;
+            for start in (0..indices.len()).step_by(eval_batch_size) {
+                let end = (start + eval_batch_size).min(indices.len());
+                let condition_chunk = &indices[start..end];
+                let target_chunk = &target_indices[start..end];
+                let nearest_chunk = &nearest[start..end];
+                let nearest_indices = nearest_chunk
+                    .iter()
+                    .map(|(idx, _)| *idx)
+                    .collect::<Vec<_>>();
+                let teacher_vectors = train_conditions
+                    .select_teacher(&nearest_indices)
+                    .expect("nearest-teacher validation requires train teacher adapters");
+                let quality = batch_e2e_eval_quality(
+                    params,
+                    generator,
+                    npa_config,
+                    conditions,
+                    &targets,
+                    condition_chunk,
+                    target_chunk,
+                    config,
+                    eval_config,
+                    config.validation_seed,
+                    device,
+                    E2eEvalConditionMode::ExplicitAdapter(teacher_vectors),
+                )?;
+                let render_rgb_mses = tensor1_vec(quality.render_rgb_mse.inner())?;
+                let composited_rgb_mses = tensor1_vec(quality.composited_rgb_mse.inner())?;
+                for local in 0..condition_chunk.len() {
+                    let render_rgb_mse = finite_scalar(
+                        "HyperNPA e2e nearest-teacher render RGB MSE",
+                        render_rgb_mses[local],
+                    )?;
+                    let composited_rgb_mse = finite_scalar(
+                        "HyperNPA e2e nearest-teacher composited RGB MSE",
+                        composited_rgb_mses[local],
+                    )?;
+                    let (train_idx, condition_l2_distance) = nearest_chunk[local];
+                    let render_rgb_psnr_db = psnr_db_from_mse(render_rgb_mse);
+                    let composited_rgb_psnr_db = psnr_db_from_mse(composited_rgb_mse);
+                    render_psnr_sum += render_rgb_psnr_db;
+                    composited_mse_sum += composited_rgb_mse;
+                    count += 1;
+                    dino_nearest_teacher_entries.push(BurnE2eNearestTeacherEntry {
+                        holdout_slug: examples[condition_chunk[local]].slug.clone(),
+                        train_slug: train_examples[train_idx].slug.clone(),
+                        condition_l2_distance,
+                        render_rgb_psnr_db,
+                        composited_rgb_psnr_db,
+                    });
+                }
+            }
+            if count > 0 {
+                (
+                    Some(render_psnr_sum / count as f32),
+                    Some(psnr_db_from_mse(composited_mse_sum / count as f32)),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
         };
         let examples_count = entries.len();
         if examples_count == 0 {
             return Ok(None);
         }
+        let target_point_splat_mses = target_point_splat_composited_mses(
+            &targets,
+            eval_config,
+            eval_batch_size,
+            device,
+        )?;
+        let target_point_splat_aggregate_composited_rgb_psnr_db = psnr_db_from_mse(
+            target_point_splat_mses.iter().sum::<f32>()
+                / target_point_splat_mses.len().max(1) as f32,
+        );
+        let mut target_point_splat_psnrs = target_point_splat_mses
+            .into_iter()
+            .map(psnr_db_from_mse)
+            .collect::<Vec<_>>();
+        target_point_splat_psnrs.sort_by(f32::total_cmp);
+        let target_point_splat_p10_composited_rgb_psnr_db =
+            sorted_percentile(&target_point_splat_psnrs, 0.1);
         let mut mean_total_loss = 0.0_f32;
         let mut mean_splat_loss = 0.0_f32;
         let mut mean_color_loss = 0.0_f32;
@@ -2797,6 +4773,11 @@ mod $module {
         let mut mean_render_rgb_psnr_db = 0.0_f32;
         let mut min_render_rgb_psnr_db = f32::INFINITY;
         let mut max_render_rgb_psnr_db = f32::NEG_INFINITY;
+        let mut aggregate_composited_rgb_mse = 0.0_f32;
+        let mut aggregate_foreground_rgb_mse = 0.0_f32;
+        let mut aggregate_density_mse = 0.0_f32;
+        let mut mean_density_soft_iou = 0.0_f32;
+        let mut composited_psnrs = Vec::with_capacity(examples_count);
         for entry in &entries {
             mean_total_loss += entry.total_loss;
             mean_splat_loss += entry.splat_loss;
@@ -2806,6 +4787,11 @@ mod $module {
             mean_render_rgb_psnr_db += entry.render_rgb_psnr_db;
             min_render_rgb_psnr_db = min_render_rgb_psnr_db.min(entry.render_rgb_psnr_db);
             max_render_rgb_psnr_db = max_render_rgb_psnr_db.max(entry.render_rgb_psnr_db);
+            aggregate_composited_rgb_mse += entry.composited_rgb_mse;
+            aggregate_foreground_rgb_mse += entry.foreground_rgb_mse;
+            aggregate_density_mse += entry.density_mse;
+            mean_density_soft_iou += entry.density_soft_iou;
+            composited_psnrs.push(entry.composited_rgb_psnr_db);
         }
         let scale = 1.0 / examples_count as f32;
         mean_total_loss *= scale;
@@ -2814,11 +4800,49 @@ mod $module {
         mean_density_loss *= scale;
         mean_render_rgb_mse *= scale;
         mean_render_rgb_psnr_db *= scale;
+        aggregate_composited_rgb_mse *= scale;
+        aggregate_foreground_rgb_mse *= scale;
+        aggregate_density_mse *= scale;
+        mean_density_soft_iou *= scale;
+        composited_psnrs.sort_by(f32::total_cmp);
+        let mean_composited_rgb_psnr_db = composited_psnrs.iter().sum::<f32>() * scale;
+        let median_composited_rgb_psnr_db = sorted_percentile(&composited_psnrs, 0.5);
+        let p10_composited_rgb_psnr_db = sorted_percentile(&composited_psnrs, 0.1);
+        let min_composited_rgb_psnr_db = composited_psnrs[0];
+        let max_composited_rgb_psnr_db = composited_psnrs[examples_count - 1];
+        let aggregate_composited_rgb_psnr_db =
+            psnr_db_from_mse(aggregate_composited_rgb_mse);
+        let aggregate_foreground_rgb_psnr_db =
+            psnr_db_from_mse(aggregate_foreground_rgb_mse);
+        let aggregate_density_psnr_db = psnr_db_from_mse(aggregate_density_mse);
+        let base_only_scale = 1.0 / base_only_count.max(1) as f32;
+        let base_only_composited_rgb_psnr_db =
+            psnr_db_from_mse(base_only_composited_mse_sum * base_only_scale);
+        let base_only_density_psnr_db =
+            psnr_db_from_mse(base_only_density_mse_sum * base_only_scale);
+        let base_only_density_soft_iou = base_only_density_soft_iou_sum * base_only_scale;
+        let generated_adapter_composited_psnr_gain_db =
+            aggregate_composited_rgb_psnr_db - base_only_composited_rgb_psnr_db;
+        let selection_psnr_db = p10_composited_rgb_psnr_db;
+        let p10_gap_to_target_point_splat_db =
+            target_point_splat_p10_composited_rgb_psnr_db - p10_composited_rgb_psnr_db;
         let condition_shuffle_psnr_gap_db =
             mean_condition_shuffle_render_rgb_psnr_db.map(|shuffle| mean_render_rgb_psnr_db - shuffle);
-        let mean_passed = mean_render_rgb_psnr_db >= config.validation_psnr_threshold_db;
+        let condition_shuffle_composited_psnr_gap_db = condition_shuffle_composited_rgb_psnr_db
+            .map(|shuffle| aggregate_composited_rgb_psnr_db - shuffle);
+        let mean_passed =
+            aggregate_composited_rgb_psnr_db >= config.validation_psnr_threshold_db;
         let all_examples_passed = entries.iter().all(|entry| entry.passed);
-        let passed = mean_passed;
+        let conditional_control_passed = generated_adapter_composited_psnr_gain_db > 0.0
+            && condition_shuffle_composited_psnr_gap_db.is_none_or(|gap| gap > 0.0);
+        let adapter_diagnostics = adapter_diagnostics(
+            &adapter_parameter_rows,
+            npa_config,
+            config.adapter_rank,
+        )?;
+        let passed = mean_passed
+            && selection_psnr_db >= config.validation_psnr_threshold_db
+            && conditional_control_passed;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         let particle_steps =
             examples_count as f64 * config.validation_particles as f64 * config.validation_steps as f64;
@@ -2850,15 +4874,60 @@ mod $module {
             mean_render_rgb_psnr_db,
             min_render_rgb_psnr_db,
             max_render_rgb_psnr_db,
+            selection_metric: "p10-composited-rgb-psnr",
+            selection_psnr_db,
+            selection_horizon_min_steps: config.validation_steps,
+            horizon_summaries: Vec::new(),
+            peak_horizon_p10_composited_rgb_psnr_db: p10_composited_rgb_psnr_db,
+            final_horizon_p10_composited_rgb_psnr_db: p10_composited_rgb_psnr_db,
+            peak_to_final_p10_drop_db: 0.0,
+            target_point_splat_aggregate_composited_rgb_psnr_db,
+            target_point_splat_p10_composited_rgb_psnr_db,
+            p10_gap_to_target_point_splat_db,
+            aggregate_composited_rgb_mse,
+            aggregate_composited_rgb_psnr_db,
+            mean_composited_rgb_psnr_db,
+            median_composited_rgb_psnr_db,
+            p10_composited_rgb_psnr_db,
+            min_composited_rgb_psnr_db,
+            max_composited_rgb_psnr_db,
+            aggregate_foreground_rgb_mse,
+            aggregate_foreground_rgb_psnr_db,
+            aggregate_density_mse,
+            aggregate_density_psnr_db,
+            mean_density_soft_iou,
             mean_condition_shuffle_render_rgb_psnr_db,
             condition_shuffle_psnr_gap_db,
+            condition_shuffle_composited_rgb_psnr_db,
+            condition_shuffle_composited_psnr_gap_db,
+            base_only_composited_rgb_psnr_db,
+            generated_adapter_composited_psnr_gain_db,
+            base_only_density_psnr_db,
+            base_only_density_soft_iou,
+            dino_nearest_teacher_render_rgb_psnr_db,
+            dino_nearest_teacher_composited_rgb_psnr_db,
+            dino_nearest_teacher_entries,
+            conditional_control_passed,
+            adapter_diagnostics,
             entries,
         }))
     }
 
     struct BurnE2eQualityBatchTensors {
         loss: BurnLossBatchTensors,
+        adapter_vector: Option<Tensor2>,
         render_rgb_mse: Tensor1,
+        composited_rgb_mse: Tensor1,
+        foreground_rgb_mse: Tensor1,
+        density_mse: Tensor1,
+        density_soft_iou: Tensor1,
+    }
+
+    #[derive(Clone)]
+    enum E2eEvalConditionMode {
+        Generated,
+        BaseOnly,
+        ExplicitAdapter(Tensor2),
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2874,6 +4943,7 @@ mod $module {
         eval_config: DirectBasisTrainConfig,
         seed: u64,
         device: &BurnDevice,
+        condition_mode: E2eEvalConditionMode,
     ) -> Result<BurnE2eQualityBatchTensors, Box<dyn std::error::Error>> {
         if condition_indices.len() != target_indices.len() {
             return Err(std::io::Error::other(
@@ -2888,7 +4958,47 @@ mod $module {
             .into());
         };
         let condition = conditions.select(condition_indices)?;
-        let adapter_batch = generator.adapter_batch(condition, npa_config, generator_config);
+        let (adapter_batch, condition_control, adapter_vector) = match condition_mode {
+            E2eEvalConditionMode::Generated => {
+                let adapter =
+                    generator.adapter_batch(condition.clone(), npa_config, generator_config);
+                let vector = adapter.to_parameter_vector();
+                (
+                    adapter,
+                    generator.condition_control_batch(condition.clone(), generator_config),
+                    Some(vector),
+                )
+            }
+            E2eEvalConditionMode::BaseOnly => {
+                let parameter_count = NpaLowRankAdapter::parameter_count_for_config(
+                    npa_config,
+                    generator_config.adapter_rank,
+                );
+                (
+                    BurnAdapterBatch::from_parameter_vector(
+                        Tensor::<BurnBackend, 2>::zeros(
+                            [condition_indices.len(), parameter_count],
+                            device,
+                        ),
+                        npa_config,
+                        generator_config.adapter_rank,
+                        generator_config.adapter_alpha,
+                    ),
+                    None,
+                    None,
+                )
+            }
+            E2eEvalConditionMode::ExplicitAdapter(vector) => (
+                BurnAdapterBatch::from_parameter_vector(
+                    vector,
+                    npa_config,
+                    generator_config.adapter_rank,
+                    generator_config.adapter_alpha,
+                ),
+                None,
+                None,
+            ),
+        };
         let (mut x, mut s) = seed_batch_tensors_with_seed_indices(
             targets,
             target_indices,
@@ -2919,6 +5029,7 @@ mod $module {
                 &mut rngs,
                 steps,
                 displacement,
+                condition_control.as_ref(),
             );
             remaining_steps -= steps;
             if remaining_steps > 0 {
@@ -2927,7 +5038,7 @@ mod $module {
                 displacement = detach1(displacement);
             }
         }
-        Ok(target_splat_quality_batch_vector(
+        let mut quality = target_splat_quality_batch_vector(
             &x,
             &s,
             targets,
@@ -2935,7 +5046,9 @@ mod $module {
             eval_config,
             &adapter_batch,
             displacement,
-        ))
+        );
+        quality.adapter_vector = adapter_vector;
+        Ok(quality)
     }
 
     fn normalized_eval_batch_size(requested: usize, examples: usize) -> usize {
@@ -2956,6 +5069,11 @@ mod $module {
             E2eLrSchedule::Constant => 1.0,
             E2eLrSchedule::Linear => 1.0 - progress,
             E2eLrSchedule::Cosine => 0.5 * (1.0 + (std::f32::consts::PI * progress).cos()),
+            E2eLrSchedule::UpstreamGrowing => {
+                let phase_step = step.saturating_sub(1) % 10_000 + 1;
+                let milestones_passed = phase_step.saturating_sub(1).div_euclid(2_000).min(4);
+                0.3_f32.powi(milestones_passed as i32)
+            }
         };
         min_scale + (1.0 - min_scale) * raw_scale.clamp(0.0, 1.0)
     }
@@ -3013,7 +5131,102 @@ mod $module {
 
     fn psnr_db_from_mse(mse: f32) -> f32 {
         let mse = mse.max(1.0e-12);
-        finite_scalar("HyperNPA e2e render RGB PSNR", 10.0 * (1.0 / mse).log10()).unwrap_or(0.0)
+        finite_scalar("HyperNPA e2e PSNR", 10.0 * (1.0 / mse).log10()).unwrap_or(0.0)
+    }
+
+    fn sorted_percentile(sorted: &[f32], quantile: f32) -> f32 {
+        debug_assert!(!sorted.is_empty());
+        let position = quantile.clamp(0.0, 1.0) * sorted.len().saturating_sub(1) as f32;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        let blend = position - lower as f32;
+        sorted[lower] * (1.0 - blend) + sorted[upper] * blend
+    }
+
+    fn adapter_diagnostics(
+        rows: &[Vec<f32>],
+        npa_config: &NpaConfig,
+        rank: usize,
+    ) -> AutomataResult<BurnE2eAdapterDiagnostics> {
+        let parameter_count = NpaLowRankAdapter::parameter_count_for_config(npa_config, rank);
+        if rows.is_empty()
+            || rows.iter().any(|row| {
+                row.len() != parameter_count || !row.iter().all(|value| value.is_finite())
+            })
+        {
+            return Err(AutomataError::InvalidArgument(
+                "adapter diagnostics require non-empty, finite, shape-consistent rows".to_string(),
+            ));
+        }
+        let norms = rows
+            .iter()
+            .map(|row| row.iter().map(|value| value * value).sum::<f32>().sqrt())
+            .collect::<Vec<_>>();
+        let mean_l2_norm = norms.iter().sum::<f32>() / norms.len() as f32;
+        let min_l2_norm = norms.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_l2_norm = norms.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut pairwise_distance_sum = 0.0_f32;
+        let mut pairwise_cosine_sum = 0.0_f32;
+        let mut min_pairwise_l2_distance = f32::INFINITY;
+        let mut pairs = 0usize;
+        for left in 0..rows.len() {
+            for right in left + 1..rows.len() {
+                let mut squared_distance = 0.0_f32;
+                let mut dot = 0.0_f32;
+                for parameter in 0..parameter_count {
+                    let lhs = rows[left][parameter];
+                    let rhs = rows[right][parameter];
+                    let delta = lhs - rhs;
+                    squared_distance += delta * delta;
+                    dot += lhs * rhs;
+                }
+                let distance = squared_distance.sqrt();
+                pairwise_distance_sum += distance;
+                min_pairwise_l2_distance = min_pairwise_l2_distance.min(distance);
+                pairwise_cosine_sum += dot / (norms[left] * norms[right]).max(EPSILON);
+                pairs += 1;
+            }
+        }
+        let layout = crate::hyper::adapter_layout::AdapterParameterLayout2d::new(
+            npa_config,
+            rank,
+            1,
+        )?;
+        let group_rms = |group| {
+            let segment = layout
+                .segments
+                .iter()
+                .find(|segment| segment.group == group)
+                .expect("adapter layout contains every parameter group");
+            let sum = rows
+                .iter()
+                .flat_map(|row| {
+                    row[segment.vector_offset..segment.vector_offset + segment.len]
+                        .iter()
+                        .copied()
+                })
+                .map(|value| value * value)
+                .sum::<f32>();
+            (sum / (rows.len() * segment.len).max(1) as f32).sqrt()
+        };
+        use crate::hyper::adapter_layout::AdapterParameterGroup2d;
+        Ok(BurnE2eAdapterDiagnostics {
+            parameter_count,
+            mean_l2_norm,
+            min_l2_norm,
+            max_l2_norm,
+            mean_pairwise_l2_distance: (pairs > 0)
+                .then_some(pairwise_distance_sum / pairs.max(1) as f32),
+            min_pairwise_l2_distance: (pairs > 0).then_some(min_pairwise_l2_distance),
+            mean_pairwise_cosine_similarity: (pairs > 0)
+                .then_some(pairwise_cosine_sum / pairs.max(1) as f32),
+            w1_down_rms: group_rms(AdapterParameterGroup2d::W1Down),
+            w1_up_rms: group_rms(AdapterParameterGroup2d::W1Up),
+            w2_down_rms: group_rms(AdapterParameterGroup2d::W2Down),
+            w2_up_rms: group_rms(AdapterParameterGroup2d::W2Up),
+            b1_rms: group_rms(AdapterParameterGroup2d::B1),
+            b2_rms: group_rms(AdapterParameterGroup2d::B2),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3028,7 +5241,12 @@ mod $module {
         steps: usize,
         mut displacement: Tensor1,
     ) -> (Tensor2, Tensor2, Tensor1) {
-        for _ in 0..steps {
+        let mask_stack = if target.update_prob >= 1.0 {
+            None
+        } else {
+            Some(host_single_mask_stack(target, steps, rng))
+        };
+        for step in 0..steps {
             let features = rollout_dense_perception(&x, &s, config);
             let update = params.forward_adapter(features, adapter, config);
             let dx_raw = update.clone().narrow(1, 0, 2);
@@ -3050,14 +5268,20 @@ mod $module {
                 .sqrt()
                 .mean();
             displacement = displacement + dx_norm;
-            let mask = tensor(
-                stochastic_mask(target.particle_count, target.update_prob, rng),
-                [target.particle_count, 1],
-                &target.target_rgb.device(),
-            );
             let state_dims = s.shape().dims::<2>()[1];
-            x = x + dx.mul(mask.clone().expand([target.particle_count, 2]));
-            s = s + ds.mul(mask.expand([target.particle_count, state_dims]));
+            if target.update_prob >= 1.0 {
+                x = x + dx;
+                s = s + ds;
+            } else {
+                let mask = mask_stack
+                    .as_ref()
+                    .expect("non-unit update_prob should have a mask stack")
+                    .clone()
+                    .narrow(0, step, 1)
+                    .squeeze_dim::<2>(0);
+                x = x + dx.mul(mask.clone().expand([target.particle_count, 2]));
+                s = s + ds.mul(mask.expand([target.particle_count, state_dims]));
+            }
         }
         (x, s, displacement)
     }
@@ -3072,13 +5296,28 @@ mod $module {
         mut s: Tensor3,
         config: DirectBasisTrainConfig,
         particle_count: usize,
-        rng: &mut StdRng,
+        _rng: &mut StdRng,
         steps: usize,
         mut displacement: Tensor1,
+        condition_control: Option<&BurnE2eConditionControlBatch>,
     ) -> (Tensor3, Tensor3, Tensor1) {
-        for _ in 0..steps {
+        let unit_update = batch_update_prob_is_one(targets, indices);
+        let mask_stack = if unit_update {
+            None
+        } else {
+            Some(device_batch_mask_stack(
+                targets,
+                indices,
+                particle_count,
+                steps,
+            ))
+        };
+        for step in 0..steps {
             let features = rollout_dense_perception_batch(&x, &s, config);
-            let update = params.forward_adapter_batch(features, adapter_batch);
+            let mut update = params.forward_adapter_batch(features, adapter_batch);
+            if let Some(condition_control) = condition_control {
+                update = update + condition_control.update_for_particles(&x, &s);
+            }
             let state_dims = s.shape().dims::<3>()[2];
             let dx_raw = update.clone().narrow(2, 0, 2);
             let ds = update.narrow(2, 2, state_dims);
@@ -3099,9 +5338,19 @@ mod $module {
                 .sqrt()
                 .mean();
             displacement = displacement + dx_norm;
-            let mask = host_batch_mask(targets, indices, particle_count, rng);
-            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
-            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+            if unit_update {
+                x = x + dx;
+                s = s + ds;
+            } else {
+                let mask = mask_stack
+                    .as_ref()
+                    .expect("non-unit update_prob should have a mask stack")
+                    .clone()
+                    .narrow(0, step, 1)
+                    .squeeze_dim::<3>(0);
+                x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+                s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+            }
         }
         (x, s, displacement)
     }
@@ -3119,10 +5368,26 @@ mod $module {
         rngs: &mut [StdRng],
         steps: usize,
         mut displacement: Tensor1,
+        condition_control: Option<&BurnE2eConditionControlBatch>,
     ) -> (Tensor3, Tensor3, Tensor1) {
-        for _ in 0..steps {
+        let unit_update = batch_update_prob_is_one(targets, indices);
+        let mask_stack = if unit_update {
+            None
+        } else {
+            Some(host_batch_mask_stack_with_rngs(
+                targets,
+                indices,
+                particle_count,
+                steps,
+                rngs,
+            ))
+        };
+        for step in 0..steps {
             let features = rollout_dense_perception_batch(&x, &s, config);
-            let update = params.forward_adapter_batch(features, adapter_batch);
+            let mut update = params.forward_adapter_batch(features, adapter_batch);
+            if let Some(condition_control) = condition_control {
+                update = update + condition_control.update_for_particles(&x, &s);
+            }
             let state_dims = s.shape().dims::<3>()[2];
             let dx_raw = update.clone().narrow(2, 0, 2);
             let ds = update.narrow(2, 2, state_dims);
@@ -3145,9 +5410,19 @@ mod $module {
                 .mean_dim(1)
                 .squeeze_dim::<1>(1);
             displacement = displacement + dx_norm;
-            let mask = host_batch_mask_with_rngs(targets, indices, particle_count, rngs);
-            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
-            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+            if unit_update {
+                x = x + dx;
+                s = s + ds;
+            } else {
+                let mask = mask_stack
+                    .as_ref()
+                    .expect("non-unit update_prob should have a mask stack")
+                    .clone()
+                    .narrow(0, step, 1)
+                    .squeeze_dim::<3>(0);
+                x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+                s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+            }
         }
         (x, s, displacement)
     }
@@ -3165,7 +5440,19 @@ mod $module {
         steps: usize,
         mut displacement: Tensor1,
     ) -> (Tensor3, Tensor3, Tensor1) {
-        for _ in 0..steps {
+        let unit_update = batch_update_prob_is_one(targets, indices);
+        let mask_stack = if unit_update {
+            None
+        } else {
+            Some(host_batch_mask_stack_with_rngs(
+                targets,
+                indices,
+                particle_count,
+                steps,
+                rngs,
+            ))
+        };
+        for step in 0..steps {
             let features = rollout_dense_perception_batch(&x, &s, config);
             let update = params.forward(features);
             let state_dims = s.shape().dims::<3>()[2];
@@ -3190,9 +5477,19 @@ mod $module {
                 .mean_dim(1)
                 .squeeze_dim::<1>(1);
             displacement = displacement + dx_norm;
-            let mask = host_batch_mask_with_rngs(targets, indices, particle_count, rngs);
-            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
-            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+            if unit_update {
+                x = x + dx;
+                s = s + ds;
+            } else {
+                let mask = mask_stack
+                    .as_ref()
+                    .expect("non-unit update_prob should have a mask stack")
+                    .clone()
+                    .narrow(0, step, 1)
+                    .squeeze_dim::<3>(0);
+                x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+                s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+            }
         }
         (x, s, displacement)
     }
@@ -3278,6 +5575,7 @@ mod $module {
                 &mut rngs,
                 steps,
                 displacement,
+                None,
             );
             remaining_steps -= steps;
             if remaining_steps > 0 {
@@ -3333,6 +5631,7 @@ mod $module {
                 &mut rngs,
                 steps,
                 displacement,
+                None,
             );
             remaining_steps -= steps;
             if remaining_steps > 0 {
@@ -3627,9 +5926,20 @@ mod $module {
     }
 
     #[derive(Clone, Debug)]
+    struct PerceptionPreparedState {
+        density: Tensor2Inner,
+        offsets: Tensor2IntInner,
+        permutation: Tensor2IntInner,
+        raw_state_gradient: Tensor4Inner,
+        state_gradient_inverse: Tensor3Inner,
+    }
+
+    #[derive(Clone, Debug)]
     struct PerceptionAdjointState {
         x: Tensor3Inner,
         s: Tensor3Inner,
+        #[cfg($perception_cube_feature)]
+        prepared: Option<PerceptionPreparedState>,
         batch_size: usize,
         particle_count: usize,
         state_dims: usize,
@@ -3659,17 +5969,37 @@ mod $module {
 
             #[cfg($perception_cube_feature)]
             {
-                if let Some(device_adjoint) = InnerBackend::perception_cube_adjoint(
-                    ops.state.x.clone(),
-                    ops.state.s.clone(),
-                    feature_grad_tensor.clone(),
-                    perception_cube_adjoint_config(
-                        ops.state.grid_eps,
-                        x_parent.is_some(),
-                        s_parent.is_some(),
-                    ),
-                ) {
+                let cube_config = perception_cube_adjoint_config(
+                    ops.state.grid_eps,
+                    x_parent.is_some(),
+                    s_parent.is_some(),
+                );
+                let prepared_adjoint = ops.state.prepared.as_ref().and_then(|prepared| {
+                    InnerBackend::perception_cube_adjoint_prepared(
+                        ops.state.x.clone(),
+                        ops.state.s.clone(),
+                        feature_grad_tensor.clone(),
+                        prepared.density.clone(),
+                        prepared.offsets.clone(),
+                        prepared.permutation.clone(),
+                        prepared.raw_state_gradient.clone(),
+                        prepared.state_gradient_inverse.clone(),
+                        cube_config,
+                    )
+                });
+                let device_adjoint = prepared_adjoint.or_else(|| {
+                    InnerBackend::perception_cube_adjoint(
+                        ops.state.x.clone(),
+                        ops.state.s.clone(),
+                        feature_grad_tensor.clone(),
+                        cube_config,
+                    )
+                });
+                if let Some(device_adjoint) = device_adjoint {
                     PERCEPTION_CUBE_ADJOINT_DEVICE_HITS.fetch_add(1, Ordering::Relaxed);
+                    if ops.state.prepared.is_some() {
+                        PERCEPTION_CUBE_PREPARED_REUSE_HITS.fetch_add(1, Ordering::Relaxed);
+                    }
                     let device_adjoint =
                         device_adjoint.unwrap_or_else(|err| panic!("perception cube adjoint failed: {err}"));
                     if let Some(parent) = x_parent {
@@ -3782,22 +6112,58 @@ mod $module {
             s_primitive.primitive.clone(),
         ));
         #[cfg($perception_cube_feature)]
-        let output = if let Some(device_forward) = InnerBackend::perception_cube_forward(
-            x_inner.clone(),
-            s_inner.clone(),
-            perception_cube_adjoint_config(config.grid_eps, true, true),
-        ) {
-            PERCEPTION_CUBE_FORWARD_DEVICE_HITS.fetch_add(1, Ordering::Relaxed);
-            device_forward
-                .unwrap_or_else(|err| panic!("perception cube forward failed: {err}"))
-                .features
-                .into_primitive()
-                .tensor()
-        } else {
-            PERCEPTION_CUBE_FORWARD_FALLBACK_HITS.fetch_add(1, Ordering::Relaxed);
-            dense_perception_batch_inner(&x_inner, &s_inner, config)
-                .into_primitive()
-                .tensor()
+        let (output, prepared) = {
+            let cube_config = perception_cube_adjoint_config(
+                config.grid_eps,
+                !config.stopgrad_pos,
+                !config.stopgrad_state,
+            );
+            let prepared_forward = (config.stopgrad_pos && particle_count >= 512)
+                .then(|| {
+                    InnerBackend::perception_cube_forward_prepared(
+                        x_inner.clone(),
+                        s_inner.clone(),
+                        cube_config,
+                    )
+                })
+                .flatten();
+            if let Some(device_forward) = prepared_forward {
+                PERCEPTION_CUBE_FORWARD_DEVICE_HITS.fetch_add(1, Ordering::Relaxed);
+                let device_forward = device_forward.unwrap_or_else(|err| {
+                    panic!("prepared perception cube forward failed: {err}")
+                });
+                let output = device_forward.features.into_primitive().tensor();
+                let prepared = PerceptionPreparedState {
+                    density: device_forward.density,
+                    offsets: device_forward.offsets,
+                    permutation: device_forward.permutation,
+                    raw_state_gradient: device_forward.raw_state_gradient,
+                    state_gradient_inverse: device_forward.state_gradient_inverse,
+                };
+                (output, Some(prepared))
+            } else if let Some(device_forward) = InnerBackend::perception_cube_forward(
+                x_inner.clone(),
+                s_inner.clone(),
+                cube_config,
+            ) {
+                PERCEPTION_CUBE_FORWARD_DEVICE_HITS.fetch_add(1, Ordering::Relaxed);
+                (
+                    device_forward
+                        .unwrap_or_else(|err| panic!("perception cube forward failed: {err}"))
+                        .features
+                        .into_primitive()
+                        .tensor(),
+                    None,
+                )
+            } else {
+                PERCEPTION_CUBE_FORWARD_FALLBACK_HITS.fetch_add(1, Ordering::Relaxed);
+                (
+                    dense_perception_batch_inner(&x_inner, &s_inner, config)
+                        .into_primitive()
+                        .tensor(),
+                    None,
+                )
+            }
         };
         #[cfg(not($perception_cube_feature))]
         let output = dense_perception_batch_inner(&x_inner, &s_inner, config)
@@ -3806,6 +6172,8 @@ mod $module {
         let state = PerceptionAdjointState {
             x: x_inner,
             s: s_inner,
+            #[cfg($perception_cube_feature)]
+            prepared,
             batch_size,
             particle_count,
             state_dims,
@@ -3829,7 +6197,7 @@ mod $module {
     }
 
     fn perception_reference_grid(grid_eps: f32) -> burn_automata_kernels::HashGridConfig {
-        let mut grid = burn_automata_kernels::HashGridConfig::growing_2d();
+        let mut grid = crate::upstream_growing_2d_hashgrid();
         grid.eps = grid_eps.max(EPSILON);
         grid
     }
@@ -3869,6 +6237,9 @@ mod $module {
             position_features: npa.position_features,
             compute_position_grad,
             compute_state_grad,
+            grid_width: 16,
+            grid_height: 16,
+            sparse_grid_min_particles: 512,
         }
     }
 
@@ -4266,6 +6637,29 @@ mod $module {
         };
         let colors = s.clone().narrow(1, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) = splat_render(&centered, &colors, target, config, particle_count);
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let predicted_alpha = density.clone().clamp_min(0.0).clamp_max(1.0);
+        let target_alpha = target
+            .target_density
+            .clone()
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        let predicted_composited_rgb = (rgb.clone()
+            + predicted_alpha
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let target_composited_rgb = (target.target_rgb.clone()
+            + target_alpha
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let composited_diff = predicted_composited_rgb - target_composited_rgb;
+        let composited_rgb_loss = composited_diff.clone().mul(composited_diff).mean();
         let background_density_loss =
             background_density_term(density.clone(), target.target_foreground.clone()).mean();
         let foreground_density_loss = foreground_density_term(
@@ -4296,7 +6690,8 @@ mod $module {
                 .mul_scalar(config.loss_config.background_density_loss_weight)
             + foreground_density_loss
                 .clone()
-                .mul_scalar(config.loss_config.foreground_density_loss_weight);
+                .mul_scalar(config.loss_config.foreground_density_loss_weight)
+            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight);
         let bound = relu(x.clone().abs().add_scalar(-1.0));
         let bound_loss = bound.mean();
         let overflow = relu(s.clone().abs().add_scalar(-1.0));
@@ -4327,77 +6722,22 @@ mod $module {
         config: DirectBasisTrainConfig,
         adapter: &BurnAdapterBatch,
         displacement: Tensor1,
-    ) -> BurnLossTensors {
-        let dims = x.shape().dims::<3>();
-        let batches = dims[0];
-        let particle_count = dims[1];
-        let state_dims = s.shape().dims::<3>()[2];
-        let target_mean = stack_target_mean(targets, indices);
-        let target_rgb = stack_target_rgb(targets, indices);
-        let target_density = stack_target_density(targets, indices);
-        let target_foreground = stack_target_foreground(targets, indices);
-        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
-        let centered = if config.loss_config.center {
-            x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
-                + target_mean.expand([batches, particle_count, 2])
-        } else {
-            x.clone()
-        };
-        let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
-        let (rgb, density) =
-            splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
-        let background_density_loss =
-            background_density_term_batch(density.clone(), target_foreground.clone()).mean();
-        let foreground_density_loss = foreground_density_term_batch(
-            density.clone(),
-            target_density.clone(),
-            target_foreground,
-            target_foreground_scales,
-        )
-        .mean();
-        let density_diff = density - target_density;
-        let density_term = l1l2_tensor3(density_diff);
-        let density_loss = density_term.clone().mean();
-        let color_gate = target_2d_detached_color_gate3(density_term).expand([
-            batches,
-            config.loss_config.image_size * config.loss_config.image_size,
-            3,
-        ]);
-        let color_loss = l1l2_tensor3(rgb - target_rgb)
-            .mul(color_gate)
-            .mean();
-        let shape_chamfer_loss =
-            target_shape_chamfer_loss_batch_vector(&centered, targets, indices, config).mean();
-        let splat = color_loss
-            .clone()
-            .mul_scalar(config.loss_config.color_loss_weight)
-            + density_loss
-                .clone()
-                .mul_scalar(config.loss_config.density_loss_weight)
-            + background_density_loss
-                .clone()
-                .mul_scalar(config.loss_config.background_density_loss_weight)
-            + foreground_density_loss
-                .clone()
-                .mul_scalar(config.loss_config.foreground_density_loss_weight);
-        let bound_loss = relu(x.clone().abs().add_scalar(-1.0)).mean();
-        let overflow_loss = relu(s.clone().abs().add_scalar(-1.0)).mean();
-        let mut total = splat
-            .clone()
-            .mul_scalar(config.loss_config.splat_loss_weight)
-            + shape_chamfer_loss.mul_scalar(config.loss_config.shape_chamfer_loss_weight)
-            + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight)
-            + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight)
-            + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
-        if config.adapter_l2_weight > 0.0 {
-            total = total + adapter.l2_loss().mul_scalar(config.adapter_l2_weight);
-        }
-        BurnLossTensors {
-            total,
-            splat,
-            color: color_loss,
-            density: density_loss,
-        }
+    ) -> AutomataResult<BurnLossTensors> {
+        let per_example = target_splat_loss_batch_vector_selected(
+            x,
+            s,
+            targets,
+            indices,
+            config,
+            adapter,
+            displacement,
+        )?;
+        Ok(BurnLossTensors {
+            total: per_example.total.mean(),
+            splat: per_example.splat.mean(),
+            color: per_example.color.mean(),
+            density: per_example.density.mean(),
+        })
     }
 
     fn target_splat_loss_batch_vector(
@@ -4428,6 +6768,29 @@ mod $module {
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        let predicted_alpha = density.clone().clamp_min(0.0).clamp_max(1.0);
+        let target_alpha = target_density.clone().clamp_min(0.0).clamp_max(1.0);
+        let predicted_composited_rgb = (rgb.clone()
+            + predicted_alpha
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([batches, pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let target_composited_rgb = (target_rgb.clone()
+            + target_alpha
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([batches, pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let composited_diff = predicted_composited_rgb - target_composited_rgb;
+        let composited_rgb_loss = composited_diff
+            .clone()
+            .mul(composited_diff)
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
         let background_density_loss = background_density_term_batch(
             density.clone(),
             target_foreground.clone(),
@@ -4470,7 +6833,8 @@ mod $module {
                 .mul_scalar(config.loss_config.background_density_loss_weight)
             + foreground_density_loss
                 .clone()
-                .mul_scalar(config.loss_config.foreground_density_loss_weight);
+                .mul_scalar(config.loss_config.foreground_density_loss_weight)
+            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -4534,8 +6898,25 @@ mod $module {
 
     fn target2d_loss_backend_effective(config: DirectBasisTrainConfig) -> Target2dLossBackend {
         match config.target2d_loss_backend {
-            Target2dLossBackend::Auto | Target2dLossBackend::Dense => Target2dLossBackend::Dense,
+            Target2dLossBackend::Auto => target2d_loss_backend_auto(config),
+            Target2dLossBackend::Dense => Target2dLossBackend::Dense,
             Target2dLossBackend::TiledAdjoint => Target2dLossBackend::TiledAdjoint,
+        }
+    }
+
+    fn target2d_loss_backend_auto(config: DirectBasisTrainConfig) -> Target2dLossBackend {
+        #[cfg($perception_cube_feature)]
+        {
+            if config.rollout_particles >= 128 {
+                Target2dLossBackend::TiledAdjoint
+            } else {
+                Target2dLossBackend::Dense
+            }
+        }
+        #[cfg(not($perception_cube_feature))]
+        {
+            let _ = config;
+            Target2dLossBackend::Dense
         }
     }
 
@@ -4551,6 +6932,7 @@ mod $module {
             density_loss_weight: value.density_loss_weight,
             background_density_loss_weight: value.background_density_loss_weight,
             foreground_density_loss_weight: value.foreground_density_loss_weight,
+            composited_rgb_loss_weight: value.composited_rgb_loss_weight,
             center: value.center,
         }
     }
@@ -4804,13 +7186,94 @@ mod $module {
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
-        let rgb_diff = rgb - target_rgb;
+        let rgb_diff = rgb.clone() - target_rgb.clone();
         let render_rgb_mse = rgb_diff
             .clone()
             .mul(rgb_diff.clone())
             .reshape([batches, pixels * 3])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
+        let predicted_alpha = density.clone().clamp_min(0.0).clamp_max(1.0);
+        let target_alpha = target_density.clone().clamp_min(0.0).clamp_max(1.0);
+        let density_diff_for_metrics = predicted_alpha.clone() - target_alpha.clone();
+        let density_mse = density_diff_for_metrics
+            .clone()
+            .mul(density_diff_for_metrics)
+            .reshape([batches, pixels])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let predicted_straight_rgb = rgb
+            .clone()
+            .div(
+                density
+                    .clone()
+                    .clamp_min(EPSILON)
+                    .expand([batches, pixels, 3]),
+            )
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        let target_straight_rgb = target_rgb
+            .clone()
+            .div(
+                target_density
+                    .clone()
+                    .clamp_min(EPSILON)
+                    .expand([batches, pixels, 3]),
+            )
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+        let foreground_rgb_diff = predicted_straight_rgb - target_straight_rgb;
+        let foreground_rgb_squared = foreground_rgb_diff
+            .clone()
+            .mul(foreground_rgb_diff)
+            .mul(target_foreground.clone().expand([batches, pixels, 3]))
+            .reshape([batches, pixels * 3])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1);
+        let foreground_rgb_denominator = target_foreground
+            .clone()
+            .reshape([batches, pixels])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1)
+            .mul_scalar(3.0)
+            .clamp_min(EPSILON);
+        let foreground_rgb_mse = foreground_rgb_squared.div(foreground_rgb_denominator);
+        let predicted_composited_rgb = (rgb.clone()
+            + predicted_alpha
+                .clone()
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([batches, pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let target_composited_rgb = (target_rgb.clone()
+            + target_alpha
+                .clone()
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([batches, pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let composited_rgb_diff = predicted_composited_rgb - target_composited_rgb;
+        let composited_rgb_mse = composited_rgb_diff
+            .clone()
+            .mul(composited_rgb_diff)
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let density_intersection = predicted_alpha
+            .clone()
+            .min_pair(target_alpha.clone())
+            .reshape([batches, pixels])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1);
+        let density_union = predicted_alpha
+            .max_pair(target_alpha)
+            .reshape([batches, pixels])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1)
+            .clamp_min(EPSILON);
+        let density_soft_iou = density_intersection.div(density_union);
         let background_density_loss = background_density_term_batch(
             density.clone(),
             target_foreground.clone(),
@@ -4882,7 +7345,12 @@ mod $module {
                 color: color_loss,
                 density: density_loss,
             },
+            adapter_vector: None,
             render_rgb_mse,
+            composited_rgb_mse,
+            foreground_rgb_mse,
+            density_mse,
+            density_soft_iou,
         }
     }
 
@@ -5125,6 +7593,85 @@ mod $module {
             rgbs.push(weights.matmul(colors.clone()));
         }
         (Tensor::cat(rgbs, 1), Tensor::cat(densities, 1))
+    }
+
+    fn target_point_splat_composited_mses(
+        targets: &[BurnTargetExample],
+        config: DirectBasisTrainConfig,
+        requested_batch_size: usize,
+        device: &BurnDevice,
+    ) -> AutomataResult<Vec<f32>> {
+        let particle_count = config.rollout_particles.max(1);
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let batch_size = requested_batch_size.max(1).min(targets.len().max(1));
+        let mut output = Vec::with_capacity(targets.len());
+        for start in (0..targets.len()).step_by(batch_size) {
+            let end = (start + batch_size).min(targets.len());
+            let indices = (start..end).collect::<Vec<_>>();
+            let mut positions = Vec::with_capacity(indices.len() * particle_count * 2);
+            let mut colors = Vec::with_capacity(indices.len() * particle_count * 3);
+            for &target_index in &indices {
+                let target = &targets[target_index].target_cpu;
+                let target_points = target.point_count();
+                debug_assert!(target_points > 0);
+                for particle in 0..particle_count {
+                    let point = if particle_count <= target_points {
+                        particle.saturating_mul(target_points) / particle_count
+                    } else {
+                        particle % target_points
+                    }
+                    .min(target_points - 1);
+                    positions.extend_from_slice(&target.positions[point]);
+                    colors.extend_from_slice(&target.colors[point]);
+                }
+            }
+            let positions = tensor3(
+                positions,
+                [indices.len(), particle_count, 2],
+                device,
+            );
+            let colors = tensor3(colors, [indices.len(), particle_count, 3], device);
+            let (rgb, density) = splat_render_batch(
+                &positions,
+                &colors,
+                targets,
+                &indices,
+                config,
+                particle_count,
+            );
+            let predicted_alpha = density.clamp_min(0.0).clamp_max(1.0);
+            let target_alpha = stack_target_density(targets, &indices)
+                .clamp_min(0.0)
+                .clamp_max(1.0);
+            let predicted_composited_rgb = (rgb
+                + predicted_alpha
+                    .mul_scalar(-1.0)
+                    .add_scalar(1.0)
+                    .expand([indices.len(), pixels, 3]))
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+            let target_composited_rgb = (stack_target_rgb(targets, &indices)
+                + target_alpha
+                    .mul_scalar(-1.0)
+                    .add_scalar(1.0)
+                    .expand([indices.len(), pixels, 3]))
+            .clamp_min(0.0)
+            .clamp_max(1.0);
+            let diff = predicted_composited_rgb - target_composited_rgb;
+            let mses = diff
+                .clone()
+                .mul(diff)
+                .reshape([indices.len(), pixels * 3])
+                .mean_dim(1)
+                .squeeze_dim::<1>(1);
+            for mse in tensor1_vec(mses.inner())? {
+                output.push(finite_scalar(
+                    "HyperNPA target-point splat composited RGB MSE",
+                    mse,
+                )?);
+            }
+        }
+        Ok(output)
     }
 
     fn dense_particle_density(x: &Tensor2, config: DirectBasisTrainConfig) -> Tensor2 {
@@ -5755,6 +8302,36 @@ mod $module {
         fn next_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
             next_adamw_bias_correction(&mut self.step, cfg)
         }
+
+        fn snapshots(&self) -> AutomataResult<Vec<E2eTensorSnapshot>> {
+            Ok(vec![
+                tensor2_snapshot("base.w1.m", self.w1_m.clone())?,
+                tensor2_snapshot("base.w1.v", self.w1_v.clone())?,
+                tensor2_snapshot("base.b1.m", self.b1_m.clone())?,
+                tensor2_snapshot("base.b1.v", self.b1_v.clone())?,
+                tensor2_snapshot("base.w2.m", self.w2_m.clone())?,
+                tensor2_snapshot("base.w2.v", self.w2_v.clone())?,
+                tensor2_snapshot("base.b2.m", self.b2_m.clone())?,
+                tensor2_snapshot("base.b2.v", self.b2_v.clone())?,
+            ])
+        }
+
+        fn restore(
+            checkpoint: &E2eTrainingCheckpoint,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            Ok(Self {
+                step: checkpoint.base_optimizer_step,
+                w1_m: tensor2_from_snapshot(checkpoint.tensor("base.w1.m")?, device)?,
+                w1_v: tensor2_from_snapshot(checkpoint.tensor("base.w1.v")?, device)?,
+                b1_m: tensor2_from_snapshot(checkpoint.tensor("base.b1.m")?, device)?,
+                b1_v: tensor2_from_snapshot(checkpoint.tensor("base.b1.v")?, device)?,
+                w2_m: tensor2_from_snapshot(checkpoint.tensor("base.w2.m")?, device)?,
+                w2_v: tensor2_from_snapshot(checkpoint.tensor("base.w2.v")?, device)?,
+                b2_m: tensor2_from_snapshot(checkpoint.tensor("base.b2.m")?, device)?,
+                b2_v: tensor2_from_snapshot(checkpoint.tensor("base.b2.v")?, device)?,
+            })
+        }
     }
 
     impl BurnAdapterAdamWState {
@@ -5801,15 +8378,499 @@ mod $module {
                 output_w_v: params.output_w.clone().inner().zeros_like(),
                 output_b_m: params.output_b.clone().inner().zeros_like(),
                 output_b_v: params.output_b.clone().inner().zeros_like(),
+                condition_control_w_m: params
+                    .condition_control_w
+                    .clone()
+                    .inner()
+                    .zeros_like(),
+                condition_control_w_v: params
+                    .condition_control_w
+                    .clone()
+                    .inner()
+                    .zeros_like(),
+                condition_control_b_m: params
+                    .condition_control_b
+                    .clone()
+                    .inner()
+                    .zeros_like(),
+                condition_control_b_v: params
+                    .condition_control_b
+                    .clone()
+                    .inner()
+                    .zeros_like(),
+                condition_control_state_w_m: params
+                    .condition_control_state_w
+                    .clone()
+                    .inner()
+                    .zeros_like(),
+                condition_control_state_w_v: params
+                    .condition_control_state_w
+                    .clone()
+                    .inner()
+                    .zeros_like(),
             }
         }
 
         fn next_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
             next_adamw_bias_correction(&mut self.step, cfg)
         }
+
+        fn snapshots(&self) -> AutomataResult<Vec<E2eTensorSnapshot>> {
+            let tensors = [
+                ("generator.token_w.m", self.token_w_m.clone()),
+                ("generator.token_w.v", self.token_w_v.clone()),
+                ("generator.token_b.m", self.token_b_m.clone()),
+                ("generator.token_b.v", self.token_b_v.clone()),
+                ("generator.token_gate_w.m", self.token_gate_w_m.clone()),
+                ("generator.token_gate_w.v", self.token_gate_w_v.clone()),
+                ("generator.token_gate_b.m", self.token_gate_b_m.clone()),
+                ("generator.token_gate_b.v", self.token_gate_b_v.clone()),
+                ("generator.state_w.m", self.state_w_m.clone()),
+                ("generator.state_w.v", self.state_w_v.clone()),
+                ("generator.time_w.m", self.time_w_m.clone()),
+                ("generator.time_w.v", self.time_w_v.clone()),
+                ("generator.output_w.m", self.output_w_m.clone()),
+                ("generator.output_w.v", self.output_w_v.clone()),
+                ("generator.output_b.m", self.output_b_m.clone()),
+                ("generator.output_b.v", self.output_b_v.clone()),
+                ("generator.condition_control_w.m", self.condition_control_w_m.clone()),
+                ("generator.condition_control_w.v", self.condition_control_w_v.clone()),
+                ("generator.condition_control_b.m", self.condition_control_b_m.clone()),
+                ("generator.condition_control_b.v", self.condition_control_b_v.clone()),
+                (
+                    "generator.condition_control_state_w.m",
+                    self.condition_control_state_w_m.clone(),
+                ),
+                (
+                    "generator.condition_control_state_w.v",
+                    self.condition_control_state_w_v.clone(),
+                ),
+            ];
+            tensors
+                .into_iter()
+                .map(|(name, tensor)| tensor2_snapshot(name, tensor))
+                .collect()
+        }
+
+        fn restore(
+            checkpoint: &E2eTrainingCheckpoint,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            let tensor = |name| tensor2_from_snapshot(checkpoint.tensor(name)?, device);
+            Ok(Self {
+                step: checkpoint.generator_optimizer_step,
+                token_w_m: tensor("generator.token_w.m")?,
+                token_w_v: tensor("generator.token_w.v")?,
+                token_b_m: tensor("generator.token_b.m")?,
+                token_b_v: tensor("generator.token_b.v")?,
+                token_gate_w_m: tensor("generator.token_gate_w.m")?,
+                token_gate_w_v: tensor("generator.token_gate_w.v")?,
+                token_gate_b_m: tensor("generator.token_gate_b.m")?,
+                token_gate_b_v: tensor("generator.token_gate_b.v")?,
+                state_w_m: tensor("generator.state_w.m")?,
+                state_w_v: tensor("generator.state_w.v")?,
+                time_w_m: tensor("generator.time_w.m")?,
+                time_w_v: tensor("generator.time_w.v")?,
+                output_w_m: tensor("generator.output_w.m")?,
+                output_w_v: tensor("generator.output_w.v")?,
+                output_b_m: tensor("generator.output_b.m")?,
+                output_b_v: tensor("generator.output_b.v")?,
+                condition_control_w_m: tensor("generator.condition_control_w.m")?,
+                condition_control_w_v: tensor("generator.condition_control_w.v")?,
+                condition_control_b_m: tensor("generator.condition_control_b.m")?,
+                condition_control_b_v: tensor("generator.condition_control_b.v")?,
+                condition_control_state_w_m: tensor(
+                    "generator.condition_control_state_w.m",
+                )?,
+                condition_control_state_w_v: tensor(
+                    "generator.condition_control_state_w.v",
+                )?,
+            })
+        }
     }
 
     impl BurnE2eGeneratorParams {
+        fn from_seed_or_artifact(
+            base: &NpaModel,
+            examples: &[BurnE2eRolloutExample],
+            config: BurnE2eRolloutTrainConfig,
+            initial: Option<&E2eHyperNpa2d>,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            match initial {
+                Some(initial) => Self::from_artifact(base, examples, config, initial, device),
+                None => Self::seeded(base, examples, config, device),
+            }
+        }
+
+        fn adapter_parameterization_tensors(
+            base: &NpaModel,
+            config: BurnE2eRolloutTrainConfig,
+            device: &BurnDevice,
+        ) -> AutomataResult<(Tensor2, Tensor2)> {
+            let output_dims =
+                NpaLowRankAdapter::parameter_count_for_config(&base.config, config.adapter_rank);
+            let (constants, mask) = if config.canonical_full_rank_lora {
+                let canonical =
+                    crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
+                        &base.config,
+                        config.adapter_rank,
+                        config.adapter_alpha,
+                    )?;
+                (canonical.constants, canonical.trainable_mask)
+            } else {
+                (vec![0.0; output_dims], vec![1.0; output_dims])
+            };
+            Ok((
+                tensor(constants, [1, output_dims], device),
+                tensor(mask, [1, output_dims], device),
+            ))
+        }
+
+        fn adapter_parameter_segments(config: &NpaConfig, rank: usize) -> Vec<(usize, usize)> {
+            let lengths = [
+                rank * config.perception_dims(),
+                config.hidden_dims * rank,
+                rank * config.hidden_dims,
+                config.update_dims() * rank,
+                config.hidden_dims,
+                config.update_dims(),
+            ];
+            let mut offset = 0usize;
+            lengths
+                .into_iter()
+                .map(|len| {
+                    let segment = (offset, len);
+                    offset += len;
+                    segment
+                })
+                .collect()
+        }
+
+        fn from_artifact(
+            base: &NpaModel,
+            examples: &[BurnE2eRolloutExample],
+            config: BurnE2eRolloutTrainConfig,
+            initial: &E2eHyperNpa2d,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            initial.validate()?;
+            let first = examples.first().ok_or_else(|| {
+                AutomataError::InvalidArgument("HyperNPA e2e generator requires examples".into())
+            })?;
+            if examples.iter().any(|example| {
+                example.embed_dims != first.embed_dims
+                    || example.token_count != first.token_count
+            }) {
+                return Err(AutomataError::InvalidArgument(
+                    "HyperNPA e2e examples must have homogeneous condition token shapes"
+                        .to_string(),
+                ));
+            }
+            let expected_kind = config.generator_kind;
+            if initial.architecture != expected_kind.artifact_architecture() {
+                return Err(AutomataError::InvalidModel(format!(
+                    "warm-start HyperNPA architecture {:?} does not match configured {:?}",
+                    initial.architecture,
+                    expected_kind.artifact_architecture()
+                )));
+            }
+            if initial.uses_canonical_full_rank_lora() != config.canonical_full_rank_lora {
+                return Err(AutomataError::InvalidModel(format!(
+                    "warm-start HyperNPA adapter parameterization {:?} does not match configured {:?}",
+                    initial
+                        .adapter_parameterization
+                        .as_deref()
+                        .unwrap_or(E2E_HYPER_ADAPTER_FACTORIZED),
+                    if config.canonical_full_rank_lora {
+                        E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+                    } else {
+                        E2E_HYPER_ADAPTER_FACTORIZED
+                    }
+                )));
+            }
+            let (adapter_constants, adapter_trainable_mask) =
+                Self::adapter_parameterization_tensors(base, config, device)?;
+            let initial_embed_dims = initial.embed_dims()?;
+            let adding_rgb_channels = expected_kind != E2eHyperGeneratorKind::SampleIdTable
+                && !initial.condition_rgb_channels.unwrap_or(false)
+                && config.dino_rgb_channels
+                && first.embed_dims == initial_embed_dims + 3;
+            if initial.condition_token_count.is_some_and(|value| value != first.token_count)
+                || (initial_embed_dims != first.embed_dims && !adding_rgb_channels)
+            {
+                return Err(AutomataError::InvalidModel(format!(
+                    "warm-start HyperNPA condition shape {:?}x{} does not match training {}x{}",
+                    initial.condition_token_count,
+                    initial.embed_dims()?,
+                    first.token_count,
+                    first.embed_dims
+                )));
+            }
+            let adapter = initial.adapter_spec(&base.config)?;
+            if adapter.rank != config.adapter_rank
+                || (adapter.alpha - config.adapter_alpha).abs() > f32::EPSILON
+            {
+                return Err(AutomataError::InvalidModel(format!(
+                    "warm-start HyperNPA adapter rank/alpha {}/{} does not match configured {}/{}",
+                    adapter.rank, adapter.alpha, config.adapter_rank, config.adapter_alpha
+                )));
+            }
+            if expected_kind != E2eHyperGeneratorKind::SampleIdTable
+                && (initial.hidden_dims != config.generator_hidden_dims
+                    || initial.token_attention_heads != config.token_attention_heads.max(1)
+                    || initial.sample_steps != config.generator_sample_steps.max(1)
+                    || (initial.output_scale - config.generator_output_scale).abs()
+                        > f32::EPSILON)
+            {
+                return Err(AutomataError::InvalidModel(
+                    "warm-start HyperNPA hidden/sample/output-scale contract does not match the configured generator"
+                        .to_string(),
+                ));
+            }
+            if expected_kind != E2eHyperGeneratorKind::SampleIdTable
+                && ((!adding_rgb_channels
+                    && (initial.condition_rgb_channels.unwrap_or(false)
+                        != config.dino_rgb_channels
+                        || (initial.condition_rgb_channel_scale.unwrap_or(1.0)
+                            - config.dino_rgb_channel_scale)
+                            .abs()
+                            > f32::EPSILON))
+                    || initial.condition_alpha_channel.unwrap_or(false)
+                        != config.dino_alpha_channel
+                    || (initial.condition_alpha_channel_scale.unwrap_or(1.0)
+                        - config.dino_alpha_channel_scale)
+                        .abs()
+                        > f32::EPSILON
+                    || initial.condition_l2_normalize_features.unwrap_or(true)
+                        != config.dino_l2_normalize_features)
+            {
+                return Err(AutomataError::InvalidModel(
+                    "warm-start HyperNPA DINO RGB/alpha/normalization contract does not match the configured condition pipeline"
+                        .to_string(),
+                ));
+            }
+            let output_dims =
+                NpaLowRankAdapter::parameter_count_for_config(&base.config, config.adapter_rank);
+            if initial.output_dims != output_dims {
+                return Err(AutomataError::InvalidModel(format!(
+                    "warm-start HyperNPA output dims {} do not match model adapter dims {output_dims}",
+                    initial.output_dims
+                )));
+            }
+            if expected_kind == E2eHyperGeneratorKind::SampleIdTable {
+                if first.token_count != 1 || initial.hidden_dims != 1 {
+                    return Err(AutomataError::InvalidModel(
+                        "sample-ID adapter table requires one token and hidden_dims=1".to_string(),
+                    ));
+                }
+                let placeholder = |values: Vec<f32>| tracked_tensor(values, [1, 1], device);
+                return Ok(Self {
+                    kind: expected_kind,
+                    token_w: tracked_tensor(
+                        initial.weights.token_w.clone(),
+                        [output_dims, first.embed_dims],
+                        device,
+                    ),
+                    token_b: placeholder(initial.weights.token_b.clone()),
+                    token_gate_w: placeholder(initial.weights.token_gate_w.clone()),
+                    token_gate_b: placeholder(initial.weights.token_gate_b.clone()),
+                    state_w: placeholder(initial.weights.state_w.clone()),
+                    time_w: placeholder(initial.weights.time_w.clone()),
+                    output_w: placeholder(initial.weights.output_w.clone()),
+                    output_b: placeholder(initial.weights.output_b.clone()),
+                    condition_control_w: tracked_tensor(
+                        vec![0.0; base.config.update_dims()],
+                        [base.config.update_dims(), 1],
+                        device,
+                    ),
+                    condition_control_b: tracked_tensor(
+                        vec![0.0; base.config.update_dims()],
+                        [1, base.config.update_dims()],
+                        device,
+                    ),
+                    condition_control_state_w: tracked_tensor(
+                        vec![0.0; base.config.state_dims],
+                        [1, base.config.state_dims],
+                        device,
+                    ),
+                    hidden_dims: 1,
+                    token_attention_heads: 1,
+                    softmax_token_attention: false,
+                    canonical_full_rank_lora: config.canonical_full_rank_lora,
+                    adapter_constants,
+                    adapter_trainable_mask,
+                    adapter_parameter_segments: Self::adapter_parameter_segments(
+                        &base.config,
+                        config.adapter_rank,
+                    ),
+                    output_dims,
+                    output_scale: 1.0,
+                    sample_steps: 1,
+                    adapter_chunk_size: output_dims,
+                    output_chunks: 1,
+                });
+            }
+            let adapter_chunk_size = if expected_kind == E2eHyperGeneratorKind::PooledFlow {
+                output_dims
+            } else {
+                initial.adapter_chunk_size_value()
+            };
+            if adapter_chunk_size != config.adapter_chunk_size.max(1).min(output_dims).max(1)
+                && expected_kind != E2eHyperGeneratorKind::PooledFlow
+            {
+                return Err(AutomataError::InvalidModel(format!(
+                    "warm-start HyperNPA adapter chunk size {adapter_chunk_size} does not match configured {}",
+                    config.adapter_chunk_size
+                )));
+            }
+            let output_chunks = initial.weights.output_b.len() / adapter_chunk_size;
+            let expected_control = config.spatial_condition_control;
+            let initial_has_control = initial.has_spatial_condition_control();
+            if initial_has_control && !expected_control {
+                return Err(AutomataError::InvalidModel(
+                    "cannot warm-start a per-step condition-field HyperNPA as a static-adapter model"
+                        .to_string(),
+                ));
+            }
+            let initial_has_state_control =
+                initial.spatial_condition_state_control.unwrap_or(false);
+            if initial_has_state_control && !config.spatial_condition_state_control {
+                return Err(AutomataError::InvalidModel(
+                    "cannot warm-start a state-conditioned field as a state-independent field"
+                        .to_string(),
+                ));
+            }
+            let update_dims = base.config.update_dims();
+            let control_w = if initial_has_control {
+                initial.weights.condition_control_w.clone()
+            } else if expected_control {
+                let mut rng = StdRng::seed_from_u64(config.seed ^ 0xc01d_f1e1_d2d0);
+                seeded_values(
+                    update_dims * initial.hidden_dims,
+                    config.generator_output_init_scale
+                        / (initial.hidden_dims as f32).sqrt().max(1.0),
+                    &mut rng,
+                )
+            } else {
+                vec![0.0; update_dims * initial.hidden_dims]
+            };
+            let control_b = if initial_has_control {
+                initial.weights.condition_control_b.clone()
+            } else {
+                vec![0.0; update_dims]
+            };
+            let control_state_w = if initial_has_state_control {
+                if initial.weights.condition_control_state_w.len()
+                    != initial.hidden_dims * base.config.state_dims
+                {
+                    return Err(AutomataError::InvalidModel(format!(
+                        "warm-start condition state projection has {} values, expected {}",
+                        initial.weights.condition_control_state_w.len(),
+                        initial.hidden_dims * base.config.state_dims,
+                    )));
+                }
+                initial.weights.condition_control_state_w.clone()
+            } else {
+                vec![0.0; initial.hidden_dims * base.config.state_dims]
+            };
+            let token_w = if adding_rgb_channels {
+                let has_alpha = initial.condition_alpha_channel.unwrap_or(false);
+                let semantic_dims = initial_embed_dims - usize::from(has_alpha);
+                let mut expanded = vec![0.0; initial.hidden_dims * first.embed_dims];
+                for hidden in 0..initial.hidden_dims {
+                    let old = &initial.weights.token_w
+                        [hidden * initial_embed_dims..(hidden + 1) * initial_embed_dims];
+                    let new = &mut expanded
+                        [hidden * first.embed_dims..(hidden + 1) * first.embed_dims];
+                    new[..semantic_dims].copy_from_slice(&old[..semantic_dims]);
+                    if has_alpha {
+                        new[first.embed_dims - 1] = old[initial_embed_dims - 1];
+                    }
+                }
+                eprintln!(
+                    "warm-starting HyperNPA with RGB token channels: condition projection {} -> {} dimensions",
+                    initial_embed_dims, first.embed_dims,
+                );
+                expanded
+            } else {
+                initial.weights.token_w.clone()
+            };
+            Ok(Self {
+                kind: expected_kind,
+                token_w: tracked_tensor(token_w, [initial.hidden_dims, first.embed_dims], device),
+                token_b: tracked_tensor(
+                    initial.weights.token_b.clone(),
+                    [1, initial.hidden_dims],
+                    device,
+                ),
+                token_gate_w: tracked_tensor(
+                    initial.weights.token_gate_w.clone(),
+                    if expected_kind == E2eHyperGeneratorKind::PooledFlow {
+                        [initial.token_attention_heads, initial.hidden_dims]
+                    } else {
+                        [output_chunks, initial.hidden_dims]
+                    },
+                    device,
+                ),
+                token_gate_b: tracked_tensor(
+                    initial.weights.token_gate_b.clone(),
+                    if expected_kind == E2eHyperGeneratorKind::PooledFlow {
+                        [1, initial.token_attention_heads]
+                    } else {
+                        [output_chunks, initial.hidden_dims]
+                    },
+                    device,
+                ),
+                state_w: tracked_tensor(
+                    initial.weights.state_w.clone(),
+                    [initial.hidden_dims, adapter_chunk_size],
+                    device,
+                ),
+                time_w: tracked_tensor(
+                    initial.weights.time_w.clone(),
+                    [initial.hidden_dims, 1],
+                    device,
+                ),
+                output_w: tracked_tensor(
+                    initial.weights.output_w.clone(),
+                    [adapter_chunk_size, initial.hidden_dims],
+                    device,
+                ),
+                output_b: tracked_tensor(
+                    initial.weights.output_b.clone(),
+                    [output_chunks, adapter_chunk_size],
+                    device,
+                ),
+                condition_control_w: tracked_tensor(
+                    control_w,
+                    [update_dims, initial.hidden_dims],
+                    device,
+                ),
+                condition_control_b: tracked_tensor(control_b, [1, update_dims], device),
+                condition_control_state_w: tracked_tensor(
+                    control_state_w,
+                    [initial.hidden_dims, base.config.state_dims],
+                    device,
+                ),
+                hidden_dims: initial.hidden_dims,
+                token_attention_heads: initial.token_attention_heads,
+                softmax_token_attention: config.softmax_token_attention,
+                canonical_full_rank_lora: config.canonical_full_rank_lora,
+                adapter_constants,
+                adapter_trainable_mask,
+                adapter_parameter_segments: Self::adapter_parameter_segments(
+                    &base.config,
+                    config.adapter_rank,
+                ),
+                output_dims,
+                output_scale: initial.output_scale,
+                sample_steps: initial.sample_steps,
+                adapter_chunk_size,
+                output_chunks,
+            })
+        }
+
         fn seeded(
             base: &NpaModel,
             examples: &[BurnE2eRolloutExample],
@@ -5827,9 +8888,7 @@ mod $module {
                 ));
             }
             if examples.iter().any(|example| {
-                example.embed_dims != embed_dims
-                    || example.token_count != token_count
-                    || example.condition_features.len() != token_count * embed_dims
+                example.embed_dims != embed_dims || example.token_count != token_count
             }) {
                 return Err(AutomataError::InvalidArgument(
                     "HyperNPA e2e examples must have homogeneous condition token shapes"
@@ -5838,27 +8897,111 @@ mod $module {
             }
             let output_dims =
                 NpaLowRankAdapter::parameter_count_for_config(&base.config, config.adapter_rank);
-            let kind = if config.spatial_token_generator {
-                BurnE2eGeneratorKind::SpatialTokenFlow
-            } else {
-                BurnE2eGeneratorKind::PooledFlow
-            };
+            let (adapter_constants, adapter_trainable_mask) =
+                Self::adapter_parameterization_tensors(base, config, device)?;
+            let kind = config.generator_kind;
+            if kind == E2eHyperGeneratorKind::SampleIdTable {
+                if token_count != 1 {
+                    return Err(AutomataError::InvalidArgument(
+                        "sample-ID adapter table requires exactly one condition token".to_string(),
+                    ));
+                }
+                let initial_adapter = if config.canonical_full_rank_lora {
+                    vec![0.0; output_dims]
+                } else {
+                    NpaLowRankAdapter::seeded_zero_delta(
+                        &base.config,
+                        config.adapter_rank,
+                        config.adapter_alpha,
+                        config.seed ^ 0x5eed_10da,
+                    )
+                    .to_parameter_vector()
+                };
+                let mut table = vec![0.0; output_dims * embed_dims];
+                for (output, value) in initial_adapter.into_iter().enumerate() {
+                    table[output * embed_dims..(output + 1) * embed_dims].fill(value);
+                }
+                let placeholder = || tracked_tensor(vec![0.0], [1, 1], device);
+                return Ok(Self {
+                    kind,
+                    token_w: tracked_tensor(table, [output_dims, embed_dims], device),
+                    token_b: placeholder(),
+                    token_gate_w: placeholder(),
+                    token_gate_b: placeholder(),
+                    state_w: placeholder(),
+                    time_w: placeholder(),
+                    output_w: placeholder(),
+                    output_b: placeholder(),
+                    condition_control_w: tracked_tensor(
+                        vec![0.0; base.config.update_dims()],
+                        [base.config.update_dims(), 1],
+                        device,
+                    ),
+                    condition_control_b: tracked_tensor(
+                        vec![0.0; base.config.update_dims()],
+                        [1, base.config.update_dims()],
+                        device,
+                    ),
+                    condition_control_state_w: tracked_tensor(
+                        vec![0.0; base.config.state_dims],
+                        [1, base.config.state_dims],
+                        device,
+                    ),
+                    hidden_dims: 1,
+                    token_attention_heads: 1,
+                    softmax_token_attention: false,
+                    canonical_full_rank_lora: config.canonical_full_rank_lora,
+                    adapter_constants,
+                    adapter_trainable_mask,
+                    adapter_parameter_segments: Self::adapter_parameter_segments(
+                        &base.config,
+                        config.adapter_rank,
+                    ),
+                    output_dims,
+                    output_scale: 1.0,
+                    sample_steps: 1,
+                    adapter_chunk_size: output_dims,
+                    output_chunks: 1,
+                });
+            }
             let hidden_dims = config.generator_hidden_dims.max(1);
             let token_attention_heads = config.token_attention_heads.max(1);
+            if kind == E2eHyperGeneratorKind::ModuleTokenDecoder
+                && !hidden_dims.is_multiple_of(token_attention_heads)
+            {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "module-token-decoder hidden_dims={hidden_dims} must be divisible by token_attention_heads={token_attention_heads}"
+                )));
+            }
             let adapter_chunk_size = match kind {
-                BurnE2eGeneratorKind::PooledFlow => output_dims,
-                BurnE2eGeneratorKind::SpatialTokenFlow => config
+                E2eHyperGeneratorKind::PooledFlow => output_dims,
+                E2eHyperGeneratorKind::SpatialTokenFlow
+                | E2eHyperGeneratorKind::ModuleTokenDecoderV2
+                | E2eHyperGeneratorKind::ModuleTokenDecoder => config
                     .adapter_chunk_size
                     .max(1)
                     .min(output_dims)
                     .max(1),
+                E2eHyperGeneratorKind::SampleIdTable => unreachable!(),
             };
-            let output_chunks = output_dims.div_ceil(adapter_chunk_size);
+            let module_layout = kind
+                .is_module_token_decoder()
+                .then(|| {
+                    crate::hyper::adapter_layout::AdapterParameterLayout2d::new(
+                        &base.config,
+                        config.adapter_rank,
+                        adapter_chunk_size,
+                    )
+                })
+                .transpose()?;
+            let output_chunks = module_layout
+                .as_ref()
+                .map_or_else(|| output_dims.div_ceil(adapter_chunk_size), |layout| layout.chunk_count);
             let mut rng = StdRng::seed_from_u64(config.seed ^ 0xa11c_e2e0_7a5e);
             let token_w = tracked_tensor(
                 seeded_values(
                     hidden_dims * embed_dims,
-                    config.generator_init_scale / (embed_dims as f32).sqrt().max(1.0),
+                    config.generator_condition_init_scale / (embed_dims as f32).sqrt().max(1.0),
                     &mut rng,
                 ),
                 [hidden_dims, embed_dims],
@@ -5866,11 +9009,12 @@ mod $module {
             );
             let token_b = tracked_tensor(vec![0.0; hidden_dims], [1, hidden_dims], device);
             let (token_gate_w, token_gate_b, state_w) = match kind {
-                BurnE2eGeneratorKind::PooledFlow => (
+                E2eHyperGeneratorKind::PooledFlow => (
                     tracked_tensor(
                         seeded_values(
                             token_attention_heads * hidden_dims,
-                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            config.generator_condition_init_scale
+                                / (hidden_dims as f32).sqrt().max(1.0),
                             &mut rng,
                         ),
                         [token_attention_heads, hidden_dims],
@@ -5884,32 +9028,44 @@ mod $module {
                     tracked_tensor(
                         seeded_values(
                             hidden_dims * output_dims,
-                            config.generator_init_scale / (output_dims as f32).sqrt().max(1.0),
+                            config.generator_condition_init_scale
+                                / (output_dims as f32).sqrt().max(1.0),
                             &mut rng,
                         ),
                         [hidden_dims, output_dims],
                         device,
                     ),
                 ),
-                BurnE2eGeneratorKind::SpatialTokenFlow => (
+                E2eHyperGeneratorKind::SpatialTokenFlow
+                | E2eHyperGeneratorKind::ModuleTokenDecoderV2
+                | E2eHyperGeneratorKind::ModuleTokenDecoder => (
                     tracked_tensor(
                         seeded_values(
                             output_chunks * hidden_dims,
-                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            config.generator_condition_init_scale
+                                / (hidden_dims as f32).sqrt().max(1.0),
                             &mut rng,
                         ),
                         [output_chunks, hidden_dims],
                         device,
                     ),
                     tracked_tensor(
-                        vec![0.0; output_chunks * hidden_dims],
+                        module_layout.as_ref().map_or_else(
+                            || vec![0.0; output_chunks * hidden_dims],
+                            |layout| {
+                                layout.structured_query_initialization(
+                                    hidden_dims,
+                                    config.generator_condition_init_scale,
+                                )
+                            },
+                        ),
                         [output_chunks, hidden_dims],
                         device,
                     ),
                     tracked_tensor(
                         seeded_values(
                             hidden_dims * adapter_chunk_size,
-                            config.generator_init_scale
+                            config.generator_condition_init_scale
                                 / (adapter_chunk_size as f32).sqrt().max(1.0),
                             &mut rng,
                         ),
@@ -5917,59 +9073,98 @@ mod $module {
                         device,
                     ),
                 ),
+                E2eHyperGeneratorKind::SampleIdTable => unreachable!(),
             };
             let time_w = tracked_tensor(
-                seeded_values(hidden_dims, config.generator_init_scale, &mut rng),
+                seeded_values(
+                    hidden_dims,
+                    config.generator_condition_init_scale,
+                    &mut rng,
+                ),
                 [hidden_dims, 1],
                 device,
             );
             let (output_w, output_b) = match kind {
-                BurnE2eGeneratorKind::PooledFlow => (
+                E2eHyperGeneratorKind::PooledFlow => (
                     tracked_tensor(
                         seeded_values(
                             output_dims * hidden_dims,
-                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            config.generator_output_init_scale
+                                / (hidden_dims as f32).sqrt().max(1.0),
                             &mut rng,
                         ),
                         [output_dims, hidden_dims],
                         device,
                     ),
                     tracked_tensor(
-                        seeded_zero_delta_output_bias(
-                            &base.config,
-                            config.adapter_rank,
-                            config.adapter_alpha,
-                            config.seed ^ 0x5eed_10da,
-                            config.generator_output_scale,
-                        ),
+                        if config.canonical_full_rank_lora {
+                            vec![0.0; output_dims]
+                        } else {
+                            seeded_zero_delta_output_bias(
+                                &base.config,
+                                config.adapter_rank,
+                                config.adapter_alpha,
+                                config.seed ^ 0x5eed_10da,
+                                config.generator_output_scale,
+                            )
+                        },
                         [1, output_dims],
                         device,
                     ),
                 ),
-                BurnE2eGeneratorKind::SpatialTokenFlow => (
+                E2eHyperGeneratorKind::SpatialTokenFlow
+                | E2eHyperGeneratorKind::ModuleTokenDecoderV2
+                | E2eHyperGeneratorKind::ModuleTokenDecoder => (
                     tracked_tensor(
                         seeded_values(
                             adapter_chunk_size * hidden_dims,
-                            config.generator_init_scale / (hidden_dims as f32).sqrt().max(1.0),
+                            config.generator_output_init_scale
+                                / (hidden_dims as f32).sqrt().max(1.0),
                             &mut rng,
                         ),
                         [adapter_chunk_size, hidden_dims],
                         device,
                     ),
                     tracked_tensor(
-                        seeded_zero_delta_chunk_output_bias(
-                            &base.config,
-                            config.adapter_rank,
-                            config.adapter_alpha,
-                            config.seed ^ 0x5eed_10da,
-                            adapter_chunk_size,
-                            output_chunks,
-                        ),
+                        if config.canonical_full_rank_lora {
+                            vec![0.0; output_chunks * adapter_chunk_size]
+                        } else {
+                            seeded_zero_delta_chunk_output_bias(
+                                &base.config,
+                                config.adapter_rank,
+                                config.adapter_alpha,
+                                config.seed ^ 0x5eed_10da,
+                                adapter_chunk_size,
+                                output_chunks,
+                                module_layout.as_ref(),
+                            )
+                        },
                         [output_chunks, adapter_chunk_size],
                         device,
                     ),
                 ),
+                E2eHyperGeneratorKind::SampleIdTable => unreachable!(),
             };
+            let condition_control_w = tracked_tensor(
+                seeded_values(
+                    base.config.update_dims() * hidden_dims,
+                    config.generator_output_init_scale
+                        / (hidden_dims as f32).sqrt().max(1.0),
+                    &mut rng,
+                ),
+                [base.config.update_dims(), hidden_dims],
+                device,
+            );
+            let condition_control_b = tracked_tensor(
+                vec![0.0; base.config.update_dims()],
+                [1, base.config.update_dims()],
+                device,
+            );
+            let condition_control_state_w = tracked_tensor(
+                vec![0.0; hidden_dims * base.config.state_dims],
+                [hidden_dims, base.config.state_dims],
+                device,
+            );
             Ok(Self {
                 kind,
                 token_w,
@@ -5980,8 +9175,19 @@ mod $module {
                 time_w,
                 output_w,
                 output_b,
+                condition_control_w,
+                condition_control_b,
+                condition_control_state_w,
                 hidden_dims,
                 token_attention_heads,
+                softmax_token_attention: config.softmax_token_attention,
+                canonical_full_rank_lora: config.canonical_full_rank_lora,
+                adapter_constants,
+                adapter_trainable_mask,
+                adapter_parameter_segments: Self::adapter_parameter_segments(
+                    &base.config,
+                    config.adapter_rank,
+                ),
                 output_dims,
                 output_scale: config.generator_output_scale,
                 sample_steps: config.generator_sample_steps.max(1),
@@ -5990,20 +9196,11 @@ mod $module {
             })
         }
 
-        fn adapter_batch(
-            &self,
-            condition: Tensor3,
-            npa_config: &NpaConfig,
-            config: BurnE2eRolloutTrainConfig,
-        ) -> BurnAdapterBatch {
-            if self.kind == BurnE2eGeneratorKind::SpatialTokenFlow {
-                return self.spatial_token_adapter_batch(condition, npa_config, config);
-            }
+        fn token_hidden_batch(&self, condition: Tensor3) -> Tensor3 {
             let dims = condition.shape().dims::<3>();
             let batches = dims[0];
             let tokens = dims[1];
             let embed_dims = dims[2];
-            let device = condition.device();
             let token_w = self
                 .token_w
                 .clone()
@@ -6015,7 +9212,94 @@ mod $module {
                 .clone()
                 .unsqueeze_dim::<3>(0)
                 .expand([batches, tokens, self.hidden_dims]);
-            let token_hidden = relu(condition.matmul(token_w) + token_b);
+            relu(condition.matmul(token_w) + token_b)
+        }
+
+        fn condition_control_batch(
+            &self,
+            condition: Tensor3,
+            config: BurnE2eRolloutTrainConfig,
+        ) -> Option<BurnE2eConditionControlBatch> {
+            if !config.spatial_condition_control {
+                return None;
+            }
+            let dims = condition.shape().dims::<3>();
+            let tokens = dims[1];
+            let grid_width = config.dino_token_grid_width.max(1);
+            let grid_height = config.dino_token_grid_height.max(1);
+            let patch_tokens = grid_width.saturating_mul(grid_height);
+            if tokens <= 1 || patch_tokens == 0 || tokens < patch_tokens.saturating_add(1) {
+                return None;
+            }
+            let token_hidden = self.token_hidden_batch(condition);
+            Some(BurnE2eConditionControlBatch {
+                patch_hidden: token_hidden.narrow(1, 1, patch_tokens),
+                update_w: self.condition_control_w.clone(),
+                update_b: self.condition_control_b.clone(),
+                state_w: config
+                    .spatial_condition_state_control
+                    .then(|| self.condition_control_state_w.clone()),
+                grid_width,
+                grid_height,
+                sigma: config.spatial_condition_control_sigma.max(1.0e-4),
+                scale: config.spatial_condition_control_scale,
+            })
+        }
+
+        fn apply_adapter_parameterization(&self, vector: Tensor2) -> Tensor2 {
+            let batches = vector.shape().dims::<2>()[0];
+            vector.mul(
+                self.adapter_trainable_mask
+                    .clone()
+                    .expand([batches, self.output_dims]),
+            ) + self
+                .adapter_constants
+                .clone()
+                .expand([batches, self.output_dims])
+        }
+
+        fn adapter_batch(
+            &self,
+            condition: Tensor3,
+            npa_config: &NpaConfig,
+            config: BurnE2eRolloutTrainConfig,
+        ) -> BurnAdapterBatch {
+            if self.kind == E2eHyperGeneratorKind::SampleIdTable {
+                let dims = condition.shape().dims::<3>();
+                debug_assert_eq!(dims[1], 1);
+                let vector = condition
+                    .squeeze_dim::<2>(1)
+                    .matmul(self.token_w.clone().transpose());
+                return BurnAdapterBatch::from_parameter_vector(
+                    self.apply_adapter_parameterization(vector),
+                    npa_config,
+                    config.adapter_rank,
+                    config.adapter_alpha,
+                );
+            }
+            if matches!(
+                self.kind,
+                E2eHyperGeneratorKind::SpatialTokenFlow
+                    | E2eHyperGeneratorKind::ModuleTokenDecoderV2
+                    | E2eHyperGeneratorKind::ModuleTokenDecoder
+            ) {
+                let vector = self.spatial_token_adapter_vector_batch(
+                    condition,
+                    npa_config,
+                    config.adapter_rank,
+                );
+                return BurnAdapterBatch::from_parameter_vector(
+                    self.apply_adapter_parameterization(vector),
+                    npa_config,
+                    config.adapter_rank,
+                    config.adapter_alpha,
+                );
+            }
+            let dims = condition.shape().dims::<3>();
+            let batches = dims[0];
+            let tokens = dims[1];
+            let device = condition.device();
+            let token_hidden = self.token_hidden_batch(condition);
             let mean_pooled = token_hidden
                 .clone()
                 .sum_dim(1)
@@ -6033,13 +9317,18 @@ mod $module {
                 .clone()
                 .unsqueeze_dim::<3>(0)
                 .expand([batches, tokens, heads]);
-            let attention_weights = (token_hidden.clone().matmul(gate_w) + gate_b).tanh().exp();
-            let attention_denominator = attention_weights
-                .clone()
-                .sum_dim(1)
-                .add_scalar(EPSILON)
-                .expand([batches, tokens, heads]);
-            let attention_weights = attention_weights.div(attention_denominator);
+            let attention_logits = token_hidden.clone().matmul(gate_w) + gate_b;
+            let attention_weights = if self.softmax_token_attention {
+                softmax(attention_logits, 1)
+            } else {
+                let weights = attention_logits.tanh().exp();
+                let denominator = weights
+                    .clone()
+                    .sum_dim(1)
+                    .add_scalar(EPSILON)
+                    .expand([batches, tokens, heads]);
+                weights.div(denominator)
+            };
             let attended = attention_weights
                 .swap_dims(1, 2)
                 .matmul(token_hidden)
@@ -6073,36 +9362,23 @@ mod $module {
             }
             let vector = vector.tanh().mul_scalar(self.output_scale);
             BurnAdapterBatch::from_parameter_vector(
-                vector,
+                self.apply_adapter_parameterization(vector),
                 npa_config,
                 config.adapter_rank,
                 config.adapter_alpha,
             )
         }
 
-        fn spatial_token_adapter_batch(
+        fn spatial_token_adapter_vector_batch(
             &self,
             condition: Tensor3,
             npa_config: &NpaConfig,
-            config: BurnE2eRolloutTrainConfig,
-        ) -> BurnAdapterBatch {
+            adapter_rank: usize,
+        ) -> Tensor2 {
             let dims = condition.shape().dims::<3>();
             let batches = dims[0];
-            let tokens = dims[1];
-            let embed_dims = dims[2];
             let device = condition.device();
-            let token_w = self
-                .token_w
-                .clone()
-                .transpose()
-                .unsqueeze_dim::<3>(0)
-                .expand([batches, embed_dims, self.hidden_dims]);
-            let token_b = self
-                .token_b
-                .clone()
-                .unsqueeze_dim::<3>(0)
-                .expand([batches, tokens, self.hidden_dims]);
-            let token_hidden = relu(condition.matmul(token_w) + token_b);
+            let token_hidden = self.token_hidden_batch(condition);
             let mut chunks = Tensor::<BurnBackend, 3>::zeros(
                 [batches, self.output_chunks, self.adapter_chunk_size],
                 &device,
@@ -6139,7 +9415,13 @@ mod $module {
                 .clone()
                 .unsqueeze_dim::<3>(0)
                 .expand([batches, self.output_chunks, self.adapter_chunk_size]);
-            let attention_scale = 1.0 / (self.hidden_dims as f32).sqrt().max(1.0);
+            let attention_heads = if self.kind == E2eHyperGeneratorKind::ModuleTokenDecoder {
+                self.token_attention_heads
+            } else {
+                1
+            };
+            let head_dims = self.hidden_dims / attention_heads;
+            let attention_scale = 1.0 / (head_dims as f32).sqrt().max(1.0);
             for step in 0..self.sample_steps {
                 let t = if self.sample_steps <= 1 {
                     0.0
@@ -6157,17 +9439,40 @@ mod $module {
                 let query_hidden = relu(
                     query_base.clone() + shared_bias.clone() + state_hidden + time_hidden,
                 );
-                let attention_logits =
-                    query_hidden.clone().matmul(token_hidden.clone().swap_dims(1, 2));
-                let attention_weights = attention_logits.mul_scalar(attention_scale).tanh().exp();
-                let attention_denominator = attention_weights
-                    .clone()
-                    .sum_dim(2)
-                    .add_scalar(EPSILON)
-                    .expand([batches, self.output_chunks, tokens]);
-                let attended = attention_weights
-                    .div(attention_denominator)
-                    .matmul(token_hidden.clone());
+                let attend = |query: Tensor3, tokens: Tensor3, hidden: usize| {
+                    let attention_logits = query.matmul(tokens.clone().swap_dims(1, 2));
+                    let attention_logits = attention_logits.mul_scalar(attention_scale);
+                    let attention_weights = if self.softmax_token_attention {
+                        softmax(attention_logits, 2)
+                    } else {
+                        let weights = attention_logits.tanh().exp();
+                        let denominator = weights
+                            .clone()
+                            .sum_dim(2)
+                            .add_scalar(EPSILON)
+                            .expand([batches, self.output_chunks, dims[1]]);
+                        weights.div(denominator)
+                    };
+                    debug_assert_eq!(tokens.shape().dims::<3>()[2], hidden);
+                    attention_weights.matmul(tokens)
+                };
+                let attended = if attention_heads == 1 {
+                    attend(query_hidden.clone(), token_hidden.clone(), self.hidden_dims)
+                } else {
+                    Tensor::cat(
+                        (0..attention_heads)
+                            .map(|head| {
+                                let start = head * head_dims;
+                                attend(
+                                    query_hidden.clone().narrow(2, start, head_dims),
+                                    token_hidden.clone().narrow(2, start, head_dims),
+                                    head_dims,
+                                )
+                            })
+                            .collect(),
+                        2,
+                    )
+                };
                 let hidden = relu(query_hidden + attended);
                 let velocity = hidden.matmul(output_w.clone()) + output_b.clone();
                 chunks = chunks
@@ -6175,15 +9480,34 @@ mod $module {
                         .mul_scalar(self.output_scale)
                         .div_scalar(self.sample_steps as f32);
             }
-            let vector = chunks
-                .reshape([batches, self.output_chunks * self.adapter_chunk_size])
-                .narrow(1, 0, self.output_dims);
-            BurnAdapterBatch::from_parameter_vector(
-                vector,
-                npa_config,
-                config.adapter_rank,
-                config.adapter_alpha,
-            )
+            let padded = chunks.reshape([
+                batches,
+                self.output_chunks * self.adapter_chunk_size,
+            ]);
+            let vector = if self.kind.is_module_token_decoder() {
+                let layout = crate::hyper::adapter_layout::AdapterParameterLayout2d::new(
+                    npa_config,
+                    adapter_rank,
+                    self.adapter_chunk_size,
+                )
+                .expect("module adapter layout validated during generator construction");
+                assert_eq!(layout.chunk_count, self.output_chunks);
+                Tensor::cat(
+                    layout
+                        .segments
+                        .iter()
+                        .map(|segment| {
+                            padded
+                                .clone()
+                                .narrow(1, segment.chunk_offset * self.adapter_chunk_size, segment.len)
+                        })
+                        .collect(),
+                    1,
+                )
+            } else {
+                padded.narrow(1, 0, self.output_dims)
+            };
+            vector
         }
 
         fn apply_adamw(
@@ -6219,9 +9543,41 @@ mod $module {
                 self.output_b
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.output_b.clone().inner().zeros_like()),
+                self.condition_control_w
+                    .grad_remove(grads)
+                    .unwrap_or_else(|| self.condition_control_w.clone().inner().zeros_like()),
+                self.condition_control_b
+                    .grad_remove(grads)
+                    .unwrap_or_else(|| self.condition_control_b.clone().inner().zeros_like()),
+                self.condition_control_state_w
+                    .grad_remove(grads)
+                    .unwrap_or_else(|| {
+                        self.condition_control_state_w.clone().inner().zeros_like()
+                    }),
             ];
-            let (norm, scale, scale_tensor) =
-                prepare_grad_group(&mut tensors, cfg.grad_clip_norm, normalize, collect_metrics)?;
+            let normalize_sample_table = normalize && self.kind == E2eHyperGeneratorKind::SampleIdTable;
+            let original_table_norm = (normalize_sample_table && collect_metrics)
+                .then(|| group_norm_tensor(&tensors));
+            if normalize_sample_table {
+                tensors[0] = normalize_sample_id_table_gradient(
+                    tensors[0].clone(),
+                    &self.adapter_parameter_segments,
+                );
+            }
+            let (prepared_norm, scale, scale_tensor) = prepare_grad_group(
+                &mut tensors,
+                cfg.grad_clip_norm,
+                normalize && !normalize_sample_table,
+                collect_metrics,
+            )?;
+            let norm = if let Some(original) = original_table_norm {
+                finite_scalar(
+                    "Burn sample-ID adapter table grad norm",
+                    original.into_scalar(),
+                )?
+            } else {
+                prepared_norm
+            };
             let bias = state.next_bias_correction(cfg);
             self.token_w = track(apply_adamw_tensor(
                 self.token_w.clone().inner(),
@@ -6292,6 +9648,33 @@ mod $module {
                 &mut state.output_b_m,
                 &mut state.output_b_v,
                 cfg,
+                scale_tensor.clone(),
+                bias,
+            ));
+            self.condition_control_w = track(apply_adamw_tensor(
+                self.condition_control_w.clone().inner(),
+                tensors.remove(0),
+                &mut state.condition_control_w_m,
+                &mut state.condition_control_w_v,
+                cfg,
+                scale_tensor.clone(),
+                bias,
+            ));
+            self.condition_control_b = track(apply_adamw_tensor(
+                self.condition_control_b.clone().inner(),
+                tensors.remove(0),
+                &mut state.condition_control_b_m,
+                &mut state.condition_control_b_v,
+                cfg,
+                scale_tensor.clone(),
+                bias,
+            ));
+            self.condition_control_state_w = track(apply_adamw_tensor(
+                self.condition_control_state_w.clone().inner(),
+                tensors.remove(0),
+                &mut state.condition_control_state_w_m,
+                &mut state.condition_control_state_w_v,
+                cfg,
                 scale_tensor,
                 bias,
             ));
@@ -6299,6 +9682,7 @@ mod $module {
         }
 
         fn to_hyper(&self, config: BurnE2eRolloutTrainConfig) -> AutomataResult<E2eHyperNpa2d> {
+            let image_conditioned = self.kind != E2eHyperGeneratorKind::SampleIdTable;
             Ok(E2eHyperNpa2d {
                 version: 1,
                 architecture: self.kind.artifact_architecture().to_string(),
@@ -6308,15 +9692,63 @@ mod $module {
                 condition_embed_dims: None,
                 condition_token_grid_width: None,
                 condition_token_grid_height: None,
+                condition_image_size: image_conditioned.then_some(config.dino_image_size),
+                condition_alpha_mode: image_conditioned.then(|| "composite-white".to_string()),
+                condition_rgb_channels: image_conditioned.then_some(config.dino_rgb_channels),
+                condition_rgb_channel_scale: image_conditioned
+                    .then_some(config.dino_rgb_channel_scale),
+                condition_alpha_channel: image_conditioned.then_some(config.dino_alpha_channel),
+                condition_alpha_channel_scale: image_conditioned
+                    .then_some(config.dino_alpha_channel_scale),
+                condition_l2_normalize_features: image_conditioned
+                    .then_some(config.dino_l2_normalize_features),
+                condition_resize_mode: image_conditioned.then(|| "stretch".to_string()),
+                condition_application: Some(if config.spatial_condition_control {
+                    "per-step-field"
+                } else {
+                    "static-adapter"
+                }.to_string()),
+                shared_base_sha256: None,
                 hidden_dims: self.hidden_dims,
                 token_attention_heads: self.token_attention_heads,
+                attention_normalization: image_conditioned.then(|| {
+                    if self.softmax_token_attention {
+                        crate::hyper::e2e::E2E_HYPER_ATTENTION_SOFTMAX
+                    } else {
+                        crate::hyper::e2e::E2E_HYPER_ATTENTION_TANH_EXP
+                    }
+                    .to_string()
+                }),
                 output_dims: self.output_dims,
                 sample_steps: self.sample_steps,
                 output_scale: self.output_scale,
                 adapter_rank: Some(config.adapter_rank),
                 adapter_alpha: Some(config.adapter_alpha),
-                adapter_chunk_size: (self.kind == BurnE2eGeneratorKind::SpatialTokenFlow)
-                    .then_some(self.adapter_chunk_size),
+                adapter_parameterization: Some(
+                    if self.canonical_full_rank_lora {
+                        E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+                    } else {
+                        E2E_HYPER_ADAPTER_FACTORIZED
+                    }
+                    .to_string(),
+                ),
+                adapter_chunk_size: matches!(
+                    self.kind,
+                    E2eHyperGeneratorKind::SpatialTokenFlow
+                        | E2eHyperGeneratorKind::ModuleTokenDecoderV2
+                        | E2eHyperGeneratorKind::ModuleTokenDecoder
+                )
+                .then_some(self.adapter_chunk_size),
+                spatial_condition_control: config.spatial_condition_control.then_some(true),
+                spatial_condition_control_scale: config
+                    .spatial_condition_control
+                    .then_some(config.spatial_condition_control_scale),
+                spatial_condition_control_sigma: config
+                    .spatial_condition_control
+                    .then_some(config.spatial_condition_control_sigma),
+                spatial_condition_state_control: config
+                    .spatial_condition_state_control
+                    .then_some(true),
                 weights: E2eHyperNpa2dWeights {
                     token_w: tensor_vec(self.token_w.clone().inner())?,
                     token_b: tensor_vec(self.token_b.clone().inner())?,
@@ -6326,6 +9758,21 @@ mod $module {
                     time_w: tensor_vec(self.time_w.clone().inner())?,
                     output_w: tensor_vec(self.output_w.clone().inner())?,
                     output_b: tensor_vec(self.output_b.clone().inner())?,
+                    condition_control_w: if config.spatial_condition_control {
+                        tensor_vec(self.condition_control_w.clone().inner())?
+                    } else {
+                        Vec::new()
+                    },
+                    condition_control_b: if config.spatial_condition_control {
+                        tensor_vec(self.condition_control_b.clone().inner())?
+                    } else {
+                        Vec::new()
+                    },
+                    condition_control_state_w: if config.spatial_condition_state_control {
+                        tensor_vec(self.condition_control_state_w.clone().inner())?
+                    } else {
+                        Vec::new()
+                    },
                 },
             })
         }
@@ -6341,8 +9788,16 @@ mod $module {
                 time_w: detach2(self.time_w.clone()),
                 output_w: detach2(self.output_w.clone()),
                 output_b: detach2(self.output_b.clone()),
+                condition_control_w: detach2(self.condition_control_w.clone()),
+                condition_control_b: detach2(self.condition_control_b.clone()),
+                condition_control_state_w: detach2(self.condition_control_state_w.clone()),
                 hidden_dims: self.hidden_dims,
                 token_attention_heads: self.token_attention_heads,
+                softmax_token_attention: self.softmax_token_attention,
+                canonical_full_rank_lora: self.canonical_full_rank_lora,
+                adapter_constants: detach2(self.adapter_constants.clone()),
+                adapter_trainable_mask: detach2(self.adapter_trainable_mask.clone()),
+                adapter_parameter_segments: self.adapter_parameter_segments.clone(),
                 output_dims: self.output_dims,
                 output_scale: self.output_scale,
                 sample_steps: self.sample_steps,
@@ -6730,6 +10185,19 @@ mod $module {
             ));
             Ok((norm, scale))
         }
+
+        fn detached(&self) -> Self {
+            Self {
+                rank: self.rank,
+                alpha: self.alpha,
+                w1_down: detach2(self.w1_down.clone()),
+                w1_up: detach2(self.w1_up.clone()),
+                w2_down: detach2(self.w2_down.clone()),
+                w2_up: detach2(self.w2_up.clone()),
+                b1_delta: detach2(self.b1_delta.clone()),
+                b2_delta: detach2(self.b2_delta.clone()),
+            }
+        }
     }
 
     impl BurnAdapterBatch {
@@ -6744,6 +10212,50 @@ mod $module {
                 w2_up: stack_adapter_tensor(adapters, indices, |adapter| &adapter.w2_up),
                 b1_delta: stack_adapter_tensor(adapters, indices, |adapter| &adapter.b1_delta),
                 b2_delta: stack_adapter_tensor(adapters, indices, |adapter| &adapter.b2_delta),
+            }
+        }
+
+        fn select_rows(self, rows: &[usize]) -> Self {
+            if rows.is_empty() {
+                return self;
+            }
+            let device = self.w1_down.device();
+            let indices = Tensor::<BurnBackend, 1, Int>::from_data(
+                TensorData::new(
+                    rows.iter().map(|row| *row as i64).collect::<Vec<_>>(),
+                    [rows.len()],
+                ),
+                &device,
+            );
+            Self {
+                rank: self.rank,
+                alpha: self.alpha,
+                w1_down: self.w1_down.select(0, indices.clone()),
+                w1_up: self.w1_up.select(0, indices.clone()),
+                w2_down: self.w2_down.select(0, indices.clone()),
+                w2_up: self.w2_up.select(0, indices.clone()),
+                b1_delta: self.b1_delta.select(0, indices.clone()),
+                b2_delta: self.b2_delta.select(0, indices),
+            }
+        }
+
+        fn select_rows_or_identity(self, rows: Option<&[usize]>) -> Self {
+            match rows {
+                Some(rows) => self.select_rows(rows),
+                None => self,
+            }
+        }
+
+        fn detached(&self) -> Self {
+            Self {
+                rank: self.rank,
+                alpha: self.alpha,
+                w1_down: detach3(self.w1_down.clone()),
+                w1_up: detach3(self.w1_up.clone()),
+                w2_down: detach3(self.w2_down.clone()),
+                w2_up: detach3(self.w2_up.clone()),
+                b1_delta: detach3(self.b1_delta.clone()),
+                b2_delta: detach3(self.b2_delta.clone()),
             }
         }
 
@@ -6793,6 +10305,21 @@ mod $module {
                 });
             }
             total.expect("adapter batch has parameters").div_scalar(6.0)
+        }
+
+        fn to_parameter_vector(&self) -> Tensor2 {
+            let batches = self.w1_down.shape().dims::<3>()[0];
+            Tensor::cat(
+                vec![
+                    self.w1_down.clone().reshape([batches, self.w1_down.shape().num_elements() / batches]),
+                    self.w1_up.clone().reshape([batches, self.w1_up.shape().num_elements() / batches]),
+                    self.w2_down.clone().reshape([batches, self.w2_down.shape().num_elements() / batches]),
+                    self.w2_up.clone().reshape([batches, self.w2_up.shape().num_elements() / batches]),
+                    self.b1_delta.clone().reshape([batches, self.b1_delta.shape().num_elements() / batches]),
+                    self.b2_delta.clone().reshape([batches, self.b2_delta.shape().num_elements() / batches]),
+                ],
+                1,
+            )
         }
 
         fn l2_loss_vector(&self) -> Tensor1 {
@@ -6896,32 +10423,6 @@ mod $module {
             .collect()
     }
 
-    fn burn_e2e_targets(
-        examples: &[BurnE2eRolloutExample],
-        config: BurnE2eRolloutTrainConfig,
-        device: &BurnDevice,
-    ) -> AutomataResult<Vec<BurnTargetExample>> {
-        burn_e2e_targets_with_runtime(examples, config, device, None, None)
-    }
-
-    fn burn_e2e_targets_with_runtime(
-        examples: &[BurnE2eRolloutExample],
-        config: BurnE2eRolloutTrainConfig,
-        device: &BurnDevice,
-        particle_count: Option<usize>,
-        update_prob: Option<f32>,
-    ) -> AutomataResult<Vec<BurnTargetExample>> {
-        let indices = (0..examples.len()).collect::<Vec<_>>();
-        burn_e2e_targets_for_indices_with_runtime(
-            examples,
-            &indices,
-            config,
-            device,
-            particle_count,
-            update_prob,
-        )
-    }
-
     fn burn_e2e_targets_for_indices_with_runtime(
         examples: &[BurnE2eRolloutExample],
         indices: &[usize],
@@ -6931,12 +10432,7 @@ mod $module {
         update_prob: Option<f32>,
     ) -> AutomataResult<Vec<BurnTargetExample>> {
         let direct_config = direct_config_view(config);
-        let pixels = direct_config.loss_config.image_size * direct_config.loss_config.image_size;
-        let pixel_xy = tensor(
-            pixel_xy_values(direct_config.loss_config.image_size),
-            [pixels, 2],
-            device,
-        );
+        let pixel_xy = burn_e2e_pixel_xy(config, device);
         indices
             .iter()
             .map(|idx| {
@@ -6949,37 +10445,241 @@ mod $module {
             .collect::<AutomataResult<Vec<_>>>()?
             .into_iter()
             .map(|example| {
-                let render = render_target_2d_splat(&example.target, direct_config.loss_config)?;
-                let foreground = target_2d_foreground_mask(&example.target, direct_config.loss_config)?;
-                let foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
-                let target_mean = example.target.mean_position();
-                let target_positions = example
-                    .target
-                    .positions
-                    .iter()
-                    .flat_map(|position| [position[0], position[1]])
-                    .collect::<Vec<_>>();
-                Ok(BurnTargetExample {
-                    target_rgb: tensor(render.rgb, [pixels, 3], device),
-                    target_density: tensor(render.density, [pixels, 1], device),
-                    target_foreground: tensor(foreground, [pixels, 1], device),
-                    target_foreground_scale: foreground_scale,
-                    target_mean: tensor([target_mean[0], target_mean[1]].to_vec(), [1, 2], device),
-                    target_positions: tensor(
-                        target_positions,
-                        [example.target.positions.len(), 2],
-                        device,
-                    ),
-                    pixel_xy: pixel_xy.clone(),
-                    pixel_size: example.target.pixel_size,
-                    target_points: example.target.point_count(),
-                    particle_count: particle_count.unwrap_or(example.particle_count).max(1),
-                    update_prob: update_prob.unwrap_or(example.update_prob),
-                    seed_scale: example.seed_scale,
-                    target_cpu: example.target.clone(),
-                })
+                prepare_e2e_cpu_target(
+                    BurnE2eCpuTargetInput {
+                        target: example.target.clone(),
+                        particle_count: particle_count.unwrap_or(example.particle_count).max(1),
+                        update_prob: update_prob.unwrap_or(example.update_prob),
+                        seed_scale: example.seed_scale,
+                    },
+                    direct_config,
+                )
+                .map(|prepared| prepared.into_burn(&pixel_xy, device))
             })
             .collect()
+    }
+
+    fn burn_e2e_pixel_xy(config: BurnE2eRolloutTrainConfig, device: &BurnDevice) -> Tensor2 {
+        let image_size = direct_config_view(config).loss_config.image_size;
+        tensor(
+            pixel_xy_values(image_size),
+            [image_size * image_size, 2],
+            device,
+        )
+    }
+
+    fn e2e_target_cache_bytes(
+        examples: &[BurnE2eRolloutExample],
+        config: BurnE2eRolloutTrainConfig,
+    ) -> usize {
+        let pixels = config
+            .loss_config
+            .image_size
+            .saturating_mul(config.loss_config.image_size);
+        examples.iter().fold(0usize, |bytes, example| {
+            let floats = pixels
+                .saturating_mul(5)
+                .saturating_add(2)
+                .saturating_add(example.target.point_count().saturating_mul(2));
+            bytes.saturating_add(floats.saturating_mul(std::mem::size_of::<f32>()))
+        })
+    }
+
+    fn burn_e2e_target_cache(
+        examples: &[BurnE2eRolloutExample],
+        config: BurnE2eRolloutTrainConfig,
+        pixel_xy: &Tensor2,
+        device: &BurnDevice,
+    ) -> AutomataResult<Vec<BurnTargetExample>> {
+        let direct_config = direct_config_view(config);
+        let prepared = examples
+            .par_iter()
+            .map(|example| {
+                prepare_e2e_cpu_target(
+                    BurnE2eCpuTargetInput {
+                        target: example.target.clone(),
+                        particle_count: example.particle_count,
+                        update_prob: example.update_prob,
+                        seed_scale: example.seed_scale,
+                    },
+                    direct_config,
+                )
+            })
+            .collect::<AutomataResult<Vec<_>>>()?;
+        burn_e2e_prepared_targets_to_burn(prepared, pixel_xy, device)
+    }
+
+    fn spawn_e2e_cpu_batch_prefetch(
+        examples: &[BurnE2eRolloutExample],
+        conditions: &BurnE2eConditionCache,
+        indices: Vec<usize>,
+        config: BurnE2eRolloutTrainConfig,
+        targets_cached: bool,
+    ) -> AutomataResult<BurnE2eCpuBatchPrefetch> {
+        let mut target_inputs = Vec::with_capacity(indices.len());
+        if !targets_cached {
+            for &idx in &indices {
+                let example = examples.get(idx).ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "HyperNPA e2e prefetch target index out of bounds".to_string(),
+                    )
+                })?;
+                target_inputs.push(BurnE2eCpuTargetInput {
+                    target: example.target.clone(),
+                    particle_count: example.particle_count,
+                    update_prob: example.update_prob,
+                    seed_scale: example.seed_scale,
+                });
+            }
+        }
+        let condition_paths = conditions.dynamic_dino_paths_for_indices(&indices)?;
+        let pending_indices = indices.clone();
+        Ok(BurnE2eCpuBatchPrefetch {
+            indices: pending_indices,
+            handle: thread::spawn(move || {
+                prepare_e2e_cpu_batch(indices, target_inputs, condition_paths, config)
+            }),
+        })
+    }
+
+    fn join_e2e_cpu_batch_prefetch(
+        handle: BurnE2eCpuBatchPrefetch,
+    ) -> AutomataResult<BurnE2ePreparedCpuBatch> {
+        handle
+            .handle
+            .join()
+            .map_err(|_| {
+                AutomataError::InvalidArgument("HyperNPA e2e CPU prefetch panicked".to_string())
+            })?
+            .map_err(AutomataError::InvalidArgument)
+    }
+
+    fn prepare_e2e_cpu_batch(
+        indices: Vec<usize>,
+        target_inputs: Vec<BurnE2eCpuTargetInput>,
+        condition_paths: Option<Vec<PathBuf>>,
+        config: BurnE2eRolloutTrainConfig,
+    ) -> Result<BurnE2ePreparedCpuBatch, String> {
+        let direct_config = direct_config_view(config);
+        let (targets, prepared_dino) = rayon::join(
+            move || {
+                target_inputs
+                    .into_par_iter()
+                    .map(|input| {
+                        prepare_e2e_cpu_target(input, direct_config).map_err(|err| err.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            },
+            move || match condition_paths {
+                Some(paths) => prepare_dino_condition_batch_for_prefetch(paths, config.dino_image_size)
+                    .map(Some),
+                None => Ok(None),
+            },
+        );
+        let targets = targets?;
+        let prepared_dino = prepared_dino?;
+        Ok(BurnE2ePreparedCpuBatch {
+            indices,
+            targets,
+            prepared_dino,
+        })
+    }
+
+    fn prepare_e2e_cpu_target(
+        input: BurnE2eCpuTargetInput,
+        config: DirectBasisTrainConfig,
+    ) -> AutomataResult<BurnE2ePreparedTargetExample> {
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let render = render_target_2d_splat(&input.target, config.loss_config)?;
+        let foreground = target_2d_foreground_mask(&input.target, config.loss_config)?;
+        let target_foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
+        let target_mean = input.target.mean_position();
+        let target_positions = input
+            .target
+            .positions
+            .iter()
+            .flat_map(|position| [position[0], position[1]])
+            .collect::<Vec<_>>();
+        Ok(BurnE2ePreparedTargetExample {
+            target_rgb: render.rgb,
+            target_density: render.density,
+            target_foreground: foreground,
+            target_foreground_scale,
+            target_mean,
+            target_positions,
+            pixel_size: input.target.pixel_size,
+            target_points: input.target.point_count(),
+            particle_count: input.particle_count.max(1),
+            update_prob: input.update_prob,
+            seed_scale: input.seed_scale,
+            target_cpu: input.target,
+        })
+    }
+
+    fn burn_e2e_prepared_targets_to_burn(
+        targets: Vec<BurnE2ePreparedTargetExample>,
+        pixel_xy: &Tensor2,
+        device: &BurnDevice,
+    ) -> AutomataResult<Vec<BurnTargetExample>> {
+        targets
+            .into_iter()
+            .map(|target| Ok(target.into_burn(pixel_xy, device)))
+            .collect()
+    }
+
+    impl BurnE2ePreparedTargetExample {
+        fn into_burn(self, pixel_xy: &Tensor2, device: &BurnDevice) -> BurnTargetExample {
+            let pixels = self.target_rgb.len() / 3;
+            let target_position_count = self.target_positions.len() / 2;
+            BurnTargetExample {
+                target_rgb: tensor(self.target_rgb, [pixels, 3], device),
+                target_density: tensor(self.target_density, [pixels, 1], device),
+                target_foreground: tensor(self.target_foreground, [pixels, 1], device),
+                target_foreground_scale: self.target_foreground_scale,
+                target_mean: tensor(self.target_mean.to_vec(), [1, 2], device),
+                target_positions: tensor(
+                    self.target_positions,
+                    [target_position_count, 2],
+                    device,
+                ),
+                pixel_xy: pixel_xy.clone(),
+                pixel_size: self.pixel_size,
+                target_points: self.target_points,
+                particle_count: self.particle_count,
+                update_prob: self.update_prob,
+                seed_scale: self.seed_scale,
+                target_cpu: self.target_cpu,
+            }
+        }
+    }
+
+    fn e2e_cpu_prefetch_depth(batch_size: usize, steps: usize) -> usize {
+        if steps <= 1 {
+            return 1;
+        }
+        let depth = if batch_size >= 256 { 2 } else { 4 };
+        depth.min(steps).max(1)
+    }
+
+    #[cfg(feature = "dino")]
+    fn prepare_dino_condition_batch_for_prefetch(
+        paths: Vec<PathBuf>,
+        image_size: usize,
+    ) -> Result<DinoVitsPreparedConditionBatch, String> {
+        let images = paths
+            .into_par_iter()
+            .map(|path| load_dino_condition_image(&path).map_err(|err| err.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        DinoVitsPreparedConditionBatch::from_conditions(&images, image_size)
+            .map_err(|err| err.to_string())
+    }
+
+    #[cfg(not(feature = "dino"))]
+    fn prepare_dino_condition_batch_for_prefetch(
+        _paths: Vec<PathBuf>,
+        _image_size: usize,
+    ) -> Result<BurnE2ePreparedDinoBatch, String> {
+        Err("DINO prefetch requires the dino feature".to_string())
     }
 
     fn direct_config_view(config: BurnE2eRolloutTrainConfig) -> DirectBasisTrainConfig {
@@ -7052,10 +10752,12 @@ mod $module {
             examples: &mut [BurnE2eRolloutExample],
             device: &BurnDevice,
             device_cache_max_bytes: usize,
+            config: BurnE2eRolloutTrainConfig,
         ) -> AutomataResult<Self> {
             if examples.is_empty() {
                 return Ok(Self {
                     values: BurnE2eConditionValues::HostRows(Vec::new()),
+                    teacher_vectors: None,
                     examples: 0,
                     token_count: 0,
                     embed_dims: 0,
@@ -7071,10 +10773,125 @@ mod $module {
                 ));
             }
             let row_len = token_count * embed_dims;
+            let teacher_vectors = if examples.iter().all(|example| example.teacher_adapter.is_some()) {
+                let teacher_len = examples[0]
+                    .teacher_adapter
+                    .as_ref()
+                    .map_or(0, Vec::len);
+                if teacher_len == 0
+                    || examples.iter().any(|example| {
+                        example.teacher_adapter.as_ref().map(Vec::len) != Some(teacher_len)
+                    })
+                {
+                    return Err(AutomataError::InvalidArgument(
+                        "HyperNPA teacher adapter vectors must have one homogeneous non-empty shape"
+                            .to_string(),
+                    ));
+                }
+                Some(tensor(
+                    examples
+                        .iter()
+                        .flat_map(|example| example.teacher_adapter.as_ref().unwrap().iter().copied())
+                        .collect(),
+                    [examples.len(), teacher_len],
+                    device,
+                ))
+            } else if examples.iter().any(|example| example.teacher_adapter.is_some()) {
+                return Err(AutomataError::InvalidArgument(
+                    "HyperNPA examples must either all or none provide teacher adapters".to_string(),
+                ));
+            } else {
+                None
+            };
             let feature_bytes = examples
                 .len()
                 .saturating_mul(row_len)
                 .saturating_mul(std::mem::size_of::<f32>());
+            let static_rows = examples
+                .iter()
+                .all(|example| example.condition_features.len() == row_len);
+            let dynamic_dino_rows = examples
+                .iter()
+                .all(|example| example.condition_features.is_empty() && example.condition_path.is_some());
+            if !static_rows && !dynamic_dino_rows {
+                return Err(AutomataError::InvalidArgument(
+                    "HyperNPA e2e condition examples must be all static feature rows or all DINO image paths".to_string(),
+                ));
+            }
+            if dynamic_dino_rows {
+                #[cfg(feature = "dino")]
+                {
+                    let model_path = first.dino_model_path.as_ref().ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "DINO on-demand condition source requires condition.dino_model"
+                                .to_string(),
+                        )
+                    })?;
+                    let encoder =
+                        DinoVitsConditionEncoderBackend::<InnerBackend>::load(
+                            model_path,
+                            config.dino_image_size,
+                        )
+                        .map_err(|err| {
+                            AutomataError::InvalidArgument(format!(
+                                "failed to load DINO model {}: {err}",
+                                model_path.display()
+                            ))
+                        })?;
+                    let paths = examples
+                        .iter()
+                        .map(|example| {
+                            example.condition_path.clone().ok_or_else(|| {
+                                AutomataError::InvalidArgument(
+                                    "DINO condition example is missing condition_path".to_string(),
+                                )
+                            })
+                        })
+                        .collect::<AutomataResult<Vec<_>>>()?;
+                    let source = BurnE2eDinoConditionSource {
+                        paths,
+                        encoder,
+                        batch_size: config.dino_batch_size.max(1),
+                        token_grid_width: config.dino_token_grid_width,
+                        token_grid_height: config.dino_token_grid_height,
+                        l2_normalize_features: config.dino_l2_normalize_features,
+                        rgb_channels: config.dino_rgb_channels,
+                        rgb_channel_scale: config.dino_rgb_channel_scale,
+                        alpha_channel: config.dino_alpha_channel,
+                        alpha_channel_scale: config.dino_alpha_channel_scale,
+                    };
+                    let values = if device_cache_max_bytes > 0
+                        && feature_bytes <= device_cache_max_bytes
+                    {
+                        eprintln!(
+                            "encoding {} DINO conditions into a bounded {:.2} GiB device token cache",
+                            examples.len(),
+                            feature_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                        );
+                        BurnE2eConditionValues::Device(source.encode_all_to_device(
+                            token_count,
+                            embed_dims,
+                            device,
+                        )?)
+                    } else {
+                        BurnE2eConditionValues::DynamicDino(Box::new(source))
+                    };
+                    return Ok(Self {
+                        values,
+                        teacher_vectors,
+                        examples: examples.len(),
+                        token_count,
+                        embed_dims,
+                        device: device.clone(),
+                    });
+                }
+                #[cfg(not(feature = "dino"))]
+                {
+                    return Err(AutomataError::InvalidArgument(
+                        "DINO on-demand condition source requires the dino feature".to_string(),
+                    ));
+                }
+            }
             let use_device_cache =
                 device_cache_max_bytes > 0 && feature_bytes <= device_cache_max_bytes;
             let mut flat_values = use_device_cache
@@ -7108,11 +10925,129 @@ mod $module {
             };
             Ok(Self {
                 values,
+                teacher_vectors,
                 examples: examples.len(),
                 token_count,
                 embed_dims,
                 device: device.clone(),
             })
+        }
+
+        fn select_teacher(&self, indices: &[usize]) -> Option<Tensor2> {
+            self.teacher_vectors.as_ref().map(|teachers| {
+                teachers.clone().select(
+                    0,
+                    Tensor::<BurnBackend, 1, Int>::from_data(
+                        TensorData::new(
+                            indices.iter().map(|index| *index as i64).collect::<Vec<_>>(),
+                            [indices.len()],
+                        ),
+                        &self.device,
+                    ),
+                )
+            })
+        }
+
+        fn mean_pairwise_l2(&self) -> AutomataResult<Option<f32>> {
+            if self.examples < 2 {
+                return Ok(None);
+            }
+            let indices = (0..self.examples).collect::<Vec<_>>();
+            let values = tensor3_vec(self.select(&indices)?.inner())?;
+            let row_len = self.token_count * self.embed_dims;
+            let mut sum = 0.0_f64;
+            let mut pairs = 0usize;
+            for lhs in 0..self.examples {
+                for rhs in lhs + 1..self.examples {
+                    let lhs = &values[lhs * row_len..(lhs + 1) * row_len];
+                    let rhs = &values[rhs * row_len..(rhs + 1) * row_len];
+                    let distance = lhs
+                        .iter()
+                        .zip(rhs)
+                        .map(|(lhs, rhs)| {
+                            let delta = f64::from(*lhs - *rhs);
+                            delta * delta
+                        })
+                        .sum::<f64>()
+                        .sqrt();
+                    sum += distance;
+                    pairs += 1;
+                }
+            }
+            Ok(Some((sum / pairs.max(1) as f64) as f32))
+        }
+
+        fn nearest_rows(
+            &self,
+            queries: &Self,
+            query_indices: &[usize],
+        ) -> AutomataResult<Vec<(usize, f32)>> {
+            if self.examples == 0 {
+                return Err(AutomataError::InvalidArgument(
+                    "nearest-condition lookup requires non-empty reference conditions".to_string(),
+                ));
+            }
+            if self.token_count != queries.token_count || self.embed_dims != queries.embed_dims {
+                return Err(AutomataError::InvalidArgument(
+                    "nearest-condition lookup requires matching token shapes".to_string(),
+                ));
+            }
+            let reference_indices = (0..self.examples).collect::<Vec<_>>();
+            let references = tensor3_vec(self.select(&reference_indices)?.inner())?;
+            let query_values = tensor3_vec(queries.select(query_indices)?.inner())?;
+            let row_len = self.token_count * self.embed_dims;
+            Ok(query_values
+                .chunks_exact(row_len)
+                .map(|query| {
+                    references
+                        .chunks_exact(row_len)
+                        .enumerate()
+                        .map(|(idx, reference)| {
+                            let squared = query
+                                .iter()
+                                .zip(reference)
+                                .map(|(query, reference)| {
+                                    let delta = f64::from(*query - *reference);
+                                    delta * delta
+                                })
+                                .sum::<f64>();
+                            (idx, squared)
+                        })
+                        .min_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1))
+                        .map(|(idx, squared)| (idx, squared.sqrt() as f32))
+                        .expect("non-empty nearest-condition reference set")
+                })
+                .collect())
+        }
+
+        fn mean_teacher_pairwise_l2(&self) -> AutomataResult<Option<f32>> {
+            let Some(teachers) = &self.teacher_vectors else {
+                return Ok(None);
+            };
+            if self.examples < 2 {
+                return Ok(None);
+            }
+            let dims = teachers.shape().dims::<2>();
+            let values = tensor_vec(teachers.clone().inner())?;
+            let mut sum = 0.0_f64;
+            let mut pairs = 0usize;
+            for lhs in 0..self.examples {
+                for rhs in lhs + 1..self.examples {
+                    let lhs = &values[lhs * dims[1]..(lhs + 1) * dims[1]];
+                    let rhs = &values[rhs * dims[1]..(rhs + 1) * dims[1]];
+                    sum += lhs
+                        .iter()
+                        .zip(rhs)
+                        .map(|(lhs, rhs)| {
+                            let delta = f64::from(*lhs - *rhs);
+                            delta * delta
+                        })
+                        .sum::<f64>()
+                        .sqrt();
+                    pairs += 1;
+                }
+            }
+            Ok(Some((sum / pairs.max(1) as f64) as f32))
         }
 
         fn select(&self, indices: &[usize]) -> AutomataResult<Tensor3> {
@@ -7145,10 +11080,58 @@ mod $module {
                         &self.device,
                     ))
                 }
+                #[cfg(feature = "dino")]
+                BurnE2eConditionValues::DynamicDino(source) => {
+                    source.select(indices, self.token_count, self.embed_dims)
+                }
             }
         }
 
+        fn select_prepared(
+            &self,
+            indices: &[usize],
+            prepared_dino: Option<&BurnE2ePreparedDinoBatch>,
+        ) -> AutomataResult<Tensor3> {
+            #[cfg(feature = "dino")]
+            if let (BurnE2eConditionValues::DynamicDino(source), Some(prepared)) =
+                (&self.values, prepared_dino)
+            {
+                return source.encode_preprocessed(prepared, indices.len(), self.token_count, self.embed_dims);
+            }
+            self.select(indices)
+        }
+
+        fn dynamic_dino_paths_for_indices(
+            &self,
+            indices: &[usize],
+        ) -> AutomataResult<Option<Vec<PathBuf>>> {
+            if indices.iter().any(|idx| *idx >= self.examples) {
+                return Err(AutomataError::InvalidArgument(
+                    "HyperNPA e2e condition cache index out of bounds".to_string(),
+                ));
+            }
+            #[cfg(feature = "dino")]
+            if let BurnE2eConditionValues::DynamicDino(source) = &self.values {
+                return indices
+                    .iter()
+                    .map(|idx| {
+                        source.paths.get(*idx).cloned().ok_or_else(|| {
+                            AutomataError::InvalidArgument(
+                                "DINO condition source index out of bounds".to_string(),
+                            )
+                        })
+                    })
+                    .collect::<AutomataResult<Vec<_>>>()
+                    .map(Some);
+            }
+            Ok(None)
+        }
+
         fn feature_bytes(&self) -> usize {
+            #[cfg(feature = "dino")]
+            if matches!(self.values, BurnE2eConditionValues::DynamicDino(_)) {
+                return 0;
+            }
             self.examples
                 .saturating_mul(self.token_count)
                 .saturating_mul(self.embed_dims)
@@ -7156,15 +11139,193 @@ mod $module {
         }
 
         fn storage_label(&self) -> &'static str {
+            if self.examples == 0 {
+                return "empty";
+            }
             match &self.values {
                 BurnE2eConditionValues::Device(_) => "device-resident",
                 BurnE2eConditionValues::HostRows(_) => "host-row-streamed",
+                #[cfg(feature = "dino")]
+                BurnE2eConditionValues::DynamicDino(_) => "dino-on-demand-device",
             }
         }
 
         fn is_device_resident(&self) -> bool {
             matches!(self.values, BurnE2eConditionValues::Device(_))
         }
+
+        fn drained_cpu_features_from_examples(&self) -> bool {
+            if self.examples == 0 {
+                return false;
+            }
+            match &self.values {
+                BurnE2eConditionValues::Device(_) | BurnE2eConditionValues::HostRows(_) => true,
+                #[cfg(feature = "dino")]
+                BurnE2eConditionValues::DynamicDino(_) => false,
+            }
+        }
+    }
+
+    #[cfg(feature = "dino")]
+    impl BurnE2eDinoConditionSource {
+        fn encode_all_to_device(
+            &self,
+            token_count: usize,
+            embed_dims: usize,
+            device: &BurnDevice,
+        ) -> AutomataResult<Tensor3> {
+            let mut values = Tensor::<InnerBackend, 3>::zeros(
+                [self.paths.len(), token_count, embed_dims],
+                device,
+            );
+            let batches = self.paths.len().div_ceil(self.batch_size);
+            for (batch, paths) in self.paths.chunks(self.batch_size).enumerate() {
+                let images = paths
+                    .par_iter()
+                    .map(|path| load_dino_condition_image(path))
+                    .collect::<AutomataResult<Vec<_>>>()?;
+                let encoded = self
+                    .encode_loaded(&images, token_count, embed_dims)?
+                    .inner();
+                let start = batch * self.batch_size;
+                let slots = (start..start + paths.len()).collect::<Vec<_>>();
+                let slot_indices = inner_index_tensor(&slots, device);
+                values = values.select_assign(
+                    0,
+                    slot_indices,
+                    encoded,
+                    IndexingUpdateOp::Add,
+                );
+                let completed = batch + 1;
+                if completed == batches || completed.is_multiple_of(64) {
+                    eprintln!("encoded DINO device cache batch {completed}/{batches}");
+                }
+            }
+            Ok(Tensor::<BurnBackend, 3>::from_inner(values))
+        }
+
+        fn select(
+            &self,
+            indices: &[usize],
+            token_count: usize,
+            embed_dims: usize,
+        ) -> AutomataResult<Tensor3> {
+            let mut chunks = Vec::with_capacity(indices.len().div_ceil(self.batch_size));
+            for chunk_indices in indices.chunks(self.batch_size) {
+                let conditions = chunk_indices
+                    .iter()
+                    .map(|idx| {
+                        let path = self.paths.get(*idx).ok_or_else(|| {
+                            AutomataError::InvalidArgument(
+                                "DINO condition source index out of bounds".to_string(),
+                            )
+                        })?;
+                        load_dino_condition_image(path)
+                    })
+                    .collect::<AutomataResult<Vec<_>>>()?;
+                let encoded = self
+                    .encoder
+                    .encode_batch_tensor_with_contract(&conditions, self.contract())
+                    .map_err(|err| {
+                        AutomataError::InvalidArgument(format!(
+                            "failed to encode on-demand DINO condition batch: {err}"
+                        ))
+                    })?;
+                chunks.push(encoded);
+            }
+            let encoded = if chunks.len() == 1 {
+                chunks.remove(0)
+            } else {
+                Tensor::cat(chunks, 0)
+            };
+            let dims = encoded.dims();
+            if dims != [indices.len(), token_count, embed_dims] {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "on-demand DINO condition tensor shape {:?} != [{}, {}, {}]",
+                    dims,
+                    indices.len(),
+                    token_count,
+                    embed_dims
+                )));
+            }
+            Ok(Tensor::<BurnBackend, 3>::from_inner(encoded))
+        }
+
+        fn encode_preprocessed(
+            &self,
+            prepared: &DinoVitsPreparedConditionBatch,
+            batch: usize,
+            token_count: usize,
+            embed_dims: usize,
+        ) -> AutomataResult<Tensor3> {
+            if batch == 0 {
+                return Err(AutomataError::InvalidArgument(
+                    "preprocessed DINO condition batch is empty".to_string(),
+                ));
+            }
+            let encoded = self
+                .encoder
+                .encode_preprocessed_batch_tensor_with_contract(prepared, self.contract())
+                .map_err(|err| {
+                    AutomataError::InvalidArgument(format!(
+                        "failed to encode preprocessed DINO condition batch: {err}"
+                    ))
+                })?;
+            let dims = encoded.dims();
+            if dims != [batch, token_count, embed_dims] {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "preprocessed DINO condition tensor shape {:?} != [{}, {}, {}]",
+                    dims, batch, token_count, embed_dims
+                )));
+            }
+            Ok(Tensor::<BurnBackend, 3>::from_inner(encoded))
+        }
+
+        fn encode_loaded(
+            &self,
+            images: &[ConditionImage2d],
+            token_count: usize,
+            embed_dims: usize,
+        ) -> AutomataResult<Tensor3> {
+            let mut chunks = Vec::with_capacity(images.len().div_ceil(self.batch_size));
+            for conditions in images.chunks(self.batch_size) {
+                let encoded = self
+                    .encoder
+                    .encode_batch_tensor_with_contract(conditions, self.contract())
+                    .map_err(|err| {
+                        AutomataError::InvalidArgument(format!(
+                            "failed to encode preloaded DINO condition batch: {err}"
+                        ))
+                    })?;
+                chunks.push(encoded);
+            }
+            let encoded = if chunks.len() == 1 {
+                chunks.remove(0)
+            } else {
+                Tensor::cat(chunks, 0)
+            };
+            let dims = encoded.dims();
+            if dims != [images.len(), token_count, embed_dims] {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "preloaded DINO condition tensor shape {:?} != [{}, {}, {}]",
+                    dims,
+                    images.len(),
+                    token_count,
+                    embed_dims
+                )));
+            }
+            Ok(Tensor::<BurnBackend, 3>::from_inner(encoded))
+        }
+    }
+
+    #[cfg(feature = "dino")]
+    fn load_dino_condition_image(path: &Path) -> AutomataResult<ConditionImage2d> {
+        crate::load_condition_image(path).map_err(|err| {
+            AutomataError::InvalidArgument(format!(
+                "failed to load condition image {}: {err}",
+                path.display()
+            ))
+        })
     }
 
     fn seed_batch_tensors(
@@ -7243,6 +11404,89 @@ mod $module {
         )
     }
 
+    fn host_single_mask_stack(
+        target: &BurnTargetExample,
+        steps: usize,
+        rng: &mut StdRng,
+    ) -> Tensor3 {
+        let mut values = Vec::with_capacity(steps * target.particle_count);
+        for _ in 0..steps {
+            values.extend(stochastic_mask(
+                target.particle_count,
+                target.update_prob,
+                rng,
+            ));
+        }
+        STOCHASTIC_MASK_UPLOAD_HITS.fetch_add(1, Ordering::Relaxed);
+        tensor3(
+            values,
+            [steps, target.particle_count, 1],
+            &target.target_rgb.device(),
+        )
+    }
+
+    fn host_batch_mask_stack(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        steps: usize,
+        rng: &mut StdRng,
+    ) -> Tensor4 {
+        let mut values = Vec::with_capacity(steps * indices.len() * particle_count);
+        for _ in 0..steps {
+            for &idx in indices {
+                values.extend(stochastic_mask(
+                    particle_count,
+                    targets[idx].update_prob,
+                    rng,
+                ));
+            }
+        }
+        STOCHASTIC_MASK_UPLOAD_HITS.fetch_add(1, Ordering::Relaxed);
+        tensor4(
+            values,
+            [steps, indices.len(), particle_count, 1],
+            &targets[indices[0]].target_rgb.device(),
+        )
+    }
+
+    fn device_batch_mask_stack(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        steps: usize,
+    ) -> Tensor4 {
+        let device = &targets[indices[0]].target_rgb.device();
+        let shape = [steps, indices.len(), particle_count, 1];
+        let samples = Tensor::<BurnBackend, 4>::random(
+            shape,
+            Distribution::Uniform(0.0, 1.0),
+            device,
+        );
+        STOCHASTIC_MASK_DEVICE_HITS.fetch_add(1, Ordering::Relaxed);
+        if let Some(update_prob) = homogeneous_update_prob(targets, indices) {
+            return samples.lower_elem(update_prob).float();
+        }
+        let probs = indices
+            .iter()
+            .map(|idx| targets[*idx].update_prob)
+            .collect::<Vec<_>>();
+        let probs = tensor4(probs, [1, indices.len(), 1, 1], device).expand(shape);
+        samples.lower(probs).float()
+    }
+
+    fn batch_update_prob_is_one(targets: &[BurnTargetExample], indices: &[usize]) -> bool {
+        indices.iter().all(|&idx| targets[idx].update_prob >= 1.0)
+    }
+
+    fn homogeneous_update_prob(targets: &[BurnTargetExample], indices: &[usize]) -> Option<f32> {
+        let first = targets[*indices.first()?].update_prob;
+        indices
+            .iter()
+            .all(|&idx| (targets[idx].update_prob - first).abs() <= f32::EPSILON)
+            .then_some(first)
+    }
+
     fn host_batch_mask_with_rngs(
         targets: &[BurnTargetExample],
         indices: &[usize],
@@ -7261,6 +11505,31 @@ mod $module {
         tensor3(
             values,
             [indices.len(), particle_count, 1],
+            &targets[indices[0]].target_rgb.device(),
+        )
+    }
+
+    fn host_batch_mask_stack_with_rngs(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        steps: usize,
+        rngs: &mut [StdRng],
+    ) -> Tensor4 {
+        let mut values = Vec::with_capacity(steps * indices.len() * particle_count);
+        for _ in 0..steps {
+            for (local, &idx) in indices.iter().enumerate() {
+                values.extend(stochastic_mask(
+                    particle_count,
+                    targets[idx].update_prob,
+                    &mut rngs[local],
+                ));
+            }
+        }
+        STOCHASTIC_MASK_UPLOAD_HITS.fetch_add(1, Ordering::Relaxed);
+        tensor4(
+            values,
+            [steps, indices.len(), particle_count, 1],
             &targets[indices[0]].target_rgb.device(),
         )
     }
@@ -7357,6 +11626,21 @@ mod $module {
             for x in 0..image_size {
                 values.push(x as f32);
                 values.push(y as f32);
+            }
+        }
+        values
+    }
+
+    fn condition_patch_centers_values(width: usize, height: usize) -> Vec<f32> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let mut values = Vec::with_capacity(width * height * 2);
+        for y in 0..height {
+            let yy = ((y as f32 + 0.5) / height as f32) * 2.0 - 1.0;
+            for x in 0..width {
+                let xx = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
+                values.push(xx);
+                values.push(yy);
             }
         }
         values
@@ -7488,10 +11772,70 @@ mod $module {
     }
 
     fn sample_indices(examples: usize, batch_size: usize, rng: &mut StdRng) -> Vec<usize> {
-        let mut indices = (0..examples).collect::<Vec<_>>();
-        indices.shuffle(rng);
-        indices.truncate(batch_size.min(examples));
+        let batch_size = batch_size.min(examples);
+        if batch_size == 0 {
+            return Vec::new();
+        }
+        if batch_size.saturating_mul(4) > examples {
+            let mut indices = (0..examples).collect::<Vec<_>>();
+            indices.shuffle(rng);
+            indices.truncate(batch_size);
+            return indices;
+        }
+        let mut indices = Vec::with_capacity(batch_size);
+        while indices.len() < batch_size {
+            let idx = rng.random_range(0..examples);
+            if !indices.contains(&idx) {
+                indices.push(idx);
+            }
+        }
         indices
+    }
+
+    fn sample_rollout_indices(
+        sampler: &mut E2eIdentitySampler,
+        rollout_replicas: usize,
+        rng: &mut StdRng,
+    ) -> Vec<usize> {
+        sampler
+            .next_batch(rng)
+            .into_iter()
+            .flat_map(|example| std::iter::repeat_n(example, rollout_replicas.max(1)))
+            .collect()
+    }
+
+    fn e2e_sampling_rng(seed: u64, step: usize) -> StdRng {
+        StdRng::seed_from_u64(
+            seed ^ 0x51a9_1e5a_d00d_f00d_u64
+                ^ (step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        )
+    }
+
+    fn e2e_pool_rng(seed: u64, step: usize) -> StdRng {
+        StdRng::seed_from_u64(
+            seed ^ 0x9a7c_e2e0_f00d_51ce_u64
+                ^ (step as u64).wrapping_mul(0xd1b5_4a32_d192_ed03),
+        )
+    }
+
+    fn per_identity_seed_replacement_rows(
+        rollout_identities: &[usize],
+        trajectory_counts: &mut [usize],
+        interval: usize,
+    ) -> Vec<usize> {
+        let interval = interval.max(1);
+        let mut rows = Vec::new();
+        for (row, &identity) in rollout_identities.iter().enumerate() {
+            let Some(count) = trajectory_counts.get_mut(identity) else {
+                continue;
+            };
+            *count = count.saturating_add(1);
+            if *count >= interval {
+                *count %= interval;
+                rows.push(row);
+            }
+        }
+        rows
     }
 
     fn seeded_values(len: usize, scale: f32, rng: &mut StdRng) -> Vec<f32> {
@@ -7525,9 +11869,15 @@ mod $module {
         seed: u64,
         chunk_size: usize,
         output_chunks: usize,
+        module_layout: Option<&crate::hyper::adapter_layout::AdapterParameterLayout2d>,
     ) -> Vec<f32> {
         let adapter = NpaLowRankAdapter::seeded_zero_delta(config, rank, alpha, seed);
         let mut values = adapter.to_parameter_vector();
+        if let Some(layout) = module_layout {
+            return layout
+                .pack(&values)
+                .expect("module adapter layout matches seeded adapter");
+        }
         values.resize(output_chunks.saturating_mul(chunk_size), 0.0);
         values
     }
@@ -7561,13 +11911,14 @@ mod $module {
         Ok(())
     }
 
-    impl BurnHostParticlePool {
+    impl BurnDeviceParticlePool {
         fn new(
             pool_size: usize,
             particle_count: usize,
             state_dims: usize,
             seed_scale: f32,
             config: DirectBasisTrainConfig,
+            device: &BurnDevice,
         ) -> Self {
             let (positions, states) = seed_particles_scaled(
                 pool_size,
@@ -7578,12 +11929,20 @@ mod $module {
                 config.seed_mode,
                 seed_scale,
             );
+            let position_values = positions
+                .iter()
+                .flat_map(|position| [position[0], position[1]])
+                .collect::<Vec<_>>();
+            let inner_device = Device::<InnerBackend>::from(device.clone());
             Self {
-                positions: positions
-                    .iter()
-                    .flat_map(|position| [position[0], position[1]])
-                    .collect(),
-                states,
+                positions: Tensor::<InnerBackend, 3>::from_data(
+                    TensorData::new(position_values, [pool_size, particle_count, 2]),
+                    &inner_device,
+                ),
+                states: Tensor::<InnerBackend, 3>::from_data(
+                    TensorData::new(states, [pool_size, particle_count, state_dims]),
+                    &inner_device,
+                ),
                 pool_size,
                 particle_count,
                 state_dims,
@@ -7598,22 +11957,17 @@ mod $module {
             seed_scale: f32,
             config: DirectBasisTrainConfig,
             device: &BurnDevice,
-        ) -> BurnPoolBatch {
+        ) -> AutomataResult<BurnPoolBatch> {
             let mut pool_indices = (0..self.pool_size).collect::<Vec<_>>();
             pool_indices.shuffle(rng);
             pool_indices.truncate(batch_size.min(self.pool_size));
-
-            let mut positions = Vec::with_capacity(pool_indices.len() * self.particle_count * 2);
-            let mut states =
-                Vec::with_capacity(pool_indices.len() * self.particle_count * self.state_dims);
-            for pool_index in &pool_indices {
-                let position_start = pool_index * self.particle_count * 2;
-                let position_end = position_start + self.particle_count * 2;
-                positions.extend_from_slice(&self.positions[position_start..position_end]);
-                let state_start = pool_index * self.particle_count * self.state_dims;
-                let state_end = state_start + self.particle_count * self.state_dims;
-                states.extend_from_slice(&self.states[state_start..state_end]);
-            }
+            let inner_device = self.positions.device();
+            let indices = inner_index_tensor(&pool_indices, &inner_device);
+            let mut x = Tensor::<BurnBackend, 3>::from_inner(
+                self.positions.clone().select(0, indices.clone()),
+            );
+            let mut s =
+                Tensor::<BurnBackend, 3>::from_inner(self.states.clone().select(0, indices));
 
             if replace_seed && !pool_indices.is_empty() {
                 let seed = config.seed ^ rng.random::<u64>();
@@ -7626,63 +11980,67 @@ mod $module {
                     config.seed_mode,
                     seed_scale,
                 );
-                for (particle, position) in seed_positions.iter().enumerate() {
-                    let base = particle * 2;
-                    positions[base] = position[0];
-                    positions[base + 1] = position[1];
-                }
-                states[..self.particle_count * self.state_dims]
-                    .copy_from_slice(&seed_states[..self.particle_count * self.state_dims]);
+                let position_values = seed_positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect::<Vec<_>>();
+                let replacement = Tensor::<BurnBackend, 1, Int>::from_data(
+                    TensorData::new(vec![0_i64], [1]),
+                    device,
+                );
+                let new_positions = tensor3(
+                    position_values,
+                    [1, self.particle_count, 2],
+                    device,
+                );
+                let position_delta = new_positions - x.clone().select(0, replacement.clone());
+                x = x.select_assign(
+                    0,
+                    replacement.clone(),
+                    position_delta,
+                    IndexingUpdateOp::Add,
+                );
+                let new_states = tensor3(
+                    seed_states,
+                    [1, self.particle_count, self.state_dims],
+                    device,
+                );
+                let state_delta = new_states - s.clone().select(0, replacement.clone());
+                s = s.select_assign(0, replacement, state_delta, IndexingUpdateOp::Add);
             }
 
-            if config.brush_size > 0.0 {
-                self.apply_brush_damage(&positions, &mut states, pool_indices.len(), config.brush_size, rng);
+            if config.brush_size > 0.0 && !pool_indices.is_empty() {
+                let center_indices = (0..pool_indices.len())
+                    .map(|batch| {
+                        (batch * self.particle_count + rng.random_range(0..self.particle_count))
+                            as i64
+                    })
+                    .collect::<Vec<_>>();
+                let center_indices = Tensor::<BurnBackend, 1, Int>::from_data(
+                    TensorData::new(center_indices, [pool_indices.len()]),
+                    device,
+                );
+                let centers = x
+                    .clone()
+                    .reshape([pool_indices.len() * self.particle_count, 2])
+                    .select(0, center_indices)
+                    .reshape([pool_indices.len(), 1, 2])
+                    .expand([pool_indices.len(), self.particle_count, 2]);
+                let diff = x.clone() - centers;
+                let damaged = diff
+                    .clone()
+                    .mul(diff)
+                    .sum_dim(2)
+                    .lower_elem(config.brush_size * config.brush_size)
+                    .expand([pool_indices.len(), self.particle_count, self.state_dims]);
+                s = s.mask_fill(damaged, 0.0);
             }
 
-            BurnPoolBatch {
+            Ok(BurnPoolBatch {
                 pool_indices,
-                x: tensor3(
-                    positions,
-                    [batch_size.min(self.pool_size), self.particle_count, 2],
-                    device,
-                ),
-                s: tensor3(
-                    states,
-                    [
-                        batch_size.min(self.pool_size),
-                        self.particle_count,
-                        self.state_dims,
-                    ],
-                    device,
-                ),
-            }
-        }
-
-        fn apply_brush_damage(
-            &self,
-            positions: &[f32],
-            states: &mut [f32],
-            batch_size: usize,
-            brush_size: f32,
-            rng: &mut StdRng,
-        ) {
-            for batch in 0..batch_size {
-                let center_idx = batch * self.particle_count + rng.random_range(0..self.particle_count);
-                let center_base = center_idx * 2;
-                let center_x = positions[center_base];
-                let center_y = positions[center_base + 1];
-                let brush2 = brush_size * brush_size;
-                for particle in 0..self.particle_count {
-                    let row = batch * self.particle_count + particle;
-                    let position_base = row * 2;
-                    let dx = positions[position_base] - center_x;
-                    let dy = positions[position_base + 1] - center_y;
-                    if dx * dx + dy * dy < brush2 {
-                        let state_base = row * self.state_dims;
-                        states[state_base..state_base + self.state_dims].fill(0.0);
-                    }
-                }
-            }
+                x,
+                s,
+            })
         }
 
         fn update_batch(
@@ -7691,84 +12049,105 @@ mod $module {
             x: Tensor3,
             s: Tensor3,
         ) -> AutomataResult<()> {
-            let positions = tensor3_vec(x.inner())?;
-            let states = tensor3_vec(s.inner())?;
-            for (batch, pool_index) in pool_indices.iter().copied().enumerate() {
-                let position_dst = pool_index * self.particle_count * 2;
-                let position_src = batch * self.particle_count * 2;
-                self.positions[position_dst..position_dst + self.particle_count * 2]
-                    .copy_from_slice(&positions[position_src..position_src + self.particle_count * 2]);
-
-                let state_dst = pool_index * self.particle_count * self.state_dims;
-                let state_src = batch * self.particle_count * self.state_dims;
-                self.states[state_dst..state_dst + self.particle_count * self.state_dims]
-                    .copy_from_slice(&states[state_src..state_src + self.particle_count * self.state_dims]);
+            if pool_indices.is_empty() {
+                return Ok(());
             }
+            let inner_device = self.positions.device();
+            let indices = inner_index_tensor(pool_indices, &inner_device);
+            let position_delta = x.inner() - self.positions.clone().select(0, indices.clone());
+            self.positions = self.positions.clone().select_assign(
+                0,
+                indices.clone(),
+                position_delta,
+                IndexingUpdateOp::Add,
+            );
+            let state_delta = s.inner() - self.states.clone().select(0, indices.clone());
+            self.states = self.states.clone().select_assign(
+                0,
+                indices,
+                state_delta,
+                IndexingUpdateOp::Add,
+            );
             Ok(())
         }
     }
 
-    impl BurnE2eHostParticlePool {
+    impl BurnE2eDeviceParticlePool {
         fn new(
-            examples: usize,
-            slots_per_example: usize,
+            capacity: usize,
             particle_count: usize,
             state_dims: usize,
-            seed_scale: f32,
-            config: DirectBasisTrainConfig,
+            slots_per_example: usize,
+            device: &BurnDevice,
         ) -> Self {
-            let pool_rows = examples.max(1).saturating_mul(slots_per_example.max(1));
-            let (positions, states) = seed_particles_scaled(
-                pool_rows,
-                particle_count,
-                state_dims,
-                2,
-                config.seed,
-                config.seed_mode,
-                seed_scale,
-            );
+            let inner_device = Device::<InnerBackend>::from(device.clone());
             Self {
-                positions: positions
-                    .iter()
-                    .flat_map(|position| [position[0], position[1]])
-                    .collect(),
-                states,
-                examples: examples.max(1),
-                slots_per_example: slots_per_example.max(1),
+                positions: Tensor::<InnerBackend, 3>::zeros(
+                    [capacity, particle_count, 2],
+                    &inner_device,
+                ),
+                states: Tensor::<InnerBackend, 3>::zeros(
+                    [capacity, particle_count, state_dims],
+                    &inner_device,
+                ),
+                slot_examples: vec![None; capacity],
+                example_slots: HashMap::with_capacity(capacity),
+                next_evict: 0,
+                capacity,
                 particle_count,
                 state_dims,
+                slots_per_example: slots_per_example.max(1),
             }
         }
 
         fn sample_batch(
-            &self,
+            &mut self,
             example_indices: &[usize],
             rng: &mut StdRng,
-            replace_seed: bool,
+            seed_replacement_rows: &[usize],
             seed_scale: f32,
             config: DirectBasisTrainConfig,
             device: &BurnDevice,
-        ) -> BurnE2ePoolBatch {
-            let batch_size = example_indices.len();
-            let mut keys = Vec::with_capacity(batch_size);
-            let mut positions = Vec::with_capacity(batch_size * self.particle_count * 2);
-            let mut states = Vec::with_capacity(batch_size * self.particle_count * self.state_dims);
-            for &example in example_indices {
-                let slot = rng.random_range(0..self.slots_per_example);
-                let key = BurnE2ePoolKey {
-                    example: example.min(self.examples - 1),
-                    slot,
-                };
-                self.extend_state_for_key(key, &mut positions, &mut states);
-                keys.push(key);
+        ) -> AutomataResult<BurnE2ePoolBatch> {
+            if example_indices.len() > self.capacity {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "device particle pool capacity {} is smaller than batch {}",
+                    self.capacity,
+                    example_indices.len()
+                )));
             }
-
-            let mut seed_replacements = 0usize;
-            if replace_seed && batch_size > 0 {
-                let replacement_row = rng.random_range(0..batch_size);
+            let mut slots = Vec::with_capacity(example_indices.len());
+            let mut new_slots = Vec::new();
+            let mut replica_choices = HashMap::<usize, Vec<usize>>::new();
+            for &example in example_indices {
+                let choices = replica_choices.entry(example).or_insert_with(|| {
+                    let mut choices = (0..self.slots_per_example).collect::<Vec<_>>();
+                    choices.shuffle(rng);
+                    choices
+                });
+                let replica = choices.pop().ok_or_else(|| {
+                    AutomataError::InvalidArgument(format!(
+                        "requested more than {} rollout replicas for example {example}",
+                        self.slots_per_example
+                    ))
+                })?;
+                let key = (example, replica);
+                if let Some(&slot) = self.example_slots.get(&key) {
+                    slots.push(slot);
+                    continue;
+                }
+                let slot = self.allocate_slot(&slots);
+                if let Some(previous) = self.slot_examples[slot].replace(key) {
+                    self.example_slots.remove(&previous);
+                }
+                self.example_slots.insert(key, slot);
+                slots.push(slot);
+                new_slots.push(slot);
+            }
+            if !new_slots.is_empty() {
                 let seed = config.seed ^ rng.random::<u64>();
-                let (seed_positions, seed_states) = seed_particles_scaled(
-                    1,
+                let (positions, states) = seed_particles_scaled(
+                    new_slots.len(),
                     self.particle_count,
                     self.state_dims,
                     2,
@@ -7776,104 +12155,270 @@ mod $module {
                     config.seed_mode,
                     seed_scale,
                 );
-                let position_base = replacement_row * self.particle_count * 2;
-                for (particle, position) in seed_positions.iter().enumerate() {
-                    let base = position_base + particle * 2;
-                    positions[base] = position[0];
-                    positions[base + 1] = position[1];
-                }
-                let state_base = replacement_row * self.particle_count * self.state_dims;
-                states[state_base..state_base + self.particle_count * self.state_dims]
-                    .copy_from_slice(&seed_states[..self.particle_count * self.state_dims]);
-                seed_replacements = 1;
+                let position_values = positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect::<Vec<_>>();
+                let inner_device = self.positions.device();
+                let indices = inner_index_tensor(&new_slots, &inner_device);
+                let new_positions = Tensor::<InnerBackend, 3>::from_data(
+                        TensorData::new(
+                            position_values,
+                            [new_slots.len(), self.particle_count, 2],
+                        ),
+                        &inner_device,
+                    );
+                let position_delta = new_positions - self.positions.clone().select(0, indices.clone());
+                self.positions = self.positions.clone().select_assign(
+                    0,
+                    indices.clone(),
+                    position_delta,
+                    IndexingUpdateOp::Add,
+                );
+                let new_states = Tensor::<InnerBackend, 3>::from_data(
+                        TensorData::new(
+                            states,
+                            [new_slots.len(), self.particle_count, self.state_dims],
+                        ),
+                        &inner_device,
+                    );
+                let state_delta = new_states - self.states.clone().select(0, indices.clone());
+                self.states = self.states.clone().select_assign(
+                    0,
+                    indices,
+                    state_delta,
+                    IndexingUpdateOp::Add,
+                );
             }
 
-            if config.brush_size > 0.0 {
-                self.apply_brush_damage(&positions, &mut states, batch_size, config.brush_size, rng);
-            }
-
-            BurnE2ePoolBatch {
-                keys,
-                x: tensor3(positions, [batch_size, self.particle_count, 2], device),
-                s: tensor3(
-                    states,
-                    [batch_size, self.particle_count, self.state_dims],
+            let inner_device = self.positions.device();
+            let slot_indices = inner_index_tensor(&slots, &inner_device);
+            let mut x = Tensor::<BurnBackend, 3>::from_inner(
+                self.positions.clone().select(0, slot_indices.clone()),
+            );
+            let mut s = Tensor::<BurnBackend, 3>::from_inner(
+                self.states.clone().select(0, slot_indices),
+            );
+            let mut replacement_rows = seed_replacement_rows
+                .iter()
+                .copied()
+                .filter(|row| *row < slots.len())
+                .collect::<Vec<_>>();
+            replacement_rows.sort_unstable();
+            replacement_rows.dedup();
+            let seed_replacements = replacement_rows.len();
+            if seed_replacements > 0 {
+                let seed = config.seed ^ rng.random::<u64>();
+                let (positions, states) = seed_particles_scaled(
+                    seed_replacements,
+                    self.particle_count,
+                    self.state_dims,
+                    2,
+                    seed,
+                    config.seed_mode,
+                    seed_scale,
+                );
+                let position_values = positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect::<Vec<_>>();
+                let replacement = Tensor::<BurnBackend, 1, Int>::from_data(
+                    TensorData::new(
+                        replacement_rows
+                            .iter()
+                            .map(|row| *row as i64)
+                            .collect::<Vec<_>>(),
+                        [seed_replacements],
+                    ),
                     device,
-                ),
+                );
+                let new_positions = tensor3(
+                    position_values,
+                    [seed_replacements, self.particle_count, 2],
+                    device,
+                );
+                let position_delta = new_positions - x.clone().select(0, replacement.clone());
+                x = x.select_assign(
+                    0,
+                    replacement.clone(),
+                    position_delta,
+                    IndexingUpdateOp::Add,
+                );
+                let new_states = tensor3(
+                    states,
+                    [seed_replacements, self.particle_count, self.state_dims],
+                    device,
+                );
+                let state_delta = new_states - s.clone().select(0, replacement.clone());
+                s = s.select_assign(
+                    0,
+                    replacement,
+                    state_delta,
+                    IndexingUpdateOp::Add,
+                );
+            }
+            if config.brush_size > 0.0 && !slots.is_empty() {
+                let center_particles = (0..slots.len())
+                    .map(|_| rng.random_range(0..self.particle_count))
+                    .collect::<Vec<_>>();
+                let centers = gather_live_particle_centers(x.clone(), &center_particles, device)
+                    .expand([slots.len(), self.particle_count, 2]);
+                let diff = x.clone() - centers;
+                let damaged = diff
+                    .clone()
+                    .mul(diff)
+                    .sum_dim(2)
+                    .lower_elem(config.brush_size * config.brush_size)
+                    .expand([slots.len(), self.particle_count, self.state_dims]);
+                s = s.mask_fill(damaged, 0.0);
+            }
+            Ok(BurnE2ePoolBatch {
+                slots,
+                x,
+                s,
                 seed_replacements,
-            }
-        }
-
-        fn apply_brush_damage(
-            &self,
-            positions: &[f32],
-            states: &mut [f32],
-            batch_size: usize,
-            brush_size: f32,
-            rng: &mut StdRng,
-        ) {
-            for batch in 0..batch_size {
-                let center_idx =
-                    batch * self.particle_count + rng.random_range(0..self.particle_count);
-                let center_base = center_idx * 2;
-                let center_x = positions[center_base];
-                let center_y = positions[center_base + 1];
-                let brush2 = brush_size * brush_size;
-                for particle in 0..self.particle_count {
-                    let row = batch * self.particle_count + particle;
-                    let position_base = row * 2;
-                    let dx = positions[position_base] - center_x;
-                    let dy = positions[position_base + 1] - center_y;
-                    if dx * dx + dy * dy < brush2 {
-                        let state_base = row * self.state_dims;
-                        states[state_base..state_base + self.state_dims].fill(0.0);
-                    }
-                }
-            }
+            })
         }
 
         fn update_batch(
             &mut self,
-            keys: &[BurnE2ePoolKey],
+            slots: &[usize],
             x: Tensor3,
             s: Tensor3,
         ) -> AutomataResult<()> {
-            let positions = tensor3_vec(x.inner())?;
-            let states = tensor3_vec(s.inner())?;
-            for (batch, key) in keys.iter().copied().enumerate() {
-                let pool_index = self.pool_index(key);
-                let position_dst = pool_index * self.particle_count * 2;
-                let position_src = batch * self.particle_count * 2;
-                self.positions[position_dst..position_dst + self.particle_count * 2]
-                    .copy_from_slice(&positions[position_src..position_src + self.particle_count * 2]);
-
-                let state_dst = pool_index * self.particle_count * self.state_dims;
-                let state_src = batch * self.particle_count * self.state_dims;
-                self.states[state_dst..state_dst + self.particle_count * self.state_dims]
-                    .copy_from_slice(&states[state_src..state_src + self.particle_count * self.state_dims]);
+            if slots.is_empty() {
+                return Ok(());
             }
+            let inner_device = self.positions.device();
+            let indices = inner_index_tensor(slots, &inner_device);
+            let persisted_x = x.inner().clamp(-1.0, 1.0);
+            let position_delta =
+                persisted_x - self.positions.clone().select(0, indices.clone());
+            self.positions = self.positions.clone().select_assign(
+                0,
+                indices.clone(),
+                position_delta,
+                IndexingUpdateOp::Add,
+            );
+            // Upstream persists mature recurrent state without amplitude clipping. Keep a
+            // generous finite safety bound, but do not erase valid attractor state at +/-1.
+            let persisted_s = s.inner().clamp(-32.0, 32.0);
+            let state_delta = persisted_s - self.states.clone().select(0, indices.clone());
+            self.states = self.states.clone().select_assign(
+                0,
+                indices,
+                state_delta,
+                IndexingUpdateOp::Add,
+            );
             Ok(())
         }
 
-        fn extend_state_for_key(
-            &self,
-            key: BurnE2ePoolKey,
-            positions: &mut Vec<f32>,
-            states: &mut Vec<f32>,
-        ) {
-            let pool_index = self.pool_index(key);
-            let position_start = pool_index * self.particle_count * 2;
-            let position_end = position_start + self.particle_count * 2;
-            positions.extend_from_slice(&self.positions[position_start..position_end]);
-            let state_start = pool_index * self.particle_count * self.state_dims;
-            let state_end = state_start + self.particle_count * self.state_dims;
-            states.extend_from_slice(&self.states[state_start..state_end]);
+        fn snapshot(&self) -> AutomataResult<E2eParticlePoolSnapshot> {
+            Ok(E2eParticlePoolSnapshot {
+                positions: tensor3_snapshot("pool.positions", self.positions.clone())?,
+                states: tensor3_snapshot("pool.states", self.states.clone())?,
+                slot_examples: self.slot_examples.clone(),
+                next_evict: self.next_evict,
+                slots_per_example: self.slots_per_example,
+            })
         }
 
-        fn pool_index(&self, key: BurnE2ePoolKey) -> usize {
-            key.example.min(self.examples - 1) * self.slots_per_example
-                + key.slot.min(self.slots_per_example - 1)
+        fn restore(
+            snapshot: &E2eParticlePoolSnapshot,
+            config: BurnE2eRolloutTrainConfig,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            let position_shape: [usize; 3] = snapshot
+                .positions
+                .shape
+                .clone()
+                .try_into()
+                .map_err(|_| {
+                    AutomataError::InvalidArgument(
+                        "checkpoint pool positions are not rank three".to_string(),
+                    )
+                })?;
+            let state_shape: [usize; 3] = snapshot.states.shape.clone().try_into().map_err(|_| {
+                AutomataError::InvalidArgument(
+                    "checkpoint pool states are not rank three".to_string(),
+                )
+            })?;
+            if position_shape[0] != state_shape[0]
+                || position_shape[1] != state_shape[1]
+                || position_shape[2] != 2
+                || state_shape[2] != 16
+                || position_shape[0] != snapshot.slot_examples.len()
+                || position_shape[0] != config.pool_capacity
+                || position_shape[1] != config.rollout_particles
+                || snapshot.slots_per_example != config.pool_slots_per_example
+            {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "checkpoint particle pool shape {:?}/{:?} is incompatible with capacity={} particles={} slots_per_example={}",
+                    position_shape,
+                    state_shape,
+                    config.pool_capacity,
+                    config.rollout_particles,
+                    config.pool_slots_per_example,
+                )));
+            }
+            let mut example_slots = HashMap::with_capacity(snapshot.slot_examples.len());
+            for (slot, key) in snapshot.slot_examples.iter().enumerate() {
+                if let Some(key) = key {
+                    example_slots.insert(*key, slot);
+                }
+            }
+            Ok(Self {
+                positions: tensor3_from_snapshot(&snapshot.positions, device)?,
+                states: tensor3_from_snapshot(&snapshot.states, device)?,
+                slot_examples: snapshot.slot_examples.clone(),
+                example_slots,
+                next_evict: snapshot.next_evict % config.pool_capacity.max(1),
+                capacity: config.pool_capacity,
+                particle_count: config.rollout_particles,
+                state_dims: 16,
+                slots_per_example: config.pool_slots_per_example,
+            })
         }
+
+        fn allocate_slot(&mut self, protected: &[usize]) -> usize {
+            if let Some(slot) = self.slot_examples.iter().position(Option::is_none) {
+                return slot;
+            }
+            for _ in 0..self.capacity {
+                let slot = self.next_evict;
+                self.next_evict = (self.next_evict + 1) % self.capacity;
+                if !protected.contains(&slot) {
+                    return slot;
+                }
+            }
+            unreachable!("pool capacity is validated against batch size")
+        }
+    }
+
+    fn gather_live_particle_centers(
+        positions: Tensor3,
+        particle_indices: &[usize],
+        device: &BurnDevice,
+    ) -> Tensor3 {
+        let indices = particle_indices
+            .iter()
+            .flat_map(|index| [*index as i64, *index as i64])
+            .collect::<Vec<_>>();
+        let indices = Tensor::<BurnBackend, 3, Int>::from_data(
+            TensorData::new(indices, [particle_indices.len(), 1, 2]),
+            device,
+        );
+        positions.gather(1, indices)
+    }
+
+    fn inner_index_tensor(indices: &[usize], device: &Device<InnerBackend>) -> Tensor1IntInner {
+        Tensor::from_data(
+            TensorData::new(
+                indices.iter().map(|index| *index as i64).collect::<Vec<_>>(),
+                [indices.len()],
+            ),
+            device,
+        )
     }
 
     struct PhaseBatchSampler {
@@ -8060,6 +12605,33 @@ mod $module {
         total.expect("gradient group has tensors").sqrt()
     }
 
+    fn normalize_sample_id_table_gradient(
+        gradient: Tensor2Inner,
+        segments: &[(usize, usize)],
+    ) -> Tensor2Inner {
+        let dims = gradient.shape().dims::<2>();
+        debug_assert_eq!(
+            segments.iter().map(|(_, len)| *len).sum::<usize>(),
+            dims[0]
+        );
+        Tensor::cat(
+            segments
+                .iter()
+                .map(|&(offset, len)| {
+                    let segment = gradient.clone().narrow(0, offset, len);
+                    let per_identity_norm = segment
+                        .clone()
+                        .mul(segment.clone())
+                        .sum_dim(0)
+                        .sqrt()
+                        .add_scalar(1.0e-8);
+                    segment.div(per_identity_norm.expand([len, dims[1]]))
+                })
+                .collect(),
+            0,
+        )
+    }
+
     fn tensor_l2_norm_tensor(tensor: &Tensor2Inner) -> Tensor1Inner {
         tensor.clone().mul(tensor.clone()).sum().sqrt()
     }
@@ -8128,6 +12700,10 @@ mod $module {
         Tensor::<BurnBackend, 3>::from_data(TensorData::new(values, shape), device)
     }
 
+    fn tensor4(values: Vec<f32>, shape: [usize; 4], device: &BurnDevice) -> Tensor4 {
+        Tensor::<BurnBackend, 4>::from_data(TensorData::new(values, shape), device)
+    }
+
     fn tensor1(values: Vec<f32>, shape: [usize; 1], device: &BurnDevice) -> Tensor1 {
         Tensor::<BurnBackend, 1>::from_data(TensorData::new(values, shape), device)
     }
@@ -8142,6 +12718,12 @@ mod $module {
 
     fn detach3(tensor: Tensor3) -> Tensor3 {
         Tensor::<BurnBackend, 3>::from_inner(tensor.inner())
+    }
+
+    fn sync_training_device(device: &BurnDevice) -> Result<(), Box<dyn std::error::Error>> {
+        let inner_device: Device<InnerBackend> = device.clone();
+        <InnerBackend as Backend>::sync(&inner_device)?;
+        Ok(())
     }
 
     fn target_2d_detached_color_gate2(density_term: Tensor2) -> Tensor2 {
@@ -8170,10 +12752,78 @@ mod $module {
         })
     }
 
+    fn tensor2_snapshot(name: &str, tensor: Tensor2Inner) -> AutomataResult<E2eTensorSnapshot> {
+        let shape = tensor.shape().dims::<2>();
+        Ok(E2eTensorSnapshot {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            values: tensor_vec(tensor)?,
+        })
+    }
+
+    fn tensor2_from_snapshot(
+        snapshot: &E2eTensorSnapshot,
+        device: &BurnDevice,
+    ) -> AutomataResult<Tensor2Inner> {
+        let shape: [usize; 2] = snapshot.shape.clone().try_into().map_err(|_| {
+            AutomataError::InvalidArgument(format!(
+                "checkpoint tensor {} is not rank two",
+                snapshot.name
+            ))
+        })?;
+        if shape[0].saturating_mul(shape[1]) != snapshot.values.len() {
+            return Err(AutomataError::InvalidArgument(format!(
+                "checkpoint tensor {} shape {:?} does not match {} values",
+                snapshot.name,
+                shape,
+                snapshot.values.len()
+            )));
+        }
+        let inner_device: Device<InnerBackend> = device.clone();
+        Ok(Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(snapshot.values.clone(), shape),
+            &inner_device,
+        ))
+    }
+
     fn tensor3_vec(tensor: Tensor3Inner) -> AutomataResult<Vec<f32>> {
         tensor.into_data().to_vec::<f32>().map_err(|err| {
             AutomataError::InvalidArgument(format!("Burn dense tensor readback failed: {err}"))
         })
+    }
+
+    fn tensor3_snapshot(name: &str, tensor: Tensor3Inner) -> AutomataResult<E2eTensorSnapshot> {
+        let shape = tensor.shape().dims::<3>();
+        Ok(E2eTensorSnapshot {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            values: tensor3_vec(tensor)?,
+        })
+    }
+
+    fn tensor3_from_snapshot(
+        snapshot: &E2eTensorSnapshot,
+        device: &BurnDevice,
+    ) -> AutomataResult<Tensor3Inner> {
+        let shape: [usize; 3] = snapshot.shape.clone().try_into().map_err(|_| {
+            AutomataError::InvalidArgument(format!(
+                "checkpoint tensor {} is not rank three",
+                snapshot.name
+            ))
+        })?;
+        if shape.iter().product::<usize>() != snapshot.values.len() {
+            return Err(AutomataError::InvalidArgument(format!(
+                "checkpoint tensor {} shape {:?} does not match {} values",
+                snapshot.name,
+                shape,
+                snapshot.values.len()
+            )));
+        }
+        let inner_device: Device<InnerBackend> = device.clone();
+        Ok(Tensor::<InnerBackend, 3>::from_data(
+            TensorData::new(snapshot.values.clone(), shape),
+            &inner_device,
+        ))
     }
 
     fn tensor1_vec(tensor: Tensor1Inner) -> AutomataResult<Vec<f32>> {
@@ -8290,6 +12940,191 @@ mod $module {
     mod tests {
         use super::*;
 
+        #[test]
+        fn sample_id_table_gradients_normalize_each_parameter_and_identity() {
+            let device = BurnDevice::default();
+            let inner_device: Device<InnerBackend> = device;
+            let gradient = Tensor::<InnerBackend, 2>::from_data(
+                TensorData::new(vec![3.0, 0.0, 4.0, 5.0, 0.0, 6.0, 0.0, 8.0], [4, 2]),
+                &inner_device,
+            );
+            let normalized = normalize_sample_id_table_gradient(gradient, &[(0, 2), (2, 2)]);
+            let values = normalized.into_data().to_vec::<f32>().unwrap();
+            let expected = [0.6, 0.0, 0.8, 1.0, 0.0, 0.6, 0.0, 0.8];
+            assert!(max_abs_difference(&values, &expected) <= 1.0e-5);
+        }
+
+        #[test]
+        fn module_token_v3_burn_forward_matches_serialized_inference() {
+            let device = BurnDevice::default();
+            let config = NpaConfig::growing_2d();
+            let rank = 2;
+            let chunk_size = 16;
+            let hidden_dims = 4;
+            let attention_heads = 2;
+            let embed_dims = 3;
+            let token_count = 3;
+            let layout = crate::hyper::adapter_layout::AdapterParameterLayout2d::new(
+                &config,
+                rank,
+                chunk_size,
+            )
+            .unwrap();
+            let token_w = vec![
+                0.7, 0.1, 0.0, 0.0, 0.8, 0.2, 0.1, 0.0, 0.9, 0.3, 0.4, 0.5,
+            ];
+            let token_b = vec![0.01, 0.02, 0.03, 0.04];
+            let token_gate_w = layout.structured_query_initialization(hidden_dims, 0.2);
+            let token_gate_b = layout.structured_query_initialization(hidden_dims, 0.1);
+            let state_w = vec![0.0; hidden_dims * chunk_size];
+            let time_w = vec![0.0; hidden_dims];
+            let output_w = (0..chunk_size * hidden_dims)
+                .map(|index| ((index % 11) as f32 - 5.0) * 0.003)
+                .collect::<Vec<_>>();
+            let output_b = vec![0.0; layout.padded_parameter_count()];
+            let condition = vec![0.9, 0.1, 0.2, 0.1, 0.8, 0.3, 0.2, 0.3, 0.9];
+            let output_dims = layout.parameter_count;
+
+            let generator = BurnE2eGeneratorParams {
+                kind: E2eHyperGeneratorKind::ModuleTokenDecoder,
+                token_w: tracked_tensor(
+                    token_w.clone(),
+                    [hidden_dims, embed_dims],
+                    &device,
+                ),
+                token_b: tracked_tensor(token_b.clone(), [1, hidden_dims], &device),
+                token_gate_w: tracked_tensor(
+                    token_gate_w.clone(),
+                    [layout.chunk_count, hidden_dims],
+                    &device,
+                ),
+                token_gate_b: tracked_tensor(
+                    token_gate_b.clone(),
+                    [layout.chunk_count, hidden_dims],
+                    &device,
+                ),
+                state_w: tracked_tensor(
+                    state_w.clone(),
+                    [hidden_dims, chunk_size],
+                    &device,
+                ),
+                time_w: tracked_tensor(time_w.clone(), [hidden_dims, 1], &device),
+                output_w: tracked_tensor(
+                    output_w.clone(),
+                    [chunk_size, hidden_dims],
+                    &device,
+                ),
+                output_b: tracked_tensor(
+                    output_b.clone(),
+                    [layout.chunk_count, chunk_size],
+                    &device,
+                ),
+                condition_control_w: tracked_tensor(
+                    vec![0.0; config.update_dims() * hidden_dims],
+                    [config.update_dims(), hidden_dims],
+                    &device,
+                ),
+                condition_control_b: tracked_tensor(
+                    vec![0.0; config.update_dims()],
+                    [1, config.update_dims()],
+                    &device,
+                ),
+                condition_control_state_w: tracked_tensor(
+                    vec![0.0; hidden_dims * config.state_dims],
+                    [hidden_dims, config.state_dims],
+                    &device,
+                ),
+                hidden_dims,
+                token_attention_heads: attention_heads,
+                softmax_token_attention: true,
+                canonical_full_rank_lora: false,
+                adapter_constants: tracked_tensor(vec![0.0; output_dims], [1, output_dims], &device),
+                adapter_trainable_mask: tracked_tensor(
+                    vec![1.0; output_dims],
+                    [1, output_dims],
+                    &device,
+                ),
+                adapter_parameter_segments: BurnE2eGeneratorParams::adapter_parameter_segments(
+                    &config, rank,
+                ),
+                output_dims,
+                output_scale: 1.0,
+                sample_steps: 1,
+                adapter_chunk_size: chunk_size,
+                output_chunks: layout.chunk_count,
+            };
+            let burn_vector = tensor_vec(
+                generator
+                    .spatial_token_adapter_vector_batch(
+                        tensor3(condition.clone(), [1, token_count, embed_dims], &device),
+                        &config,
+                        rank,
+                    )
+                    .inner(),
+            )
+            .unwrap();
+            let hyper = E2eHyperNpa2d {
+                version: 1,
+                architecture: E2eHyperGeneratorKind::ModuleTokenDecoder
+                    .artifact_architecture()
+                    .to_string(),
+                backend: Some("test".to_string()),
+                condition_encoder: Some("dino-vits-full-tokens".to_string()),
+                condition_token_count: Some(token_count),
+                condition_embed_dims: Some(embed_dims),
+                condition_token_grid_width: None,
+                condition_token_grid_height: None,
+                condition_image_size: Some(224),
+                condition_alpha_mode: Some("composite-white".to_string()),
+                condition_rgb_channels: Some(false),
+                condition_rgb_channel_scale: Some(1.0),
+                condition_alpha_channel: Some(false),
+                condition_alpha_channel_scale: Some(1.0),
+                condition_l2_normalize_features: Some(false),
+                condition_resize_mode: Some("stretch".to_string()),
+                condition_application: Some("static-adapter".to_string()),
+                shared_base_sha256: None,
+                hidden_dims,
+                token_attention_heads: attention_heads,
+                attention_normalization: Some(
+                    crate::hyper::e2e::E2E_HYPER_ATTENTION_SOFTMAX.to_string(),
+                ),
+                output_dims,
+                sample_steps: 1,
+                output_scale: 1.0,
+                adapter_rank: Some(rank),
+                adapter_alpha: Some(rank as f32),
+                adapter_parameterization: Some(E2E_HYPER_ADAPTER_FACTORIZED.to_string()),
+                adapter_chunk_size: Some(chunk_size),
+                spatial_condition_control: None,
+                spatial_condition_control_scale: None,
+                spatial_condition_control_sigma: None,
+                spatial_condition_state_control: None,
+                weights: E2eHyperNpa2dWeights {
+                    token_w,
+                    token_b,
+                    token_gate_w,
+                    token_gate_b,
+                    state_w,
+                    time_w,
+                    output_w,
+                    output_b,
+                    condition_control_w: Vec::new(),
+                    condition_control_b: Vec::new(),
+                    condition_control_state_w: Vec::new(),
+                },
+            };
+            let inference_vector = hyper
+                .predict_adapter(&config, &condition)
+                .unwrap()
+                .to_parameter_vector();
+
+            assert!(
+                max_abs_difference(&burn_vector, &inference_vector) < 2.0e-5,
+                "Burn and serialized inference module-token v3 forwards diverged"
+            );
+        }
+
         fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
             assert_eq!(left.len(), right.len());
             left.iter()
@@ -8388,6 +13223,91 @@ mod $module {
         }
 
         #[test]
+        fn functional_teacher_probe_loss_distinguishes_adapter_behavior() {
+            let device = BurnDevice::default();
+            let config = NpaConfig::growing_2d();
+            let base = NpaModel::upstream_seeded(config.clone(), 7);
+            let params = BurnBaseParams::from_model(&base, &device).unwrap();
+            let rank = 4;
+            let mut adapter = NpaLowRankAdapter::seeded(&config, rank, rank as f32, 19);
+            adapter.b2_delta.fill(0.25);
+            let adapter_vector = adapter.to_parameter_vector();
+            let adapter_batch = BurnAdapterBatch::from_parameter_vector(
+                tensor(adapter_vector, [1, adapter.parameter_count()], &device),
+                &config,
+                rank,
+                rank as f32,
+            );
+            let zero_batch = BurnAdapterBatch::from_parameter_vector(
+                Tensor::<BurnBackend, 2>::zeros([1, adapter.parameter_count()], &device),
+                &config,
+                rank,
+                rank as f32,
+            );
+            let feature_dims = config.perception_dims();
+            let features = tensor3(
+                (0..3 * feature_dims)
+                    .map(|idx| (idx as f32 * 0.071).sin())
+                    .collect(),
+                [1, 3, feature_dims],
+                &device,
+            );
+            let teacher = params.forward_adapter_batch(features.clone(), &adapter_batch);
+            let matching = params.forward_adapter_batch(features.clone(), &adapter_batch);
+            let mismatched = params.forward_adapter_batch(features, &zero_batch);
+            let matching_delta = matching - teacher.clone();
+            let mismatched_delta = mismatched - teacher;
+            let matching_mse = matching_delta
+                .clone()
+                .mul(matching_delta)
+                .mean()
+                .inner()
+                .into_scalar();
+            let mismatched_mse = mismatched_delta
+                .clone()
+                .mul(mismatched_delta)
+                .mean()
+                .inner()
+                .into_scalar();
+
+            assert!(matching_mse <= 1.0e-12);
+            assert!(mismatched_mse > 1.0e-8);
+        }
+
+        #[test]
+        fn spatial_condition_state_projection_is_zero_warm_start_compatible() {
+            let device = BurnDevice::default();
+            let x = tensor3(vec![0.0, 0.0], [1, 1, 2], &device);
+            let state = tensor3(vec![1.0, 0.0], [1, 1, 2], &device);
+            let base = BurnE2eConditionControlBatch {
+                patch_hidden: tensor3(vec![1.0, 0.0], [1, 1, 2], &device),
+                update_w: tensor(vec![1.0, 0.0, 0.0, 1.0], [2, 2], &device),
+                update_b: tensor(vec![0.0, 0.0], [1, 2], &device),
+                state_w: None,
+                grid_width: 1,
+                grid_height: 1,
+                sigma: 0.25,
+                scale: 1.0,
+            };
+            let baseline = tensor3_vec(base.update_for_particles(&x, &state).inner()).unwrap();
+            let zero_state = BurnE2eConditionControlBatch {
+                state_w: Some(tensor(vec![0.0; 4], [2, 2], &device)),
+                ..base.clone()
+            };
+            let zero_state_output =
+                tensor3_vec(zero_state.update_for_particles(&x, &state).inner()).unwrap();
+            assert_eq!(baseline, zero_state_output);
+
+            let state_aware = BurnE2eConditionControlBatch {
+                state_w: Some(tensor(vec![1.0, 0.0, 0.0, 1.0], [2, 2], &device)),
+                ..base
+            };
+            let state_aware_output =
+                tensor3_vec(state_aware.update_for_particles(&x, &state).inner()).unwrap();
+            assert!(state_aware_output[0] > baseline[0]);
+        }
+
+        #[test]
         fn perception_auto_uses_fused_path_for_training_scale_particles() {
             let mut small = test_direct_config(127);
             small.perception_backend = PerceptionRolloutBackend::Auto;
@@ -8408,7 +13328,27 @@ mod $module {
         }
 
         #[test]
-        fn stochastic_rollout_step_sampler_can_emit_configured_maximum() {
+        fn target2d_auto_uses_device_adjoint_for_training_scale_particles() {
+            let mut small = test_direct_config(127);
+            small.target2d_loss_backend = Target2dLossBackend::Auto;
+            assert_eq!(target2d_loss_backend_effective(small), Target2dLossBackend::Dense);
+
+            let mut training_scale = test_direct_config(128);
+            training_scale.target2d_loss_backend = Target2dLossBackend::Auto;
+            #[cfg($perception_cube_feature)]
+            assert_eq!(
+                target2d_loss_backend_effective(training_scale),
+                Target2dLossBackend::TiledAdjoint
+            );
+            #[cfg(not($perception_cube_feature))]
+            assert_eq!(
+                target2d_loss_backend_effective(training_scale),
+                Target2dLossBackend::Dense
+            );
+        }
+
+        #[test]
+        fn stochastic_rollout_step_sampler_matches_upstream_exclusive_maximum() {
             let mut config = test_direct_config(4);
             config.rollout_step_min = 2;
             config.rollout_steps = 4;
@@ -8416,13 +13356,27 @@ mod $module {
                 .map(|seed| sampled_training_rollout_steps(config, seed))
                 .collect::<Vec<_>>();
             assert!(
-                samples.iter().all(|steps| (2..=4).contains(steps)),
-                "sampled rollout steps escaped configured inclusive range: {samples:?}"
+                samples.iter().all(|steps| (2..4).contains(steps)),
+                "sampled rollout steps escaped configured upstream range: {samples:?}"
             );
             assert!(
-                samples.contains(&4),
-                "sampled rollout steps never reached configured maximum: {samples:?}"
+                samples.contains(&2) && samples.contains(&3) && !samples.contains(&4),
+                "sampled rollout steps did not match the upstream-exclusive maximum: {samples:?}"
             );
+        }
+
+        #[test]
+        fn brush_centers_are_gathered_from_live_particles_per_batch_row() {
+            let device = BurnDevice::default();
+            let positions = tensor3(
+                vec![
+                    -0.9, -0.8, -0.4, -0.3, 0.1, 0.2, 0.3, 0.4, 0.7, 0.8, 0.9, 1.0,
+                ],
+                [2, 3, 2],
+                &device,
+            );
+            let centers = gather_live_particle_centers(positions, &[2, 0], &device);
+            assert_eq!(tensor3_vec(centers.inner()).unwrap(), [0.1, 0.2, 0.3, 0.4]);
         }
 
         #[test]
@@ -8459,6 +13413,41 @@ mod $module {
         }
 
         #[test]
+        fn canonical_lora_batched_device_transform_matches_shared_cpu_layout() {
+            let device = BurnDevice::default();
+            let config = NpaConfig::growing_2d();
+            let rank = config.perception_dims().max(config.update_dims());
+            let canonical = crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
+                &config,
+                rank,
+                rank as f32,
+            )
+            .unwrap();
+            let output_dims = canonical.constants.len();
+            let first = (0..output_dims)
+                .map(|index| (index as f32 * 0.013).sin() * 0.01)
+                .collect::<Vec<_>>();
+            let second = (0..output_dims)
+                .map(|index| (index as f32 * 0.017).cos() * 0.02)
+                .collect::<Vec<_>>();
+            let expected = [canonical.apply(&first).unwrap(), canonical.apply(&second).unwrap()]
+                .concat();
+            let generated = tensor([first, second].concat(), [2, output_dims], &device);
+            let mask = tensor(
+                canonical.trainable_mask.clone(),
+                [1, output_dims],
+                &device,
+            )
+            .expand([2, output_dims]);
+            let constants = tensor(canonical.constants, [1, output_dims], &device)
+                .expand([2, output_dims]);
+            let actual = tensor_vec((generated.mul(mask) + constants).inner()).unwrap();
+
+            assert!(max_abs_difference(&actual, &expected) < 1.0e-7);
+            assert_ne!(&actual[..output_dims], &actual[output_dims..]);
+        }
+
+        #[test]
         fn hyper_e2e_batch_dimension_is_sample_parallel() {
             let device = BurnDevice::default();
             let targets = vec![
@@ -8491,6 +13480,26 @@ mod $module {
             assert!(mask_values[particle_count..particle_count * 2]
                 .iter()
                 .all(|value| *value == 0.0));
+            let device_mask = device_batch_mask_stack(&targets, &indices, particle_count, 2);
+            assert_eq!(device_mask.shape().dims::<4>(), [2, 2, particle_count, 1]);
+            let device_mask_values = tensor3_vec(
+                device_mask
+                    .reshape([2 * indices.len(), particle_count, 1])
+                    .inner(),
+            )
+            .unwrap();
+            assert!(
+                device_mask_values[0..particle_count]
+                    .iter()
+                    .all(|value| *value == 1.0),
+                "update_prob=1.0 should keep all device-mask entries active"
+            );
+            assert!(
+                device_mask_values[particle_count..particle_count * 2]
+                    .iter()
+                    .all(|value| *value == 0.0),
+                "update_prob=0.0 should keep all device-mask entries inactive"
+            );
 
             let npa_config = NpaConfig::growing_2d();
             let rank = 2;
@@ -8509,6 +13518,349 @@ mod $module {
             let row_len = rank * npa_config.perception_dims();
             assert!(w1_down[0..row_len].iter().all(|value| *value == 0.0));
             assert!(w1_down[row_len..row_len * 2].iter().all(|value| *value == 1.0));
+
+            let model = NpaModel::seeded(npa_config.clone(), 91);
+            let params = BurnBaseParams::from_model(&model, &device).unwrap();
+            let host_adapters = [
+                NpaLowRankAdapter::seeded(&npa_config, rank, 1.0, 101),
+                NpaLowRankAdapter::seeded(&npa_config, rank, 1.0, 202),
+            ];
+            let burn_adapters = host_adapters
+                .iter()
+                .map(|adapter| BurnAdapterParams::from_adapter(adapter, &model, &device).unwrap())
+                .collect::<Vec<_>>();
+            let batch_adapter = BurnAdapterBatch::from_indices(&burn_adapters, &[0, 1]);
+            let expanded_adapter = batch_adapter.clone().select_rows(&[0, 0, 1, 1]);
+            let expanded_w1 = tensor3_vec(expanded_adapter.w1_down.inner()).unwrap();
+            let adapter_row = rank * npa_config.perception_dims();
+            assert_eq!(&expanded_w1[..adapter_row], &expanded_w1[adapter_row..2 * adapter_row]);
+            assert_eq!(
+                &expanded_w1[2 * adapter_row..3 * adapter_row],
+                &expanded_w1[3 * adapter_row..4 * adapter_row]
+            );
+            assert_ne!(&expanded_w1[..adapter_row], &expanded_w1[2 * adapter_row..3 * adapter_row]);
+            let rows = 3;
+            let input_dims = npa_config.perception_dims();
+            let feature_values = (0..2 * rows * input_dims)
+                .map(|index| index as f32 * 0.001 - 0.25)
+                .collect::<Vec<_>>();
+            let batch_output = params.forward_adapter_batch(
+                tensor3(
+                    feature_values.clone(),
+                    [2, rows, input_dims],
+                    &device,
+                ),
+                &batch_adapter,
+            );
+            let batch_values = tensor3_vec(batch_output.inner()).unwrap();
+            let output_dims = npa_config.update_dims();
+            for batch in 0..2 {
+                let feature_start = batch * rows * input_dims;
+                let single_output = params.forward_adapter(
+                    tensor(
+                        feature_values[feature_start..feature_start + rows * input_dims].to_vec(),
+                        [rows, input_dims],
+                        &device,
+                    ),
+                    &burn_adapters[batch],
+                    test_direct_config(particle_count),
+                );
+                let single_values = tensor_vec(single_output.inner()).unwrap();
+                let batch_start = batch * rows * output_dims;
+                for (actual, expected) in batch_values
+                    [batch_start..batch_start + rows * output_dims]
+                    .iter()
+                    .zip(single_values)
+                {
+                    assert!(
+                        (actual - expected).abs() < 1.0e-5,
+                        "batched per-sample LoRA output diverged from unbatched output: {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn target2d_batched_loss_and_gradients_match_unbatched_mean() {
+            let device = BurnDevice::default();
+            let npa_config = NpaConfig::growing_2d();
+            let model = NpaModel::upstream_seeded(npa_config.clone(), 31);
+            let targets = vec![
+                test_burn_target(&device, 1.0, 0.1),
+                test_burn_target(&device, 1.0, 0.2),
+            ];
+            let adapters = (0..2)
+                .map(|_| {
+                    BurnAdapterParams::from_adapter(
+                        &NpaLowRankAdapter::zeros(&npa_config, 1, 1.0),
+                        &model,
+                        &device,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let adapter_batch = BurnAdapterBatch::from_indices(&adapters, &[0, 1]);
+            let mut config = test_direct_config(4);
+            config.loss_config.image_size = 1;
+            let x_values = vec![
+                -0.30, -0.20, 0.15, -0.10, -0.05, 0.25, 0.30, 0.20,
+                -0.25, 0.30, 0.20, 0.15, -0.10, -0.20, 0.35, -0.05,
+            ];
+            let s_values = (0..2 * 4 * npa_config.state_dims)
+                .map(|idx| (idx as f32 * 0.013).sin() * 0.25)
+                .collect::<Vec<_>>();
+            let x_batch = tensor3(x_values.clone(), [2, 4, 2], &device).require_grad();
+            let s_batch = tensor3(
+                s_values.clone(),
+                [2, 4, npa_config.state_dims],
+                &device,
+            )
+            .require_grad();
+            let batch_loss = target_splat_loss_batch(
+                &x_batch,
+                &s_batch,
+                &targets,
+                &[0, 1],
+                config,
+                &adapter_batch,
+                Tensor::<BurnBackend, 1>::zeros([2], &device),
+            )
+            .unwrap();
+            let batch_total = loss_scalars(&batch_loss).unwrap().total;
+            let mut batch_grads = batch_loss.total.backward();
+            let batch_x_grad = tensor3_vec(
+                x_batch
+                    .grad_remove(&mut batch_grads)
+                    .expect("batched position gradient"),
+            )
+            .unwrap();
+            let batch_s_grad = tensor3_vec(
+                s_batch
+                    .grad_remove(&mut batch_grads)
+                    .expect("batched state gradient"),
+            )
+            .unwrap();
+
+            let mut unbatched_total = 0.0_f32;
+            let mut expected_x_grad = Vec::with_capacity(batch_x_grad.len());
+            let mut expected_s_grad = Vec::with_capacity(batch_s_grad.len());
+            for batch in 0..2 {
+                let x_start = batch * 4 * 2;
+                let s_start = batch * 4 * npa_config.state_dims;
+                let x = tracked_tensor(
+                    x_values[x_start..x_start + 4 * 2].to_vec(),
+                    [4, 2],
+                    &device,
+                );
+                let s = tracked_tensor(
+                    s_values[s_start..s_start + 4 * npa_config.state_dims].to_vec(),
+                    [4, npa_config.state_dims],
+                    &device,
+                );
+                let loss = target_splat_loss(
+                    &x,
+                    &s,
+                    &targets[batch],
+                    config,
+                    &adapters[batch],
+                    Tensor::<BurnBackend, 1>::zeros([1], &device),
+                );
+                unbatched_total += loss_scalars(&loss).unwrap().total;
+                let mut grads = loss.total.backward();
+                expected_x_grad.extend(
+                    tensor_vec(x.grad_remove(&mut grads).expect("position gradient"))
+                        .unwrap()
+                        .into_iter()
+                        .map(|value| value * 0.5),
+                );
+                expected_s_grad.extend(
+                    tensor_vec(s.grad_remove(&mut grads).expect("state gradient"))
+                        .unwrap()
+                        .into_iter()
+                        .map(|value| value * 0.5),
+                );
+            }
+
+            assert!((batch_total - unbatched_total * 0.5).abs() < 1.0e-5);
+            assert!(max_abs_difference(&batch_x_grad, &expected_x_grad) < 1.0e-5);
+            assert!(max_abs_difference(&batch_s_grad, &expected_s_grad) < 1.0e-5);
+        }
+
+        #[test]
+        #[cfg($perception_cube_feature)]
+        fn target2d_training_loss_routes_auto_to_device_adjoint() {
+            let device = BurnDevice::default();
+            let npa_config = NpaConfig::growing_2d();
+            let model = NpaModel::upstream_seeded(npa_config.clone(), 37);
+            let targets = vec![test_burn_target(&device, 1.0, 0.1)];
+            let adapters = vec![
+                BurnAdapterParams::from_adapter(
+                    &NpaLowRankAdapter::zeros(&npa_config, 1, 1.0),
+                    &model,
+                    &device,
+                )
+                .unwrap(),
+            ];
+            let adapter_batch = BurnAdapterBatch::from_indices(&adapters, &[0]);
+            let mut config = test_direct_config(128);
+            config.loss_config.image_size = 1;
+            config.target2d_loss_backend = Target2dLossBackend::Auto;
+            TARGET2D_CUBE_ADJOINT_DEVICE_HITS.store(0, Ordering::Relaxed);
+            TARGET2D_CUBE_ADJOINT_FALLBACK_HITS.store(0, Ordering::Relaxed);
+
+            let loss = target_splat_loss_batch(
+                &Tensor::<BurnBackend, 3>::zeros([1, 128, 2], &device).require_grad(),
+                &Tensor::<BurnBackend, 3>::zeros(
+                    [1, 128, npa_config.state_dims],
+                    &device,
+                )
+                .require_grad(),
+                &targets,
+                &[0],
+                config,
+                &adapter_batch,
+                Tensor::<BurnBackend, 1>::zeros([1], &device),
+            )
+            .unwrap();
+            let scalar = loss.total.inner().into_scalar();
+
+            assert!(scalar.is_finite());
+            assert_eq!(
+                TARGET2D_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                TARGET2D_CUBE_ADJOINT_FALLBACK_HITS.load(Ordering::Relaxed),
+                0
+            );
+        }
+
+        #[test]
+        fn direct_particle_pool_persists_state_on_backend() {
+            let device = BurnDevice::default();
+            let config = test_direct_config(4);
+            let mut pool = BurnDeviceParticlePool::new(2, 4, 16, 0.1, config, &device);
+            pool.update_batch(
+                &[1],
+                Tensor::<BurnBackend, 3>::full([1, 4, 2], 0.25, &device),
+                Tensor::<BurnBackend, 3>::full([1, 4, 16], 0.5, &device),
+            )
+            .unwrap();
+
+            let inner_device = pool.positions.device();
+            let index = inner_index_tensor(&[1], &inner_device);
+            assert!(
+                tensor3_vec(pool.positions.clone().select(0, index.clone()))
+                    .unwrap()
+                    .iter()
+                    .all(|value| (*value - 0.25).abs() < 1.0e-6)
+            );
+            assert!(
+                tensor3_vec(pool.states.clone().select(0, index))
+                    .unwrap()
+                    .iter()
+                    .all(|value| (*value - 0.5).abs() < 1.0e-6)
+            );
+        }
+
+        #[test]
+        fn hyper_e2e_device_particle_pool_is_bounded_and_persistent() {
+            let device = BurnDevice::default();
+            let particle_count = 4;
+            let state_dims = 16;
+            let mut pool = BurnE2eDeviceParticlePool::new(
+                2,
+                particle_count,
+                state_dims,
+                2,
+                &device,
+            );
+            let mut rng = StdRng::seed_from_u64(7);
+            let config = test_direct_config(particle_count);
+            let first = pool
+                .sample_batch(&[10, 10], &mut rng, &[], 0.1, config, &device)
+                .unwrap();
+            assert_eq!(first.slots.len(), 2);
+            assert_ne!(first.slots[0], first.slots[1]);
+            pool.update_batch(
+                &first.slots,
+                Tensor::<BurnBackend, 3>::full([2, particle_count, 2], 0.25, &device),
+                Tensor::<BurnBackend, 3>::full(
+                    [2, particle_count, state_dims],
+                    0.5,
+                    &device,
+                ),
+            )
+            .unwrap();
+            let persisted = pool
+                .sample_batch(&[10, 10], &mut rng, &[], 0.1, config, &device)
+                .unwrap();
+            assert!(
+                tensor3_vec(persisted.x.inner())
+                    .unwrap()
+                    .iter()
+                    .all(|value| (*value - 0.25).abs() < 1.0e-6)
+            );
+            assert!(
+                tensor3_vec(persisted.s.inner())
+                    .unwrap()
+                    .iter()
+                    .all(|value| (*value - 0.5).abs() < 1.0e-6)
+            );
+            let refreshed = pool
+                .sample_batch(&[10, 10], &mut rng, &[0, 1], 0.1, config, &device)
+                .unwrap();
+            assert_eq!(refreshed.seed_replacements, 2);
+            assert!(
+                tensor3_vec(refreshed.x.inner())
+                    .unwrap()
+                    .iter()
+                    .any(|value| (*value - 0.25).abs() > 1.0e-3)
+            );
+            pool.update_batch(
+                &first.slots,
+                Tensor::<BurnBackend, 3>::full([2, particle_count, 2], 2.0, &device),
+                Tensor::<BurnBackend, 3>::full(
+                    [2, particle_count, state_dims],
+                    -3.0,
+                    &device,
+                ),
+            )
+            .unwrap();
+            let clamped = pool
+                .sample_batch(&[10], &mut rng, &[], 0.1, config, &device)
+                .unwrap();
+            assert!(
+                tensor3_vec(clamped.x.inner())
+                    .unwrap()
+                    .iter()
+                    .all(|value| (*value - 1.0).abs() < 1.0e-6)
+            );
+            assert!(
+                tensor3_vec(clamped.s.inner())
+                    .unwrap()
+                    .iter()
+                    .all(|value| (*value + 3.0).abs() < 1.0e-6)
+            );
+            pool.sample_batch(&[12], &mut rng, &[], 0.1, config, &device)
+                .unwrap();
+            assert_eq!(pool.example_slots.len(), 2);
+            assert!(pool.example_slots.keys().any(|(example, _)| *example == 12));
+        }
+
+        #[test]
+        fn hyper_e2e_seed_replacement_cadence_is_per_identity_trajectory() {
+            let mut counts = vec![0usize; 2];
+            let identities = [0usize, 0, 1, 1];
+            assert!(
+                per_identity_seed_replacement_rows(&identities, &mut counts, 4).is_empty()
+            );
+            assert_eq!(counts, [2, 2]);
+            assert_eq!(
+                per_identity_seed_replacement_rows(&identities, &mut counts, 4),
+                [1, 3]
+            );
+            assert_eq!(counts, [0, 0]);
         }
 
         fn reference_perception_state_finite_difference(
@@ -8823,6 +14175,260 @@ mod $module {
             );
         }
 
+        #[cfg($perception_cube_feature)]
+        #[test]
+        fn perception_sparse_grid_matches_reference_state_vjp_at_threshold() {
+            let npa_config = NpaConfig::growing_2d();
+            let grid = crate::upstream_growing_2d_hashgrid();
+            let particle_count = 512;
+            let (positions, states) = seed_particles_scaled(
+                1,
+                particle_count,
+                npa_config.state_dims,
+                npa_config.spatial_dims,
+                91,
+                crate::ParticleSeed::UniformCircle,
+                0.5,
+            );
+            let options = perception_reference_options(grid.eps);
+            let reference = burn_automata_kernels::perceive_with_options(
+                &positions,
+                &states,
+                1,
+                particle_count,
+                npa_config.state_dims,
+                &grid,
+                options,
+            )
+            .unwrap();
+            let feature_dims = reference.feature_dims;
+            let feature_weights = (0..particle_count * feature_dims)
+                .map(|idx| (((idx * 17) % 19) as f32 - 9.0) * 1.0e-4)
+                .collect::<Vec<_>>();
+            let reference_adjoint = burn_automata_kernels::perceive_adjoint_with_options(
+                &positions,
+                &states,
+                1,
+                particle_count,
+                npa_config.state_dims,
+                &grid,
+                options,
+                &feature_weights,
+            )
+            .unwrap();
+
+            let device = BurnDevice::default();
+            let position_values = positions
+                .iter()
+                .flat_map(|position| [position[0], position[1]])
+                .collect::<Vec<_>>();
+            let x = tensor3(position_values, [1, particle_count, 2], &device);
+            let s = tensor3(
+                states,
+                [1, particle_count, npa_config.state_dims],
+                &device,
+            )
+            .require_grad();
+            let mut config = test_direct_config(particle_count);
+            config.stopgrad_pos = true;
+            config.stopgrad_state = false;
+            config.grid_eps = grid.eps;
+            config.perception_backend = PerceptionRolloutBackend::TiledAdjoint;
+            let cube_config = perception_cube_adjoint_config(grid.eps, false, true);
+            let feature_grad_inner = Tensor::<InnerBackend, 3>::from_data(
+                TensorData::new(
+                    feature_weights.clone(),
+                    [1, particle_count, feature_dims],
+                ),
+                &x.clone().inner().device(),
+            );
+            let prepared_forward = InnerBackend::perception_cube_forward_prepared(
+                x.clone().inner(),
+                s.clone().inner(),
+                cube_config,
+            )
+            .expect("prepared perception backend")
+            .expect("prepared perception forward");
+            let prepared_adjoint = InnerBackend::perception_cube_adjoint_prepared(
+                x.clone().inner(),
+                s.clone().inner(),
+                feature_grad_inner.clone(),
+                prepared_forward.density,
+                prepared_forward.offsets,
+                prepared_forward.permutation,
+                prepared_forward.raw_state_gradient,
+                prepared_forward.state_gradient_inverse,
+                cube_config,
+            )
+            .expect("prepared perception adjoint backend")
+            .expect("prepared perception adjoint");
+            let recomputed_adjoint = InnerBackend::perception_cube_adjoint(
+                x.clone().inner(),
+                s.clone().inner(),
+                feature_grad_inner,
+                cube_config,
+            )
+            .expect("recomputed perception adjoint backend")
+            .expect("recomputed perception adjoint");
+            let prepared_state = tensor3_vec(prepared_adjoint.state_grad).unwrap();
+            let recomputed_state = tensor3_vec(recomputed_adjoint.state_grad).unwrap();
+            let prepared_recomputed_diff = max_abs_difference(&prepared_state, &recomputed_state);
+            assert!(
+                prepared_recomputed_diff < 2.0e-5,
+                "retained-state perception VJP diverged from recomputed sparse VJP: max_abs_diff={prepared_recomputed_diff}"
+            );
+            let prepared_reuse_before =
+                PERCEPTION_CUBE_PREPARED_REUSE_HITS.load(Ordering::Relaxed);
+            let features = perception_tiled_adjoint_batch(x, s.clone(), config);
+            let weights = tensor3(
+                feature_weights,
+                [1, particle_count, feature_dims],
+                &device,
+            );
+            let loss = features.clone().mul(weights).sum();
+            let feature_values = tensor3_vec(features.inner()).unwrap();
+            let mut grads = loss.backward();
+            let state_grad = tensor3_vec(
+                s.grad_remove(&mut grads)
+                    .unwrap_or_else(|| s.clone().inner().zeros_like()),
+            )
+            .unwrap();
+
+            let feature_diff = max_abs_difference(&feature_values, &reference.features);
+            let (_, state_diff, state_reference, state_sparse) =
+                max_abs_difference_with_index(&reference_adjoint.state, &state_grad);
+            let state_relative = state_diff
+                / state_reference.abs().max(state_sparse.abs()).max(1.0e-4);
+            assert!(
+                PERCEPTION_CUBE_PREPARED_REUSE_HITS.load(Ordering::Relaxed)
+                    > prepared_reuse_before,
+                "sparse perception backward did not reuse its forward grid/density"
+            );
+            assert!(
+                feature_diff < 1.0e-2,
+                "sparse perception forward diverged from the 512-particle reference: max_abs_diff={feature_diff}"
+            );
+            assert!(
+                state_diff < 6.0e-3 && state_relative < 5.0e-2,
+                "sparse perception state VJP diverged from the 512-particle reference: reference={state_reference} sparse={state_sparse} max_abs_diff={state_diff} rel_diff={state_relative}"
+            );
+        }
+
+        #[cfg($perception_cube_feature)]
+        #[test]
+        #[ignore = "opt-in GPU perception throughput benchmark"]
+        fn benchmark_perception_sparse_grid_forward_and_state_vjp() {
+            let npa_config = NpaConfig::growing_2d();
+            let grid = crate::upstream_growing_2d_hashgrid();
+            let device = BurnDevice::default();
+            let inner_device = device.clone().into();
+            for particle_count in [512usize, 1024, 2048, 4096] {
+                let (positions, states) = seed_particles_scaled(
+                    1,
+                    particle_count,
+                    npa_config.state_dims,
+                    npa_config.spatial_dims,
+                    7331 + particle_count as u64,
+                    crate::ParticleSeed::UniformCircle,
+                    0.5,
+                );
+                let x = tensor3(
+                    positions
+                        .iter()
+                        .flat_map(|position| [position[0], position[1]])
+                        .collect(),
+                    [1, particle_count, 2],
+                    &device,
+                )
+                .inner();
+                let s = tensor3(
+                    states,
+                    [1, particle_count, npa_config.state_dims],
+                    &device,
+                )
+                .inner();
+                let feature_dims = npa_config.perception_dims();
+                let feature_grad = tensor3(
+                    (0..particle_count * feature_dims)
+                        .map(|idx| (((idx * 17) % 19) as f32 - 9.0) * 1.0e-4)
+                        .collect(),
+                    [1, particle_count, feature_dims],
+                    &device,
+                )
+                .inner();
+
+                for (mode, sparse_grid_min_particles, reuse_forward) in [
+                    ("all_pairs", u32::MAX, false),
+                    ("sparse_grid", 1u32, false),
+                    ("sparse_prepared", 1u32, true),
+                ]
+                {
+                    let mut cube_config =
+                        perception_cube_adjoint_config(grid.eps, false, true);
+                    cube_config.sparse_grid_min_particles = sparse_grid_min_particles;
+                    let run = || {
+                        if reuse_forward {
+                            let forward = InnerBackend::perception_cube_forward_prepared(
+                                x.clone(),
+                                s.clone(),
+                                cube_config,
+                            )
+                            .expect("CubeCL prepared perception forward backend")
+                            .expect("CubeCL prepared perception forward");
+                            let adjoint = InnerBackend::perception_cube_adjoint_prepared(
+                                x.clone(),
+                                s.clone(),
+                                feature_grad.clone(),
+                                forward.density.clone(),
+                                forward.offsets.clone(),
+                                forward.permutation.clone(),
+                                forward.raw_state_gradient.clone(),
+                                forward.state_gradient_inverse.clone(),
+                                cube_config,
+                            )
+                            .expect("CubeCL prepared perception adjoint backend")
+                            .expect("CubeCL prepared perception adjoint");
+                            (forward.features, adjoint)
+                        } else {
+                            let forward = InnerBackend::perception_cube_forward(
+                                x.clone(),
+                                s.clone(),
+                                cube_config,
+                            )
+                            .expect("CubeCL perception forward backend")
+                            .expect("CubeCL perception forward");
+                            let adjoint = InnerBackend::perception_cube_adjoint(
+                                x.clone(),
+                                s.clone(),
+                                feature_grad.clone(),
+                                cube_config,
+                            )
+                            .expect("CubeCL perception adjoint backend")
+                            .expect("CubeCL perception adjoint");
+                            (forward.features, adjoint)
+                        }
+                    };
+                    let warmup = run();
+                    <InnerBackend as Backend>::sync(&inner_device).unwrap();
+                    drop(warmup);
+
+                    let repeats = 50usize;
+                    let start = Instant::now();
+                    for _ in 0..repeats {
+                        let output = run();
+                        <InnerBackend as Backend>::sync(&inner_device).unwrap();
+                        drop(output);
+                    }
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1_000.0;
+                    println!(
+                        "perception_cube_bench mode={mode} particles={particle_count} repeats={repeats} mean_forward_vjp_ms={:.6} particle_steps_per_sec={:.0}",
+                        elapsed_ms / repeats as f64,
+                        particle_count as f64 * repeats as f64 / (elapsed_ms / 1_000.0),
+                    );
+                }
+            }
+        }
+
         #[test]
         fn burn_target_splat_loss_matches_reference_cpu_fixture() {
             let npa_config = NpaConfig::growing_2d();
@@ -8841,6 +14447,7 @@ mod $module {
                 sigma: 1.0,
                 center: true,
                 foreground_density_loss_weight: 0.5,
+                composited_rgb_loss_weight: 0.75,
                 displacement_regularizer_weight: 0.0,
                 overflow_regularizer_weight: 0.0,
                 bound_regularizer_weight: 0.0,
@@ -9157,6 +14764,47 @@ mod $module {
             batch.sort_unstable();
 
             assert_eq!(batch, (0..8).collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn checkpoint_selection_does_not_compare_different_validation_contracts() {
+            let frequent = BurnE2eValidationContract {
+                examples: 16,
+                particles: 2_048,
+                horizons: vec![512],
+                selection_horizon_min_steps: 512,
+            };
+            let final_contract = BurnE2eValidationContract {
+                examples: 16,
+                particles: 4_096,
+                horizons: vec![96, 256, 512, 1_024],
+                selection_horizon_min_steps: 256,
+            };
+
+            assert!(!comparable_selection_score_is_better(
+                Some(&frequent),
+                15.049,
+                Some(&final_contract),
+                13.707,
+            ));
+            assert!(comparable_selection_score_is_better(
+                Some(&frequent),
+                15.049,
+                None,
+                -0.185,
+            ));
+            assert!(!comparable_selection_score_is_better(
+                None,
+                -0.180,
+                Some(&frequent),
+                15.049,
+            ));
+            assert!(comparable_selection_score_is_better(
+                Some(&final_contract),
+                13.707,
+                Some(&final_contract),
+                13.236,
+            ));
         }
 
         #[test]

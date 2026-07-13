@@ -130,13 +130,6 @@ impl OmniSvgDatasetArg {
             Self::MmsvgIcon => "OmniSVG/MMSVG-Icon",
         }
     }
-
-    pub(crate) fn cache_slug(self) -> &'static str {
-        match self {
-            Self::MmsvgIllustration => "mmsvg-illustration",
-            Self::MmsvgIcon => "mmsvg-icon",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]

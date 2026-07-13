@@ -1,136 +1,224 @@
-# HyperNPA: Current Paper Status
+# HyperNPA 2D
 
-This document mirrors the current `docs/hyper_npa.tex` revision.
+## Maintained Path
 
-## Current Paradigm
-
-The current HyperNPA path is end-to-end and image-conditioned:
+The Burn-native `train-hyper2d-e2e-rollout` command owns training and quality
+validation:
 
 ```text
-image -> DINO ViT-S full tokens -> token-aware rectified-flow LoRA generator
-      -> shared trainable NPA base -> rollout image loss
+RGBA image
+  -> native 224x224 DINOv2 ViT-S/14 preprocessing on GPU
+  -> CLS + 16x16 patch tokens
+  -> structured multi-head adapter-layout decoder
+  -> shared growing-2D NPA + generated rank-r LoRA
+  -> recurrent NPA rollout
+  -> alpha-aware Target2D image and density objective
 ```
 
-This replaces the older primary emphasis on per-sample oracle LoRA training plus
-raw adapter-vector regression. Oracle adapters are now treated as baselines and
-controls, not the main training target.
+The normal token contract is `257 x 385` (384 DINO channels plus alpha). The
+optional high-fidelity contract is `257 x 388` and appends patch-aligned RGB
+plus alpha. DINO runs without an autodiff graph in bounded batches; conditions
+may remain device-resident. Every rollout batch row receives its own adapter.
 
-## Main Artifact
+## Generator Modes
 
-The current default E2E artifact is:
+- `token-attention-pool`: full adapter-space deterministic head.
+- `module-token-decoder`: maintained v3 generalized path. Learned queries for
+  the six NPA adapter parameter groups independently cross-attend to all DINO
+  tokens in multiple channel heads, then emit a static adapter end to end from
+  rollout loss.
+- `module-token-decoder-v2`: legacy single-attention-map decoder retained only
+  for loading and evaluating existing artifacts.
+- `sample-id-table`: direct per-sample adapter substrate control. It memorizes
+  identities, cannot infer an adapter for an unseen image, and is never
+  evidence of HyperNPA generalization.
 
-- `artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/shared_base.bpk`
-- `artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/hyper_2d.json`
-- `models/dino/dino_vits.mpk`
+The maintained module-token decoder uses true per-head softmax token attention and the
+`canonical-full-rank` adapter parameterization. For growing 2D, rank 82 is
+full-rank for both NPA matrices. Canonical mode fixes one LoRA factor to an
+identity embedding and predicts the other factor plus both bias deltas. This
+is exactly equivalent to predicting dense NPA weight deltas, while reducing
+the effective conditional output from 28,026 non-identifiable factor
+coordinates to 12,946 identifiable delta coordinates. The serialized artifact
+records the parameterization, and CPU/Bevy inference applies the same mask and
+fixed factors as Burn training.
 
-Training config:
+The historical artifact name contains `rectified_flow`, but the maintained
+one-step deterministic generator is not a stochastic rectified-flow model. A
+real adapter flow still requires noisy adapter states, timestep-conditioned
+velocity training, and sampled-adapter rollout validation.
 
-- 10k OmniSVG selected examples.
-- 9500 train / 500 holdout.
-- Online DINO ViT-S full tokens: CLS + 37x37 patch grid, 1370 tokens x 384 dims.
-- Trainable shared growing-2D NPA base from step zero.
-- Generated LoRA rank 16, alpha 16.
-- Token-aware rectified-flow generator, hidden 128, two sample steps.
-- Burn/CUDA autodiff.
-- 128 rollout particles, 4 rollout steps, TBPTT chunk size 2.
-- Target-2D rollout image loss.
+Optional per-step spatial control samples the DINO patch field at particle
+positions. A recurrent-state projection can make that residual depend on the
+current particle state. Both features are experimental and are serialized in
+the artifact contract; the Bevy static image-to-NPA path rejects per-step-field
+artifacts rather than silently dropping their control weights.
 
-## Latest E2E Results
+## Leakage Contract
 
-The selected checkpoint is step 2700, chosen by best holdout PSNR.
+Oracle adapters may be attached to training examples for bounded teacher
+controls. Holdout examples are always teacher-free. Training aborts if a
+holdout example carries an oracle adapter target.
 
-| checkpoint | step | train loss | holdout loss | holdout PSNR |
-| --- | ---: | ---: | ---: | ---: |
-| first report | 100 | 7.642 | 5.398 | 4.83 dB |
-| best holdout PSNR | 2700 | 7.305 | 4.592 | 8.56 dB |
-| best holdout loss | 2900 | 6.364 | 4.578 | 8.35 dB |
-| final | 3000 | 4.896 | 4.583 | 8.42 dB |
+This distinction invalidates an earlier interpretation of the released
+rose/tropical-fish result. The reported 27.57 dB reconstruction came from a
+generator trained on those exact adapters. It proves adapter reconstruction
+and runtime correctness, not unseen-image generalization.
 
-The 32-sample holdout validation at training scale is:
+## Strict Held-Out Results
 
-| metric | value |
-| --- | ---: |
-| particles / steps | 128 / 4 |
-| mean target-image PSNR | 8.56 dB |
-| min target-image PSNR | 0.56 dB |
-| max target-image PSNR | 16.75 dB |
-| mean total validation loss | 4.592 |
-| passes 8 dB threshold | false |
+The latest identity-disjoint OmniSVG-1k split uses 900 train and 100 holdout
+images. The fixed quality subset contains 16 holdout identities and is
+evaluated with 2,048 particles at 96, 256, 512, and 1,024 rollout steps.
+Checkpoint selection uses the minimum p10 over horizons of at least 256 steps.
 
-This is not oracle parity. It is a functional E2E training run with low current
-quality.
+| experiment | aggregate at 1,024 | worst-horizon p10 | condition shuffle gap | adapter gain | median throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| prior factorized module decoder | 10.88 dB | 8.07 dB | 2.12 dB | 2.51 dB | 3.5-5.2M particle-steps/s |
+| canonical LoRA, 512p curriculum | 10.88 dB | 7.24 dB | 2.46 dB | 2.50 dB | 3.31M particle-steps/s |
+| canonical LoRA, 1,024p composited refinement | **11.63 dB** | **9.30 dB** | **2.79 dB** | **3.26 dB** | 2.08M particle-steps/s |
+| lower-LR continuation | 11.45 dB | 8.95 dB | retained | retained | 2.0M particle-steps/s |
 
-## New Bevy Renderer Figure
+The selected canonical checkpoint is temporally stable: horizon p10 is 9.13,
+9.30, 9.35, and 9.32 dB at 96, 256, 512, and 1,024 steps. A deterministic
+target-point splat of the same validation targets reaches 28.08 dB p10, so
+particle count and target extraction do not explain the remaining 18.78 dB
+tail gap.
 
-New paper figure:
+A 16-image table control separates substrate capacity from held-out
+generalization. At equal 2,000-step exposure, the canonical sample-ID table
+reaches 11.09 dB aggregate, while the DINO module decoder reaches 10.99 dB
+aggregate and 9.20 dB worst-horizon p10 with a 2.92 dB shuffle gap. The image
+condition and generated adapter paths are therefore active; the broad gap is
+not a batch broadcast bug or dead conditioner.
 
-- `docs/hyper_npa_figures/e2e_bevy_rollouts/e2e_hypernpa_bevy_rollout_panel.png`
+The selected 1k training sequence exposes each training identity to only about
+111 rollout trajectories after the 512p pretrain and first 1,024p refinement.
+The released upstream single-target recipe uses 240,000 trajectories per
+target (10k epochs, three repetitions, batch size eight), 4,096 particles,
+32-95 sampled steps from NumPy's `[32, 96)` range, a 256px splat loss, a 512-state pool, seed injection every
+16 epochs, and brush damage 0.1. Current results therefore show a better
+conditioned representation and curriculum, not oracle parity.
 
-Supporting generated artifacts:
+## Exposure-Matched Campaign
 
-- `docs/hyper_npa_figures/e2e_bevy_rollouts/e2e_bevy_rollout_summary.json`
-- per-sample PNGs and reports under `docs/hyper_npa_figures/e2e_bevy_rollouts/<slug>/`
+The maintained exposure campaign is bundled under
+`configs/sandbox/hyper_e2e/omnisvg_*_upstream_exposure_*.toml` and
+`omnisvg_1k_exposure_stage_*.toml`. It proceeds only when the prior gate passes:
 
-The figure uses the current E2E HyperNPA inference path through `bevy_automata`
-headless export:
+1. A 16-identity `sample-id-table` control jointly trains the shared base and
+   canonical full-rank dense deltas. The maintained 512-, 1,024-, and
+   2,048-particle continuations together execute 104.17% of the upstream
+   per-identity particle-update exposure. Each identity owns 512 persistent
+   pool states, replaces one seed per 128 trajectories, and uses
+   live-particle-centered brush damage. A bounded 4,096-particle cycle then
+   tests whether matching particle density matters beyond total exposure. Its
+   WGPU pool uses 256 states per identity so the monolithic recurrent-state
+   buffer remains below WGPU's 2 GiB single-buffer limit.
+2. The table-trained base is frozen while the deterministic full-token DINO
+   module decoder is trained on the same 16 identities. This must prove that
+   conditional adapter generation, rather than the shared base alone, can
+   recover the table control.
+3. Only then does the 900-train/100-holdout DINO campaign run its 256, 512, and
+   1,024-particle stages. A stochastic adapter flow remains deferred until the
+   deterministic generator passes.
 
-```sh
-cargo run -p bevy_automata -- export \
-  --hyper-image <condition.png> \
-  --output-dir docs/hyper_npa_figures/e2e_bevy_rollouts/<slug> \
-  --output-prefix <slug> \
-  --steps 128 \
-  --capture-steps 4,16,64,128 \
-  --width 192 \
-  --height 192 \
-  --particles 2048
-```
+Trajectory count and particle-update exposure are reported separately. The
+16-target control first runs 240,000 trajectories at 512 particles (12.5% of
+upstream particle exposure), another 240,000 at 1,024 particles (25%), and
+320,000 at 2,048 particles (66.67%). The three planned 1k stages total 40,000
+trajectories per identity but only about 2.29% of upstream per-identity
+particle exposure; their justification is amortized learning across 900
+identities, not compute parity with 900 separate oracles.
 
-Rows are the top eight held-out validation samples from the E2E report. The
-panel shows actual `bevy_gaussian_splatting` output at rollout steps 4, 16, 64,
-and 128. It also shows the current weakness clearly: many rollouts decay or go
-near-empty by long horizons.
+The completed table controls show that particle density is not
+interchangeable with total particle-update exposure. All rows use the same 16
+targets, canonical full-rank adapters, and p4096 validation at 96, 256, 512,
+and 1,024 steps:
 
-## Oracle Comparison
+| training continuation | aggregate at 1,024 | worst selected-horizon p10 | shuffle gap | adapter gain | median training throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 512p, 240k trajectories/identity | 13.06 dB | 10.82 dB | 4.85 dB | 4.35 dB | 13.26M particle-steps/s |
+| +1,024p, 240k trajectories/identity | 15.87 dB | 13.24 dB | 7.79 dB | 7.18 dB | 10.21M particle-steps/s |
+| +2,048p, 320k trajectories/identity | **20.71 dB** | **17.93 dB** | **12.60 dB** | **12.09 dB** | 6.90M particle-steps/s |
+| +4,096p density-matched cycle | 20.71 dB | 17.93 dB | 12.60 dB | 12.09 dB | 4.11M particle-steps/s |
+| frozen base, table-only LR refinement | **23.58 dB** | **18.98 dB** | active | active | bounded probe |
 
-Available high-particle oracle comparisons remain separate from the current E2E
-10k holdout slice.
+The p2048 run completed the full compute-matched exposure, but its selected
+checkpoint is step 8,500. The p4096 run selected its initial checkpoint after
+later updates regressed. Freezing the trunk and refining only table rows raised
+aggregate quality, proving optimizer interference and trunk drift, but the
+18.98 dB tail remained far from the 26 dB gate. These controls establish an
+adapter-substrate ceiling and expose optimization faults; they do not form the
+generalized model or a basis used at inference.
 
-| system | examples | particles | steps | mean PSNR | min PSNR | status |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Direct exact LoRA vs oracle NPA | 16 | 2048 | 32 | 99.00 | 99.00 | materialization sanity pass |
-| DINO-flow zero-source control vs oracle NPA | 16 | 2048 | 32 | 30.44 | 27.31 | passes 26 dB gate |
-| Trained WGPU DINO-flow adapter model vs oracle NPA | 16 | 2048 | 32 | 9.10 | 0.53 | fails oracle gate |
-| Current E2E HyperNPA vs target image | 32 | 128 | 4 | 8.56 | 0.56 | not oracle-comparable |
+The final gate evaluates all 100 identity-disjoint holdouts with 4,096
+particles at 96, 256, 512, and 1,024 steps. Both aggregate and p10 composited
+PSNR must be at least 26 dB at every selected horizon of 256 steps or longer,
+and generated adapters must outperform both the shared base and shuffled
+conditions. Frequent validation uses one representative horizon to avoid
+rerunning the same rollout prefixes.
 
-The direct/zero-source rows prove the NPA + LoRA representation and sampling
-path can match oracle-trained per-sample NPAs. The current E2E model has not yet
-matched that quality.
+## Training Throughput
 
-## Claim Boundary
+The synchronized July 2026 CUDA profile uses an RTX PRO 6000 Blackwell,
+release mode, 64 independent image conditions, 1,024 particles, and full BPTT.
+Aggregate throughput divides exact optimizer particle-step exposure by time
+between synchronized report boundaries, including kernel warmup but excluding
+source staging, validation, and checkpoint writes.
 
-What is proven:
+| configuration | aggregate particle-steps/s | median steady interval | peak VRAM |
+| --- | ---: | ---: | ---: |
+| B64, random 32-96 steps, release/warm cache | 9.28M | 11.10M | 15.0 GiB |
+| B64, fixed 96 steps, recomputed perception VJP | 14.24M | 14.91M | 15.0 GiB |
+| B64, fixed 96 steps, retained perception VJP | **17.66M** | **18.36M** | 16.8 GiB |
+| B128, fixed 96 steps, retained perception VJP | 17.30M | 17.83M | 29.6 GiB |
 
-- Feed-forward image -> DINO -> generated LoRA -> NPA rollout works in the
-  actual Bevy viewer/export path.
-- The 10k E2E training objective learns a measurable target-image signal.
-- The repo has high-particle oracle controls showing the representational upper
-  bound.
+Fixed 96-step rollouts amortize condition generation, image loss, optimizer,
+and pool persistence over more useful dynamics work. Retaining the forward
+raw SPH state gradient and correction inverse removes a duplicate hash-grid
+neighbor traversal in backward: Nsight measured the old precompute kernel at
+0.835 ms per invocation and the replacement elementwise VJP at 0.018 ms.
+The 1024-particle isolated forward+VJP benchmark improved from 0.621 ms for
+grid/density recomputation to 0.537 ms with retained state over 50 synchronized
+repeats. B128 raises power and memory without increasing throughput, so B64 is
+the validated knee. `cubecl.toml` persists CubeCL compilation and autotune
+caches under ignored `target/`; production training should use the release
+CUDA binary and
+`configs/verified/2d/hyper_e2e/throughput_omnisvg_64_b64_p1024_s96_cuda.toml`.
 
-What is not proven:
+## Quality Contract
 
-- Broad 1k/10k generalized oracle-quality HyperNPA.
-- Matched 2048-particle oracle PSNR for the current E2E holdout slice.
-- Long-rollout stability.
-- Parity with per-sample overfit NPA oracles.
+Quality reports include composited, raw-render, foreground, and density PSNR;
+density soft IoU; generated-over-base and correct-over-shuffled gaps; adapter
+norm and pairwise diagnostics; and optional nearest-training-oracle controls.
+High-quality catalog validation uses 4,096 particles, 1,024 steps, update
+probability 0.5, seed 42, and official transparent targets.
 
-## Next Work
+## Current Boundary
 
-1. Generate matched oracle NPAs for the E2E validation slice.
-2. Report current E2E HyperNPA vs oracle PSNR on the same images shown in the
-   Bevy panel.
-3. Train with longer rollout horizons and stability penalties.
-4. Add a curriculum up to 2048-particle validation without dense all-pairs memory
-   blowups.
-5. Compare trainable shared-base E2E training against frozen-base and direct
-   oracle variants on identical samples.
+Proven:
+
+- GPU DINO token extraction, including alpha and optional patch RGB;
+- per-sample batched LoRA application;
+- teacher-free identity splits and leakage rejection;
+- condition-sensitive adapters and spatial control;
+- bounded WGPU training with device Target2D/perception adjoints.
+
+Not proven:
+
+- greater than 26 dB unseen-image HyperNPA quality;
+- a broadly useful shared NPA trunk over OmniSVG;
+- parity between direct per-sample adapters and quality-scale NPA oracles;
+- stochastic rectified-flow adapter generation.
+
+The next gate is the v3 full-token, structured multi-head decoder trained
+directly through rollout loss with a frozen, independently validated trunk.
+It must first pass 16- and 64-image controls with a substantial correct-versus-
+shuffled condition gap and improve unseen identities, then run the 900/100
+identity-disjoint 1k split. Table controls remain diagnostic ceilings only; no
+table row or sample identifier participates in the generalized inference
+path. A true rectified-flow adapter generator remains a later option after the
+deterministic conditioned path demonstrates generalization. Without adapter
+endpoint/velocity supervision, calling the current end-to-end decoder
+"rectified flow" would be inaccurate.

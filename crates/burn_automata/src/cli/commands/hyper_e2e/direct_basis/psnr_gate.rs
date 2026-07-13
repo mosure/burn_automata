@@ -250,7 +250,7 @@ pub(crate) fn run_validate_hyper_2d_psnr_gate(
         )
     })?;
     let hyper = config_hyper.or(hyper);
-    let dino_image_size = config_dino_image_size.unwrap_or(518);
+    let dino_image_size = config_dino_image_size.unwrap_or(224);
     let dino_batch_size = config_dino_batch_size.unwrap_or_else(default_dino_feature_batch_size);
     let dino_cache_write_interval_batches = config_dino_cache_write_interval_batches
         .unwrap_or(default_dino_cache_write_interval_batches());
@@ -821,7 +821,7 @@ mod tests {
 
             [condition]
             dino_model = "models/dino/dino_vits.mpk"
-            dino_image_size = 518
+            dino_image_size = 224
             dino_batch_size = 4
             feature_cache = "artifacts/dino_features.json"
             token_grid_width = 8
@@ -846,7 +846,7 @@ mod tests {
         assert!(config.input.hyper.is_some());
         assert!(config.selection.selection_manifest.is_some());
         assert!(config.condition.dino_model.is_some());
-        assert_eq!(config.condition.dino_image_size, Some(518));
+        assert_eq!(config.condition.dino_image_size, Some(224));
         assert_eq!(config.condition.dino_batch_size, Some(4));
         assert_eq!(config.condition.token_grid_width, Some(8));
         assert_eq!(config.condition.token_grid_height, Some(8));

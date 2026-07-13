@@ -18,6 +18,7 @@ struct Target2dTrainExperimentConfig {
 struct Target2dTrainSourceConfig {
     target_image: Option<PathBuf>,
     reference_model: Option<PathBuf>,
+    initial_model: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -44,6 +45,7 @@ struct Target2dTrainTrainingConfig {
     particles: Option<usize>,
     step_min: Option<usize>,
     step_max: Option<usize>,
+    tbptt_chunk_steps: Option<usize>,
     inject_seed_interval: Option<usize>,
     update_prob: Option<f32>,
     seed: Option<u64>,
@@ -258,6 +260,7 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         particles,
         step_min,
         step_max,
+        tbptt_chunk_steps,
         inject_seed_interval,
         update_prob,
         seed,
@@ -310,6 +313,7 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
             std::io::Error::other("train-target2d requires --target-image or source.target_image")
         })?;
     let reference_model = file_config.source.reference_model.or(reference_model);
+    let initial_model = file_config.source.initial_model;
     let output = file_config.output.report.unwrap_or(output);
     let model_output = file_config.output.model.or(model_output);
     let checkpoint_model_output = file_config
@@ -345,6 +349,10 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
     let particles = file_config.training.particles.unwrap_or(particles);
     let step_min = file_config.training.step_min.unwrap_or(step_min);
     let step_max = file_config.training.step_max.unwrap_or(step_max);
+    let tbptt_chunk_steps = file_config
+        .training
+        .tbptt_chunk_steps
+        .unwrap_or(tbptt_chunk_steps);
     let inject_seed_interval = file_config
         .training
         .inject_seed_interval
@@ -473,6 +481,7 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         particle_count: particles,
         step_min,
         step_max,
+        tbptt_chunk_steps,
         inject_seed_interval,
         update_prob,
         seed,
@@ -529,7 +538,7 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         .map(|config| config.metadata_output.display().to_string());
     let (training, gpu_training, model_output, model_eval_loss) = match actual_training_device {
         TrainingDeviceArg::Cpu => {
-            let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), student_seed);
+            let mut model = initialize_target2d_model(initial_model.as_deref(), student_seed)?;
             let training = train_target_2d(
                 &mut model,
                 &hashgrid,
@@ -556,7 +565,7 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
             )
         }
         TrainingDeviceArg::Gpu => {
-            let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), student_seed);
+            let mut model = initialize_target2d_model(initial_model.as_deref(), student_seed)?;
             let burn_output = super::hyper_e2e::train_target_2d_burn_oracle(
                 gpu_backend,
                 &mut model,
@@ -638,6 +647,9 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         target_source_width: target.source_width,
         target_source_height: target.source_height,
         target_points: target.point_count(),
+        initial_model: initial_model
+            .as_ref()
+            .map(|path| path.display().to_string()),
         model_output: model_output.as_ref().map(|path| path.display().to_string()),
         checkpoint_model_output: checkpoint_model_output_report,
         checkpoint_best_model_output: checkpoint_best_model_output_report,
@@ -674,6 +686,27 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
             .unwrap_or_else(|| "none".to_string()),
     );
     Ok(())
+}
+
+fn initialize_target2d_model(
+    initial_model: Option<&Path>,
+    student_seed: u64,
+) -> Result<NpaModel, Box<dyn std::error::Error>> {
+    let expected = NpaConfig::growing_2d();
+    let Some(path) = initial_model else {
+        return Ok(NpaModel::upstream_seeded(expected, student_seed));
+    };
+    let manifest = crate::import::load_manifest(path)?;
+    if manifest.config != expected {
+        return Err(std::io::Error::other(format!(
+            "source.initial_model {} is not an exact growing-2d NPA architecture",
+            path.display()
+        ))
+        .into());
+    }
+    let model = manifest.into_model();
+    model.validate()?;
+    Ok(model)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1547,6 +1580,15 @@ pub(super) fn load_target_image_2d_adaptive(
         adaptive_target_image_size(path, threshold, target_points)?
     };
     let rgba = load_rgba_thumbnail(path, max_size)?;
+    let foreground = foreground_alpha_count(&rgba, threshold);
+    let pixels = rgba.width() as usize * rgba.height() as usize;
+    if foreground == pixels {
+        return Err(std::io::Error::other(format!(
+            "growing-2d target {} is fully opaque, so upstream alpha-only extraction would train on the entire image rectangle; provide a target with a transparent background",
+            path.display()
+        ))
+        .into());
+    }
     target_from_rgba(&rgba, threshold)
 }
 
@@ -1566,20 +1608,6 @@ fn adaptive_target_image_size(
             .round()
             .clamp(1.0, 2048.0) as usize;
     }
-    for _ in 0..8 {
-        let image = load_rgba_thumbnail(path, size)?;
-        let count = foreground_alpha_count(&image, threshold);
-        if count >= target_points || size >= 2048 {
-            break;
-        }
-        let next_size = ((target_points as f32 / count.max(1) as f32).sqrt() * size as f32 * 1.02)
-            .ceil()
-            .clamp((size + 1) as f32, 2048.0) as usize;
-        if next_size == size {
-            break;
-        }
-        size = next_size;
-    }
     Ok(size)
 }
 
@@ -1588,21 +1616,19 @@ fn load_rgba_thumbnail(
     max_size: usize,
 ) -> Result<image::RgbaImage, Box<dyn std::error::Error>> {
     let image = image::ImageReader::open(path)?.decode()?;
-    Ok(image.thumbnail(max_size as u32, max_size as u32).to_rgba8())
+    Ok(image
+        .resize(
+            max_size as u32,
+            max_size as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8())
 }
 
 fn foreground_alpha_count(image: &image::RgbaImage, threshold: f32) -> usize {
     image
         .pixels()
-        .filter(|pixel| {
-            crate::target2d::target_2d_foreground_rgba_pixel(
-                pixel[0] as f32 / 255.0,
-                pixel[1] as f32 / 255.0,
-                pixel[2] as f32 / 255.0,
-                pixel[3] as f32 / 255.0,
-                threshold,
-            )
-        })
+        .filter(|pixel| pixel[3] as f32 / 255.0 >= threshold)
         .count()
 }
 
@@ -1644,7 +1670,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adaptive_target_image_size_does_not_undershoot_requested_points() {
+    fn adaptive_target_image_size_matches_upstream_five_iteration_rule() {
         let path = std::env::temp_dir().join(format!(
             "burn_automata_target2d_full_alpha_{}.png",
             std::process::id()
@@ -1657,10 +1683,27 @@ mod tests {
         let count = foreground_alpha_count(&resized, 0.05);
         std::fs::remove_file(&path).ok();
 
-        assert!(
-            count >= 2048,
-            "adaptive target count {count} should meet the requested floor at size {size}"
-        );
+        assert_eq!(size, 45);
+        assert_eq!(count, 2025);
+    }
+
+    #[test]
+    fn growing_target_loader_rejects_fully_opaque_images() {
+        let path = std::env::temp_dir().join(format!(
+            "burn_automata_target2d_opaque_{}.png",
+            std::process::id()
+        ));
+        RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let error = load_target_image_2d_adaptive(&path, 0.05, 128, None)
+            .unwrap_err()
+            .to_string();
+        std::fs::remove_file(&path).ok();
+
+        assert!(error.contains("fully opaque"));
+        assert!(error.contains("transparent background"));
     }
 
     #[test]
@@ -1668,7 +1711,8 @@ mod tests {
         let config: Target2dTrainExperimentConfig = toml::from_str(
             r#"
             [source]
-            target_image = "assets/catalog_thumbnails/lizard.png"
+            target_image = "assets/reference_targets/lizard_upstream_120.png"
+            initial_model = "artifacts/lizard/previous.bpk"
 
             [training]
             experimental = true
@@ -1689,7 +1733,13 @@ mod tests {
 
         assert_eq!(
             config.source.target_image.as_deref(),
-            Some(Path::new("assets/catalog_thumbnails/lizard.png"))
+            Some(Path::new(
+                "assets/reference_targets/lizard_upstream_120.png"
+            ))
+        );
+        assert_eq!(
+            config.source.initial_model.as_deref(),
+            Some(Path::new("artifacts/lizard/previous.bpk"))
         );
         assert_eq!(config.training.experimental, Some(true));
         assert_eq!(config.training.device.as_deref(), Some("gpu"));

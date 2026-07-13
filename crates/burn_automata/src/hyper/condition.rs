@@ -68,6 +68,10 @@ impl ConditionImage2d {
         Self::new(width, height, 3, values)
     }
 
+    pub fn from_rgba(width: usize, height: usize, values: Vec<f32>) -> AutomataResult<Self> {
+        Self::new(width, height, 4, values)
+    }
+
     pub fn new(
         width: usize,
         height: usize,
@@ -127,6 +131,53 @@ impl ConditionImage2d {
 
     pub fn pixel_count(&self) -> usize {
         self.width * self.height
+    }
+
+    /// Returns straight RGB composited over a fixed background.
+    ///
+    /// Keeping this operation on the condition type makes image decoding and
+    /// DINO preprocessing share the same alpha semantics.
+    pub fn composited_rgb_values(&self, background: [f32; 3]) -> AutomataResult<Vec<f32>> {
+        self.validate()?;
+        if !background.iter().all(|value| value.is_finite()) {
+            return Err(AutomataError::InvalidArgument(
+                "condition background contains non-finite values".to_string(),
+            ));
+        }
+        let mut values = Vec::with_capacity(self.pixel_count() * 3);
+        for pixel in 0..self.pixel_count() {
+            let base = pixel * self.channels;
+            let rgb = match self.channels {
+                1 => [self.values[base]; 3],
+                _ => [
+                    self.values[base],
+                    self.values[base + 1],
+                    self.values[base + 2],
+                ],
+            };
+            let alpha = if self.channels == 4 {
+                self.values[base + 3].clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            for channel in 0..3 {
+                values.push(rgb[channel] * alpha + background[channel] * (1.0 - alpha));
+            }
+        }
+        Ok(values)
+    }
+
+    pub fn alpha_values(&self) -> AutomataResult<Vec<f32>> {
+        self.validate()?;
+        Ok((0..self.pixel_count())
+            .map(|pixel| {
+                if self.channels == 4 {
+                    self.values[pixel * self.channels + 3].clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            })
+            .collect())
     }
 
     pub fn summary(&self) -> AutomataResult<ConditionSummary2d> {
@@ -480,5 +531,16 @@ mod tests {
             .feature_vector_for_encoder(ConditionEncoder2d::DinoVitsTokenGrid, 2, 3)
             .unwrap();
         assert_eq!(features.len(), dims);
+    }
+
+    #[test]
+    fn rgba_condition_composites_transparent_pixels_without_losing_shape() {
+        let image = ConditionImage2d::from_rgba(2, 1, vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+            .unwrap();
+        assert_eq!(
+            image.composited_rgb_values([1.0; 3]).unwrap(),
+            vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(image.alpha_values().unwrap(), vec![0.0, 1.0]);
     }
 }

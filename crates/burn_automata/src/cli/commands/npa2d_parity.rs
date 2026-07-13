@@ -221,6 +221,15 @@ pub(crate) fn run_validate_npa_2d_parity(
     if validation.target.fixture_position_set_matches == Some(false) {
         failures.push("Rust target positions differ from upstream fixture".to_string());
     }
+    if let (Some(rmse), Some(tolerance)) = (
+        validation.target.fixture_color_rmse,
+        validation.target.fixture_color_tolerance,
+    ) && rmse > tolerance
+    {
+        failures.push(format!(
+            "Rust target colors differ from upstream fixture: rmse={rmse:.6} tolerance={tolerance:.6}"
+        ));
+    }
 
     let passed = failures.is_empty();
     let total_loss = validation.loss.total_loss;

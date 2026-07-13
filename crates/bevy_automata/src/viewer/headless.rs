@@ -76,7 +76,7 @@ impl Default for HeadlessExportConfig {
             hyper_base_model_path: None,
             hyper_model_path: None,
             dino_model_path: None,
-            dino_image_size: 518,
+            dino_image_size: 224,
             dino_patch_size: 14,
             seed: RolloutConfig::default().seed,
             seed_scale: None,

@@ -19,16 +19,17 @@ holdout_stride = 4
 holdout_offset = 0
 
 [output]
-output_dir = "artifacts/hyper2d_e2e_rollout_bench_omnisvg_8_steps200_b4_p128s4_tiled"
+output_dir = "artifacts/hyper2d_e2e_rollout_bench_omnisvg_8_steps200_b4_p128s4_tiled_v3"
 
 [condition]
 encoder = "dino-vits-full-tokens"
 dino_model = "models/dino/dino_vits.mpk"
-dino_image_size = 518
+dino_image_size = 224
 dino_patch_size = 14
 dino_batch_size = 4
 online = true
 token_attention_heads = 4
+alpha_channel = true
 
 [model]
 shared_base_trainable = true
@@ -43,7 +44,8 @@ objective = "target2d-rollout-image-loss"
 steps = 200
 report_interval = 50
 example_batch_size = 4
-tbptt_chunk_steps = 2
+credit_assignment = "full-bptt"
+max_full_bptt_particle_steps = 1048576
 target2d_loss_backend = "tiled-adjoint"
 perception_backend = "dense"
 max_dense_train_particles = 512
@@ -60,9 +62,11 @@ condition_device_cache_max_bytes = 8589934592
 [adapter]
 rank = 8
 alpha = 8.0
-generator = "token-aware-rectified-flow"
+generator = "module-token-decoder"
+adapter_chunk_size = 64
+attention_normalization = "softmax"
 flow_hidden = 128
-flow_sample_steps = 2
+flow_sample_steps = 1
 flow_source_scale = 1.0
 init_scale = 1.0e-3
 
@@ -99,6 +103,8 @@ adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 1.0e-8
 per_parameter_grad_normalization = true
+base_per_parameter_grad_normalization = true
+generator_per_parameter_grad_normalization = false
 
 [validation]
 examples = 2

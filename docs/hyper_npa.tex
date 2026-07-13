@@ -6,345 +6,217 @@
 \usepackage{graphicx}
 \usepackage[hypertexnames=false]{hyperref}
 \usepackage{enumitem}
-\usepackage{xcolor}
-\usepackage{array}
 \usepackage{float}
 \usepackage{xurl}
 
 \graphicspath{{docs/}{./}}
-
-\title{HyperNPA: End-to-End Image-Conditioned Neural Particle Automata}
+\title{HyperNPA: Held-Out Evaluation of Image-Conditioned Neural Particle Automata}
 \author{burn\_automata Research Notes}
-\date{July 7, 2026}
+\date{July 10, 2026}
 
 \newcommand{\npa}{\mathrm{NPA}}
-\newcommand{\hypernpa}{\mathrm{HyperNPA}}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Neural Particle Automata (NPA) encode images and shapes as local particle
-dynamics. HyperNPA asks whether a single feed-forward model can map an input
-image to an NPA instance whose rollout reconstructs the condition. This revision
-updates the paper around the current end-to-end training path: image
-\(\rightarrow\) DINO ViT-S full-token condition \(\rightarrow\)
-token-aware rectified-flow LoRA generator \(\rightarrow\) shared-base NPA rollout.
-The shared NPA base and the conditioned LoRA generator are trained jointly from
-step zero with a rollout image loss, rather than training per-sample adapters and
-regressing to their raw factor coordinates.
+HyperNPA studies amortized generation of Neural Particle Automata (NPA) from
+images. A frozen DINOv2 ViT-S/14 encoder produces spatial condition tokens; a
+deterministic hypernetwork emits a LoRA adapter for a shared growing NPA; and
+the adapted NPA is optimized through differentiable particle rollout and an
+alpha-aware image objective. This revision corrects an earlier teacher-leakage
+interpretation and reports identity-disjoint validation.
 
-The current 10k OmniSVG run is functional but not at oracle parity. It trains on
-9500 examples and holds out 500, uses online DINO features, CUDA/Burn autodiff,
-rank-16 generated LoRA, 128-particle four-step training rollouts, and TBPTT
-chunks of two steps. The selected checkpoint reaches 8.56 dB mean target-image
-PSNR over 32 holdout validation samples at the training-scale rollout setting;
-the best validation sample reaches 16.75 dB and the worst reaches 0.56 dB. New
-paper figures include actual \texttt{bevy\_gaussian\_splatting} render captures
-of eight held-out image-conditioned HyperNPA rollouts at 2048 particles across
-steps 4, 16, 64, and 128. These renders show that feed-forward inference works,
-but also that long-rollout stability and image fidelity remain weak.
-
-For context, the strongest oracle-trained NPA comparison remains an exact
-adapter-bank control, not the current E2E model: direct exact LoRA materializes
-persisted oracle NPAs at 99 dB, and a deterministic DINO-flow zero-source
-control reaches 30.44 dB mean / 27.31 dB minimum render PSNR over 16
-2048-particle oracle samples. The current learned E2E HyperNPA has not achieved
-the 26 dB oracle-parity gate. The main remaining work is therefore not
-visualization plumbing; it is raising E2E dynamics quality and validating it
-against matched high-particle oracle NPAs.
+The strongest teacher-free catalog result reaches 10.52 dB aggregate
+composited PSNR at 4096 particles and 1024 rollout steps. On an OmniSVG-1k
+split with 900 train and 100 held-out images, patch RGB channels and local
+condition control raise selected aggregate PSNR from 11.35 to 11.76 dB, but
+remain far below the 26 dB target. A direct 1000-row adapter table reaches only
+12.35 dB even on its training identities. Unfreezing the shared trunk lowers
+the short-rollout objective while degrading long-rollout PSNR; a longer
+512-particle, 32--64-step curriculum improves p10 PSNR from 10.49 to 10.80 dB
+without improving aggregate PSNR. These controls locate the present bottleneck
+in the shared-basis and rollout-training objective, before amortized DINO
+conditioning or stochastic adapter flow.
 \end{abstract}
 
-\section{Claim Boundary}
+\section{Architecture}
 
-This document reports the current local \texttt{burn\_automata} HyperNPA state.
-The term HyperNPA refers to an image-conditioned generator of NPA weights or
-adapters, followed by particle rollout. The current default inference artifact
-is:
-
-\begin{itemize}[leftmargin=*]
-  \item artifact directory:
-  \path{artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda}
-  \item shared NPA base: \path{shared_base.bpk}
-  \item HyperNPA generator: \path{hyper_2d.json}
-  \item DINO checkpoint: \path{models/dino/dino_vits.mpk}
-\end{itemize}
-
-The current result is not a proof of broad 1k/10k generalized oracle-quality
-image \(\rightarrow\) NPA generation. What is proven is narrower:
-
-\begin{enumerate}[leftmargin=*]
-  \item the E2E image-conditioned inference path loads a condition image, runs
-  DINO, emits a generated LoRA adapter, installs it on the shared NPA base, and
-  rolls out in the Bevy/WGPU viewer;
-  \item the 10k training run improves the target-image rollout objective from a
-  broken initial state to a measurable but low-fidelity holdout solution;
-  \item separate exact-oracle adapter-bank controls show that the NPA plus LoRA
-  representation can match per-sample oracle NPAs when the adapter is correct;
-  \item the current learned E2E model is still far below the oracle comparison
-  threshold and lacks matched high-particle oracle validation on its 10k holdout
-  slice.
-\end{enumerate}
-
-\section{Current Architecture}
-
-The current 2D HyperNPA pipeline is trained directly against rollout image loss:
+For condition image $c$, shared NPA parameters $W$, and generated adapter
+$a_\phi(c)$, the maintained deterministic path is
 \[
-\begin{aligned}
-\text{image} &\rightarrow \text{DINO full-token grid}
-\rightarrow \text{conditioned rectified-flow LoRA} \\
-&\rightarrow \text{shared-base NPA rollout}
-\rightarrow \text{target image loss}.
-\end{aligned}
+c \xrightarrow{\text{DINOv2}} z_c
+\xrightarrow{h_\phi} a_\phi(c), \qquad
+x_{t+1},s_{t+1}=\npa_{W,a_\phi(c)}(x_t,s_t).
 \]
+The loss is evaluated on Gaussian particle splats and combines target color,
+density, composited RGB, displacement, overflow, and boundary terms.
 
-\paragraph{Condition encoder.}
-Each condition image is resized to 518 pixels and encoded with DINO ViT-S/14.
-The model uses the CLS token plus the full \(37\times37\) patch-token grid:
-1370 tokens with 384 dimensions, or 526080 flattened values before the
-token-aware pooling path. The training run used online DINO and batch size 16.
+\paragraph{Condition tokens.}
+Inputs are resized to the native 224-pixel DINO ViT-S/14 resolution. The CLS
+token and $16\times16$ patch grid produce 257 tokens with 384 DINO channels.
+Alpha-aware runs append patch occupancy, yielding $257\times385$. The latest
+ablation also appends patch-aligned RGB, yielding $257\times388$. DINO inference
+runs on GPU without an autodiff graph, in bounded batches or a bounded resident
+device cache.
 
-\paragraph{Hypernetwork.}
-The generator is token-aware and rectified-flow inspired. It consumes condition
-tokens, a sampled source state, and a short two-step flow sampler, then emits a
-rank-16, \(\alpha=16\) LoRA adapter vector for the NPA MLP. The report labels
-this conditioner as \texttt{token\_attention\_pool\_rectified\_flow\_generated\_lora}
-with four token-attention heads, hidden width 128, and generated output dimension
-5586.
+\paragraph{Adapter generator.}
+The current scaling path uses a module-aware cross-attention decoder and emits
+a rank-82 LoRA adapter. Rank 82 is sufficient to represent the released
+growing-NPA matrix deltas exactly. The artifact name retained from earlier work
+contains \texttt{rectified\_flow}, but the maintained one-step generator is
+deterministic. It is not a stochastic flow model.
 
-\paragraph{Shared NPA base.}
-The base model is a growing-2D NPA initialized from the upstream seed. Unlike the
-older two-stage adapter-bank experiments, the shared NPA base is trainable from
-step zero together with the generator. This better matches the intended use
-case: the shared dynamics should learn reusable particle communication and
-growth behavior, while the condition-specific adapter steers the rollout.
+\paragraph{Spatial control.}
+An optional per-step field samples patch-token features at particle positions
+and adds a learned local residual. A state-aware extension also projects the
+current recurrent state into that controller. Its projection is initialized to
+zero, preserving the previous checkpoint exactly before training. Per-step
+field artifacts cannot be collapsed to static LoRA-only NPA artifacts and are
+therefore rejected by the static Bevy inference path.
 
-\paragraph{Training objective.}
-The selected 10k run optimizes a target-2D rollout image objective, not raw
-adapter-vector MSE. It uses 128 rollout particles, four rollout steps, update
-probability 0.5, 64-pixel target loss images, 512 target samples, splat loss
-weight 2.0, color loss weight 5.0, density loss weight 1.0, and boundary /
-overflow regularization. TBPTT chunks of two steps bound the training graph. The
-training backend is Burn/CUDA autodiff with dense pair interactions capped by
-the configured chunk sizes.
+\section{Evaluation Protocol}
 
-\section{Training Run}
+Teacher adapters are attached only to training examples. The trainer aborts if
+any holdout example contains an oracle adapter target. Quality reports include
+composited, raw-render, foreground, and density PSNR; density soft IoU;
+generated-over-base and correct-over-shuffled gaps; adapter diagnostics; and an
+optional nearest-training-oracle control.
 
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{ll}
-\toprule
-field & value \\
-\midrule
-dataset & OmniSVG MMSVG-Illustration, train split \\
-selected examples & 10000 \\
-train / holdout & 9500 / 500 \\
-condition & online DINO ViT-S full tokens, 1370 tokens \(\times\) 384 dims \\
-shared base & trainable, upstream-seeded growing-2D NPA \\
-adapter & generated LoRA, rank 16, alpha 16 \\
-generator & token-aware rectified-flow LoRA generator, hidden 128 \\
-optimizer & AdamW, lr \(10^{-4}\), cosine decay to 0.1x, grad clip 1.0 \\
-rollout train scale & 128 particles, 4 steps, update probability 0.5 \\
-TBPTT & chunk size 2 \\
-backend & Burn/CUDA autodiff dense direct-basis E2E rollout \\
-\bottomrule
-\end{tabular}
-\caption{Configuration of the current E2E HyperNPA training run.}
-\label{tab:e2e-config}
-\end{table}
+The catalog quality protocol uses official transparent targets, 4096 particles,
+1024 rollout steps, update probability 0.5, and seed 42. OmniSVG-1k uses a
+deterministic 900/100 identity split and reports 1024-particle, 128-step quality
+on a fixed 16-image holdout subset. Checkpoint selection uses p10 composited
+PSNR to prevent aggregate improvements from hiding tail regressions.
+
+\section{Released-Catalog Controls}
+
+An earlier two-image result reconstructed the exact rose and tropical-fish
+adapter targets and reached 27.57 dB aggregate composited PSNR. Because those
+adapters were included in training, this proves adapter materialization and
+runtime correctness, not held-out image-to-NPA generalization.
+
+The corrected split trains on eight released identities and holds out rose and
+tropical fish without teacher adapters.
 
 \begin{table}[H]
 \centering
 \small
-\begin{tabular}{lrrrr}
+\begin{tabular}{lr}
 \toprule
-checkpoint & step & train loss & holdout loss & holdout PSNR \\
+strict 8/2 catalog metric & result \\
 \midrule
-first report & 100 & 7.642 & 5.398 & 4.83 dB \\
-best holdout PSNR & 2700 & 7.305 & 4.592 & 8.56 dB \\
-best holdout loss & 2900 & 6.364 & 4.578 & 8.35 dB \\
-final & 3000 & 4.896 & 4.583 & 8.42 dB \\
+aggregate composited RGB PSNR & 10.52 dB \\
+p10 composited RGB PSNR & 9.83 dB \\
+mean raw-render RGB PSNR & 11.21 dB \\
+aggregate density PSNR & 8.11 dB \\
+mean density soft IoU & 0.498 \\
+correct condition over shuffled & 0.09 dB \\
+generated adapter over shared base & 2.33 dB \\
+nearest-training DINO oracle adapter & 8.90 dB \\
 \bottomrule
 \end{tabular}
-\caption{Training-scale validation from \texttt{report.json}. PSNR here is
-target-image validation at 128 particles and four rollout steps, not oracle-NPA
-PSNR.}
-\label{tab:e2e-training}
+\caption{Teacher-free catalog holdout quality at 4096 particles and 1024
+steps. The nearest-oracle result is lower than the generated adapter and does
+not provide a path to parity.}
+\label{tab:catalog-heldout}
 \end{table}
 
-The selected checkpoint is the best holdout-PSNR checkpoint at step 2700. The
-run reduced the first reported loss by 2.75 absolute points, but the holdout
-quality remains low. Throughput during reporting was roughly 4.8k--6.3k
-particle-steps/s and 0.62M--0.81M dense pair interactions/s, with median
-reported particle throughput 5.27k particle-steps/s.
-
-\section{Held-Out E2E Validation}
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{lrrr}
-\toprule
-metric & value & particles & rollout steps \\
-\midrule
-holdout examples evaluated & 32 & 128 & 4 \\
-mean target-image PSNR & 8.56 dB & 128 & 4 \\
-minimum target-image PSNR & 0.56 dB & 128 & 4 \\
-maximum target-image PSNR & 16.75 dB & 128 & 4 \\
-mean total validation loss & 4.592 & 128 & 4 \\
-passed 8 dB threshold & false & 128 & 4 \\
-\bottomrule
-\end{tabular}
-\caption{Current E2E holdout validation. This is the best reported holdout
-checkpoint, evaluated on 32 held-out examples.}
-\label{tab:e2e-holdout}
-\end{table}
-
-\begin{table}[H]
-\centering
-\scriptsize
-\begin{tabular}{lrr}
-\toprule
-sample & target-image PSNR & total loss \\
-\midrule
-00007620 & 16.75 dB & 1.088 \\
-00005900 & 16.31 dB & 1.994 \\
-00005680 & 16.25 dB & 1.629 \\
-00009920 & 16.04 dB & 1.596 \\
-00009280 & 15.17 dB & 1.317 \\
-00007940 & 13.99 dB & 1.657 \\
-00006280 & 12.28 dB & 2.583 \\
-00002640 & 12.05 dB & 1.539 \\
-\bottomrule
-\end{tabular}
-\caption{Eight held-out validation samples used for the Bevy rollout panel.
-These are the strongest examples in the 32-sample validation report.}
-\label{tab:e2e-samples}
-\end{table}
-
-\begin{figure}[p]
-\centering
-\includegraphics[height=0.76\textheight,keepaspectratio]{hyper_npa_figures/e2e_bevy_rollouts/e2e_hypernpa_bevy_rollout_panel.png}
-\caption{Actual Bevy/WGPU HyperNPA inference and
-\texttt{bevy\_gaussian\_splatting} rendering for eight held-out validation
-images. Each row is generated from the condition image with the current E2E
-HyperNPA artifact, then rolled out with 2048 particles and captured at steps 4,
-16, 64, and 128. Row labels show the 128-particle, four-step holdout
-target-image PSNR from Table~\ref{tab:e2e-samples}. The figure is intentionally
-not cherry-picked for long-horizon stability: many samples decay or leave the
-frame by step 128.}
-\label{fig:e2e-bevy-rollouts}
-\end{figure}
-
-\section{Oracle-Trained NPA Baselines}
-
-The current E2E 10k run does not yet have a matched 2048-particle oracle-NPA
-PSNR report over the same holdout samples. To keep the comparison grounded, this
-paper includes the oracle comparisons that do exist in the repo. They answer a
-different but important question: can the NPA plus LoRA representation match
-per-sample oracle NPAs when the correct adapter is available?
+\section{OmniSVG-1k Ablations}
 
 \begin{table}[H]
 \centering
 \scriptsize
 \resizebox{\linewidth}{!}{%
-\begin{tabular}{p{0.34\linewidth}rrrrrp{0.21\linewidth}}
+\begin{tabular}{lrrr}
 \toprule
-system & examples & particles & steps & mean PSNR & min PSNR & status \\
+experiment & aggregate composited PSNR & p10 PSNR & median training throughput \\
 \midrule
-direct exact LoRA vs oracle NPA & 16 & 2048 & 32 & 99.00 & 99.00 & materialization sanity pass \\
-DINO-flow zero-source control vs oracle NPA & 16 & 2048 & 32 & 30.44 & 27.31 & passes 26 dB gate \\
-trained WGPU DINO-flow adapter model vs oracle NPA & 16 & 2048 & 32 & 9.10 & 0.53 & fails oracle gate \\
-current E2E HyperNPA vs target image & 32 & 128 & 4 & 8.56 & 0.56 & not oracle-comparable \\
+static DINO+alpha module decoder & 11.35 dB & 8.82 dB & 1.11M particle-steps/s \\
+append patch RGB channels & 11.53 dB & 9.21 dB & 1.10M particle-steps/s \\
+add per-step spatial output control & 11.76 dB & 9.34 dB & 1.00M particle-steps/s \\
+add recurrent-state control & 11.76 dB selected & 9.34 dB selected & 0.92M particle-steps/s \\
+direct sample-ID adapter table (train upper bound) & 12.35 dB & 10.49 dB & 1.92M particle-steps/s \\
+adapter table, 512p / 32--64-step curriculum & 12.30 dB & 10.80 dB & 0.59M particle-steps/s \\
 \bottomrule
-\end{tabular}
-}
-\caption{Numerical comparison against available oracle-trained NPA baselines.
-Only the first three rows use persisted oracle NPAs as the PSNR target. The
-current E2E row is included to show the scale of the remaining gap, but it uses
-target-image validation at training scale because matched oracle models are not
-available for that 10k holdout slice.}
-\label{tab:oracle-comparison}
+\end{tabular}}
+\caption{Identity-disjoint HyperNPA ablations and non-amortized train upper
+bounds. The adapter-table rows evaluate training identities and therefore are
+ceilings, not held-out generalization results.}
+\label{tab:omnisvg-ablation}
 \end{table}
 
-\begin{figure}[p]
-\centering
-\includegraphics[height=0.88\textheight,keepaspectratio]{hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_panel_a.png}
-\caption{Oracle comparison control, first half. Columns show condition image,
-DINO-flow zero-source control, direct exact LoRA, and oracle NPA target. These
-are 2048-particle, 32-step rollout rasterizations. This is a representation and
-sampling-path control, not the current E2E learned model.}
-\label{fig:oracle-control-a}
-\end{figure}
+Patch RGB improves the aggregate by 0.18 dB and the p10 tail by 0.39 dB. Local
+output control adds another 0.23 dB aggregate. State-aware control improves the
+short objective and a later aggregate checkpoint, but lowers the p10 selection
+score, so the state-independent checkpoint remains selected.
+
+The sample-ID table removes DINO and adapter prediction entirely. Its 12.35 dB
+train ceiling is the central diagnostic result: the current shared basis and
+rollout optimization cannot fit the 1k training set near oracle quality. A
+5000-step short-rollout continuation adds only 0.21 dB. Updating the shared
+trunk lowers sampled loss from roughly 3.0 to 2.59 while long-horizon PSNR
+regresses, demonstrating objective mismatch. The longer curriculum improves
+the p10 tail by 0.31 dB but not the aggregate.
+
+This upper bound is specific to the tested curriculum, not an intrinsic LoRA
+expressivity result. The released growing trainer uses 4096 particles, 32--96
+sampled rollout steps, a 256-pixel splat grid, 4096 target points, a 512-state
+pool, batch size 8, seed injection every 16 epochs, brush damage 0.1, and three
+10k-epoch repetitions. Our 1k controls use 256/512 particles, 8--64 steps, a
+64-pixel loss grid, 2048 target points, two pool slots per identity, and only
+hundreds of visits per identity. The next experiment therefore depends on a
+sparse/tiled 4096-particle Burn backward path capable of reproducing the
+upstream regime.
+
+\section{Renderer Evidence}
 
 \begin{figure}[p]
 \centering
-\includegraphics[height=0.88\textheight,keepaspectratio]{hyper_npa_figures/exact_dino_flow_psnr/exact_dino_flow_16sample_panel_b.png}
-\caption{Oracle comparison control, second half. Direct exact LoRA reaches
-99 dB by construction; the deterministic DINO-flow control clears the 26 dB
-oracle gate on all 16 examples.}
-\label{fig:oracle-control-b}
+\includegraphics[height=0.72\textheight,keepaspectratio]{hyper_npa_figures/e2e_bevy_rollouts/e2e_hypernpa_bevy_rollout_panel.png}
+\caption{Actual Bevy/WGPU and \texttt{bevy\_gaussian\_splatting} captures from
+eight held-out conditions at multiple rollout steps. This panel is retained as
+an inference-integration and failure-mode record from an earlier 10k
+checkpoint; it is not used for the strict numerical claims in
+Tables~\ref{tab:catalog-heldout} and~\ref{tab:omnisvg-ablation}. Sparse and
+collapsing late rollouts illustrate the quality gap.}
+\label{fig:bevy-rollouts}
 \end{figure}
 
-\section{Interpretation}
+\section{Discussion}
 
-The current training paradigm is better aligned with the intended HyperNPA use
-case than the older raw-adapter regression path. It avoids a separate
-per-sample LoRA optimization loop and trains the shared base plus conditioned
-adapter generator directly through the downstream rollout image objective.
-However, this does not automatically solve the quality problem.
+The experiments reject four simple explanations for the gap. First, holdout
+DINO tokens are available and condition shuffling changes outputs on OmniSVG.
+Second, explicit RGB information helps but is not sufficient. Third, a larger
+local controller lowers training loss but does not solve the tail. Fourth,
+direct adapters without a hypernetwork are themselves far below oracle
+quality. The first unresolved problem is therefore learning a robust shared NPA
+basis under a quality-scale recurrent objective.
 
-The evidence now separates three levels:
-
+The next gate is:
 \begin{enumerate}[leftmargin=*]
-  \item \textbf{Representation upper bound.} Exact adapters and the
-  zero-source DINO-flow control can match oracle NPAs at high particle count.
-  \item \textbf{Current learned E2E model.} The online image-conditioned model
-  learns a real signal on 10k examples, but only at low rollout scale and with
-  low target-image PSNR.
-  \item \textbf{Renderer integration.} The Bevy/WGPU path can run feed-forward
-  HyperNPA inference from an image and render 2048-particle Gaussian splats, but
-  visual rollouts are not yet stable enough for an oracle-quality claim.
-\end{enumerate}
-
-The most important negative result is long-horizon stability. In
-Figure~\ref{fig:e2e-bevy-rollouts}, several top validation samples produce
-visible early particle structure but collapse to sparse or near-empty renders by
-step 64 or 128. This indicates that the training horizon, stability losses, and
-quality-scale validation must be strengthened before the model can be presented
-as a high-quality image-to-NPA generator.
-
-\section{Remaining Work}
-
-\begin{enumerate}[leftmargin=*]
-  \item Generate matched high-particle oracle NPAs for the E2E validation slice
-  and report HyperNPA-vs-oracle PSNR for the same images shown in
-  Figure~\ref{fig:e2e-bevy-rollouts}.
-  \item Train with longer rollout horizons and a curriculum that reaches at
-  least 2048-particle validation without dense all-pairs memory blowups.
-  \item Add stability objectives that penalize collapse, off-frame drift, and
-  late-rollout extinction.
-  \item Compare trainable shared-base E2E training against a frozen-base E2E
-  variant and a direct per-sample oracle baseline on identical samples.
-  \item Improve throughput by replacing dense quality-scale backward passes with
-  tiled or sparse GPU kernels, then re-run the 10k experiment with longer
-  rollouts and larger validation batches.
-  \item Continue to use Bevy headless exports for paper figures so the paper
-  reflects the actual viewer/inference stack.
+  \item train shared-trunk plus direct adapters at particle counts and rollout
+  horizons overlapping validation;
+  \item compare each row to an independently overfit NPA oracle with identical
+  targets, seeds, particles, and rollout steps;
+  \item select on aggregate and p10 oracle-relative quality, never short loss
+  alone;
+  \item freeze the proven trunk and amortize the direct adapters with DINO
+  tokens plus downstream rollout loss;
+  \item only then introduce noisy adapter states and timestep-conditioned
+  velocity training for a true rectified-flow generator.
 \end{enumerate}
 
 \section{Conclusion}
 
-HyperNPA has moved from adapter-vector reconstruction toward the more appropriate
-end-to-end image conditioned training paradigm: DINO tokens feed a generated LoRA
-adapter, the adapter modulates a shared trainable NPA, and the whole path is
-optimized through rollout image loss. The current 10k run proves this path is
-implemented and learning, and the new Bevy figures prove feed-forward image
-input to rendered NPA rollout works. It does not yet prove oracle-quality
-generalization. The oracle-trained NPA controls show that the representation can
-reach the target quality band; the learned E2E model now needs to close that gap
-under matched high-particle validation.
+The Burn/WGPU implementation now provides a leakage-safe, identity-disjoint,
+GPU-native HyperNPA evaluation stack. It proves conditional control and useful
+incremental gains from spatial RGB and local rollout conditioning. It does not
+prove generalized oracle-quality image-to-NPA generation: the best strict
+held-out scores remain 14--16 dB below the 26 dB target, and the direct-adapter
+upper bound is also low. Future claims must first establish a quality-scale
+shared NPA basis and then demonstrate that DINO-conditioned amortization retains
+that oracle-relative quality.
 
 \begin{thebibliography}{9}
 \bibitem{npa}

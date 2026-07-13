@@ -1,10 +1,13 @@
 preset = "growing-2d"
 
 [source]
-target_images = ["assets/reference_targets/lizard_upstream_120.png"]
+target_images = [
+  ".cache/selforg_npa/targets/growing/rose.png",
+  ".cache/selforg_npa/targets/growing/tropical_fish.png",
+]
 
 [output]
-output_dir = "artifacts/hyper2d_e2e_rollout_smoke_lizard_steps1"
+output_dir = "artifacts/hyper2d_verified_growing_catalog_nonbase_eval"
 
 [condition]
 encoder = "dino-vits-full-tokens"
@@ -17,9 +20,9 @@ token_attention_heads = 4
 alpha_channel = true
 
 [model]
-shared_base_trainable = true
-shared_base_train_start_step = 0
-shared_base_init = "upstream-seeded"
+shared_base = "artifacts/hyper2d_verified_growing_catalog_refine/shared_base.bpk"
+hyper = "artifacts/hyper2d_verified_growing_catalog_refine/hyper_2d.bpk"
+shared_base_trainable = false
 hidden_dims = 128
 output_activation = "tanh"
 
@@ -30,40 +33,42 @@ steps = 1
 report_interval = 1
 example_batch_size = 1
 credit_assignment = "full-bptt"
-max_full_bptt_particle_steps = 1048576
-target2d_loss_backend = "dense"
-perception_backend = "dense"
-max_dense_train_particles = 512
+max_full_bptt_particle_steps = 32
+task_loss_weight = 0.0
+adapter_teacher_weight = 0.0
+target2d_loss_backend = "tiled-adjoint"
+perception_backend = "auto"
+max_dense_train_particles = 32
 system_memory_budget_gb = 12.0
-gpu_memory_budget_gb = 8.0
+gpu_memory_budget_gb = 16.0
 seed = 42
 
 [gpu]
 backend = "burn-wgpu"
-max_dense_chunk_floats = 262144
-max_splat_chunk_floats = 262144
-condition_device_cache_max_bytes = 8589934592
+max_dense_chunk_floats = 524288
+max_splat_chunk_floats = 524288
+condition_device_cache_max_bytes = 1073741824
 
 [adapter]
-rank = 8
-alpha = 8.0
-generator = "module-token-decoder"
+rank = 82
+alpha = 82.0
+generator = "token-attention-pool"
 adapter_chunk_size = 64
-attention_normalization = "softmax"
 flow_hidden = 128
 flow_sample_steps = 1
-flow_source_scale = 1.0
+flow_source_scale = 2.0
 init_scale = 1.0e-3
 
 [rollout]
 particles = 32
-steps = 2
+steps = 1
 update_prob = 0.5
 seed = 42
+seed_scale = 0.2
 seed_mode = "uniform-circle"
 
 [target]
-points = 128
+points = 4096
 threshold = 0.05
 loss_image_size = 32
 splat_sigma = 1.0
@@ -75,33 +80,27 @@ overflow_regularizer_weight = 100.0
 bound_regularizer_weight = 100.0
 
 [optimizer]
-learning_rate = 1.0e-4
-base_learning_rate = 1.0e-4
-generator_learning_rate = 1.0e-4
-weight_decay = 0.0
-base_weight_decay = 0.0
-generator_weight_decay = 0.0
-grad_clip_norm = 1.0
-base_grad_clip_norm = 1.0
-generator_grad_clip_norm = 1.0
-adam_beta1 = 0.9
-adam_beta2 = 0.999
-adam_epsilon = 1.0e-8
-per_parameter_grad_normalization = true
-base_per_parameter_grad_normalization = true
+learning_rate = 0.0
+base_learning_rate = 0.0
+generator_learning_rate = 0.0
+per_parameter_grad_normalization = false
+base_per_parameter_grad_normalization = false
 generator_per_parameter_grad_normalization = false
 
 [validation]
-examples = 1
+initial_examples = 0
+examples = 2
 interval = 1
-particles = 32
-steps = 2
+particles = 4096
+steps = 1024
+horizons = [96, 256, 512, 1024]
+selection_horizon_min_steps = 256
 update_prob = 0.5
 seed = 42
 psnr_threshold_db = 26.0
 
 [gates]
 min_median_particle_steps_per_sec = 1.0
-max_quality_validation_evaluations = 3
+max_quality_validation_evaluations = 2
 max_quality_validation_elapsed_fraction = 1.0
-fail_on_violation = true
+fail_on_violation = false

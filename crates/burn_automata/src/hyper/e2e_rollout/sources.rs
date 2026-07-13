@@ -2,17 +2,17 @@ use super::{E2eCatalogGroup, OmniSvgDataset, preset_name};
 use std::path::{Path, PathBuf};
 
 mod omnisvg;
-pub(super) use omnisvg::OmniSvgSourceConfig;
+pub(crate) use omnisvg::OmniSvgSourceConfig;
 
 #[derive(Clone, Debug)]
-pub(super) struct Hyper2dScratchSource {
-    pub(super) slug: String,
-    pub(super) title: Option<String>,
-    pub(super) group: Option<String>,
-    pub(super) condition_path: PathBuf,
-    pub(super) particles: Option<usize>,
-    pub(super) seed_scale: Option<f32>,
-    pub(super) update_prob: Option<f32>,
+pub(crate) struct Hyper2dScratchSource {
+    pub(crate) slug: String,
+    pub(crate) title: Option<String>,
+    pub(crate) group: Option<String>,
+    pub(crate) condition_path: PathBuf,
+    pub(crate) particles: Option<usize>,
+    pub(crate) seed_scale: Option<f32>,
+    pub(crate) update_prob: Option<f32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -26,21 +26,21 @@ struct SelfOrgCatalogEntry {
     update_prob: Option<f32>,
 }
 
-pub(super) struct ScratchSourceResolveConfig<'a> {
-    pub(super) preset: crate::AutomataPreset,
-    pub(super) target_images: &'a [PathBuf],
-    pub(super) target_image_dirs: &'a [PathBuf],
-    pub(super) target_image_recursive: bool,
-    pub(super) image_extensions: &'a [String],
-    pub(super) catalog: Option<&'a PathBuf>,
-    pub(super) catalog_thumbnail_dir: &'a Path,
-    pub(super) catalog_group: Option<E2eCatalogGroup>,
-    pub(super) catalog_targets: &'a [String],
-    pub(super) catalog_limit: usize,
-    pub(super) omnisvg: Option<OmniSvgSourceConfig<'a>>,
+pub(crate) struct ScratchSourceResolveConfig<'a> {
+    pub(crate) preset: crate::AutomataPreset,
+    pub(crate) target_images: &'a [PathBuf],
+    pub(crate) target_image_dirs: &'a [PathBuf],
+    pub(crate) target_image_recursive: bool,
+    pub(crate) image_extensions: &'a [String],
+    pub(crate) catalog: Option<&'a PathBuf>,
+    pub(crate) catalog_thumbnail_dir: &'a Path,
+    pub(crate) catalog_group: Option<E2eCatalogGroup>,
+    pub(crate) catalog_targets: &'a [String],
+    pub(crate) catalog_limit: usize,
+    pub(crate) omnisvg: Option<OmniSvgSourceConfig<'a>>,
 }
 
-pub(super) fn resolve_scratch_sources(
+pub(crate) fn resolve_scratch_sources(
     config: ScratchSourceResolveConfig<'_>,
 ) -> Result<Vec<Hyper2dScratchSource>, Box<dyn std::error::Error>> {
     let ScratchSourceResolveConfig {
@@ -207,7 +207,7 @@ fn relative_path_slug(root: &Path, path: &Path) -> String {
     sanitize_slug(&stem_path.to_string_lossy())
 }
 
-pub(super) fn sanitize_slug(value: &str) -> String {
+pub(crate) fn sanitize_slug(value: &str) -> String {
     let slug = value
         .chars()
         .map(|ch| {

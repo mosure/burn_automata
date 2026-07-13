@@ -2198,7 +2198,7 @@ mod tests {
             [condition]
             encoder = "dino-vits-token-grid"
             dino_model = "models/dino/dino_vits.mpk"
-            dino_image_size = 518
+            dino_image_size = 224
             dino_batch_size = 4
             dino_cache_write_interval_batches = 8
             feature_cache = "artifacts/dino_features.json"

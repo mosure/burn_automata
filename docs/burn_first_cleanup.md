@@ -22,12 +22,16 @@ configs are:
 - `configs/verified/2d/parity/lizard_full.toml`
 - `configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml`
 - `configs/verified/2d/hyper_e2e/bench_omnisvg_8_b4_p128.toml`
-- `configs/verified/2d/hyper_e2e/production_omnisvg_10k_rank16_cuda.toml`
+- `configs/verified/2d/hyper_e2e/bench_omnisvg_8_b4_p128_tiled.toml`
 
 Exploratory configs, failed sweeps, and local one-offs belong in
 `configs/sandbox/`, which is gitignored. Direct-basis LoRA banks, static
 adapter reconstruction, and dense Burn target-image trainers stay in sandbox or
 artifacts until they pass the official parity gate.
+
+No production-quality 1k/10k HyperNPA configuration is currently verified.
+Promoting one requires a high-particle held-out quality report and an explicit
+oracle-relative parity result, not only a successful scale run.
 
 ## Retained Python Inventory
 

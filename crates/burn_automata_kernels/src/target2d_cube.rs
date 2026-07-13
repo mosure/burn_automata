@@ -32,6 +32,7 @@ pub struct Target2dCubeLossConfig {
     pub density_loss_weight: f32,
     pub background_density_loss_weight: f32,
     pub foreground_density_loss_weight: f32,
+    pub composited_rgb_loss_weight: f32,
     pub center: bool,
 }
 
@@ -423,7 +424,7 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
     let pixel_loss = empty_device_dtype(
         client.clone(),
         device.clone(),
-        Shape::new([batches, pixels, 4]),
+        Shape::new([batches, pixels, 5]),
         dtype,
     );
     let position_grad = empty_device_dtype(
@@ -491,6 +492,7 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
         InputScalar::new(cfg.density_loss_weight, dtype),
         InputScalar::new(cfg.background_density_loss_weight, dtype),
         InputScalar::new(cfg.foreground_density_loss_weight, dtype),
+        InputScalar::new(cfg.composited_rgb_loss_weight, dtype),
         dtype.into(),
     );
     reduce_loss_kernel::launch(
@@ -506,6 +508,7 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
         InputScalar::new(cfg.density_loss_weight, dtype),
         InputScalar::new(cfg.background_density_loss_weight, dtype),
         InputScalar::new(cfg.foreground_density_loss_weight, dtype),
+        InputScalar::new(cfg.composited_rgb_loss_weight, dtype),
         dtype.into(),
     );
     particle_adjoint_kernel::launch(
@@ -673,6 +676,7 @@ fn pixel_loss_kernel<F: Float>(
     density_loss_weight: InputScalar,
     background_density_loss_weight: InputScalar,
     foreground_density_loss_weight: InputScalar,
+    composited_rgb_loss_weight: InputScalar,
     #[define(F)] _dtype: StorageType,
 ) {
     let index = ABSOLUTE_POS;
@@ -756,12 +760,36 @@ fn pixel_loss_kernel<F: Float>(
     let color_loss = color_gate
         * (cube_l1l2::<F>(rgb_diff0) + cube_l1l2::<F>(rgb_diff1) + cube_l1l2::<F>(rgb_diff2))
         / color_denom;
+    let predicted_alpha = density.clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let target_alpha = target_density_value.clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let predicted_composited0 =
+        (rgb0 + F::new(1.0_f32) - predicted_alpha).clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let predicted_composited1 =
+        (rgb1 + F::new(1.0_f32) - predicted_alpha).clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let predicted_composited2 =
+        (rgb2 + F::new(1.0_f32) - predicted_alpha).clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let target_composited0 = (target_rgb[rgb_base] + F::new(1.0_f32) - target_alpha)
+        .clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let target_composited1 = (target_rgb[rgb_base + target_rgb.stride(2)] + F::new(1.0_f32)
+        - target_alpha)
+        .clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let target_composited2 = (target_rgb[rgb_base + 2 * target_rgb.stride(2)] + F::new(1.0_f32)
+        - target_alpha)
+        .clamp(F::new(0.0_f32), F::new(1.0_f32));
+    let composited_diff0 = predicted_composited0 - target_composited0;
+    let composited_diff1 = predicted_composited1 - target_composited1;
+    let composited_diff2 = predicted_composited2 - target_composited2;
+    let composited_rgb_loss = (composited_diff0 * composited_diff0
+        + composited_diff1 * composited_diff1
+        + composited_diff2 * composited_diff2)
+        / color_denom;
 
     let splat_loss_weight = splat_loss_weight.get::<F>();
     let color_loss_weight = color_loss_weight.get::<F>();
     let density_loss_weight = density_loss_weight.get::<F>();
     let background_density_loss_weight = background_density_loss_weight.get::<F>();
     let foreground_density_loss_weight = foreground_density_loss_weight.get::<F>();
+    let composited_rgb_loss_weight = composited_rgb_loss_weight.get::<F>();
     let mut density_adj =
         splat_loss_weight * density_loss_weight * cube_l1l2_grad::<F>(density_diff) / density_denom;
     if background_density_loss_weight > F::new(0.0_f32) {
@@ -777,12 +805,42 @@ fn pixel_loss_kernel<F: Float>(
             / foreground_denom;
     }
     let color_scale = splat_loss_weight * color_loss_weight * color_gate / color_denom;
+    let alpha_grad = if density > F::new(0.0_f32) && density < F::new(1.0_f32) {
+        F::new(1.0_f32)
+    } else {
+        F::new(0.0_f32)
+    };
+    let raw_composited0 = rgb0 + F::new(1.0_f32) - predicted_alpha;
+    let raw_composited1 = rgb1 + F::new(1.0_f32) - predicted_alpha;
+    let raw_composited2 = rgb2 + F::new(1.0_f32) - predicted_alpha;
+    let composited_grad0 = if raw_composited0 > F::new(0.0_f32) && raw_composited0 < F::new(1.0_f32)
+    {
+        splat_loss_weight * composited_rgb_loss_weight * F::new(2.0_f32) * composited_diff0
+            / color_denom
+    } else {
+        F::new(0.0_f32)
+    };
+    let composited_grad1 = if raw_composited1 > F::new(0.0_f32) && raw_composited1 < F::new(1.0_f32)
+    {
+        splat_loss_weight * composited_rgb_loss_weight * F::new(2.0_f32) * composited_diff1
+            / color_denom
+    } else {
+        F::new(0.0_f32)
+    };
+    let composited_grad2 = if raw_composited2 > F::new(0.0_f32) && raw_composited2 < F::new(1.0_f32)
+    {
+        splat_loss_weight * composited_rgb_loss_weight * F::new(2.0_f32) * composited_diff2
+            / color_denom
+    } else {
+        F::new(0.0_f32)
+    };
+    density_adj -= alpha_grad * (composited_grad0 + composited_grad1 + composited_grad2);
     let adj_base = batch * pixel_adjoint.stride(0) + pixel * pixel_adjoint.stride(1);
-    pixel_adjoint[adj_base] = color_scale * cube_l1l2_grad::<F>(rgb_diff0);
+    pixel_adjoint[adj_base] = color_scale * cube_l1l2_grad::<F>(rgb_diff0) + composited_grad0;
     pixel_adjoint[adj_base + pixel_adjoint.stride(2)] =
-        color_scale * cube_l1l2_grad::<F>(rgb_diff1);
+        color_scale * cube_l1l2_grad::<F>(rgb_diff1) + composited_grad1;
     pixel_adjoint[adj_base + 2 * pixel_adjoint.stride(2)] =
-        color_scale * cube_l1l2_grad::<F>(rgb_diff2);
+        color_scale * cube_l1l2_grad::<F>(rgb_diff2) + composited_grad2;
     pixel_adjoint[adj_base + 3 * pixel_adjoint.stride(2)] = density_adj;
 
     let loss_base = batch * pixel_loss.stride(0) + pixel * pixel_loss.stride(1);
@@ -790,6 +848,7 @@ fn pixel_loss_kernel<F: Float>(
     pixel_loss[loss_base + pixel_loss.stride(2)] = density_loss;
     pixel_loss[loss_base + 2 * pixel_loss.stride(2)] = bg_loss;
     pixel_loss[loss_base + 3 * pixel_loss.stride(2)] = fg_loss;
+    pixel_loss[loss_base + 4 * pixel_loss.stride(2)] = composited_rgb_loss;
 }
 
 #[cube(launch, address_type = "dynamic")]
@@ -802,6 +861,7 @@ fn reduce_loss_kernel<F: Float>(
     density_loss_weight: InputScalar,
     background_density_loss_weight: InputScalar,
     foreground_density_loss_weight: InputScalar,
+    composited_rgb_loss_weight: InputScalar,
     #[define(F)] _dtype: StorageType,
 ) {
     let batch = ABSOLUTE_POS;
@@ -813,6 +873,7 @@ fn reduce_loss_kernel<F: Float>(
     let mut density_sum = F::new(0.0_f32);
     let mut background_sum = F::new(0.0_f32);
     let mut foreground_sum = F::new(0.0_f32);
+    let mut composited_rgb_sum = F::new(0.0_f32);
     let mut pixel = 0usize;
     while pixel < pixels {
         let base = batch * pixel_loss.stride(0) + pixel * pixel_loss.stride(1);
@@ -820,6 +881,7 @@ fn reduce_loss_kernel<F: Float>(
         density_sum += pixel_loss[base + pixel_loss.stride(2)];
         background_sum += pixel_loss[base + 2 * pixel_loss.stride(2)];
         foreground_sum += pixel_loss[base + 3 * pixel_loss.stride(2)];
+        composited_rgb_sum += pixel_loss[base + 4 * pixel_loss.stride(2)];
         pixel += 1;
     }
     color[batch] = color_sum;
@@ -827,7 +889,8 @@ fn reduce_loss_kernel<F: Float>(
     splat[batch] = color_loss_weight.get::<F>() * color_sum
         + density_loss_weight.get::<F>() * density_sum
         + background_density_loss_weight.get::<F>() * background_sum
-        + foreground_density_loss_weight.get::<F>() * foreground_sum;
+        + foreground_density_loss_weight.get::<F>() * foreground_sum
+        + composited_rgb_loss_weight.get::<F>() * composited_rgb_sum;
 }
 
 #[cube(launch, address_type = "dynamic")]

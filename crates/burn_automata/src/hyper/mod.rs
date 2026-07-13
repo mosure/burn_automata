@@ -4,18 +4,24 @@
 //! rollout APIs. The first supported target is a single 2D condition that emits
 //! one LoRA adapter and a particle prior for an existing base NPA.
 
+pub mod adapter_layout;
 pub mod condition;
 #[cfg(feature = "dino")]
 pub mod dino;
 pub mod e2e;
 #[cfg(feature = "cli")]
 pub mod e2e_rollout;
-#[cfg(feature = "cli")]
+#[cfg(any(feature = "cli", test))]
 pub(crate) mod e2e_training;
 pub mod hypernet;
 pub mod inference;
 pub mod prior;
+pub mod quality;
 pub mod training;
+
+pub use adapter_layout::{
+    AdapterParameterGroup2d, AdapterParameterLayout2d, AdapterParameterSegment2d,
+};
 
 pub use condition::{
     CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS, ConditionEncoder2d, ConditionImage2d,
@@ -26,7 +32,10 @@ pub use condition::{
     condition_feature_dims_for_token_grid,
 };
 #[cfg(feature = "dino")]
-pub use dino::DinoVitsConditionEncoder;
+pub use dino::{
+    DINO_CONDITION_BACKGROUND_RGB, DinoVitsConditionContract, DinoVitsConditionEncoder,
+    decode_condition_image, load_condition_image,
+};
 pub use e2e::{
     E2eConditionedNpa2d, E2eHyperNpa2d, E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights,
     PerceptionRolloutBackend, Target2dLossBackend, generate_e2e_conditioned_npa_2d,
@@ -40,6 +49,7 @@ pub use hypernet::{
 };
 pub use inference::{ConditionedNpa2d, generate_conditioned_npa_2d};
 pub use prior::{ParticlePrior2d, ParticlePriorConfig};
+pub use quality::{AlphaAwareImageMetrics, alpha_aware_image_metrics};
 pub use training::{
     HyperAdapterExample2d, HyperAdapterTrainingReport, HyperFlowExample2d,
     hyper_adapter_regression_loss, hyper_adapter_regression_train_step, hyper_rectified_flow_loss,

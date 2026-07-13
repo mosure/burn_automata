@@ -31,12 +31,14 @@ pub(crate) fn train_e2e_rollout_burn_wgpu(
     train_examples: &mut [BurnE2eRolloutExample],
     holdout_examples: &mut [BurnE2eRolloutExample],
     train_config: BurnE2eRolloutTrainConfig,
+    initial_generator: Option<&crate::E2eHyperNpa2d>,
 ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
     super::wgpu_imp::train_e2e_rollout_burn_dense(
         base,
         train_examples,
         holdout_examples,
         train_config,
+        initial_generator,
     )
 }
 
@@ -46,6 +48,7 @@ pub(crate) fn train_e2e_rollout_burn_wgpu(
     _train_examples: &mut [BurnE2eRolloutExample],
     _holdout_examples: &mut [BurnE2eRolloutExample],
     _train_config: BurnE2eRolloutTrainConfig,
+    _initial_generator: Option<&crate::E2eHyperNpa2d>,
 ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/WGPU HyperNPA e2e rollout training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
@@ -117,12 +120,14 @@ pub(crate) fn train_e2e_rollout_burn_cuda(
     train_examples: &mut [BurnE2eRolloutExample],
     holdout_examples: &mut [BurnE2eRolloutExample],
     train_config: BurnE2eRolloutTrainConfig,
+    initial_generator: Option<&crate::E2eHyperNpa2d>,
 ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
     super::cuda_imp::train_e2e_rollout_burn_dense(
         base,
         train_examples,
         holdout_examples,
         train_config,
+        initial_generator,
     )
 }
 
@@ -132,6 +137,7 @@ pub(crate) fn train_e2e_rollout_burn_cuda(
     _train_examples: &mut [BurnE2eRolloutExample],
     _holdout_examples: &mut [BurnE2eRolloutExample],
     _train_config: BurnE2eRolloutTrainConfig,
+    _initial_generator: Option<&crate::E2eHyperNpa2d>,
 ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/CUDA HyperNPA e2e rollout training requires the backend_cuda feature; rebuild with --features cli,backend_cuda or use backend = \"burn-wgpu\"",

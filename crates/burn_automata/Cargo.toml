@@ -14,7 +14,7 @@ categories = ["science", "simulation", "computer-vision"]
 
 [features]
 default = ["cli", "backend_ndarray", "backend_wgpu"]
-backend_ndarray = ["burn/ndarray"]
+backend_ndarray = ["burn/ndarray", "burn/autodiff"]
 backend_cuda = [
   "burn_automata_kernels/cubecl_cuda",
   "burn/cuda",
@@ -45,6 +45,7 @@ image = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 rand.workspace = true
 rayon.workspace = true
+rmp-serde.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -59,7 +60,6 @@ criterion.workspace = true
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "burn_automata"

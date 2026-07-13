@@ -21,8 +21,8 @@ struct DirectBasisOracleJob<'a> {
     seed: u64,
 }
 
-const MAX_TILED_BURN_ORACLE_PARTICLES: usize = 2048;
-const QUALITY_TILED_PARTICLE_THRESHOLD: usize = 1024;
+const MAX_TILED_BURN_ORACLE_PARTICLES: usize = 4096;
+const QUALITY_TILED_PARTICLE_THRESHOLD: usize = 512;
 const DEFAULT_DENSE_CHUNK_FLOATS: usize = 16_000_000;
 const DEFAULT_SPLAT_CHUNK_FLOATS: usize = 16_000_000;
 const QUALITY_DENSE_CHUNK_FLOATS: usize = 512 * 1024;
@@ -328,8 +328,8 @@ fn train_burn_model_batch_direct_basis_oracles(
         grid_eps: hashgrid.eps,
         motion_scale: models[0].config.alpha * models[0].config.motion_eps(hashgrid.eps),
         loss_config: eval_config.loss_config,
-        target2d_loss_backend: Target2dLossBackend::Dense,
-        perception_backend: PerceptionRolloutBackend::Dense,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
         per_parameter_grad_normalization: eval_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: oracle_config.learning_rate,
@@ -530,6 +530,7 @@ fn evaluate_direct_basis_oracle_entry(
             .unwrap_or(eval_config.rollout_particles),
         step_min: eval_config.rollout_steps,
         step_max: eval_config.rollout_steps,
+        tbptt_chunk_steps: 0,
         inject_seed_interval: 16,
         update_prob: example
             .source
@@ -864,8 +865,8 @@ fn train_burn_dense_direct_basis_oracle(
         grid_eps: hashgrid.eps,
         motion_scale: oracle_model.config.alpha * oracle_model.config.motion_eps(hashgrid.eps),
         loss_config,
-        target2d_loss_backend: Target2dLossBackend::Dense,
-        perception_backend: PerceptionRolloutBackend::Dense,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
         per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
         base_sgd: SgdConfig {
             learning_rate: oracle_config.learning_rate,

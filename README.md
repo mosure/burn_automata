@@ -106,7 +106,7 @@ under `.cache/`; the full gate also consumes a small exported fixture:
 scripts/fetch_selforg_npa.sh
 python3 scripts/export_selforg_npa_fixture.py \
   --upstream-root .cache/selforg_npa/NPA \
-  --target-image assets/catalog_thumbnails/lizard.png \
+  --target-image assets/reference_targets/lizard_upstream_120.png \
   --output artifacts/reference/selforg_npa/lizard_fixture.json
 
 cargo run -p burn_automata --features cli --bin burn_automata -- \
@@ -137,6 +137,13 @@ particle throughput, bounded validation overhead, and optional PSNR gates; gate
 failures are written into the JSON report and fail the command when
 `fail_on_violation = true`. Exploratory TOMLs belong in gitignored
 `configs/sandbox/`.
+
+Quality-scale CUDA throughput runs should use a release build. The repository
+`cubecl.toml` persists compiled CubeCL kernels and autotune choices under
+ignored `target/`, avoiding repeated CUDA kernel compilation across runs. The
+validated B64/1,024-particle/fixed-96-step profile is
+`configs/verified/2d/hyper_e2e/throughput_omnisvg_64_b64_p1024_s96_cuda.toml`;
+its report uses synchronized interval and aggregate optimizer throughput.
 
 The retired built-in 3D mesh commands now default to writing legacy diagnostic
 artifacts under `artifacts/`, not catalog models. Multi-view render-proxy

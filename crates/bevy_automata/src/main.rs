@@ -160,7 +160,7 @@ struct ExportArgs {
     hyper_model: Option<PathBuf>,
     #[arg(long)]
     dino_model: Option<PathBuf>,
-    #[arg(long, default_value_t = 518)]
+    #[arg(long, default_value_t = 224)]
     dino_image_size: usize,
     #[arg(long, default_value_t = 14)]
     dino_patch_size: usize,

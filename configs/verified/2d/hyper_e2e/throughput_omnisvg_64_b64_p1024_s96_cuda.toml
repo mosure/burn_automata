@@ -1,0 +1,145 @@
+preset = "growing-2d"
+
+[source]
+source_limit = 64
+
+[source.omnisvg]
+dataset = "illustration"
+split = "train"
+cache_dir = "data/omnisvg"
+offset = 0
+limit = 64
+page_size = 100
+download = false
+refresh = false
+token_env = "HF_TOKEN"
+
+[output]
+output_dir = "artifacts/hyper2d_throughput_b64_p1024_s96_cuda"
+checkpoint_interval_steps = 1000
+
+[condition]
+encoder = "dino-vits-full-tokens"
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 224
+dino_patch_size = 14
+dino_batch_size = 32
+online = true
+token_attention_heads = 4
+rgb_channels = true
+rgb_channel_scale = 4.0
+alpha_channel = true
+alpha_channel_scale = 1.0
+
+[model]
+shared_base = "models/catalog/growing/lizard.bpk"
+shared_base_trainable = false
+shared_base_train_start_step = 0
+hidden_dims = 256
+output_activation = "identity"
+
+[training]
+backend = "gpu"
+objective = "target2d-rollout-image-loss"
+steps = 300
+report_interval = 50
+example_batch_size = 64
+credit_assignment = "full-bptt"
+max_full_bptt_particle_steps = 6291456
+use_particle_pool = true
+pool_slots_per_example = 8
+rollouts_per_example = 1
+pool_capacity = 256
+inject_seed_interval = 16
+seed_replacements_per_interval = 1
+brush_size = 0.1
+pre_rollout_steps = 0
+adapter_teacher_weight = 0.0
+task_loss_weight = 1.0
+target2d_loss_backend = "tiled-adjoint"
+perception_backend = "auto"
+max_dense_train_particles = 1024
+system_memory_budget_gb = 24.0
+gpu_memory_budget_gb = 40.0
+seed = 42
+
+[gpu]
+backend = "burn-cuda"
+max_dense_chunk_floats = 1048576
+max_splat_chunk_floats = 1048576
+condition_device_cache_max_bytes = 1073741824
+
+[adapter]
+rank = 82
+alpha = 82.0
+generator = "module-token-decoder"
+parameterization = "canonical-full-rank"
+adapter_chunk_size = 256
+attention_normalization = "softmax"
+flow_hidden = 256
+flow_sample_steps = 1
+flow_source_scale = 1.0
+init_scale = 1.0e-3
+condition_init_scale = 1.0e-1
+output_init_scale = 1.0e-3
+spatial_condition_control = false
+
+[rollout]
+particles = 1024
+step_min = 96
+steps = 96
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "uniform-circle"
+
+[target]
+points = 4096
+threshold = 0.05
+loss_image_size = 128
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+composited_rgb_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+learning_rate = 1.0e-4
+base_learning_rate = 0.0
+generator_learning_rate = 1.0e-4
+weight_decay = 0.0
+base_weight_decay = 0.0
+generator_weight_decay = 0.0
+grad_clip_norm = 1.0
+base_grad_clip_norm = 0.0
+generator_grad_clip_norm = 1.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1.0e-8
+per_parameter_grad_normalization = true
+base_per_parameter_grad_normalization = false
+generator_per_parameter_grad_normalization = true
+lr_schedule = "cosine"
+min_lr_scale = 0.1
+
+[validation]
+initial_examples = 0
+examples = 0
+interval = 1000
+particles = 2048
+steps = 512
+horizons = [96, 256, 512]
+selection_horizon_min_steps = 256
+update_prob = 0.5
+seed = 42
+psnr_threshold_db = 26.0
+
+[gates]
+min_median_particle_steps_per_sec = 15000000.0
+max_quality_validation_evaluations = 0
+max_quality_validation_elapsed_fraction = 0.5
+require_validation_interval_at_least_report_interval = true
+fail_on_violation = true

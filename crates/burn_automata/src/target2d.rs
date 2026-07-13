@@ -160,6 +160,8 @@ pub struct Target2dLossConfig {
     #[serde(default)]
     pub foreground_density_loss_weight: f32,
     #[serde(default)]
+    pub composited_rgb_loss_weight: f32,
+    #[serde(default)]
     pub shape_chamfer_loss_weight: f32,
     pub displacement_regularizer_weight: f32,
     pub overflow_regularizer_weight: f32,
@@ -179,6 +181,7 @@ impl Default for Target2dLossConfig {
             density_loss_weight: 1.0,
             background_density_loss_weight: 0.0,
             foreground_density_loss_weight: 0.0,
+            composited_rgb_loss_weight: 0.0,
             shape_chamfer_loss_weight: 0.0,
             displacement_regularizer_weight: 0.01,
             overflow_regularizer_weight: 100.0,
@@ -196,6 +199,8 @@ pub struct Target2dLossReport {
     pub background_density_loss: f32,
     #[serde(default)]
     pub foreground_density_loss: f32,
+    #[serde(default)]
+    pub composited_rgb_loss: f32,
     #[serde(default)]
     pub shape_chamfer_loss: f32,
     pub displacement_regularizer: f32,
@@ -224,6 +229,8 @@ pub struct Target2dTrainingConfig {
     pub particle_count: usize,
     pub step_min: usize,
     pub step_max: usize,
+    /// Zero selects the backend's bounded-memory automatic chunk depth.
+    pub tbptt_chunk_steps: usize,
     pub inject_seed_interval: usize,
     pub update_prob: f32,
     pub seed: u64,
@@ -247,6 +254,7 @@ impl Default for Target2dTrainingConfig {
             particle_count: 4096,
             step_min: 32,
             step_max: 96,
+            tbptt_chunk_steps: 0,
             inject_seed_interval: 16,
             update_prob: 0.5,
             seed: 42,
@@ -453,6 +461,7 @@ pub fn target_2d_loss_with_adjoint(
     let mut density_loss = 0.0_f32;
     let mut background_density_loss = 0.0_f32;
     let mut foreground_density_loss = 0.0_f32;
+    let mut composited_rgb_loss = 0.0_f32;
     let mut shape_chamfer_loss = 0.0_f32;
     let mut position_gradients = vec![[0.0_f32; 4]; positions.len()];
     let mut state_gradients = vec![0.0_f32; states.len()];
@@ -501,6 +510,14 @@ pub fn target_2d_loss_with_adjoint(
                     / foreground_denom;
             }
             let color_gate = target_2d_color_gate_from_density_term(density_term);
+            let predicted_alpha = rendered.density[pixel].clamp(0.0, 1.0);
+            let target_alpha = target_render.density[pixel].clamp(0.0, 1.0);
+            let predicted_alpha_grad =
+                if rendered.density[pixel] > 0.0 && rendered.density[pixel] < 1.0 {
+                    1.0
+                } else {
+                    0.0
+                };
             for channel in 0..3 {
                 let idx = pixel * 3 + channel;
                 let color_diff = rendered.rgb[idx] - target_render.rgb[idx];
@@ -510,6 +527,26 @@ pub fn target_2d_loss_with_adjoint(
                     * color_gate
                     * target_2d_l1l2_grad(color_diff)
                     / color_denom;
+                if cfg.composited_rgb_loss_weight > 0.0 {
+                    let predicted_raw = rendered.rgb[idx] + 1.0 - predicted_alpha;
+                    let target_composited =
+                        (target_render.rgb[idx] + 1.0 - target_alpha).clamp(0.0, 1.0);
+                    let composited_diff = predicted_raw.clamp(0.0, 1.0) - target_composited;
+                    composited_rgb_loss += composited_diff * composited_diff / color_denom;
+                    let clamp_grad = if predicted_raw > 0.0 && predicted_raw < 1.0 {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let composited_adjoint = cfg.splat_loss_weight
+                        * cfg.composited_rgb_loss_weight
+                        * 2.0
+                        * composited_diff
+                        * clamp_grad
+                        / color_denom;
+                    rgb_adjoint[idx] += composited_adjoint;
+                    *density_adj -= composited_adjoint * predicted_alpha_grad;
+                }
             }
         }
 
@@ -575,7 +612,8 @@ pub fn target_2d_loss_with_adjoint(
     let splat_loss = cfg.color_loss_weight * color_loss
         + cfg.density_loss_weight * density_loss
         + cfg.background_density_loss_weight * background_density_loss
-        + cfg.foreground_density_loss_weight * foreground_density_loss;
+        + cfg.foreground_density_loss_weight * foreground_density_loss
+        + cfg.composited_rgb_loss_weight * composited_rgb_loss;
     let total_loss = cfg.splat_loss_weight * splat_loss
         + cfg.shape_chamfer_loss_weight * shape_chamfer_loss
         + cfg.displacement_regularizer_weight * displacement_regularizer
@@ -590,6 +628,7 @@ pub fn target_2d_loss_with_adjoint(
             density_loss,
             background_density_loss,
             foreground_density_loss,
+            composited_rgb_loss,
             shape_chamfer_loss,
             displacement_regularizer,
             overflow_regularizer,
