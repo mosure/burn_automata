@@ -52,18 +52,20 @@ backend = "gpu"
 objective = "conditional-row-flow-e2e"
 steps = 100000
 report_interval = 100
-# Measured saturation shape for a 96 GiB CUDA device: 16 independent image
-# conditions x 32 trajectories = 512 recurrent rollouts per optimizer step.
-example_batch_size = 16
+# Upstream-aligned quality shape: 8 independent image conditions x 8
+# trajectories x 4096 particles. This retains the previous aggregate 262144
+# particles per optimizer step while giving each trajectory quality-scale state.
+example_batch_size = 8
 credit_assignment = "full-bptt"
 task_loss_weight = 1.0
 flow_matching_weight = 0.0
 flow_self_rectification_weight = 0.05
 max_full_bptt_particle_steps = 33554432
 use_particle_pool = true
-pool_slots_per_example = 32
-rollouts_per_example = 32
-pool_capacity = 32000
+pool_slots_per_example = 8
+rollouts_per_example = 8
+# 900 train identities x 8 persistent slots = 7200; retain eviction headroom.
+pool_capacity = 8000
 inject_seed_interval = 4
 seed_replacements_per_interval = 2
 seed_trajectory_interval = 16
@@ -71,7 +73,7 @@ brush_size = 0.1
 pre_rollout_steps = 0
 target2d_loss_backend = "tiled-adjoint"
 perception_backend = "auto"
-max_dense_train_particles = 512
+max_dense_train_particles = 4096
 system_memory_budget_gb = 24.0
 gpu_memory_budget_gb = 90.0
 seed = 42
@@ -99,8 +101,10 @@ flow_source_seed = 42
 flow_source_scale = 1.0e-3
 
 [rollout]
-particles = 512
-step_min = 96
+# The exclusive sampler draws 32..95 steps, matching the upstream random
+# rollout horizon while avoiding a fixed 96-step objective.
+particles = 4096
+step_min = 32
 steps = 96
 update_prob = 0.5
 seed = 42
@@ -152,6 +156,13 @@ final_particles = 4096
 final_steps = 512
 final_horizons = [96, 256, 512]
 final_selection_horizon_min_steps = 256
+# Final-only, generated-adapter, graph-detached stability contract. The same
+# held-out trajectories are measured at 512 and 4096 in one bounded rollout.
+stability_examples = 16
+stability_particles = 4096
+stability_reference_steps = 512
+stability_steps = 4096
+stability_tail_steps = 256
 
 [gates]
 max_quality_validation_evaluations = 60

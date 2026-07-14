@@ -207,4 +207,9 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) final_validation_horizons: [usize; MAX_VALIDATION_HORIZONS],
     pub(crate) final_validation_horizon_count: usize,
     pub(crate) final_validation_selection_horizon_min_steps: usize,
+    pub(crate) stability_examples: usize,
+    pub(crate) stability_particles: usize,
+    pub(crate) stability_reference_steps: usize,
+    pub(crate) stability_steps: usize,
+    pub(crate) stability_tail_steps: usize,
 }

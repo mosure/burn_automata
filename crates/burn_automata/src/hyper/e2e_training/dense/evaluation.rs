@@ -737,6 +737,358 @@ use super::*;
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_e2e_rollout_stability(
+        params: &BurnBaseParams,
+        generator: &BurnE2eGeneratorParams,
+        npa_config: &NpaConfig,
+        holdout_examples: &[BurnE2eRolloutExample],
+        holdout_conditions: &BurnE2eConditionCache,
+        config: BurnE2eRolloutTrainConfig,
+        device: &BurnDevice,
+    ) -> Result<Option<BurnE2eRolloutStabilityReport>, Box<dyn std::error::Error>> {
+        if config.stability_examples == 0 {
+            return Ok(None);
+        }
+        if holdout_examples.len() < config.stability_examples {
+            return Err(std::io::Error::other(format!(
+                "HyperNPA stability validation requested {} held-out examples but only {} are available",
+                config.stability_examples,
+                holdout_examples.len(),
+            ))
+            .into());
+        }
+
+        let started = Instant::now();
+        let params = params.detached();
+        let generator = generator.detached();
+        let mut indices = (0..holdout_examples.len()).collect::<Vec<_>>();
+        let mut rng = StdRng::seed_from_u64(config.validation_seed ^ 0x57ab_1117_4096_0001);
+        indices.shuffle(&mut rng);
+        indices.truncate(config.stability_examples);
+        indices.sort_unstable();
+
+        let stability_config = BurnE2eRolloutTrainConfig {
+            validation_examples: config.stability_examples,
+            validation_particles: config.stability_particles,
+            validation_steps: config.stability_steps,
+            validation_horizon_count: 0,
+            ..config
+        };
+        let mut eval_config = validation_direct_config(stability_config);
+        // The rollout helper avoids displacement accumulation when the training
+        // regularizer is disabled. Stability evaluation always needs motion.
+        eval_config.loss_config.displacement_regularizer_weight = 1.0;
+        let targets = burn_e2e_targets_for_indices_with_runtime(
+            holdout_examples,
+            &indices,
+            stability_config,
+            device,
+            Some(config.stability_particles),
+            Some(config.validation_update_prob),
+        )?;
+        let target_indices = (0..targets.len()).collect::<Vec<_>>();
+        let eval_batch_size = normalized_eval_batch_size(eval_config.eval_batch_size, indices.len());
+        let stability_batches = indices.len().div_ceil(eval_batch_size);
+        eprintln!(
+            "hyper2d detached stability start examples={} batches={} particles={} reference={} final={} tail={}",
+            indices.len(),
+            stability_batches,
+            config.stability_particles,
+            config.stability_reference_steps,
+            config.stability_steps,
+            config.stability_tail_steps,
+        );
+        let tail_steps = config
+            .stability_tail_steps
+            .min(config.stability_reference_steps)
+            .min(config.stability_steps)
+            .max(1);
+        let reference_tail_start = config.stability_reference_steps.saturating_sub(tail_steps);
+        let final_tail_start = config.stability_steps.saturating_sub(tail_steps);
+        let mut checkpoints = vec![
+            reference_tail_start,
+            config.stability_reference_steps,
+            final_tail_start,
+            config.stability_steps,
+        ];
+        checkpoints.sort_unstable();
+        checkpoints.dedup();
+
+        let mut entries = Vec::with_capacity(indices.len());
+        let mut reference_mses = Vec::with_capacity(indices.len());
+        let mut final_mses = Vec::with_capacity(indices.len());
+        let mut reference_psnrs = Vec::with_capacity(indices.len());
+        let mut final_psnrs = Vec::with_capacity(indices.len());
+        let mut reference_occupancies = Vec::with_capacity(indices.len());
+        let mut final_occupancies = Vec::with_capacity(indices.len());
+        let mut final_position_overflows = Vec::with_capacity(indices.len());
+        let mut final_state_overflows = Vec::with_capacity(indices.len());
+        let mut reference_tail_motions = Vec::with_capacity(indices.len());
+        let mut final_tail_motions = Vec::with_capacity(indices.len());
+        let mut tail_motion_ratios = Vec::with_capacity(indices.len());
+        let mut all_finite = true;
+
+        for (batch_index, (condition_chunk, target_chunk)) in indices
+            .chunks(eval_batch_size)
+            .zip(target_indices.chunks(eval_batch_size))
+            .enumerate()
+        {
+            let condition = holdout_conditions.select(condition_chunk)?;
+            let adapter_batch = generator.adapter_batch(condition.clone(), npa_config, config);
+            let condition_control = generator.condition_control_batch(condition, config);
+            let particle_count = config.stability_particles;
+            let (mut x, mut s) = seed_batch_tensors_with_seed_indices(
+                &targets,
+                target_chunk,
+                target_chunk,
+                particle_count,
+                eval_config,
+                config.validation_seed,
+                device,
+            );
+            let mut rollout_rngs = target_chunk
+                .iter()
+                .map(|idx| {
+                    StdRng::seed_from_u64(
+                        config.validation_seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut displacement =
+                Tensor::<BurnBackend, 1>::zeros([target_chunk.len()], device);
+            let mut elapsed_steps = 0usize;
+            let mut reference_quality = None;
+            let mut final_quality = None;
+            let mut reference_tail_start_displacement = None;
+            let mut reference_displacement = None;
+            let mut final_tail_start_displacement = None;
+            let mut final_displacement = None;
+
+            for &checkpoint in &checkpoints {
+                while elapsed_steps < checkpoint {
+                    let steps = (checkpoint - elapsed_steps).min(config.tbptt_chunk_steps.max(1));
+                    (x, s, displacement) = rollout_batch_eval_chunk(
+                        &params,
+                        &adapter_batch,
+                        &targets,
+                        target_chunk,
+                        x,
+                        s,
+                        eval_config,
+                        particle_count,
+                        &mut rollout_rngs,
+                        steps,
+                        displacement,
+                        condition_control.as_ref(),
+                    );
+                    x = detach3(x);
+                    s = detach3(s);
+                    displacement = detach1(displacement);
+                    elapsed_steps += steps;
+                }
+                if checkpoint == reference_tail_start {
+                    reference_tail_start_displacement = Some(displacement.clone());
+                }
+                if checkpoint == config.stability_reference_steps {
+                    reference_displacement = Some(displacement.clone());
+                    reference_quality = Some(target_splat_quality_batch_vector(
+                        &x,
+                        &s,
+                        &targets,
+                        target_chunk,
+                        eval_config,
+                        &adapter_batch,
+                        displacement.clone(),
+                    ));
+                }
+                if checkpoint == final_tail_start {
+                    final_tail_start_displacement = Some(displacement.clone());
+                }
+                if checkpoint == config.stability_steps {
+                    final_displacement = Some(displacement.clone());
+                    final_quality = Some(target_splat_quality_batch_vector(
+                        &x,
+                        &s,
+                        &targets,
+                        target_chunk,
+                        eval_config,
+                        &adapter_batch,
+                        displacement.clone(),
+                    ));
+                }
+                sync_training_device(device)?;
+                eprintln!(
+                    "hyper2d detached stability batch {}/{} reached step {checkpoint}/{}",
+                    batch_index + 1,
+                    stability_batches,
+                    config.stability_steps,
+                );
+            }
+
+            let reference_quality = reference_quality.expect("reference checkpoint is evaluated");
+            let final_quality = final_quality.expect("final checkpoint is evaluated");
+            let reference_batch_mses = tensor1_vec(reference_quality.composited_rgb_mse.inner())?;
+            let final_batch_mses = tensor1_vec(final_quality.composited_rgb_mse.inner())?;
+            let reference_batch_occupancies =
+                tensor1_vec(reference_quality.render_occupancy.inner())?;
+            let final_batch_occupancies = tensor1_vec(final_quality.render_occupancy.inner())?;
+            let final_batch_position_overflows =
+                tensor1_vec(final_quality.position_overflow_fraction.inner())?;
+            let final_batch_state_overflows =
+                tensor1_vec(final_quality.state_overflow_fraction.inner())?;
+            let reference_tail_start_values = tensor1_vec(
+                reference_tail_start_displacement
+                    .expect("reference tail-start displacement is captured")
+                    .inner(),
+            )?;
+            let reference_values = tensor1_vec(
+                reference_displacement
+                    .expect("reference displacement is captured")
+                    .inner(),
+            )?;
+            let final_tail_start_values = tensor1_vec(
+                final_tail_start_displacement
+                    .expect("final tail-start displacement is captured")
+                    .inner(),
+            )?;
+            let final_values = tensor1_vec(
+                final_displacement
+                    .expect("final displacement is captured")
+                    .inner(),
+            )?;
+
+            for local in 0..condition_chunk.len() {
+                let reference_mse = reference_batch_mses[local];
+                let final_mse = final_batch_mses[local];
+                let reference_occupancy = reference_batch_occupancies[local];
+                let final_occupancy = final_batch_occupancies[local];
+                let final_position_overflow = final_batch_position_overflows[local];
+                let final_state_overflow = final_batch_state_overflows[local];
+                let reference_tail_motion = ((reference_values[local]
+                    - reference_tail_start_values[local])
+                    / tail_steps as f32)
+                    .max(0.0);
+                let final_tail_motion = ((final_values[local]
+                    - final_tail_start_values[local])
+                    / tail_steps as f32)
+                    .max(0.0);
+                let tail_motion_ratio =
+                    final_tail_motion / reference_tail_motion.max(EPSILON);
+                let finite = [
+                    reference_mse,
+                    final_mse,
+                    reference_occupancy,
+                    final_occupancy,
+                    final_position_overflow,
+                    final_state_overflow,
+                    reference_tail_motion,
+                    final_tail_motion,
+                    tail_motion_ratio,
+                ]
+                .into_iter()
+                .all(f32::is_finite);
+                all_finite &= finite;
+
+                let reference_mse = finite_stability_value(reference_mse, 1.0);
+                let final_mse = finite_stability_value(final_mse, 1.0);
+                let reference_occupancy = finite_stability_value(reference_occupancy, 0.0);
+                let final_occupancy = finite_stability_value(final_occupancy, 0.0);
+                let final_position_overflow =
+                    finite_stability_value(final_position_overflow, 1.0);
+                let final_state_overflow = finite_stability_value(final_state_overflow, 1.0);
+                let reference_tail_motion =
+                    finite_stability_value(reference_tail_motion, 0.0);
+                let final_tail_motion = finite_stability_value(final_tail_motion, 0.0);
+                let tail_motion_ratio = finite_stability_value(tail_motion_ratio, 0.0);
+                let reference_psnr = psnr_db_from_mse(reference_mse);
+                let final_psnr = psnr_db_from_mse(final_mse);
+
+                reference_mses.push(reference_mse);
+                final_mses.push(final_mse);
+                reference_psnrs.push(reference_psnr);
+                final_psnrs.push(final_psnr);
+                reference_occupancies.push(reference_occupancy);
+                final_occupancies.push(final_occupancy);
+                final_position_overflows.push(final_position_overflow);
+                final_state_overflows.push(final_state_overflow);
+                reference_tail_motions.push(reference_tail_motion);
+                final_tail_motions.push(final_tail_motion);
+                tail_motion_ratios.push(tail_motion_ratio);
+                entries.push(BurnE2eRolloutStabilityEntry {
+                    slug: holdout_examples[condition_chunk[local]].slug.clone(),
+                    reference_composited_rgb_psnr_db: reference_psnr,
+                    final_composited_rgb_psnr_db: final_psnr,
+                    composited_rgb_psnr_drift_db: final_psnr - reference_psnr,
+                    reference_render_occupancy: reference_occupancy,
+                    final_render_occupancy: final_occupancy,
+                    render_occupancy_drift: final_occupancy - reference_occupancy,
+                    final_position_overflow_fraction: final_position_overflow,
+                    final_state_overflow_fraction: final_state_overflow,
+                    reference_tail_mean_motion_per_step: reference_tail_motion,
+                    final_tail_mean_motion_per_step: final_tail_motion,
+                    tail_motion_ratio,
+                    finite,
+                });
+            }
+        }
+
+        reference_psnrs.sort_by(f32::total_cmp);
+        final_psnrs.sort_by(f32::total_cmp);
+        let mean = |values: &[f32]| values.iter().sum::<f32>() / values.len().max(1) as f32;
+        let reference_aggregate_psnr = psnr_db_from_mse(mean(&reference_mses));
+        let final_aggregate_psnr = psnr_db_from_mse(mean(&final_mses));
+        let reference_p10_psnr = sorted_percentile(&reference_psnrs, 0.1);
+        let final_p10_psnr = sorted_percentile(&final_psnrs, 0.1);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let particle_steps =
+            entries.len() as f64 * config.stability_particles as f64 * config.stability_steps as f64;
+        Ok(Some(BurnE2eRolloutStabilityReport {
+            split: "holdout",
+            evaluation_mode: "detached-no-grad-generated-adapter-only",
+            autodiff_graph_retained: false,
+            examples: entries.len(),
+            particle_count: config.stability_particles,
+            reference_steps: config.stability_reference_steps,
+            rollout_steps: config.stability_steps,
+            tail_steps,
+            elapsed_ms,
+            particle_steps,
+            particle_steps_per_sec: particle_steps
+                / (elapsed_ms / 1000.0).max(f64::MIN_POSITIVE),
+            reference_aggregate_composited_rgb_psnr_db: reference_aggregate_psnr,
+            final_aggregate_composited_rgb_psnr_db: final_aggregate_psnr,
+            aggregate_composited_rgb_psnr_drift_db: final_aggregate_psnr
+                - reference_aggregate_psnr,
+            reference_p10_composited_rgb_psnr_db: reference_p10_psnr,
+            final_p10_composited_rgb_psnr_db: final_p10_psnr,
+            p10_composited_rgb_psnr_drift_db: final_p10_psnr - reference_p10_psnr,
+            reference_mean_render_occupancy: mean(&reference_occupancies),
+            final_mean_render_occupancy: mean(&final_occupancies),
+            mean_render_occupancy_drift: mean(&final_occupancies)
+                - mean(&reference_occupancies),
+            mean_final_position_overflow_fraction: mean(&final_position_overflows),
+            max_final_position_overflow_fraction: final_position_overflows
+                .iter()
+                .copied()
+                .fold(0.0, f32::max),
+            mean_final_state_overflow_fraction: mean(&final_state_overflows),
+            max_final_state_overflow_fraction: final_state_overflows
+                .iter()
+                .copied()
+                .fold(0.0, f32::max),
+            mean_reference_tail_motion_per_step: mean(&reference_tail_motions),
+            mean_final_tail_motion_per_step: mean(&final_tail_motions),
+            mean_tail_motion_ratio: mean(&tail_motion_ratios),
+            all_finite,
+            entries,
+        }))
+    }
+
+    pub(super) fn finite_stability_value(value: f32, fallback: f32) -> f32 {
+        if value.is_finite() { value } else { fallback }
+    }
+
     pub(super) struct BurnE2eQualityBatchTensors {
         pub(super) loss: BurnLossBatchTensors,
         pub(super) adapter_vector: Option<Tensor2>,
@@ -745,6 +1097,9 @@ use super::*;
         pub(super) foreground_rgb_mse: Tensor1,
         pub(super) density_mse: Tensor1,
         pub(super) density_soft_iou: Tensor1,
+        pub(super) render_occupancy: Tensor1,
+        pub(super) position_overflow_fraction: Tensor1,
+        pub(super) state_overflow_fraction: Tensor1,
     }
 
     #[derive(Clone)]

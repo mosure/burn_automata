@@ -158,6 +158,56 @@ pub(crate) struct BurnE2eRolloutQualityReport {
     pub(crate) entries: Vec<BurnE2eRolloutQualityEntry>,
 }
 
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct BurnE2eRolloutStabilityEntry {
+    pub(crate) slug: String,
+    pub(crate) reference_composited_rgb_psnr_db: f32,
+    pub(crate) final_composited_rgb_psnr_db: f32,
+    pub(crate) composited_rgb_psnr_drift_db: f32,
+    pub(crate) reference_render_occupancy: f32,
+    pub(crate) final_render_occupancy: f32,
+    pub(crate) render_occupancy_drift: f32,
+    pub(crate) final_position_overflow_fraction: f32,
+    pub(crate) final_state_overflow_fraction: f32,
+    pub(crate) reference_tail_mean_motion_per_step: f32,
+    pub(crate) final_tail_mean_motion_per_step: f32,
+    pub(crate) tail_motion_ratio: f32,
+    pub(crate) finite: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct BurnE2eRolloutStabilityReport {
+    pub(crate) split: &'static str,
+    pub(crate) evaluation_mode: &'static str,
+    pub(crate) autodiff_graph_retained: bool,
+    pub(crate) examples: usize,
+    pub(crate) particle_count: usize,
+    pub(crate) reference_steps: usize,
+    pub(crate) rollout_steps: usize,
+    pub(crate) tail_steps: usize,
+    pub(crate) elapsed_ms: f64,
+    pub(crate) particle_steps: f64,
+    pub(crate) particle_steps_per_sec: f64,
+    pub(crate) reference_aggregate_composited_rgb_psnr_db: f32,
+    pub(crate) final_aggregate_composited_rgb_psnr_db: f32,
+    pub(crate) aggregate_composited_rgb_psnr_drift_db: f32,
+    pub(crate) reference_p10_composited_rgb_psnr_db: f32,
+    pub(crate) final_p10_composited_rgb_psnr_db: f32,
+    pub(crate) p10_composited_rgb_psnr_drift_db: f32,
+    pub(crate) reference_mean_render_occupancy: f32,
+    pub(crate) final_mean_render_occupancy: f32,
+    pub(crate) mean_render_occupancy_drift: f32,
+    pub(crate) mean_final_position_overflow_fraction: f32,
+    pub(crate) max_final_position_overflow_fraction: f32,
+    pub(crate) mean_final_state_overflow_fraction: f32,
+    pub(crate) max_final_state_overflow_fraction: f32,
+    pub(crate) mean_reference_tail_motion_per_step: f32,
+    pub(crate) mean_final_tail_motion_per_step: f32,
+    pub(crate) mean_tail_motion_ratio: f32,
+    pub(crate) all_finite: bool,
+    pub(crate) entries: Vec<BurnE2eRolloutStabilityEntry>,
+}
+
 pub(crate) struct BurnE2eRolloutOutput {
     pub(crate) backend: String,
     pub(crate) device: String,
@@ -166,4 +216,5 @@ pub(crate) struct BurnE2eRolloutOutput {
     pub(crate) final_loss: Option<f32>,
     pub(crate) generator: E2eHyperNpa2d,
     pub(crate) quality_validation: Option<BurnE2eRolloutQualityReport>,
+    pub(crate) stability_validation: Option<BurnE2eRolloutStabilityReport>,
 }

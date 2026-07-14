@@ -962,6 +962,30 @@ use super::*;
             }
             quality_validation
         };
+        let stability_validation = evaluate_e2e_rollout_stability(
+            &params,
+            &generator,
+            &npa_config,
+            holdout_examples,
+            &holdout_conditions,
+            config,
+            &device,
+        )?;
+        if let Some(stability) = &stability_validation {
+            eprintln!(
+                "hyper2d e2e detached stability examples={} particles={} reference={} final={} aggregate_psnr_drift={:.3}dB p10_psnr_drift={:.3}dB occupancy_drift={:.6} position_overflow={:.6} state_overflow={:.6} tail_motion_ratio={:.3}",
+                stability.examples,
+                stability.particle_count,
+                stability.reference_steps,
+                stability.rollout_steps,
+                stability.aggregate_composited_rgb_psnr_drift_db,
+                stability.p10_composited_rgb_psnr_drift_db,
+                stability.mean_render_occupancy_drift,
+                stability.mean_final_position_overflow_fraction,
+                stability.mean_final_state_overflow_fraction,
+                stability.mean_tail_motion_ratio,
+            );
+        }
         let generator_hyper = generator.to_hyper(config)?;
         let (min_reported_particle_steps_per_sec, median_reported_particle_steps_per_sec, max_reported_particle_steps_per_sec) =
             reported_particle_step_speed_summary(&history);
@@ -1194,6 +1218,19 @@ use super::*;
         metrics.insert(
             "quality_validation_elapsed_ms".to_string(),
             json!(quality_validation_elapsed_ms),
+        );
+        metrics.insert(
+            "stability_validation_contract".to_string(),
+            json!({
+                "examples": config.stability_examples,
+                "particles": config.stability_particles,
+                "reference_steps": config.stability_reference_steps,
+                "steps": config.stability_steps,
+                "tail_steps": config.stability_tail_steps,
+                "split": "holdout",
+                "condition_mode": "generated-adapter-only",
+                "autodiff_graph_retained": false,
+            }),
         );
         metrics.insert(
             "loss_on_final_chunk_only".to_string(),
@@ -1471,6 +1508,10 @@ use super::*;
             json!(quality_validation.clone()),
         );
         metrics.insert(
+            "stability_validation".to_string(),
+            json!(stability_validation.clone()),
+        );
+        metrics.insert(
             "elapsed_ms".to_string(),
             json!(started.elapsed().as_secs_f64() * 1000.0),
         );
@@ -1483,6 +1524,7 @@ use super::*;
             final_loss,
             generator: generator_hyper,
             quality_validation,
+            stability_validation,
         })
     }
 

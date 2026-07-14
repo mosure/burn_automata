@@ -1033,6 +1033,72 @@
         }
 
         #[test]
+        fn production_rollout_step_sampler_covers_32_through_95() {
+            let mut config = test_direct_config(4);
+            config.rollout_step_min = 32;
+            config.rollout_steps = 96;
+            let samples = (0..8192)
+                .map(|seed| sampled_training_rollout_steps(config, seed))
+                .collect::<Vec<_>>();
+            assert!(samples.iter().all(|steps| (32..96).contains(steps)));
+            assert_eq!(samples.iter().copied().min(), Some(32));
+            assert_eq!(samples.iter().copied().max(), Some(95));
+        }
+
+        #[test]
+        fn rollout_quality_diagnostics_measure_occupancy_and_overflow() {
+            let device = BurnDevice::default();
+            let npa_config = NpaConfig::growing_2d();
+            let rank = 2;
+            let adapter = NpaLowRankAdapter::seeded_zero_delta(
+                &npa_config,
+                rank,
+                rank as f32,
+                17,
+            );
+            let adapter_batch = BurnAdapterBatch::from_parameter_vector(
+                tensor(
+                    adapter.to_parameter_vector(),
+                    [1, adapter.parameter_count()],
+                    &device,
+                ),
+                &npa_config,
+                rank,
+                rank as f32,
+            );
+            let target = test_burn_target(&device, 1.0, 0.1);
+            let mut config = test_direct_config(4);
+            config.loss_config.image_size = 1;
+            config.loss_config.center = false;
+            let x = tensor3(
+                vec![1.1, 0.0, -1.2, 1.3, 0.0, 0.0, 0.5, -0.5],
+                [1, 4, 2],
+                &device,
+            );
+            let mut state_values = vec![0.0; 4 * npa_config.state_dims];
+            state_values[0] = 1.1;
+            state_values[17] = -2.0;
+            let s = tensor3(state_values, [1, 4, npa_config.state_dims], &device);
+            let quality = target_splat_quality_batch_vector(
+                &x,
+                &s,
+                &[target],
+                &[0],
+                config,
+                &adapter_batch,
+                Tensor::<BurnBackend, 1>::zeros([1], &device),
+            );
+            let occupancy = tensor1_vec(quality.render_occupancy.inner()).unwrap()[0];
+            let position_overflow =
+                tensor1_vec(quality.position_overflow_fraction.inner()).unwrap()[0];
+            let state_overflow =
+                tensor1_vec(quality.state_overflow_fraction.inner()).unwrap()[0];
+            assert!((0.0..=1.0).contains(&occupancy));
+            assert!((position_overflow - 0.5).abs() < 1.0e-6);
+            assert!((state_overflow - 2.0 / 64.0).abs() < 1.0e-6);
+        }
+
+        #[test]
         fn brush_centers_are_gathered_from_live_particles_per_batch_row() {
             let device = BurnDevice::default();
             let positions = tensor3(
@@ -1661,6 +1727,45 @@
                 .unwrap();
             assert_eq!(pool.example_slots.len(), 2);
             assert!(pool.example_slots.keys().any(|(example, _)| *example == 12));
+        }
+
+        #[test]
+        fn hyper_e2e_particle_pool_erases_only_a_local_state_neighborhood() {
+            let device = BurnDevice::default();
+            let particle_count = 4;
+            let state_dims = 16;
+            let mut pool = BurnE2eDeviceParticlePool::new(
+                1,
+                particle_count,
+                state_dims,
+                1,
+                &device,
+            );
+            let mut rng = StdRng::seed_from_u64(31);
+            let mut config = test_direct_config(particle_count);
+            let initial = pool
+                .sample_batch(&[7], &mut rng, &[], 0.1, config, &device)
+                .unwrap();
+            pool.update_batch(
+                &initial.slots,
+                tensor3(
+                    vec![-0.9, 0.0, -0.3, 0.0, 0.3, 0.0, 0.9, 0.0],
+                    [1, particle_count, 2],
+                    &device,
+                ),
+                Tensor::<BurnBackend, 3>::ones(
+                    [1, particle_count, state_dims],
+                    &device,
+                ),
+            )
+            .unwrap();
+            config.brush_size = 0.05;
+            let damaged = pool
+                .sample_batch(&[7], &mut rng, &[], 0.1, config, &device)
+                .unwrap();
+            let states = tensor3_vec(damaged.s.inner()).unwrap();
+            assert_eq!(states.iter().filter(|value| **value == 0.0).count(), state_dims);
+            assert_eq!(states.iter().filter(|value| **value == 1.0).count(), 3 * state_dims);
         }
 
         #[test]

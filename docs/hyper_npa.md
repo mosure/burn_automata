@@ -88,9 +88,12 @@ quality parity: p10 is 12.18 dB. A post-VJP-fix 2,000-step continuation trained
 only at 64 particles still did not transfer to quality scale. Its selected
 checkpoint reaches 10.96 dB p10 at 2,048 particles and 96 steps, where the
 generated residual gain is 1.53 dB, then falls to 9.34 dB p10 and 0.02 dB gain
-at 256 steps. The matched target-point-splat p10 is 28.42 dB. The production
-contract therefore trains at 512 particles and a fixed 96-step horizon rather
-than treating short low-particle trajectories as the main objective.
+at 256 steps. The matched target-point-splat p10 is 28.42 dB. The corrected
+production contract trains eight conditions with eight independent 4,096-
+particle trajectories each. It samples rollout lengths from the upstream-style
+exclusive range `32..96` (32 through 95) instead of optimizing a fixed 96-step
+horizon. This preserves the previous aggregate 262,144 particles per optimizer
+step while moving each trajectory to quality scale.
 
 Long full-BPTT rollouts produce substantially larger startup gradients than the
 short-horizon probes. Verified production configs linearly warm the optimizer
@@ -102,7 +105,17 @@ The E2E particle pool now enforces both configured seed policies. A global
 cadence injects `seed_replacements_per_interval` fresh trajectories, while a
 per-identity counter prevents frequently or infrequently sampled identities
 from going indefinitely without a fresh seed. Both select explicit batch rows
-and are checkpoint-contract inputs.
+and are checkpoint-contract inputs. Eight persistent slots are retained per
+training identity, and localized state erasure remains active through the
+configured brush perturbation.
+
+Final quality validation reports held-out PSNR at 96, 256, and 512 steps. A
+separate final-only stability pass measures the same continuous rollouts for 16
+held-out conditions at 512 and 4,096 steps with detached parameters and
+recurrent state chunks, generated adapters only, and no backward graph. Its
+report includes aggregate and p10 PSNR drift, rendered occupancy drift,
+particle/state overflow fractions, and mean particle motion over the final
+256-step windows at both horizons.
 
 The device perception VJP uses a stable small-radius series for
 `log1p(r) / r`, includes the configured state-equivalence scale in dense,

@@ -46,6 +46,9 @@ const DEFAULT_MAX_DENSE_TRAIN_PARTICLES: usize = 512;
 const DEFAULT_DEVICE_CONDITION_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024;
 const DEFAULT_DEVICE_TARGET_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const UPSTREAM_GROWING_TRAJECTORIES_PER_TARGET: usize = 10_000 * 3 * 8;
+const MAX_STABILITY_EXAMPLES: usize = 16;
+const MAX_STABILITY_PARTICLES: usize = 4096;
+const MAX_STABILITY_STEPS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 enum Hyper2dE2eSplit {
@@ -363,6 +366,11 @@ struct RolloutValidationConfig {
     final_steps: Option<usize>,
     final_horizons: Option<Vec<usize>>,
     final_selection_horizon_min_steps: Option<usize>,
+    stability_examples: Option<usize>,
+    stability_particles: Option<usize>,
+    stability_reference_steps: Option<usize>,
+    stability_steps: Option<usize>,
+    stability_tail_steps: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -645,6 +653,12 @@ struct E2eRolloutValidationReport {
     final_steps: usize,
     final_horizons: Vec<usize>,
     final_selection_horizon_min_steps: usize,
+    stability_examples: usize,
+    stability_particles: usize,
+    stability_reference_steps: usize,
+    stability_steps: usize,
+    stability_tail_steps: usize,
+    stability_evaluation_mode: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -678,6 +692,7 @@ struct E2eRolloutTrainingResultReport {
     history: serde_json::Value,
     metrics: serde_json::Value,
     quality_validation: Option<serde_json::Value>,
+    stability_validation: Option<serde_json::Value>,
     gates_passed: bool,
     gates: Vec<E2eRolloutGateResultReport>,
     shared_base_output: String,
@@ -716,6 +731,11 @@ pub fn run_train_hyper_2d_e2e_rollout_config_path(
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?;
+        let stability_validation = training
+            .stability_validation
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
         report.training_result = Some(E2eRolloutTrainingResultReport {
             backend: training.backend,
             device: training.device,
@@ -723,6 +743,7 @@ pub fn run_train_hyper_2d_e2e_rollout_config_path(
             history: serde_json::to_value(training.history)?,
             metrics: training.metrics,
             quality_validation,
+            stability_validation,
             gates_passed,
             gates: gate_results,
             shared_base_output,
@@ -1216,6 +1237,12 @@ fn build_e2e_rollout_report(
         ))
         .into());
     }
+    if use_particle_pool && pool_slots_per_example < rollouts_per_example {
+        return Err(std::io::Error::other(format!(
+            "training.pool_slots_per_example={pool_slots_per_example} must be at least rollouts_per_example={rollouts_per_example} so every trajectory has persistent identity-local state"
+        ))
+        .into());
+    }
     let inject_seed_interval = config.training.inject_seed_interval.unwrap_or(64).max(1);
     let seed_replacements_per_interval = config
         .training
@@ -1269,7 +1296,7 @@ fn build_e2e_rollout_report(
     let sampled_training_steps = rollout_step_min != rollout_steps;
     if steps > 0 && rollout_particles > max_dense_train_particles {
         return Err(std::io::Error::other(format!(
-            "rollout.particles={rollout_particles} exceeds training.max_dense_train_particles={max_dense_train_particles}; keep 2048-particle runs validation-only until the tiled/fused backward path lands"
+            "rollout.particles={rollout_particles} exceeds training.max_dense_train_particles={max_dense_train_particles}; raise the cap only for a profiled fused perception/Target2D backward configuration"
         ))
         .into());
     }
@@ -1278,7 +1305,7 @@ fn build_e2e_rollout_report(
         .checked_mul(rollout_particles)
         .ok_or_else(|| std::io::Error::other("rollout particle pair count overflowed"))?;
     let batch_pair_interactions = pair_interactions
-        .checked_mul(example_batch_size)
+        .checked_mul(effective_rollout_batch_size)
         .ok_or_else(|| std::io::Error::other("rollout batch particle pair count overflowed"))?;
 
     let adapter_rank = config.adapter.rank.unwrap_or(16).max(1);
@@ -1310,6 +1337,20 @@ fn build_e2e_rollout_report(
         .map(PerceptionRolloutBackend::parse)
         .transpose()?
         .unwrap_or_default();
+    if steps > 0 && rollout_particles >= 2048 {
+        if target2d_loss_backend == Target2dLossBackend::Dense {
+            return Err(std::io::Error::other(
+                "quality-scale HyperNPA training requires target2d_loss_backend=auto or tiled-adjoint",
+            )
+            .into());
+        }
+        if perception_backend == PerceptionRolloutBackend::Dense {
+            return Err(std::io::Error::other(
+                "quality-scale HyperNPA training requires perception_backend=auto or tiled-adjoint",
+            )
+            .into());
+        }
+    }
     let weight_decay = config.optimizer.weight_decay.unwrap_or(0.0);
     let base_weight_decay = config.optimizer.base_weight_decay.unwrap_or(weight_decay);
     let generator_weight_decay = config
@@ -1412,6 +1453,59 @@ fn build_e2e_rollout_report(
         .validation
         .initial_examples
         .unwrap_or(validation_examples);
+    let stability_examples = config.validation.stability_examples.unwrap_or(0);
+    let stability_particles = config
+        .validation
+        .stability_particles
+        .unwrap_or(MAX_STABILITY_PARTICLES)
+        .max(1);
+    let stability_reference_steps = config
+        .validation
+        .stability_reference_steps
+        .unwrap_or(final_validation_steps)
+        .max(1);
+    let stability_steps = config
+        .validation
+        .stability_steps
+        .unwrap_or(MAX_STABILITY_STEPS)
+        .max(1);
+    let stability_tail_steps = config.validation.stability_tail_steps.unwrap_or(256).max(1);
+    if stability_examples > MAX_STABILITY_EXAMPLES {
+        return Err(std::io::Error::other(format!(
+            "validation.stability_examples={stability_examples} exceeds the bounded no-grad limit {MAX_STABILITY_EXAMPLES}"
+        ))
+        .into());
+    }
+    if stability_examples > holdout_examples {
+        return Err(std::io::Error::other(format!(
+            "validation.stability_examples={stability_examples} requires at least that many held-out examples, but the split resolves {holdout_examples}"
+        ))
+        .into());
+    }
+    if stability_examples > 0 && stability_particles > MAX_STABILITY_PARTICLES {
+        return Err(std::io::Error::other(format!(
+            "validation.stability_particles={stability_particles} exceeds the bounded no-grad limit {MAX_STABILITY_PARTICLES}"
+        ))
+        .into());
+    }
+    if stability_examples > 0 && stability_steps > MAX_STABILITY_STEPS {
+        return Err(std::io::Error::other(format!(
+            "validation.stability_steps={stability_steps} exceeds the bounded no-grad limit {MAX_STABILITY_STEPS}"
+        ))
+        .into());
+    }
+    if stability_examples > 0 && stability_reference_steps >= stability_steps {
+        return Err(std::io::Error::other(format!(
+            "validation.stability_reference_steps={stability_reference_steps} must be less than stability_steps={stability_steps}"
+        ))
+        .into());
+    }
+    if stability_examples > 0 && stability_tail_steps > stability_reference_steps {
+        return Err(std::io::Error::other(format!(
+            "validation.stability_tail_steps={stability_tail_steps} must be no greater than stability_reference_steps={stability_reference_steps}"
+        ))
+        .into());
+    }
     let validation_quality_scale = validation_particles >= 2048
         || validation_steps >= 32
         || validation_examples >= 16
@@ -1959,6 +2053,12 @@ fn build_e2e_rollout_report(
             final_steps: final_validation_steps,
             final_horizons: final_validation_horizons,
             final_selection_horizon_min_steps: final_validation_selection_horizon_min_steps,
+            stability_examples,
+            stability_particles,
+            stability_reference_steps,
+            stability_steps,
+            stability_tail_steps,
+            stability_evaluation_mode: "final-only-detached-generated-adapter",
         },
         gates: E2eRolloutGateReport {
             min_median_particle_steps_per_sec: config.gates.min_median_particle_steps_per_sec,
@@ -2215,6 +2315,11 @@ fn run_burn_e2e_rollout_training(
         final_validation_selection_horizon_min_steps: report
             .validation
             .final_selection_horizon_min_steps,
+        stability_examples: report.validation.stability_examples,
+        stability_particles: report.validation.stability_particles,
+        stability_reference_steps: report.validation.stability_reference_steps,
+        stability_steps: report.validation.stability_steps,
+        stability_tail_steps: report.validation.stability_tail_steps,
     };
     let train_started = Instant::now();
     let mut output = match report.training.gpu_backend.as_str() {
@@ -4228,10 +4333,10 @@ mod tests {
             assert_eq!(config.adapter.flow_source_scale, Some(1.0e-3));
             assert_eq!(config.validation.final_particles, final_particles);
             if final_particles.is_some() {
-                assert_eq!(config.training.example_batch_size, Some(16));
-                assert_eq!(config.training.rollouts_per_example, Some(32));
-                assert_eq!(config.training.pool_slots_per_example, Some(32));
-                assert_eq!(config.training.pool_capacity, Some(32_000));
+                assert_eq!(config.training.example_batch_size, Some(8));
+                assert_eq!(config.training.rollouts_per_example, Some(8));
+                assert_eq!(config.training.pool_slots_per_example, Some(8));
+                assert_eq!(config.training.pool_capacity, Some(8_000));
                 assert_eq!(
                     config.training.credit_assignment.as_deref(),
                     Some("full-bptt")
@@ -4246,9 +4351,31 @@ mod tests {
                 assert_eq!(config.training.seed_replacements_per_interval, Some(2));
                 assert_eq!(config.training.seed_trajectory_interval, Some(16));
                 assert_eq!(config.model.shared_base_train_start_step, Some(5_000));
-                assert_eq!(config.rollout.particles, Some(512));
-                assert_eq!(config.rollout.step_min, Some(96));
+                assert_eq!(config.training.max_dense_train_particles, Some(4096));
+                assert_eq!(
+                    config.training.target2d_loss_backend.as_deref(),
+                    Some("tiled-adjoint")
+                );
+                assert_eq!(config.training.perception_backend.as_deref(), Some("auto"));
+                assert_eq!(config.rollout.particles, Some(4096));
+                assert_eq!(config.rollout.step_min, Some(32));
                 assert_eq!(config.rollout.steps, Some(96));
+                assert_eq!(
+                    config.training.example_batch_size.unwrap()
+                        * config.training.rollouts_per_example.unwrap()
+                        * config.rollout.particles.unwrap(),
+                    16 * 32 * 512,
+                );
+                assert!(config.training.pool_capacity.unwrap() >= 900 * 8);
+                assert_eq!(
+                    config.validation.final_horizons.as_deref(),
+                    Some(&[96, 256, 512][..])
+                );
+                assert_eq!(config.validation.stability_examples, Some(16));
+                assert_eq!(config.validation.stability_particles, Some(4096));
+                assert_eq!(config.validation.stability_reference_steps, Some(512));
+                assert_eq!(config.validation.stability_steps, Some(4096));
+                assert_eq!(config.validation.stability_tail_steps, Some(256));
                 assert_eq!(
                     config.gates.min_final_p10_composited_rgb_psnr_db,
                     Some(26.0)
@@ -5027,6 +5154,7 @@ mod tests {
             final_loss: Some(1.0),
             generator: tiny_test_hyper(),
             quality_validation: None,
+            stability_validation: None,
         };
 
         let gates = evaluate_e2e_rollout_gates(&report, &training);

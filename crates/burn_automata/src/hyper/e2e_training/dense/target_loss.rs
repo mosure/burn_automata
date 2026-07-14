@@ -613,6 +613,30 @@ use super::*;
             .squeeze_dim::<1>(1);
         let predicted_alpha = density.clone().clamp_min(0.0).clamp_max(1.0);
         let target_alpha = target_density.clone().clamp_min(0.0).clamp_max(1.0);
+        let render_occupancy = predicted_alpha
+            .clone()
+            .reshape([batches, pixels])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let position_overflow_fraction = x
+            .clone()
+            .abs()
+            .greater_elem(1.0)
+            .float()
+            .sum_dim(2)
+            .greater_elem(0.0)
+            .float()
+            .reshape([batches, particle_count])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let state_overflow_fraction = s
+            .clone()
+            .abs()
+            .greater_elem(1.0)
+            .float()
+            .reshape([batches, particle_count * state_dims])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
         let density_diff_for_metrics = predicted_alpha.clone() - target_alpha.clone();
         let density_mse = density_diff_for_metrics
             .clone()
@@ -769,6 +793,9 @@ use super::*;
             foreground_rgb_mse,
             density_mse,
             density_soft_iou,
+            render_occupancy,
+            position_overflow_fraction,
+            state_overflow_fraction,
         }
     }
 
