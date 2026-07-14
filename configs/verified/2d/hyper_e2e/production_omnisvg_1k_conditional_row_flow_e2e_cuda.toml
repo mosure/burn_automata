@@ -1,0 +1,163 @@
+# Teacher-free 1k generalization experiment. The upstream-parity lizard is an
+# initialization only; both the shared NPA trunk and conditioned row flow are
+# optimized from rollout image loss. Oracle models are reserved for evaluation.
+preset = "growing-2d"
+
+[source]
+source_limit = 1000
+
+[source.omnisvg]
+dataset = "illustration"
+split = "train"
+cache_dir = "data/omnisvg"
+offset = 0
+limit = 1000
+page_size = 1000
+download = true
+refresh = false
+token_env = "HF_TOKEN"
+
+[split]
+holdout_stride = 10
+holdout_offset = 9
+
+[output]
+output_dir = "artifacts/hyper2d_omnisvg_1k_row_flow_e2e_cuda"
+checkpoint_interval_steps = 500
+checkpoint_interval_seconds = 900
+auto_resume = true
+
+[condition]
+encoder = "dino-vits-full-tokens"
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 224
+dino_patch_size = 14
+dino_batch_size = 32
+online = true
+token_attention_heads = 12
+rgb_channels = true
+rgb_channel_scale = 4.0
+alpha_channel = true
+alpha_channel_scale = 1.0
+
+[model]
+shared_base = "models/catalog/growing/lizard.bpk"
+shared_base_trainable = true
+shared_base_train_start_step = 5000
+hidden_dims = 128
+output_activation = "identity"
+
+[training]
+backend = "gpu"
+objective = "conditional-row-flow-e2e"
+steps = 100000
+report_interval = 100
+# Measured saturation shape for a 96 GiB CUDA device: 16 independent image
+# conditions x 32 trajectories = 512 recurrent rollouts per optimizer step.
+example_batch_size = 16
+credit_assignment = "full-bptt"
+task_loss_weight = 1.0
+flow_matching_weight = 0.0
+flow_self_rectification_weight = 0.05
+max_full_bptt_particle_steps = 33554432
+use_particle_pool = true
+pool_slots_per_example = 32
+rollouts_per_example = 32
+pool_capacity = 32000
+inject_seed_interval = 4
+seed_replacements_per_interval = 2
+seed_trajectory_interval = 16
+brush_size = 0.1
+pre_rollout_steps = 0
+target2d_loss_backend = "tiled-adjoint"
+perception_backend = "auto"
+max_dense_train_particles = 512
+system_memory_budget_gb = 24.0
+gpu_memory_budget_gb = 90.0
+seed = 42
+
+[gpu]
+backend = "burn-cuda"
+max_dense_chunk_floats = 1048576
+max_splat_chunk_floats = 1048576
+condition_device_cache_max_bytes = 1073741824
+target_device_cache_max_bytes = 1073741824
+
+[adapter]
+rank = 66
+alpha = 66.0
+generator = "conditional-row-flow"
+parameterization = "dense-npa-row-residual"
+attention_normalization = "softmax"
+flow_hidden = 768
+flow_layers = 12
+flow_ffn_dims = 3072
+# Four Heun steps retain eight velocity evaluations while allowing twice the
+# condition diversity of the eight-step solver at the measured memory limit.
+flow_sample_steps = 4
+flow_source_seed = 42
+flow_source_scale = 1.0e-3
+
+[rollout]
+particles = 512
+step_min = 96
+steps = 96
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "uniform-circle"
+
+[target]
+points = 4096
+threshold = 0.05
+loss_image_size = 128
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+composited_rgb_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+base_learning_rate = 1.0e-6
+generator_learning_rate = 1.0e-4
+base_weight_decay = 0.0
+generator_weight_decay = 0.01
+base_grad_clip_norm = 1.0
+generator_grad_clip_norm = 1.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1.0e-8
+base_per_parameter_grad_normalization = false
+generator_per_parameter_grad_normalization = false
+lr_schedule = "cosine"
+warmup_steps = 2000
+min_lr_scale = 0.05
+
+[validation]
+initial_examples = 8
+examples = 32
+interval = 2000
+particles = 2048
+steps = 256
+horizons = [96, 256]
+selection_horizon_min_steps = 256
+update_prob = 0.5
+seed = 42
+psnr_threshold_db = 26.0
+final_examples = 100
+final_particles = 4096
+final_steps = 512
+final_horizons = [96, 256, 512]
+final_selection_horizon_min_steps = 256
+
+[gates]
+max_quality_validation_evaluations = 60
+max_quality_validation_elapsed_fraction = 0.25
+min_final_p10_composited_rgb_psnr_db = 26.0
+min_final_condition_shuffle_composited_psnr_gap_db = 1.0
+min_final_generated_adapter_composited_psnr_gain_db = 1.0
+require_validation_interval_at_least_report_interval = true
+fail_on_violation = true

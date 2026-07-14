@@ -25,6 +25,46 @@ non-base reconstruction passes 26 dB at 4,096 particles and 1,024 rollout
 steps. It is not an identity-disjoint generalization result; strict holdout
 quality is documented in `docs/hyper_npa.md`.
 
+`smoke_conditional_row_flow.toml` is the bounded regression for the new
+structured controller-flow path. It trains a timestep-conditioned velocity
+field over dense NPA parameter rows from full DINOv2 tokens, uses device-side
+Gaussian sources, and samples a deterministic controller with Heun integration.
+`production_contract_growing_catalog_row_flow_pretrain.toml` records the Flow-S
+production shape (12 layers, width 768, 12 heads, FFN width 3072, eight Heun
+steps). Its endpoint phase keeps the paired shared base frozen; rollout
+refinement must set `flow_matching_weight = 0` before changing that base,
+because endpoint deltas are defined relative to the frozen checkpoint. The
+filename deliberately does not claim quality: only the bounded smoke has run.
+
+`smoke_conditional_row_flow_e2e.toml` is the canonical teacher-free command
+gate. It jointly optimizes the shared trunk and a DINO-conditioned dense NPA
+row-residual flow from Target2D rollout loss, with a small self-rectification
+auxiliary that reuses the generated endpoint. It has no oracle directory or
+per-sample adapter targets. Teacher-free configs initialize the deterministic
+source residual at `1e-3` RMS so it does not overwhelm the pretrained trunk;
+velocity learning remains row-normalized. The corresponding quality-scale contract is
+`production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`: 16 independent
+images per optimizer step, 32 trajectories per image, online native-224 DINO
+tokens, four Heun flow steps, fixed 96-step full-BPTT rollouts, deterministic
+global and per-identity fresh-seed injection, a frozen-trunk generator warmup,
+timed checkpoints, long-horizon p10 validation, condition-shuffle and base-only
+controls, and a final 4,096-particle evaluation. The C16 x R32 shape is the
+measured 96 GiB CUDA contract; use a smaller effective batch on lower-memory
+devices rather than raising `gpu_memory_budget_gb`. Endpoint-bank
+pretraining is optional warm-starting, not a required stage of this path.
+
+The row flow uses Burn/CubeCL tiled attention and fused modulated layer
+normalization behind explicit analytic autodiff adjoints. Static source, row,
+and timestep tensors remain device-resident. A 10-step C16 x R32,
+512-particle, 96-step profile measured 13.25M particle-steps/s, 430 W and 96.3%
+mean steady-state GPU power/utilization, 479 W peak power, and 78.3 GiB peak
+VRAM on an RTX PRO 6000 Blackwell. A steady-state Nsight comparison against the
+unfused layer norm raised device-active duty from 84.6% to 89.6%, reduced gaps
+of at least 1 ms from 74 to 49, and reduced the worst gap from 13.3 ms to
+3.36 ms. Active-graph preflight accounts for the rollout graph, flow graph,
+trainable state, caches, pool, and runtime reserve; oversized shapes fail
+before GPU condition/model allocation.
+
 Canonical HyperNPA configs should set `[validation].interval` separately from
 `[training].report_interval`, cap DINO condition cache residency with
 `[gpu].condition_device_cache_max_bytes`, and spell out base/generator optimizer

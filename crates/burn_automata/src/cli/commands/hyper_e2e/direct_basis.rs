@@ -134,6 +134,12 @@ struct DirectBasisOracleConfig {
     report_interval: usize,
     batch_size: usize,
     pool_size: usize,
+    rollout_step_min: usize,
+    tbptt_chunk_steps: usize,
+    loss_on_final_chunk_only: bool,
+    use_particle_pool: bool,
+    inject_seed_interval: usize,
+    brush_size: f32,
     learning_rate: f32,
     weight_decay: f32,
     grad_clip_norm: f32,
@@ -442,6 +448,12 @@ struct DirectBasisOracleExperimentConfig {
     report_interval: Option<usize>,
     batch_size: Option<usize>,
     pool_size: Option<usize>,
+    rollout_step_min: Option<usize>,
+    tbptt_chunk_steps: Option<usize>,
+    loss_on_final_chunk_only: Option<bool>,
+    use_particle_pool: Option<bool>,
+    inject_seed_interval: Option<usize>,
+    brush_size: Option<f32>,
     learning_rate: Option<f32>,
     weight_decay: Option<f32>,
     grad_clip_norm: Option<f32>,
@@ -754,6 +766,12 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         report_interval: config_oracle_report_interval,
         batch_size: config_oracle_batch_size,
         pool_size: config_oracle_pool_size,
+        rollout_step_min: config_oracle_rollout_step_min,
+        tbptt_chunk_steps: config_oracle_tbptt_chunk_steps,
+        loss_on_final_chunk_only: config_oracle_loss_on_final_chunk_only,
+        use_particle_pool: config_oracle_use_particle_pool,
+        inject_seed_interval: config_oracle_inject_seed_interval,
+        brush_size: config_oracle_brush_size,
         learning_rate: config_oracle_learning_rate,
         weight_decay: config_oracle_weight_decay,
         grad_clip_norm: config_oracle_grad_clip_norm,
@@ -877,6 +895,13 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
     let oracle_report_interval = config_oracle_report_interval.unwrap_or(oracle_report_interval);
     let oracle_batch_size = config_oracle_batch_size.unwrap_or(oracle_batch_size);
     let oracle_pool_size = config_oracle_pool_size.unwrap_or(oracle_pool_size);
+    let oracle_rollout_step_min =
+        config_oracle_rollout_step_min.unwrap_or(rollout_steps.clamp(1, 32));
+    let oracle_tbptt_chunk_steps = config_oracle_tbptt_chunk_steps.unwrap_or(rollout_steps.max(1));
+    let oracle_loss_on_final_chunk_only = config_oracle_loss_on_final_chunk_only.unwrap_or(true);
+    let oracle_use_particle_pool = config_oracle_use_particle_pool.unwrap_or(true);
+    let oracle_inject_seed_interval = config_oracle_inject_seed_interval.unwrap_or(16);
+    let oracle_brush_size = config_oracle_brush_size.unwrap_or(0.1);
     let oracle_learning_rate = config_oracle_learning_rate.unwrap_or(oracle_learning_rate);
     let oracle_weight_decay = config_oracle_weight_decay.unwrap_or(oracle_weight_decay);
     let oracle_grad_clip_norm = config_oracle_grad_clip_norm.unwrap_or(oracle_grad_clip_norm);
@@ -932,6 +957,12 @@ pub(crate) fn run_train_hyper_2d_direct_basis(
         report_interval: oracle_report_interval,
         batch_size: oracle_batch_size,
         pool_size: oracle_pool_size,
+        rollout_step_min: oracle_rollout_step_min,
+        tbptt_chunk_steps: oracle_tbptt_chunk_steps,
+        loss_on_final_chunk_only: oracle_loss_on_final_chunk_only,
+        use_particle_pool: oracle_use_particle_pool,
+        inject_seed_interval: oracle_inject_seed_interval,
+        brush_size: oracle_brush_size,
         learning_rate: oracle_learning_rate,
         weight_decay: oracle_weight_decay,
         grad_clip_norm: oracle_grad_clip_norm,
@@ -1459,6 +1490,12 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         report_interval: config_oracle_report_interval,
         batch_size: config_oracle_batch_size,
         pool_size: config_oracle_pool_size,
+        rollout_step_min: config_oracle_rollout_step_min,
+        tbptt_chunk_steps: config_oracle_tbptt_chunk_steps,
+        loss_on_final_chunk_only: config_oracle_loss_on_final_chunk_only,
+        use_particle_pool: config_oracle_use_particle_pool,
+        inject_seed_interval: config_oracle_inject_seed_interval,
+        brush_size: config_oracle_brush_size,
         learning_rate: config_oracle_learning_rate,
         weight_decay: config_oracle_weight_decay,
         grad_clip_norm: config_oracle_grad_clip_norm,
@@ -1509,6 +1546,13 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
     let oracle_report_interval = config_oracle_report_interval.unwrap_or(oracle_report_interval);
     let oracle_batch_size = config_oracle_batch_size.unwrap_or(oracle_batch_size);
     let oracle_pool_size = config_oracle_pool_size.unwrap_or(oracle_pool_size);
+    let oracle_rollout_step_min =
+        config_oracle_rollout_step_min.unwrap_or(rollout_steps.clamp(1, 32));
+    let oracle_tbptt_chunk_steps = config_oracle_tbptt_chunk_steps.unwrap_or(rollout_steps.max(1));
+    let oracle_loss_on_final_chunk_only = config_oracle_loss_on_final_chunk_only.unwrap_or(true);
+    let oracle_use_particle_pool = config_oracle_use_particle_pool.unwrap_or(true);
+    let oracle_inject_seed_interval = config_oracle_inject_seed_interval.unwrap_or(16);
+    let oracle_brush_size = config_oracle_brush_size.unwrap_or(0.1);
     let oracle_learning_rate = config_oracle_learning_rate.unwrap_or(oracle_learning_rate);
     let oracle_weight_decay = config_oracle_weight_decay.unwrap_or(oracle_weight_decay);
     let oracle_grad_clip_norm = config_oracle_grad_clip_norm.unwrap_or(oracle_grad_clip_norm);
@@ -1557,6 +1601,12 @@ pub(crate) fn run_validate_hyper_2d_direct_basis_oracles(
         report_interval: oracle_report_interval,
         batch_size: oracle_batch_size,
         pool_size: oracle_pool_size,
+        rollout_step_min: oracle_rollout_step_min,
+        tbptt_chunk_steps: oracle_tbptt_chunk_steps,
+        loss_on_final_chunk_only: oracle_loss_on_final_chunk_only,
+        use_particle_pool: oracle_use_particle_pool,
+        inject_seed_interval: oracle_inject_seed_interval,
+        brush_size: oracle_brush_size,
         learning_rate: oracle_learning_rate,
         weight_decay: oracle_weight_decay,
         grad_clip_norm: oracle_grad_clip_norm,
@@ -2462,9 +2512,18 @@ fn validate_oracle_config(
         || config.repetitions == 0
         || config.batch_size == 0
         || config.pool_size == 0
+        || config.rollout_step_min == 0
+        || config.tbptt_chunk_steps == 0
+        || config.inject_seed_interval == 0
     {
         return Err(std::io::Error::other(
-            "oracle epochs, repetitions, batch size, and pool size must be greater than zero",
+            "oracle epochs, repetitions, batch size, pool size, rollout step minimum, TBPTT chunk steps, and seed-injection interval must be greater than zero",
+        )
+        .into());
+    }
+    if config.use_particle_pool && config.pool_size < config.batch_size {
+        return Err(std::io::Error::other(
+            "oracle pool_size must be at least batch_size when particle-pool training is enabled",
         )
         .into());
     }
@@ -2474,6 +2533,8 @@ fn validate_oracle_config(
         || config.weight_decay < 0.0
         || !config.grad_clip_norm.is_finite()
         || config.grad_clip_norm < 0.0
+        || !config.brush_size.is_finite()
+        || config.brush_size < 0.0
     {
         return Err(std::io::Error::other(
             "oracle optimizer settings must be finite and non-negative",
@@ -2490,9 +2551,9 @@ fn validate_oracle_config(
             std::io::Error::other("oracle.gpu_parallel_jobs must be greater than zero").into(),
         );
     }
-    if config.gpu_parallel_jobs > 32 {
+    if config.gpu_parallel_jobs > 64 {
         return Err(std::io::Error::other(
-            "oracle.gpu_parallel_jobs must be <= 32 to avoid accidental oversubscription",
+            "oracle.gpu_parallel_jobs must be <= 64 to avoid accidental oversubscription",
         )
         .into());
     }
@@ -2753,9 +2814,23 @@ fn select_direct_basis_adapter_bank_oracle_entries(
     requested_examples: usize,
     seed: u64,
 ) -> Vec<DirectBasisAdapterBankIndexedEntry> {
-    eval_indices(entries.len(), requested_examples, seed)
+    if requested_examples == 0 {
+        return Vec::new();
+    }
+    let alpha_capable = entries
+        .iter()
+        .filter(|(_, entry)| {
+            !Path::new(&entry.condition)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
+                })
+        })
+        .collect::<Vec<_>>();
+    eval_indices(alpha_capable.len(), requested_examples, seed)
         .into_iter()
-        .map(|idx| entries[idx].clone())
+        .map(|idx| alpha_capable[idx].clone())
         .collect()
 }
 
@@ -3330,6 +3405,23 @@ mod tests {
     }
 
     #[test]
+    fn zero_oracle_selection_loads_no_entries() {
+        let entries = vec![(0, test_adapter_bank_entry("a", "holdout"))];
+        assert!(select_direct_basis_adapter_bank_oracle_entries(&entries, 0, 7).is_empty());
+    }
+
+    #[test]
+    fn oracle_selection_excludes_alpha_less_jpeg_targets() {
+        let png = test_adapter_bank_entry("alpha", "train");
+        let mut jpeg = test_adapter_bank_entry("opaque", "train");
+        jpeg.condition = "opaque.JPG".to_string();
+        let selected =
+            select_direct_basis_adapter_bank_oracle_entries(&[(0, png), (1, jpeg)], 2, 7);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].1.slug, "alpha");
+    }
+
+    #[test]
     fn adapter_bank_selection_manifest_replays_split_slug_rows() {
         let train = vec![
             (0, test_adapter_bank_entry("same", "train")),
@@ -3749,6 +3841,12 @@ mod tests {
             report_interval: 1,
             batch_size: 1,
             pool_size: 1,
+            rollout_step_min: 1,
+            tbptt_chunk_steps: 1,
+            loss_on_final_chunk_only: true,
+            use_particle_pool: true,
+            inject_seed_interval: 16,
+            brush_size: 0.1,
             learning_rate: 1.0e-3,
             weight_decay: 0.0,
             grad_clip_norm: 1.0,
@@ -3757,7 +3855,7 @@ mod tests {
         assert!(validate_oracle_config(&config).is_err());
         config.gpu_parallel_jobs = 1;
         assert!(validate_oracle_config(&config).is_ok());
-        config.gpu_parallel_jobs = 33;
+        config.gpu_parallel_jobs = 65;
         assert!(validate_oracle_config(&config).is_err());
     }
 

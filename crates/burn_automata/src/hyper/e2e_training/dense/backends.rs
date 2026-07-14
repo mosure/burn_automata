@@ -5,6 +5,24 @@ use super::super::{
 };
 
 #[cfg(feature = "backend_wgpu")]
+pub(crate) fn predict_conditional_row_flow_adapter_wgpu(
+    hyper: &crate::E2eHyperNpa2d,
+    config: &crate::NpaConfig,
+    condition: &[f32],
+) -> crate::AutomataResult<crate::NpaLowRankAdapter> {
+    super::wgpu_imp::entrypoints::predict_conditional_row_flow_adapter(hyper, config, condition)
+}
+
+#[cfg(feature = "backend_cuda")]
+pub(crate) fn predict_conditional_row_flow_adapter_cuda(
+    hyper: &crate::E2eHyperNpa2d,
+    config: &crate::NpaConfig,
+    condition: &[f32],
+) -> crate::AutomataResult<crate::NpaLowRankAdapter> {
+    super::cuda_imp::entrypoints::predict_conditional_row_flow_adapter(hyper, config, condition)
+}
+
+#[cfg(feature = "backend_wgpu")]
 pub(crate) fn train_direct_basis_burn_wgpu(
     base: &mut crate::NpaModel,
     train_examples: &mut [DirectBasisTrainingExample],
@@ -14,7 +32,7 @@ pub(crate) fn train_direct_basis_burn_wgpu(
     holdout_config: DirectBasisTrainConfig,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
-    super::wgpu_imp::train_direct_basis_burn_dense(
+    super::wgpu_imp::entrypoints::train_direct_basis_burn_dense(
         base,
         train_examples,
         holdout_examples,
@@ -33,7 +51,7 @@ pub(crate) fn train_e2e_rollout_burn_wgpu(
     train_config: BurnE2eRolloutTrainConfig,
     initial_generator: Option<&crate::E2eHyperNpa2d>,
 ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
-    super::wgpu_imp::train_e2e_rollout_burn_dense(
+    super::wgpu_imp::entrypoints::train_e2e_rollout_burn_dense(
         base,
         train_examples,
         holdout_examples,
@@ -78,7 +96,7 @@ pub(crate) fn train_oracle_models_burn_wgpu(
     examples: &[DirectBasisTrainingExample],
     train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::wgpu_imp::train_oracle_models_burn_dense(models, examples, train_config)
+    super::wgpu_imp::entrypoints::train_oracle_models_burn_dense(models, examples, train_config)
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
@@ -103,7 +121,7 @@ pub(crate) fn train_direct_basis_burn_cuda(
     holdout_config: DirectBasisTrainConfig,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
 ) -> Result<BurnWgpuDirectBasisOutput, Box<dyn std::error::Error>> {
-    super::cuda_imp::train_direct_basis_burn_dense(
+    super::cuda_imp::entrypoints::train_direct_basis_burn_dense(
         base,
         train_examples,
         holdout_examples,
@@ -122,7 +140,7 @@ pub(crate) fn train_e2e_rollout_burn_cuda(
     train_config: BurnE2eRolloutTrainConfig,
     initial_generator: Option<&crate::E2eHyperNpa2d>,
 ) -> Result<BurnE2eRolloutOutput, Box<dyn std::error::Error>> {
-    super::cuda_imp::train_e2e_rollout_burn_dense(
+    super::cuda_imp::entrypoints::train_e2e_rollout_burn_dense(
         base,
         train_examples,
         holdout_examples,
@@ -167,7 +185,7 @@ pub(crate) fn train_oracle_models_burn_cuda(
     examples: &[DirectBasisTrainingExample],
     train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::cuda_imp::train_oracle_models_burn_dense(models, examples, train_config)
+    super::cuda_imp::entrypoints::train_oracle_models_burn_dense(models, examples, train_config)
 }
 
 #[cfg(not(feature = "backend_cuda"))]

@@ -28,6 +28,10 @@ pub use burn_automata_kernels as kernels;
 pub use burn_automata_kernels::GaussianDecodeMode;
 pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
 pub use error::{AutomataError, AutomataResult};
+#[cfg(feature = "backend_cuda")]
+pub use hyper::generate_e2e_conditioned_npa_2d_cuda;
+#[cfg(feature = "backend_wgpu")]
+pub use hyper::generate_e2e_conditioned_npa_2d_wgpu;
 pub use hyper::{
     AdapterParameterGroup2d, AdapterParameterLayout2d, AdapterParameterSegment2d,
     AlphaAwareImageMetrics, CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS,

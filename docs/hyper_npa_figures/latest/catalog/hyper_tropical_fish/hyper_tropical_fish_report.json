@@ -1,0 +1,158 @@
+{
+  "output_dir": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish",
+  "report_path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_report.json",
+  "config": {
+    "output_dir": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish",
+    "output_prefix": "hyper_tropical_fish",
+    "width": 512,
+    "height": 512,
+    "particles": 4096,
+    "steps": 1024,
+    "capture_every": null,
+    "capture_steps": [
+      0,
+      32,
+      96,
+      256,
+      512,
+      1024
+    ],
+    "warmup_frames": 8,
+    "steps_per_frame": 4,
+    "preset": "Growing2d",
+    "seed_mode": "UniformCircle",
+    "model_path": null,
+    "hyper_image_path": ".cache/selforg_npa/targets/growing/tropical_fish.png",
+    "hyper_base_model_path": "artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/shared_base.bpk",
+    "hyper_model_path": "artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/hyper_2d.bpk",
+    "dino_model_path": "models/dino/dino_vits.mpk",
+    "dino_image_size": 224,
+    "dino_patch_size": 14,
+    "seed": 42,
+    "seed_scale": null,
+    "update_prob": 0.5,
+    "dt": 1.0,
+    "render_scale": 0.5,
+    "render_opacity": 2.0
+  },
+  "model_source": "hyper-image:.cache/selforg_npa/targets/growing/tropical_fish.png",
+  "requested_steps": [
+    0,
+    32,
+    96,
+    256,
+    512,
+    1024
+  ],
+  "captures": [
+    {
+      "requested_step": 0,
+      "actual_step": 0,
+      "path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_step000000.png",
+      "particles": 4096,
+      "width": 512,
+      "height": 512,
+      "metrics": {
+        "width": 512,
+        "height": 512,
+        "lit_pixels": 0,
+        "max_delta": 0,
+        "min_x": 512,
+        "max_x": 0,
+        "min_y": 512,
+        "max_y": 0
+      }
+    },
+    {
+      "requested_step": 32,
+      "actual_step": 32,
+      "path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_step000032.png",
+      "particles": 4096,
+      "width": 512,
+      "height": 512,
+      "metrics": {
+        "width": 512,
+        "height": 512,
+        "lit_pixels": 24154,
+        "max_delta": 250,
+        "min_x": 76,
+        "max_x": 434,
+        "min_y": 122,
+        "max_y": 430
+      }
+    },
+    {
+      "requested_step": 96,
+      "actual_step": 96,
+      "path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_step000096.png",
+      "particles": 4096,
+      "width": 512,
+      "height": 512,
+      "metrics": {
+        "width": 512,
+        "height": 512,
+        "lit_pixels": 27761,
+        "max_delta": 214,
+        "min_x": 68,
+        "max_x": 458,
+        "min_y": 115,
+        "max_y": 480
+      }
+    },
+    {
+      "requested_step": 256,
+      "actual_step": 256,
+      "path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_step000256.png",
+      "particles": 4096,
+      "width": 512,
+      "height": 512,
+      "metrics": {
+        "width": 512,
+        "height": 512,
+        "lit_pixels": 28290,
+        "max_delta": 212,
+        "min_x": 68,
+        "max_x": 461,
+        "min_y": 111,
+        "max_y": 462
+      }
+    },
+    {
+      "requested_step": 512,
+      "actual_step": 512,
+      "path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_step000512.png",
+      "particles": 4096,
+      "width": 512,
+      "height": 512,
+      "metrics": {
+        "width": 512,
+        "height": 512,
+        "lit_pixels": 28377,
+        "max_delta": 213,
+        "min_x": 69,
+        "max_x": 455,
+        "min_y": 99,
+        "max_y": 452
+      }
+    },
+    {
+      "requested_step": 1024,
+      "actual_step": 1024,
+      "path": "docs/hyper_npa_figures/latest/catalog/hyper_tropical_fish/hyper_tropical_fish_step001024.png",
+      "particles": 4096,
+      "width": 512,
+      "height": 512,
+      "metrics": {
+        "width": 512,
+        "height": 512,
+        "lit_pixels": 28570,
+        "max_delta": 219,
+        "min_x": 68,
+        "max_x": 482,
+        "min_y": 70,
+        "max_y": 443
+      }
+    }
+  ],
+  "elapsed_ms": 2816.2006
+}

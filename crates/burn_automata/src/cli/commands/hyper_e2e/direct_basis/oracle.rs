@@ -132,6 +132,12 @@ pub(super) fn evaluate_direct_basis_oracles(
         repetitions: oracle_config.repetitions,
         batch_size: oracle_config.batch_size,
         pool_size: oracle_config.pool_size,
+        rollout_step_min: oracle_config.rollout_step_min,
+        tbptt_chunk_steps: oracle_config.tbptt_chunk_steps,
+        loss_on_final_chunk_only: oracle_config.loss_on_final_chunk_only,
+        use_particle_pool: oracle_config.use_particle_pool,
+        inject_seed_interval: oracle_config.inject_seed_interval,
+        brush_size: oracle_config.brush_size,
         learning_rate: oracle_config.learning_rate,
         weight_decay: oracle_config.weight_decay,
         grad_clip_norm: oracle_config.grad_clip_norm,
@@ -287,11 +293,10 @@ fn train_burn_model_batch_direct_basis_oracles(
     }
 
     let quality_tiled = particle_count >= QUALITY_TILED_PARTICLE_THRESHOLD;
-    let tbptt_chunk_steps = if quality_tiled {
-        1
-    } else {
-        eval_config.rollout_steps.max(1)
-    };
+    let tbptt_chunk_steps = oracle_config
+        .tbptt_chunk_steps
+        .max(1)
+        .min(eval_config.rollout_steps.max(1));
     let max_dense_chunk_floats = if quality_tiled {
         QUALITY_DENSE_CHUNK_FLOATS
     } else {
@@ -309,17 +314,20 @@ fn train_burn_model_batch_direct_basis_oracles(
     let burn_config = DirectBasisTrainConfig {
         steps: training_steps,
         report_interval: oracle_config.report_interval.max(1),
-        example_batch_size: jobs.len(),
+        example_batch_size: oracle_config.batch_size,
         tbptt_chunk_steps,
-        loss_on_final_chunk_only: false,
-        use_particle_pool: false,
-        pool_size: 0,
-        inject_seed_interval: 0,
-        brush_size: 0.0,
+        loss_on_final_chunk_only: oracle_config.loss_on_final_chunk_only,
+        use_particle_pool: oracle_config.use_particle_pool,
+        pool_size: oracle_config.pool_size,
+        inject_seed_interval: oracle_config.inject_seed_interval,
+        brush_size: oracle_config.brush_size,
         stopgrad_pos: models[0].config.stopgrad_pos,
         stopgrad_state: models[0].config.stopgrad_state,
         rollout_particles: particle_count,
-        rollout_step_min: eval_config.rollout_steps,
+        rollout_step_min: oracle_config
+            .rollout_step_min
+            .min(eval_config.rollout_steps)
+            .max(1),
         rollout_steps: eval_config.rollout_steps,
         update_prob: eval_config.update_prob,
         seed: evals[0].seed,
@@ -347,8 +355,8 @@ fn train_burn_model_batch_direct_basis_oracles(
         eval_interval: 0,
         eval_batch_size: 1,
         eval_seed: evals[0].seed,
-        system_memory_budget_gb: Some(24.0),
-        gpu_memory_budget_gb: Some(24.0),
+        system_memory_budget_gb: Some(48.0),
+        gpu_memory_budget_gb: Some(80.0),
         max_dense_train_particles: MAX_TILED_BURN_ORACLE_PARTICLES,
         max_dense_chunk_floats,
         max_splat_chunk_floats,
@@ -828,11 +836,10 @@ fn train_burn_dense_direct_basis_oracle(
         .saturating_add(1)
         .saturating_mul(training_config.repetitions);
     let quality_tiled = training_config.particle_count >= QUALITY_TILED_PARTICLE_THRESHOLD;
-    let tbptt_chunk_steps = if quality_tiled {
-        1
-    } else {
-        eval.rollout_steps.max(1)
-    };
+    let tbptt_chunk_steps = oracle_config
+        .tbptt_chunk_steps
+        .max(1)
+        .min(eval.rollout_steps.max(1));
     let max_dense_chunk_floats = if quality_tiled {
         QUALITY_DENSE_CHUNK_FLOATS
     } else {
@@ -848,15 +855,18 @@ fn train_burn_dense_direct_basis_oracle(
         report_interval: training_config.report_interval.max(1),
         example_batch_size: rollout_batch_size,
         tbptt_chunk_steps,
-        loss_on_final_chunk_only: false,
-        use_particle_pool: false,
-        pool_size: 0,
-        inject_seed_interval: 0,
-        brush_size: 0.0,
+        loss_on_final_chunk_only: oracle_config.loss_on_final_chunk_only,
+        use_particle_pool: oracle_config.use_particle_pool,
+        pool_size: oracle_config.pool_size,
+        inject_seed_interval: oracle_config.inject_seed_interval,
+        brush_size: oracle_config.brush_size,
         stopgrad_pos: oracle_model.config.stopgrad_pos,
         stopgrad_state: oracle_model.config.stopgrad_state,
         rollout_particles: training_config.particle_count,
-        rollout_step_min: eval.rollout_steps,
+        rollout_step_min: oracle_config
+            .rollout_step_min
+            .min(eval.rollout_steps)
+            .max(1),
         rollout_steps: eval.rollout_steps,
         update_prob: training_config.update_prob,
         seed: training_config.seed,
@@ -884,8 +894,8 @@ fn train_burn_dense_direct_basis_oracle(
         eval_interval: training_config.report_interval.max(1),
         eval_batch_size: 1,
         eval_seed: eval.seed,
-        system_memory_budget_gb: Some(24.0),
-        gpu_memory_budget_gb: Some(24.0),
+        system_memory_budget_gb: Some(48.0),
+        gpu_memory_budget_gb: Some(80.0),
         max_dense_train_particles: MAX_TILED_BURN_ORACLE_PARTICLES,
         max_dense_chunk_floats,
         max_splat_chunk_floats,

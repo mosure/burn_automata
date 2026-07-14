@@ -1,0 +1,5 @@
+[fusion.beam_search]
+max_blocks = 2
+
+[cubecl.streaming]
+max_streams = 128

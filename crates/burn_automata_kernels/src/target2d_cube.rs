@@ -14,6 +14,7 @@ use burn_fusion::{
     stream::{Operation, OperationStreams},
 };
 use burn_ir::{CustomOpIr, HandleContainer, OperationIr, OperationOutput, TensorIr};
+use cubecl::features::AtomicUsage;
 use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
 use crate::{KernelError, KernelResult};
@@ -467,34 +468,81 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
         InputScalar::new(cfg.hi, dtype),
         dtype.into(),
     );
-    pixel_loss_kernel::launch(
-        &client,
-        pixel_cube_count,
-        pixel_cube_dim,
-        AddressType::U32,
-        centered_x.clone().into_tensor_arg(),
-        s.clone().into_tensor_arg(),
-        denominator.clone().into_tensor_arg(),
-        target_rgb.into_tensor_arg(),
-        target_density.into_tensor_arg(),
-        target_foreground.into_tensor_arg(),
-        target_foreground_scale.into_tensor_arg(),
-        pixel_size.clone().into_tensor_arg(),
-        target_points.clone().into_tensor_arg(),
-        pixel_adjoint.clone().into_tensor_arg(),
-        pixel_loss.clone().into_tensor_arg(),
-        cfg.image_size,
-        InputScalar::new(cfg.sigma, dtype),
-        InputScalar::new(cfg.lo, dtype),
-        InputScalar::new(cfg.hi, dtype),
-        InputScalar::new(cfg.splat_loss_weight, dtype),
-        InputScalar::new(cfg.color_loss_weight, dtype),
-        InputScalar::new(cfg.density_loss_weight, dtype),
-        InputScalar::new(cfg.background_density_loss_weight, dtype),
-        InputScalar::new(cfg.foreground_density_loss_weight, dtype),
-        InputScalar::new(cfg.composited_rgb_loss_weight, dtype),
-        dtype.into(),
-    );
+    if supports_float_atomic_add::<R, f32>(&client) {
+        let render = zeros_client(
+            client.clone(),
+            device,
+            Shape::new([batches, pixels, 4]),
+            dtype,
+        );
+        particle_splat_kernel::launch(
+            &client,
+            particle_cube_count.clone(),
+            particle_cube_dim,
+            AddressType::U32,
+            centered_x.clone().into_tensor_arg(),
+            s.clone().into_tensor_arg(),
+            denominator.clone().into_tensor_arg(),
+            pixel_size.clone().into_tensor_arg(),
+            target_points.clone().into_tensor_arg(),
+            render.clone().into_tensor_arg(),
+            cfg.image_size,
+            InputScalar::new(cfg.sigma, dtype),
+            InputScalar::new(cfg.lo, dtype),
+            InputScalar::new(cfg.hi, dtype),
+            dtype.into(),
+        );
+        pixel_loss_from_render_kernel::launch(
+            &client,
+            pixel_cube_count,
+            pixel_cube_dim,
+            AddressType::U32,
+            render.into_tensor_arg(),
+            target_rgb.into_tensor_arg(),
+            target_density.into_tensor_arg(),
+            target_foreground.into_tensor_arg(),
+            target_foreground_scale.into_tensor_arg(),
+            pixel_adjoint.clone().into_tensor_arg(),
+            pixel_loss.clone().into_tensor_arg(),
+            cfg.image_size,
+            InputScalar::new(cfg.splat_loss_weight, dtype),
+            InputScalar::new(cfg.color_loss_weight, dtype),
+            InputScalar::new(cfg.density_loss_weight, dtype),
+            InputScalar::new(cfg.background_density_loss_weight, dtype),
+            InputScalar::new(cfg.foreground_density_loss_weight, dtype),
+            InputScalar::new(cfg.composited_rgb_loss_weight, dtype),
+            dtype.into(),
+        );
+    } else {
+        pixel_loss_dense_kernel::launch(
+            &client,
+            pixel_cube_count,
+            pixel_cube_dim,
+            AddressType::U32,
+            centered_x.clone().into_tensor_arg(),
+            s.clone().into_tensor_arg(),
+            denominator.clone().into_tensor_arg(),
+            target_rgb.into_tensor_arg(),
+            target_density.into_tensor_arg(),
+            target_foreground.into_tensor_arg(),
+            target_foreground_scale.into_tensor_arg(),
+            pixel_size.clone().into_tensor_arg(),
+            target_points.clone().into_tensor_arg(),
+            pixel_adjoint.clone().into_tensor_arg(),
+            pixel_loss.clone().into_tensor_arg(),
+            cfg.image_size,
+            InputScalar::new(cfg.sigma, dtype),
+            InputScalar::new(cfg.lo, dtype),
+            InputScalar::new(cfg.hi, dtype),
+            InputScalar::new(cfg.splat_loss_weight, dtype),
+            InputScalar::new(cfg.color_loss_weight, dtype),
+            InputScalar::new(cfg.density_loss_weight, dtype),
+            InputScalar::new(cfg.background_density_loss_weight, dtype),
+            InputScalar::new(cfg.foreground_density_loss_weight, dtype),
+            InputScalar::new(cfg.composited_rgb_loss_weight, dtype),
+            dtype.into(),
+        );
+    }
     reduce_loss_kernel::launch(
         &client,
         batch_cube_count,
@@ -538,6 +586,14 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
         color,
         density,
     }
+}
+
+fn supports_float_atomic_add<R: CubeRuntime, F: Float>(client: &ComputeClient<R>) -> bool {
+    let storage = StorageType::Atomic(F::as_type_native_unchecked().elem_type());
+    client
+        .properties()
+        .atomic_type_usage(Type::new(storage))
+        .contains(AtomicUsage::Add)
 }
 
 #[cube]
@@ -655,7 +711,128 @@ fn denominator_kernel<F: Float>(
 
 #[cube(launch, address_type = "dynamic")]
 #[allow(clippy::too_many_arguments)]
-fn pixel_loss_kernel<F: Float>(
+fn particle_splat_kernel<F: Float>(
+    centered_x: &Tensor<F>,
+    s: &Tensor<F>,
+    denominator: &Tensor<F>,
+    pixel_size: &Tensor<F>,
+    target_points: &Tensor<F>,
+    render: &mut Tensor<Atomic<F>>,
+    #[comptime] image_size: usize,
+    sigma_scale: InputScalar,
+    lo: InputScalar,
+    hi: InputScalar,
+    #[define(F)] _dtype: StorageType,
+) {
+    let index = ABSOLUTE_POS;
+    let particle_count = centered_x.shape(1);
+    if index >= centered_x.shape(0) * particle_count {
+        terminate!();
+    }
+    let batch = index / particle_count;
+    let particle = index - batch * particle_count;
+    let x_base = batch * centered_x.stride(0) + particle * centered_x.stride(1);
+    let pixel_size_value = pixel_size[batch * pixel_size.stride(0)];
+    let target_points_value = target_points[batch * target_points.stride(0)];
+    let output_scale = target_points_value / F::cast_from(particle_count as f32);
+    let size_f = F::cast_from(image_size as f32);
+    let norm = size_f * pixel_size_value / (hi.get::<F>() - lo.get::<F>());
+    let norm_scale = norm * norm * output_scale;
+    let (_, _, base_x, base_y, frac_x, frac_y, radius, inv_two_sigma2, _, _) =
+        particle_pixel_params::<F>(
+            centered_x[x_base],
+            centered_x[x_base + centered_x.stride(2)],
+            pixel_size_value,
+            image_size,
+            sigma_scale.get::<F>(),
+            lo.get::<F>(),
+            hi.get::<F>(),
+        );
+    let denom = denominator[batch * denominator.stride(0) + particle * denominator.stride(1)];
+    let state_dims = s.shape(2);
+    let state_base = batch * s.stride(0) + particle * s.stride(1) + (state_dims - 3) * s.stride(2);
+    let c0 = s[state_base] + F::new(0.5_f32);
+    let c1 = s[state_base + s.stride(2)] + F::new(0.5_f32);
+    let c2 = s[state_base + 2 * s.stride(2)] + F::new(0.5_f32);
+    let size_i = image_size as i32;
+    let mut oy = 0 - radius;
+    while oy <= radius {
+        let y = base_y + oy;
+        if y >= 0 && y < size_i {
+            let mut ox = 0 - radius;
+            while ox <= radius {
+                let x = base_x + ox;
+                if x >= 0 && x < size_i {
+                    let dx = F::cast_from(ox as f32) - frac_x;
+                    let dy = F::cast_from(oy as f32) - frac_y;
+                    let g = sample_g::<F>(dx, dy, inv_two_sigma2);
+                    let weight = norm_scale * g / denom;
+                    let pixel = y as usize * image_size + x as usize;
+                    let render_base = batch * render.stride(0) + pixel * render.stride(1);
+                    render[render_base].fetch_add(c0 * weight);
+                    render[render_base + render.stride(2)].fetch_add(c1 * weight);
+                    render[render_base + 2 * render.stride(2)].fetch_add(c2 * weight);
+                    render[render_base + 3 * render.stride(2)].fetch_add(weight);
+                }
+                ox += 1;
+            }
+        }
+        oy += 1;
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+#[allow(clippy::too_many_arguments)]
+fn pixel_loss_from_render_kernel<F: Float>(
+    render: &Tensor<Atomic<F>>,
+    target_rgb: &Tensor<F>,
+    target_density: &Tensor<F>,
+    target_foreground: &Tensor<F>,
+    target_foreground_scale: &Tensor<F>,
+    pixel_adjoint: &mut Tensor<F>,
+    pixel_loss: &mut Tensor<F>,
+    #[comptime] image_size: usize,
+    splat_loss_weight: InputScalar,
+    color_loss_weight: InputScalar,
+    density_loss_weight: InputScalar,
+    background_density_loss_weight: InputScalar,
+    foreground_density_loss_weight: InputScalar,
+    composited_rgb_loss_weight: InputScalar,
+    #[define(F)] _dtype: StorageType,
+) {
+    let index = ABSOLUTE_POS;
+    let pixels = image_size * image_size;
+    if index >= render.shape(0) * pixels {
+        terminate!();
+    }
+    let batch = index / pixels;
+    let pixel = index - batch * pixels;
+    let render_base = batch * render.stride(0) + pixel * render.stride(1);
+    write_pixel_loss::<F>(
+        render[render_base + 3 * render.stride(2)].load(),
+        render[render_base].load(),
+        render[render_base + render.stride(2)].load(),
+        render[render_base + 2 * render.stride(2)].load(),
+        batch,
+        pixel,
+        target_rgb,
+        target_density,
+        target_foreground,
+        target_foreground_scale,
+        pixel_adjoint,
+        pixel_loss,
+        splat_loss_weight.get::<F>(),
+        color_loss_weight.get::<F>(),
+        density_loss_weight.get::<F>(),
+        background_density_loss_weight.get::<F>(),
+        foreground_density_loss_weight.get::<F>(),
+        composited_rgb_loss_weight.get::<F>(),
+    );
+}
+
+#[cube(launch, address_type = "dynamic")]
+#[allow(clippy::too_many_arguments)]
+fn pixel_loss_dense_kernel<F: Float>(
     centered_x: &Tensor<F>,
     s: &Tensor<F>,
     denominator: &Tensor<F>,
@@ -736,6 +913,51 @@ fn pixel_loss_kernel<F: Float>(
         particle += 1;
     }
 
+    write_pixel_loss::<F>(
+        density,
+        rgb0,
+        rgb1,
+        rgb2,
+        batch,
+        pixel,
+        target_rgb,
+        target_density,
+        target_foreground,
+        target_foreground_scale,
+        pixel_adjoint,
+        pixel_loss,
+        splat_loss_weight.get::<F>(),
+        color_loss_weight.get::<F>(),
+        density_loss_weight.get::<F>(),
+        background_density_loss_weight.get::<F>(),
+        foreground_density_loss_weight.get::<F>(),
+        composited_rgb_loss_weight.get::<F>(),
+    );
+}
+
+#[cube]
+#[allow(clippy::too_many_arguments)]
+fn write_pixel_loss<F: Float>(
+    density: F,
+    rgb0: F,
+    rgb1: F,
+    rgb2: F,
+    batch: usize,
+    pixel: usize,
+    target_rgb: &Tensor<F>,
+    target_density: &Tensor<F>,
+    target_foreground: &Tensor<F>,
+    target_foreground_scale: &Tensor<F>,
+    pixel_adjoint: &mut Tensor<F>,
+    pixel_loss: &mut Tensor<F>,
+    splat_loss_weight: F,
+    color_loss_weight: F,
+    density_loss_weight: F,
+    background_density_loss_weight: F,
+    foreground_density_loss_weight: F,
+    composited_rgb_loss_weight: F,
+) {
+    let pixels = target_density.shape(1);
     let density_denom = F::cast_from(pixels as f32);
     let color_denom = F::cast_from((pixels * 3) as f32);
     let target_density_value =
@@ -784,12 +1006,6 @@ fn pixel_loss_kernel<F: Float>(
         + composited_diff2 * composited_diff2)
         / color_denom;
 
-    let splat_loss_weight = splat_loss_weight.get::<F>();
-    let color_loss_weight = color_loss_weight.get::<F>();
-    let density_loss_weight = density_loss_weight.get::<F>();
-    let background_density_loss_weight = background_density_loss_weight.get::<F>();
-    let foreground_density_loss_weight = foreground_density_loss_weight.get::<F>();
-    let composited_rgb_loss_weight = composited_rgb_loss_weight.get::<F>();
     let mut density_adj =
         splat_loss_weight * density_loss_weight * cube_l1l2_grad::<F>(density_diff) / density_denom;
     if background_density_loss_weight > F::new(0.0_f32) {

@@ -1,224 +1,225 @@
-# HyperNPA 2D
+# HyperNPA Paper Companion
 
-## Maintained Path
+The publication source is [`hyper_npa.tex`](hyper_npa.tex), with references in
+[`hyper_npa.bib`](hyper_npa.bib) and renderer evidence under
+[`hyper_npa_figures/latest`](hyper_npa_figures/latest). The generated local PDF
+is `docs/hyper_npa.pdf`.
 
-The Burn-native `train-hyper2d-e2e-rollout` command owns training and quality
-validation:
+This document records the claim boundary and the exact evidence used by the
+paper. It is not a second manuscript.
+
+## Evaluated Architecture
+
+The selected quality checkpoint implements:
 
 ```text
-RGBA image
-  -> native 224x224 DINOv2 ViT-S/14 preprocessing on GPU
-  -> CLS + 16x16 patch tokens
-  -> structured multi-head adapter-layout decoder
-  -> shared growing-2D NPA + generated rank-r LoRA
-  -> recurrent NPA rollout
-  -> alpha-aware Target2D image and density objective
+RGBA image at 224 x 224
+  -> frozen DINOv2 ViT-S/14
+  -> 257 tokens x (384 DINO + 3 RGB + 1 alpha)
+  -> module-token cross-attention decoder (artifact architecture v2)
+  -> 10,898 identifiable full-rank controller deltas
+  -> shared 66 -> 128 -> 18 growing-2D NPA
+  -> recurrent particle rollout
+  -> alpha-aware Target2D loss
 ```
 
-The normal token contract is `257 x 385` (384 DINO channels plus alpha). The
-optional high-fidelity contract is `257 x 388` and appends patch-aligned RGB
-plus alpha. DINO runs without an autodiff graph in bounded batches; conditions
-may remain device-resident. Every rollout batch row receives its own adapter.
+The selected decoder is deterministic. Historical artifact names containing
+`rectified_flow` do not make it a rectified-flow model: there is no noisy
+adapter source, timestep-conditioned velocity objective, or multi-step adapter
+sampling in the reported checkpoint.
 
-## Generator Modes
+The source tree now defaults to the v3 four-head module-token decoder. The
+paper reports v3 only for the current CUDA throughput benchmark; it does not
+attribute v3 to the older v2 quality checkpoint.
 
-- `token-attention-pool`: full adapter-space deterministic head.
-- `module-token-decoder`: maintained v3 generalized path. Learned queries for
-  the six NPA adapter parameter groups independently cross-attend to all DINO
-  tokens in multiple channel heads, then emit a static adapter end to end from
-  rollout loss.
-- `module-token-decoder-v2`: legacy single-attention-map decoder retained only
-  for loading and evaluating existing artifacts.
-- `sample-id-table`: direct per-sample adapter substrate control. It memorizes
-  identities, cannot infer an adapter for an unseen image, and is never
-  evidence of HyperNPA generalization.
+## Canonical Conditional Row-Flow Experiment
 
-The maintained module-token decoder uses true per-head softmax token attention and the
-`canonical-full-rank` adapter parameterization. For growing 2D, rank 82 is
-full-rank for both NPA matrices. Canonical mode fixes one LoRA factor to an
-identity embedding and predicts the other factor plus both bias deltas. This
-is exactly equivalent to predicting dense NPA weight deltas, while reducing
-the effective conditional output from 28,026 non-identifiable factor
-coordinates to 12,946 identifiable delta coordinates. The serialized artifact
-records the parameterization, and CPU/Bevy inference applies the same mask and
-fixed factors as Burn training.
+The maintained trainer implements the next architecture; it is not yet part of
+the paper's quality claim:
 
-The historical artifact name contains `rectified_flow`, but the maintained
-one-step deterministic generator is not a stochastic rectified-flow model. A
-real adapter flow still requires noisy adapter states, timestep-conditioned
-velocity training, and sampled-adapter rollout validation.
+```text
+224 x 224 RGBA image
+  -> frozen DINOv2 ViT-S/14, all 257 spatial/CLS tokens
+  -> per-token-preserved DINO + aligned RGB/alpha condition projection
+  -> deterministic seeded source rows for W1+b1 and W2+b2
+  -> timestep-conditioned self/cross-attention velocity transformer
+  -> eight-step deterministic Heun solve
+  -> 10,898 identifiable dense controller residuals
+  -> jointly trained shared NPA trunk + generated residual
+  -> autonomous particle rollout
+  -> alpha-aware Target2D image/density loss
+```
 
-Optional per-step spatial control samples the DINO patch field at particle
-positions. A recurrent-state projection can make that residual depend on the
-current particle state. Both features are experimental and are serialized in
-the artifact contract; the Bevy static image-to-NPA path rejects per-step-field
-artifacts rather than silently dropping their control weights.
+The primary path is teacher-free and end to end. Image and recurrent-rollout
+gradients update both the generated dense residual and shared NPA trunk. A
+small self-rectification auxiliary detaches the current generated endpoint,
+samples a continuous time on the source-to-endpoint line, and trains the
+velocity field toward that endpoint; it reuses the endpoint already generated
+for the rollout rather than paying for a second Heun solve. Optional endpoint
+pretraining can still sample Gaussian controller rows and regress toward a
+modest exact-oracle bank, but it is a warm start or control rather than the
+generalization objective.
 
-## Leakage Contract
+Teacher-free runs use a `1e-3` deterministic source-noise scale. This keeps the
+initial residual near the pretrained shared trunk while row-normalized
+velocity outputs remain free to grow to the scale demanded by rollout loss.
 
-Oracle adapters may be attached to training examples for bounded teacher
-controls. Holdout examples are always teacher-free. Training aborts if a
-holdout example carries an oracle adapter target.
+Row-wise RMS normalization is used without elementwise centering. Padding is
+masked on ndarray, WGPU, and CUDA. The v5 architecture contract inside the v2
+BPK container stores row widths, RMS scales, solver/source metadata, and
+transformer tensors; it serializes neither JSON weights nor ambiguous raw LoRA
+factors. Legacy v4 row-flow artifacts remain loadable.
 
-This distinction invalidates an earlier interpretation of the released
-rose/tropical-fish result. The reported 27.57 dB reconstruction came from a
-generator trained on those exact adapters. It proves adapter reconstruction
-and runtime correctness, not unseen-image generalization.
+The bounded endpoint-pretraining smoke is
+`configs/verified/2d/hyper_e2e/smoke_conditional_row_flow.toml`. The canonical
+teacher-free command smoke is `smoke_conditional_row_flow_e2e.toml`, and the
+1k quality contract is
+`production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`. The production
+shape is an untrained contract, not evidence of broad 1k/10k generalization or
+26 dB parity; those claims require completed held-out p10, condition-shuffle,
+base-only, long-horizon, and matched-oracle gates.
 
-## Strict Held-Out Results
+A bounded four-identity CUDA control run establishes that the new conditional
+path is active: at its selected checkpoint, correct conditions beat a cyclic
+condition shuffle by 3.72 dB and generated residuals beat the shared trunk by
+3.42 dB at 256 particles and 64 steps. The generated 10,898-value controller
+rows have mean pairwise L2 distance 1.36. This is a controllability result, not
+quality parity: p10 is 12.18 dB. A post-VJP-fix 2,000-step continuation trained
+only at 64 particles still did not transfer to quality scale. Its selected
+checkpoint reaches 10.96 dB p10 at 2,048 particles and 96 steps, where the
+generated residual gain is 1.53 dB, then falls to 9.34 dB p10 and 0.02 dB gain
+at 256 steps. The matched target-point-splat p10 is 28.42 dB. The production
+contract therefore trains at 512 particles and a fixed 96-step horizon rather
+than treating short low-particle trajectories as the main objective.
 
-The latest identity-disjoint OmniSVG-1k split uses 900 train and 100 holdout
-images. The fixed quality subset contains 16 holdout identities and is
-evaluated with 2,048 particles at 96, 256, 512, and 1,024 rollout steps.
-Checkpoint selection uses the minimum p10 over horizons of at least 256 steps.
+Long full-BPTT rollouts produce substantially larger startup gradients than the
+short-horizon probes. Verified production configs linearly warm the optimizer
+learning rate before applying the configured cosine or upstream schedule.
+Gradient clipping alone is insufficient because Adam's first sign-normalized
+update can still destroy a near-zero generated controller.
 
-| experiment | aggregate at 1,024 | worst-horizon p10 | condition shuffle gap | adapter gain | median throughput |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| prior factorized module decoder | 10.88 dB | 8.07 dB | 2.12 dB | 2.51 dB | 3.5-5.2M particle-steps/s |
-| canonical LoRA, 512p curriculum | 10.88 dB | 7.24 dB | 2.46 dB | 2.50 dB | 3.31M particle-steps/s |
-| canonical LoRA, 1,024p composited refinement | **11.63 dB** | **9.30 dB** | **2.79 dB** | **3.26 dB** | 2.08M particle-steps/s |
-| lower-LR continuation | 11.45 dB | 8.95 dB | retained | retained | 2.0M particle-steps/s |
+The E2E particle pool now enforces both configured seed policies. A global
+cadence injects `seed_replacements_per_interval` fresh trajectories, while a
+per-identity counter prevents frequently or infrequently sampled identities
+from going indefinitely without a fresh seed. Both select explicit batch rows
+and are checkpoint-contract inputs.
 
-The selected canonical checkpoint is temporally stable: horizon p10 is 9.13,
-9.30, 9.35, and 9.32 dB at 96, 256, 512, and 1,024 steps. A deterministic
-target-point splat of the same validation targets reaches 28.08 dB p10, so
-particle count and target extraction do not explain the remaining 18.78 dB
-tail gap.
+The device perception VJP uses a stable small-radius series for
+`log1p(r) / r`, includes the configured state-equivalence scale in dense,
+sparse-channel, and sparse-plane forwards, and versions the corresponding
+CubeCL/Fusion operation IDs. Component and aggregate VJP fixtures pass against
+the analytic reference on both CUDA and WGPU with a 0.5% relative bound. The
+shared dense Burn normalization uses the same series, avoiding the inaccurate
+tiny-`log1p` lowering previously observed on WGPU.
 
-A 16-image table control separates substrate capacity from held-out
-generalization. At equal 2,000-step exposure, the canonical sample-ID table
-reaches 11.09 dB aggregate, while the DINO module decoder reaches 10.99 dB
-aggregate and 9.20 dB worst-horizon p10 with a 2.92 dB shuffle gap. The image
-condition and generated adapter paths are therefore active; the broad gap is
-not a batch broadcast bug or dead conditioner.
+## Claim-to-Evidence Matrix
 
-The selected 1k training sequence exposes each training identity to only about
-111 rollout trajectories after the 512p pretrain and first 1,024p refinement.
-The released upstream single-target recipe uses 240,000 trajectories per
-target (10k epochs, three repetitions, batch size eight), 4,096 particles,
-32-95 sampled steps from NumPy's `[32, 96)` range, a 256px splat loss, a 512-state pool, seed injection every
-16 epochs, and brush damage 0.1. Current results therefore show a better
-conditioned representation and curriculum, not oracle parity.
+| Claim | Evidence | Boundary |
+| --- | --- | --- |
+| Image-conditioned control is active | OmniSVG-1k correct-vs-shuffled gap: 2.79 dB | Fixed 16-image subset of 100 identity-disjoint holdouts |
+| Generated deltas affect dynamics | OmniSVG-1k generated-vs-base gain: 3.26 dB | Same validation contract as above |
+| Current broad quality is below parity | 11.63 dB aggregate and 9.32 dB p10 at step 1,024 | 2,048-particle numerical validation; all 16 samples miss 26 dB |
+| Target extraction is not the dominant ceiling | 28.08 dB target-point-splat p10 | 4,096 extracted target points |
+| Released oracles remain much stronger | Rose/fish HyperNPA: 9.63/11.65 dB; released oracles: 27.93/27.45 dB | Same target, seed, 4,096 particles, and 1,024 steps |
+| Shared-base plus deltas has substantial capacity | 16-ID direct table reaches 23.58 dB aggregate and 19.30 dB p10 | Training identities only; this is memorization, not HyperNPA generalization |
+| Current trainer has a high-throughput path | 17.66M measured and 18.36M median particle-steps/s | v3, CUDA, batch 64, 1,024 particles, 96 full-BPTT steps; quality disabled |
 
-## Exposure-Matched Campaign
+The paper intentionally does **not** claim:
 
-The maintained exposure campaign is bundled under
-`configs/sandbox/hyper_e2e/omnisvg_*_upstream_exposure_*.toml` and
-`omnisvg_1k_exposure_stage_*.toml`. It proceeds only when the prior gate passes:
+- oracle-quality unseen-image generation;
+- Burn-from-scratch oracle parity;
+- rectified-flow adapter quality;
+- a 1k result evaluated over all 100 holdouts or multiple rollout seeds;
+- that the direct per-ID adapter table is an oracle or a generalized model.
 
-1. A 16-identity `sample-id-table` control jointly trains the shared base and
-   canonical full-rank dense deltas. The maintained 512-, 1,024-, and
-   2,048-particle continuations together execute 104.17% of the upstream
-   per-identity particle-update exposure. Each identity owns 512 persistent
-   pool states, replaces one seed per 128 trajectories, and uses
-   live-particle-centered brush damage. A bounded 4,096-particle cycle then
-   tests whether matching particle density matters beyond total exposure. Its
-   WGPU pool uses 256 states per identity so the monolithic recurrent-state
-   buffer remains below WGPU's 2 GiB single-buffer limit.
-2. The table-trained base is frozen while the deterministic full-token DINO
-   module decoder is trained on the same 16 identities. This must prove that
-   conditional adapter generation, rather than the shared base alone, can
-   recover the table control.
-3. Only then does the 900-train/100-holdout DINO campaign run its 256, 512, and
-   1,024-particle stages. A stochastic adapter flow remains deferred until the
-   deterministic generator passes.
+## Primary Reports
 
-Trajectory count and particle-update exposure are reported separately. The
-16-target control first runs 240,000 trajectories at 512 particles (12.5% of
-upstream particle exposure), another 240,000 at 1,024 particles (25%), and
-320,000 at 2,048 particles (66.67%). The three planned 1k stages total 40,000
-trajectories per identity but only about 2.29% of upstream per-identity
-particle exposure; their justification is amortized learning across 900
-identities, not compute parity with 900 separate oracles.
+The numerical tables are derived from these immutable local reports:
 
-The completed table controls show that particle density is not
-interchangeable with total particle-update exposure. All rows use the same 16
-targets, canonical full-rank adapters, and p4096 validation at 96, 256, 512,
-and 1,024 steps:
+```text
+artifacts/hyper2d_omnisvg_1k_dino_canonical_quality_refine/report.json
+artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/report.json
+artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json
+artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json
+```
 
-| training continuation | aggregate at 1,024 | worst selected-horizon p10 | shuffle gap | adapter gain | median training throughput |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 512p, 240k trajectories/identity | 13.06 dB | 10.82 dB | 4.85 dB | 4.35 dB | 13.26M particle-steps/s |
-| +1,024p, 240k trajectories/identity | 15.87 dB | 13.24 dB | 7.79 dB | 7.18 dB | 10.21M particle-steps/s |
-| +2,048p, 320k trajectories/identity | **20.71 dB** | **17.93 dB** | **12.60 dB** | **12.09 dB** | 6.90M particle-steps/s |
-| +4,096p density-matched cycle | 20.71 dB | 17.93 dB | 12.60 dB | 12.09 dB | 4.11M particle-steps/s |
-| frozen base, table-only LR refinement | **23.58 dB** | **18.98 dB** | active | active | bounded probe |
+Each renderer directory in `docs/hyper_npa_figures/latest` also contains its
+headless export report. Those reports record model paths, image conditions,
+particle count, seed, update probability, requested capture steps, actual
+capture steps, dimensions, and nonblank-pixel bounds.
 
-The p2048 run completed the full compute-matched exposure, but its selected
-checkpoint is step 8,500. The p4096 run selected its initial checkpoint after
-later updates regressed. Freezing the trunk and refining only table rows raised
-aggregate quality, proving optimizer interference and trunk drift, but the
-18.98 dB tail remained far from the 26 dB gate. These controls establish an
-adapter-substrate ceiling and expose optimization faults; they do not form the
-generalized model or a basis used at inference.
+## Rollout Contract
 
-The final gate evaluates all 100 identity-disjoint holdouts with 4,096
-particles at 96, 256, 512, and 1,024 steps. Both aggregate and p10 composited
-PSNR must be at least 26 dB at every selected horizon of 256 steps or longer,
-and generated adapters must outperform both the shared base and shuffled
-conditions. Frequent validation uses one representative horizon to avoid
-rerunning the same rollout prefixes.
+Every paper screenshot is an unmodified 512 x 512 capture from the same
+Bevy/WGPU simulation and `bevy_gaussian_splatting` renderer used by the viewer:
 
-## Training Throughput
+```text
+particles:          4,096
+seed:               42
+seed mode:          uniform circle
+update probability: 0.5
+rollout steps:      1,024
+captures:           0, 32, 96, 256, 512, 1,024
+render scale:       0.5
+render opacity:     2.0
+```
 
-The synchronized July 2026 CUDA profile uses an RTX PRO 6000 Blackwell,
-release mode, 64 independent image conditions, 1,024 particles, and full BPTT.
-Aggregate throughput divides exact optimizer particle-step exposure by time
-between synchronized report boundaries, including kernel warmup but excluding
-source staging, validation, and checkpoint writes.
+The paper includes eight identity-disjoint OmniSVG conditions, two paired
+catalog holdouts with released target-specific NPA checkpoints, and the
+released lizard checkpoint as a renderer sanity check. Numerical PSNR comes
+from the differentiable Target2D renderer, not screenshot pixels. The 1k
+metrics use 2,048 particles; the screenshots deliberately use 4,096 particles
+and are labeled accordingly.
 
-| configuration | aggregate particle-steps/s | median steady interval | peak VRAM |
-| --- | ---: | ---: | ---: |
-| B64, random 32-96 steps, release/warm cache | 9.28M | 11.10M | 15.0 GiB |
-| B64, fixed 96 steps, recomputed perception VJP | 14.24M | 14.91M | 15.0 GiB |
-| B64, fixed 96 steps, retained perception VJP | **17.66M** | **18.36M** | 16.8 GiB |
-| B128, fixed 96 steps, retained perception VJP | 17.30M | 17.83M | 29.6 GiB |
+An equivalent HyperNPA export has this shape:
 
-Fixed 96-step rollouts amortize condition generation, image loss, optimizer,
-and pool persistence over more useful dynamics work. Retaining the forward
-raw SPH state gradient and correction inverse removes a duplicate hash-grid
-neighbor traversal in backward: Nsight measured the old precompute kernel at
-0.835 ms per invocation and the replacement elementwise VJP at 0.018 ms.
-The 1024-particle isolated forward+VJP benchmark improved from 0.621 ms for
-grid/density recomputation to 0.537 ms with retained state over 50 synchronized
-repeats. B128 raises power and memory without increasing throughput, so B64 is
-the validated knee. `cubecl.toml` persists CubeCL compilation and autotune
-caches under ignored `target/`; production training should use the release
-CUDA binary and
-`configs/verified/2d/hyper_e2e/throughput_omnisvg_64_b64_p1024_s96_cuda.toml`.
+```bash
+target/debug/bevy_automata export \
+  --output-dir docs/hyper_npa_figures/latest/heldout/<sample> \
+  --output-prefix <sample> \
+  --particles 4096 \
+  --steps 1024 \
+  --capture-steps 0,32,96,256,512,1024 \
+  --steps-per-frame 4 \
+  --seed 42 \
+  --update-prob 0.5 \
+  --hyper-image data/omnisvg/mmsvg-illustration/train/<sample>.png \
+  --hyper-base artifacts/hyper2d_omnisvg_1k_dino_canonical_quality_refine/shared_base.bpk \
+  --hyper-model artifacts/hyper2d_omnisvg_1k_dino_canonical_quality_refine/hyper_2d.bpk \
+  --dino-model models/dino/dino_vits.mpk
+```
 
-## Quality Contract
+## Build and Validate
 
-Quality reports include composited, raw-render, foreground, and density PSNR;
-density soft IoU; generated-over-base and correct-over-shuffled gaps; adapter
-norm and pairwise diagnostics; and optional nearest-training-oracle controls.
-High-quality catalog validation uses 4,096 particles, 1,024 steps, update
-probability 0.5, seed 42, and official transparent targets.
+Build the manuscript with a TeX distribution containing `acmart`, TikZ, and
+PGFPlots:
 
-## Current Boundary
+```bash
+cd docs
+latexmk -pdf -interaction=nonstopmode -halt-on-error hyper_npa.tex
+```
 
-Proven:
+A publication check should confirm:
 
-- GPU DINO token extraction, including alpha and optional patch RGB;
-- per-sample batched LoRA application;
-- teacher-free identity splits and leakage rejection;
-- condition-sensitive adapters and spatial control;
-- bounded WGPU training with device Target2D/perception adjoints.
+```bash
+pdfinfo hyper_npa.pdf
+pdftotext hyper_npa.pdf - | rg \
+  'HyperNPA|Strict Released-Oracle Comparison|References'
+rg 'undefined|LaTeX Error|Overfull \\hbox|Overfull \\vbox' hyper_npa.log
+```
 
-Not proven:
+The checked source is self-contained for LaTeX compilation when
+`hyper_npa.tex`, `hyper_npa.bib`, and `hyper_npa_figures/latest` are bundled
+together. Model checkpoints and the OmniSVG cache are runtime artifacts and
+are not part of the arXiv source archive.
 
-- greater than 26 dB unseen-image HyperNPA quality;
-- a broadly useful shared NPA trunk over OmniSVG;
-- parity between direct per-sample adapters and quality-scale NPA oracles;
-- stochastic rectified-flow adapter generation.
+## Interpretation
 
-The next gate is the v3 full-token, structured multi-head decoder trained
-directly through rollout loss with a frozen, independently validated trunk.
-It must first pass 16- and 64-image controls with a substantial correct-versus-
-shuffled condition gap and improve unseen identities, then run the 900/100
-identity-disjoint 1k split. Table controls remain diagnostic ceilings only; no
-table row or sample identifier participates in the generalized inference
-path. A true rectified-flow adapter generator remains a later option after the
-deterministic conditioned path demonstrates generalization. Without adapter
-endpoint/velocity supervision, calling the current end-to-end decoder
-"rectified flow" would be inaccurate.
+The result is a systems-and-method baseline with a useful negative finding.
+Conditioning, per-sample controller materialization, long recurrent rollout,
+GPU training, and renderer export all work. The learned attractors are stable
+but usually coarse, generated controller deltas remain highly similar, and
+the direct-table tail is itself below the 26 dB target. The evidence therefore
+places the immediate research priority on a parity-validated recurrent
+substrate and stronger conditional control, not on relabeling the current
+deterministic decoder as a successful generalized flow model.

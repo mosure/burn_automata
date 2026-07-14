@@ -1,0 +1,130 @@
+# Bounded teacher-free proof that image loss reaches a DINO-conditioned dense
+# NPA row flow while the shared NPA trunk is trainable.
+preset = "growing-2d"
+
+[source]
+target_image_dirs = [".cache/selforg_npa/targets/growing"]
+image_extensions = ["png"]
+source_limit = 4
+
+[split]
+holdout_stride = 2
+holdout_offset = 1
+
+[output]
+output_dir = "artifacts/hyper2d_verified_row_flow_e2e_smoke"
+checkpoint_interval_steps = 1
+checkpoint_interval_seconds = 300
+auto_resume = false
+
+[condition]
+encoder = "dino-vits-full-tokens"
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 224
+dino_patch_size = 14
+dino_batch_size = 2
+online = true
+token_attention_heads = 4
+rgb_channels = true
+alpha_channel = true
+
+[model]
+shared_base = "models/catalog/growing/lizard.bpk"
+shared_base_trainable = true
+shared_base_train_start_step = 0
+hidden_dims = 128
+output_activation = "identity"
+
+[training]
+backend = "gpu"
+objective = "conditional-row-flow-e2e"
+steps = 1
+report_interval = 1
+example_batch_size = 2
+credit_assignment = "full-bptt"
+task_loss_weight = 1.0
+flow_matching_weight = 0.0
+flow_self_rectification_weight = 0.05
+max_full_bptt_particle_steps = 1024
+use_particle_pool = false
+rollouts_per_example = 2
+target2d_loss_backend = "tiled-adjoint"
+perception_backend = "auto"
+max_dense_train_particles = 32
+system_memory_budget_gb = 12.0
+gpu_memory_budget_gb = 8.0
+seed = 42
+
+[gpu]
+backend = "burn-cuda"
+max_dense_chunk_floats = 262144
+max_splat_chunk_floats = 262144
+condition_device_cache_max_bytes = 536870912
+target_device_cache_max_bytes = 268435456
+
+[adapter]
+rank = 66
+alpha = 66.0
+generator = "conditional-row-flow"
+parameterization = "dense-npa-row-residual"
+attention_normalization = "softmax"
+flow_hidden = 64
+flow_layers = 2
+flow_ffn_dims = 128
+flow_sample_steps = 2
+flow_source_seed = 42
+flow_source_scale = 1.0e-3
+
+[rollout]
+particles = 32
+step_min = 2
+steps = 2
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "uniform-circle"
+
+[target]
+points = 128
+threshold = 0.05
+loss_image_size = 32
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+base_learning_rate = 1.0e-5
+generator_learning_rate = 1.0e-4
+base_weight_decay = 0.0
+generator_weight_decay = 0.01
+base_grad_clip_norm = 1.0
+generator_grad_clip_norm = 1.0
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1.0e-8
+base_per_parameter_grad_normalization = false
+generator_per_parameter_grad_normalization = false
+lr_schedule = "constant"
+min_lr_scale = 1.0
+
+[validation]
+initial_examples = 0
+examples = 2
+interval = 1
+particles = 32
+steps = 2
+horizons = [2]
+selection_horizon_min_steps = 2
+update_prob = 0.5
+seed = 42
+psnr_threshold_db = 26.0
+
+[gates]
+max_quality_validation_evaluations = 2
+max_quality_validation_elapsed_fraction = 1.0
+require_validation_interval_at_least_report_interval = true
+fail_on_violation = false

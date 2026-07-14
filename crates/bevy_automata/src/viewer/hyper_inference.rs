@@ -354,7 +354,30 @@ fn generate_model_for_source(
     let embed_dims = hyper.embed_dims()?;
     let token_count = condition_tokens.len() / embed_dims;
     let spec = hyper.adapter_spec(&base_model.config)?;
-    let conditioned = generate_e2e_conditioned_npa_2d(&base_model, &hyper, &condition_tokens)?;
+    let conditioned = if hyper.is_conditional_row_flow() {
+        #[cfg(feature = "hyper_dino_cuda")]
+        {
+            burn_automata::generate_e2e_conditioned_npa_2d_cuda(
+                &base_model,
+                &hyper,
+                &condition_tokens,
+            )?
+        }
+        #[cfg(all(not(feature = "hyper_dino_cuda"), feature = "hyper_dino_wgpu"))]
+        {
+            burn_automata::generate_e2e_conditioned_npa_2d_wgpu(
+                &base_model,
+                &hyper,
+                &condition_tokens,
+            )?
+        }
+        #[cfg(not(any(feature = "hyper_dino_cuda", feature = "hyper_dino_wgpu")))]
+        {
+            generate_e2e_conditioned_npa_2d(&base_model, &hyper, &condition_tokens)?
+        }
+    } else {
+        generate_e2e_conditioned_npa_2d(&base_model, &hyper, &condition_tokens)?
+    };
     Ok(GeneratedHyperNpaModel {
         model: conditioned.model,
         hashgrid,

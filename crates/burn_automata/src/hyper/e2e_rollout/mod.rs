@@ -1,30 +1,35 @@
+#[cfg(any(feature = "dino", test))]
+use crate::TargetImage2d;
+#[cfg(feature = "dino")]
+use crate::TargetImage2dExtractConfig;
+use crate::hyper::NpaParameterRowLayout2d;
 use crate::hyper::condition::DINO_VITS_EMBED_DIMS;
 use crate::hyper::e2e::{
     DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE, E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
-    E2E_HYPER_ADAPTER_FACTORIZED, E2E_HYPER_ARCH_MODULE_TOKEN_DECODER,
+    E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL, E2E_HYPER_ADAPTER_FACTORIZED,
+    E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW, E2E_HYPER_ARCH_MODULE_TOKEN_DECODER,
     E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2, E2E_HYPER_ARCH_SAMPLE_ID_TABLE,
     E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW, E2E_HYPER_ATTENTION_SOFTMAX, E2E_HYPER_ATTENTION_TANH_EXP,
     E2eHyperGeneratorKind, PerceptionRolloutBackend, Target2dLossBackend, save_e2e_hyper_npa_2d,
 };
 use crate::hyper::e2e_training::dense::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 use crate::hyper::e2e_training::{
-    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig,
-    E2eAdapterTeacherObjective, E2eCreditAssignment, E2eLrSchedule, E2eTbpttLossMode,
-    MAX_VALIDATION_HORIZONS,
+    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutQualityEntry,
+    BurnE2eRolloutTrainConfig, E2eAdapterTeacherObjective, E2eCreditAssignment, E2eLrSchedule,
+    E2eTbpttLossMode, MAX_VALIDATION_HORIZONS,
 };
 use crate::{
     AdamWConfig, AutomataPreset, BpkModelManifest, NpaConfig, NpaLowRankAdapter, NpaModel,
     NpaWeights, ParticleSeed, Target2dLossConfig,
 };
 #[cfg(feature = "dino")]
-use crate::{TargetImage2d, TargetImage2dExtractConfig};
-#[cfg(feature = "dino")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "dino")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 
@@ -249,6 +254,8 @@ struct RolloutTrainingConfig {
     adapter_teacher_objective: Option<String>,
     adapter_teacher_probe_rollout_steps: Option<usize>,
     task_loss_weight: Option<f32>,
+    flow_matching_weight: Option<f32>,
+    flow_self_rectification_weight: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -268,7 +275,10 @@ struct RolloutAdapterConfig {
     alpha: Option<f32>,
     generator: Option<String>,
     flow_hidden: Option<usize>,
+    flow_layers: Option<usize>,
+    flow_ffn_dims: Option<usize>,
     flow_sample_steps: Option<usize>,
+    flow_source_seed: Option<u64>,
     flow_source_scale: Option<f32>,
     init_scale: Option<f32>,
     condition_init_scale: Option<f32>,
@@ -330,6 +340,7 @@ struct RolloutOptimizerConfig {
     base_per_parameter_grad_normalization: Option<bool>,
     generator_per_parameter_grad_normalization: Option<bool>,
     lr_schedule: Option<String>,
+    warmup_steps: Option<usize>,
     min_lr_scale: Option<f32>,
 }
 
@@ -361,6 +372,10 @@ struct RolloutGateConfig {
     max_quality_validation_evaluations: Option<usize>,
     max_quality_validation_elapsed_fraction: Option<f64>,
     min_final_mean_render_rgb_psnr_db: Option<f32>,
+    min_final_p10_composited_rgb_psnr_db: Option<f32>,
+    min_final_condition_shuffle_composited_psnr_gap_db: Option<f32>,
+    min_final_generated_adapter_composited_psnr_gain_db: Option<f32>,
+    max_final_p90_gap_to_matched_oracle_db: Option<f32>,
     require_validation_interval_at_least_report_interval: Option<bool>,
     fail_on_violation: Option<bool>,
 }
@@ -529,6 +544,8 @@ struct E2eRolloutTrainingReport {
     adapter_teacher_objective: String,
     adapter_teacher_probe_rollout_steps: usize,
     task_loss_weight: f32,
+    flow_matching_weight: f32,
+    flow_self_rectification_weight: f32,
     trains_shared_base_from_step_zero: bool,
     trains_hypernet_from_step_zero: bool,
 }
@@ -539,7 +556,10 @@ struct E2eRolloutAdapterReport {
     alpha: f32,
     generator: String,
     flow_hidden: usize,
+    flow_layers: usize,
+    flow_ffn_dims: usize,
     flow_sample_steps: usize,
+    flow_source_seed: u64,
     flow_source_scale: f32,
     init_scale: f32,
     condition_init_scale: f32,
@@ -601,6 +621,7 @@ struct E2eRolloutOptimizerReport {
     base_per_parameter_grad_normalization: bool,
     generator_per_parameter_grad_normalization: bool,
     lr_schedule: String,
+    warmup_steps: usize,
     min_lr_scale: f32,
 }
 
@@ -632,6 +653,10 @@ struct E2eRolloutGateReport {
     max_quality_validation_evaluations: Option<usize>,
     max_quality_validation_elapsed_fraction: Option<f64>,
     min_final_mean_render_rgb_psnr_db: Option<f32>,
+    min_final_p10_composited_rgb_psnr_db: Option<f32>,
+    min_final_condition_shuffle_composited_psnr_gap_db: Option<f32>,
+    min_final_generated_adapter_composited_psnr_gain_db: Option<f32>,
+    max_final_p90_gap_to_matched_oracle_db: Option<f32>,
     require_validation_interval_at_least_report_interval: bool,
     fail_on_violation: bool,
 }
@@ -867,10 +892,14 @@ fn build_e2e_rollout_report(
         .unwrap_or_else(|| "target2d-rollout-image-loss".to_string());
     if !matches!(
         objective.as_str(),
-        "target2d-rollout-image-loss" | "rollout-image-loss" | "e2e-rollout-loss"
+        "target2d-rollout-image-loss"
+            | "rollout-image-loss"
+            | "e2e-rollout-loss"
+            | "conditional-row-flow-e2e"
+            | "conditional-row-flow-matching"
     ) {
         return Err(std::io::Error::other(format!(
-            "training.objective {objective:?} is not valid for train-hyper2d-e2e-rollout; use target2d-rollout-image-loss"
+            "training.objective {objective:?} is not valid for train-hyper2d-e2e-rollout"
         ))
         .into());
     }
@@ -1047,13 +1076,36 @@ fn build_e2e_rollout_report(
     let adapter_teacher_objective =
         parse_e2e_adapter_teacher_objective(config.training.adapter_teacher_objective.as_deref())?;
     let task_loss_weight = config.training.task_loss_weight.unwrap_or(1.0);
+    let flow_matching_weight = config.training.flow_matching_weight.unwrap_or(0.0);
+    let flow_self_rectification_weight = config
+        .training
+        .flow_self_rectification_weight
+        .unwrap_or(0.0);
+    if objective == "conditional-row-flow-matching"
+        && (task_loss_weight != 0.0 || flow_matching_weight <= 0.0)
+    {
+        return Err(std::io::Error::other(
+            "conditional-row-flow-matching requires task_loss_weight=0 and a positive flow_matching_weight",
+        )
+        .into());
+    }
+    if objective == "conditional-row-flow-e2e" && task_loss_weight <= 0.0 {
+        return Err(std::io::Error::other(
+            "conditional-row-flow-e2e requires a positive task_loss_weight",
+        )
+        .into());
+    }
     if !adapter_teacher_weight.is_finite()
         || adapter_teacher_weight < 0.0
         || !task_loss_weight.is_finite()
         || task_loss_weight < 0.0
+        || !flow_matching_weight.is_finite()
+        || flow_matching_weight < 0.0
+        || !flow_self_rectification_weight.is_finite()
+        || flow_self_rectification_weight < 0.0
     {
         return Err(std::io::Error::other(
-            "training task/adapter-teacher loss weights must be finite and non-negative",
+            "training task/adapter-teacher/flow loss weights must be finite and non-negative",
         )
         .into());
     }
@@ -1066,6 +1118,24 @@ fn build_e2e_rollout_report(
     if adapter_teacher_weight > 0.0 && credit_assignment != E2eCreditAssignment::FullBptt {
         return Err(std::io::Error::other(
             "adapter teacher supervision currently requires credit_assignment=full-bptt",
+        )
+        .into());
+    }
+    if flow_matching_weight > 0.0 && credit_assignment != E2eCreditAssignment::FullBptt {
+        return Err(std::io::Error::other(
+            "flow matching currently requires credit_assignment=full-bptt",
+        )
+        .into());
+    }
+    if flow_self_rectification_weight > 0.0 && credit_assignment != E2eCreditAssignment::FullBptt {
+        return Err(std::io::Error::other(
+            "flow self-rectification currently requires credit_assignment=full-bptt",
+        )
+        .into());
+    }
+    if flow_matching_weight > 0.0 && config.model.shared_base_trainable.unwrap_or(true) {
+        return Err(std::io::Error::other(
+            "flow endpoint targets are defined relative to a fixed shared base; set model.shared_base_trainable=false while flow_matching_weight is non-zero",
         )
         .into());
     }
@@ -1218,6 +1288,7 @@ fn build_e2e_rollout_report(
     }
     let lr_schedule = parse_e2e_lr_schedule(config.optimizer.lr_schedule.as_deref())?;
     let lr_schedule_label = lr_schedule.as_str().to_string();
+    let lr_warmup_steps = config.optimizer.warmup_steps.unwrap_or(0);
     let min_lr_scale = config.optimizer.min_lr_scale.unwrap_or(1.0).clamp(0.0, 1.0);
     let learning_rate = config.optimizer.learning_rate.unwrap_or(1.0e-4);
     let base_learning_rate = config.optimizer.base_learning_rate.unwrap_or(learning_rate);
@@ -1409,6 +1480,14 @@ fn build_e2e_rollout_report(
             .saturating_add(dino_batch_input_bytes_f32)
     };
     let adapter_generator_kind = E2eHyperGeneratorKind::parse(config.adapter.generator.as_deref())?;
+    if objective == "conditional-row-flow-e2e"
+        && adapter_generator_kind != E2eHyperGeneratorKind::ConditionalRowFlow
+    {
+        return Err(std::io::Error::other(
+            "conditional-row-flow-e2e requires adapter.generator=conditional-row-flow",
+        )
+        .into());
+    }
     let adapter_generator = adapter_generator_kind.artifact_architecture().to_string();
     match adapter_generator_kind {
         E2eHyperGeneratorKind::SampleIdTable => warnings.push(
@@ -1435,16 +1514,58 @@ fn build_e2e_rollout_report(
         }
     };
     let adapter_parameterization = match config.adapter.parameterization.as_deref() {
+        None if adapter_generator_kind == E2eHyperGeneratorKind::ConditionalRowFlow => {
+            E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
+        }
         None | Some(E2E_HYPER_ADAPTER_FACTORIZED) => E2E_HYPER_ADAPTER_FACTORIZED,
+        Some(E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL)
+        | Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK)
+            if adapter_generator_kind == E2eHyperGeneratorKind::ConditionalRowFlow =>
+        {
+            E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
+        }
         Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK) => E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
         Some(other) => {
             return Err(std::io::Error::other(format!(
-                "unsupported adapter.parameterization {other:?}; expected factorized or canonical-full-rank"
+                "unsupported adapter.parameterization {other:?}; expected factorized, canonical-full-rank, or dense-npa-row-residual"
             ))
             .into());
         }
     };
-    if adapter_parameterization == E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK {
+    if adapter_generator_kind == E2eHyperGeneratorKind::ConditionalRowFlow
+        && adapter_parameterization != E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
+    {
+        return Err(std::io::Error::other(
+            "conditional-row-flow requires adapter.parameterization = dense-npa-row-residual",
+        )
+        .into());
+    }
+    if flow_matching_weight > 0.0
+        && adapter_generator_kind != E2eHyperGeneratorKind::ConditionalRowFlow
+    {
+        return Err(std::io::Error::other(
+            "training.flow_matching_weight is only supported by conditional-row-flow",
+        )
+        .into());
+    }
+    if flow_self_rectification_weight > 0.0
+        && adapter_generator_kind != E2eHyperGeneratorKind::ConditionalRowFlow
+    {
+        return Err(std::io::Error::other(
+            "training.flow_self_rectification_weight is only supported by conditional-row-flow",
+        )
+        .into());
+    }
+    if flow_matching_weight > 0.0 && config.model.oracle_model_dir.is_none() {
+        return Err(std::io::Error::other(
+            "training.flow_matching_weight requires model.oracle_model_dir endpoint targets",
+        )
+        .into());
+    }
+    if matches!(
+        adapter_parameterization,
+        E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK | E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
+    ) {
         let (adapter_npa_config, _) = NpaConfig::for_preset(preset);
         crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
             &adapter_npa_config,
@@ -1461,14 +1582,51 @@ fn build_e2e_rollout_report(
         .adapter
         .output_init_scale
         .unwrap_or(adapter_init_scale);
-    let token_attention_heads = config.condition.token_attention_heads.unwrap_or(4).max(1);
-    let generator_hidden_dims = config.adapter.flow_hidden.unwrap_or(512).max(1);
-    if adapter_generator_kind == E2eHyperGeneratorKind::ModuleTokenDecoder
-        && !generator_hidden_dims.is_multiple_of(token_attention_heads)
+    let row_flow_selected = adapter_generator_kind == E2eHyperGeneratorKind::ConditionalRowFlow;
+    let token_attention_heads = config
+        .condition
+        .token_attention_heads
+        .unwrap_or(if row_flow_selected { 12 } else { 4 })
+        .max(1);
+    let generator_hidden_dims = config
+        .adapter
+        .flow_hidden
+        .unwrap_or(if row_flow_selected { 768 } else { 512 })
+        .max(1);
+    let generator_layers = config
+        .adapter
+        .flow_layers
+        .unwrap_or(if row_flow_selected { 12 } else { 1 })
+        .max(1);
+    let generator_ffn_dims = config
+        .adapter
+        .flow_ffn_dims
+        .unwrap_or(if row_flow_selected {
+            4 * generator_hidden_dims
+        } else {
+            generator_hidden_dims
+        })
+        .max(generator_hidden_dims);
+    let generator_sample_steps = config
+        .adapter
+        .flow_sample_steps
+        .unwrap_or(if row_flow_selected { 8 } else { 16 })
+        .max(1);
+    let generator_source_seed = config.adapter.flow_source_seed.unwrap_or(42);
+    if matches!(
+        adapter_generator_kind,
+        E2eHyperGeneratorKind::ModuleTokenDecoder | E2eHyperGeneratorKind::ConditionalRowFlow
+    ) && !generator_hidden_dims.is_multiple_of(token_attention_heads)
     {
         return Err(std::io::Error::other(format!(
-            "adapter.flow_hidden={generator_hidden_dims} must be divisible by condition.token_attention_heads={token_attention_heads} for module-token-decoder"
+            "adapter.flow_hidden={generator_hidden_dims} must be divisible by condition.token_attention_heads={token_attention_heads} for {adapter_generator}"
         ))
+        .into());
+    }
+    if row_flow_selected && config.adapter.spatial_condition_control.unwrap_or(false) {
+        return Err(std::io::Error::other(
+            "conditional-row-flow emits a static controller and does not support per-step spatial condition control",
+        )
         .into());
     }
     if !adapter_condition_init_scale.is_finite()
@@ -1517,7 +1675,8 @@ fn build_e2e_rollout_report(
         "sample-id-onehot"
     } else if matches!(
         adapter_generator.as_str(),
-        E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
+        E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW
+            | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
             | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2
             | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER
     ) {
@@ -1538,7 +1697,11 @@ fn build_e2e_rollout_report(
         } else {
             "blocked"
         },
-        implementation_status: "burn_static_adapter_full_bptt_alpha_aware_v4_multihead",
+        implementation_status: if row_flow_selected {
+            "burn_conditional_row_rectified_flow_v5"
+        } else {
+            "burn_static_adapter_full_bptt_alpha_aware_v4_multihead"
+        },
         preset,
         source: E2eRolloutSourceReport {
             requested_source_limit: source_limit,
@@ -1690,6 +1853,8 @@ fn build_e2e_rollout_report(
                 .adapter_teacher_probe_rollout_steps
                 .unwrap_or(0),
             task_loss_weight,
+            flow_matching_weight,
+            flow_self_rectification_weight,
             trains_shared_base_from_step_zero: config.model.shared_base_trainable.unwrap_or(true)
                 && shared_base_train_start_step == 0,
             trains_hypernet_from_step_zero: true,
@@ -1699,7 +1864,10 @@ fn build_e2e_rollout_report(
             alpha: adapter_alpha,
             generator: adapter_generator,
             flow_hidden: generator_hidden_dims,
-            flow_sample_steps: config.adapter.flow_sample_steps.unwrap_or(16).max(1),
+            flow_layers: generator_layers,
+            flow_ffn_dims: generator_ffn_dims,
+            flow_sample_steps: generator_sample_steps,
+            flow_source_seed: generator_source_seed,
             flow_source_scale: config.adapter.flow_source_scale.unwrap_or(1.0),
             init_scale: adapter_init_scale,
             condition_init_scale: adapter_condition_init_scale,
@@ -1765,6 +1933,7 @@ fn build_e2e_rollout_report(
                 .generator_per_parameter_grad_normalization
                 .unwrap_or(false),
             lr_schedule: lr_schedule_label,
+            warmup_steps: lr_warmup_steps,
             min_lr_scale,
         },
         validation: E2eRolloutValidationReport {
@@ -1798,6 +1967,16 @@ fn build_e2e_rollout_report(
                 .gates
                 .max_quality_validation_elapsed_fraction,
             min_final_mean_render_rgb_psnr_db: config.gates.min_final_mean_render_rgb_psnr_db,
+            min_final_p10_composited_rgb_psnr_db: config.gates.min_final_p10_composited_rgb_psnr_db,
+            min_final_condition_shuffle_composited_psnr_gap_db: config
+                .gates
+                .min_final_condition_shuffle_composited_psnr_gap_db,
+            min_final_generated_adapter_composited_psnr_gain_db: config
+                .gates
+                .min_final_generated_adapter_composited_psnr_gain_db,
+            max_final_p90_gap_to_matched_oracle_db: config
+                .gates
+                .max_final_p90_gap_to_matched_oracle_db,
             require_validation_interval_at_least_report_interval: config
                 .gates
                 .require_validation_interval_at_least_report_interval
@@ -1966,18 +2145,26 @@ fn run_burn_e2e_rollout_training(
         base_optimizer: base_adamw_from_report(report),
         generator_optimizer: generator_adamw_from_report(report),
         lr_schedule: parse_e2e_lr_schedule(Some(&report.optimizer.lr_schedule))?,
+        lr_warmup_steps: report.optimizer.warmup_steps,
         min_lr_scale: report.optimizer.min_lr_scale,
         adapter_rank: report.adapter.rank,
         adapter_alpha: report.adapter.alpha,
         generator_kind: E2eHyperGeneratorKind::parse(Some(&report.adapter.generator))?,
         adapter_chunk_size: report.adapter.adapter_chunk_size,
         generator_hidden_dims: report.adapter.flow_hidden,
+        generator_layers: report.adapter.flow_layers,
+        generator_ffn_dims: report.adapter.flow_ffn_dims,
         token_attention_heads: report.condition.token_attention_heads,
         softmax_token_attention: report.adapter.attention_normalization
             == E2E_HYPER_ATTENTION_SOFTMAX,
-        canonical_full_rank_lora: report.adapter.parameterization
-            == E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
+        canonical_full_rank_lora: matches!(
+            report.adapter.parameterization.as_str(),
+            E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK | E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
+        ),
         generator_sample_steps: report.adapter.flow_sample_steps,
+        generator_source_seed: report.adapter.flow_source_seed,
+        flow_matching_weight: report.training.flow_matching_weight,
+        flow_self_rectification_weight: report.training.flow_self_rectification_weight,
         generator_output_scale: report.adapter.flow_source_scale,
         generator_init_scale: report.adapter.init_scale,
         generator_condition_init_scale: report.adapter.condition_init_scale,
@@ -2051,7 +2238,9 @@ fn run_burn_e2e_rollout_training(
     output.generator.condition_embed_dims = Some(report.condition.embed_dims);
     output.generator.condition_token_grid_width = Some(report.condition.patch_grid_width);
     output.generator.condition_token_grid_height = Some(report.condition.patch_grid_height);
-    output.generator.adapter_chunk_size = Some(report.adapter.adapter_chunk_size);
+    if !output.generator.is_conditional_row_flow() {
+        output.generator.adapter_chunk_size = Some(report.adapter.adapter_chunk_size);
+    }
     let burn_training_ms = train_started.elapsed().as_secs_f64() * 1000.0;
     if let Some(metrics) = output.metrics.as_object_mut() {
         metrics.insert(
@@ -2270,8 +2459,150 @@ fn check_condition_preload_memory_budget(
             ))
             .into());
         }
+        if report.training.steps > 0 {
+            let projection = projected_active_training_gpu_memory(report);
+            if projection.total_bytes > budget_bytes {
+                return Err(std::io::Error::other(format!(
+                    "projected active HyperNPA GPU peak is {:.2} GiB ({:.2} GiB rollout graph, {:.2} GiB row-flow graph, {:.2} GiB trainable state, {:.2} GiB persistent caches/pool, and {:.2} GiB runtime reserve), above gpu_memory_budget_gb={budget_gb:.2}; reduce example_batch_size*rollouts_per_example, row-flow condition batch/capacity, rollout horizon, or use detached TBPTT",
+                    bytes_to_gib(projection.total_bytes),
+                    bytes_to_gib(projection.rollout_graph_bytes),
+                    bytes_to_gib(projection.row_flow_graph_bytes),
+                    bytes_to_gib(projection.trainable_state_bytes),
+                    bytes_to_gib(projection.persistent_bytes),
+                    bytes_to_gib(projection.runtime_reserve_bytes),
+                ))
+                .into());
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct E2eGpuMemoryProjection {
+    rollout_graph_bytes: usize,
+    row_flow_graph_bytes: usize,
+    trainable_state_bytes: usize,
+    persistent_bytes: usize,
+    runtime_reserve_bytes: usize,
+    total_bytes: usize,
+}
+
+fn projected_active_training_gpu_memory(report: &E2eRolloutReport) -> E2eGpuMemoryProjection {
+    // Measured on the canonical growing-2D Burn/CUDA graph. This includes the
+    // retained perception VJP state and the ordinary Burn autodiff graph.
+    const ROLLOUT_BYTES_PER_PARTICLE_STEP: usize = 2_304;
+    const RUNTIME_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    const TRAINABLE_TENSOR_COPIES: usize = 5; // value, tracked value, grad, Adam m, Adam v
+
+    let rollout_batch = report
+        .training
+        .example_batch_size
+        .saturating_mul(report.training.rollouts_per_example);
+    let active_rollout_steps = if report.training.credit_assignment == "full-bptt" {
+        report.rollout.steps
+    } else {
+        report.training.tbptt_chunk_steps.min(report.rollout.steps)
+    };
+    let rollout_graph_bytes = rollout_batch
+        .saturating_mul(report.rollout.particles)
+        .saturating_mul(active_rollout_steps)
+        .saturating_mul(ROLLOUT_BYTES_PER_PARTICLE_STEP);
+
+    let row_flow_selected = matches!(
+        report.adapter.generator.as_str(),
+        E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
+    );
+    let (row_flow_graph_bytes, trainable_state_bytes) = if row_flow_selected {
+        let npa = NpaConfig {
+            hidden_dims: report.model.hidden_dims,
+            ..NpaConfig::growing_2d()
+        };
+        let layout = NpaParameterRowLayout2d::new(&npa);
+        let rows = layout.row_count();
+        let width = report.adapter.flow_hidden;
+        let heads = report.condition.token_attention_heads;
+        let condition_tokens = report.condition.token_count;
+        let ffn_dims = report.adapter.flow_ffn_dims;
+        let velocity_evaluations = report
+            .adapter
+            .flow_sample_steps
+            .saturating_mul(2)
+            .saturating_add(usize::from(report.training.flow_matching_weight > 0.0))
+            .saturating_add(usize::from(
+                report.training.flow_self_rectification_weight > 0.0,
+            ));
+        let attention_values = heads
+            .saturating_mul(rows)
+            .saturating_mul(rows.saturating_add(condition_tokens));
+        let block_values = rows.saturating_mul(
+            width
+                .saturating_mul(12)
+                .saturating_add(ffn_dims.saturating_mul(2)),
+        );
+        let graph_bytes = report
+            .training
+            .example_batch_size
+            .saturating_mul(report.adapter.flow_layers)
+            .saturating_mul(velocity_evaluations)
+            .saturating_mul(attention_values.saturating_add(block_values))
+            .saturating_mul(std::mem::size_of::<f32>());
+
+        let per_layer_parameters = width
+            .saturating_mul(width)
+            .saturating_mul(17)
+            .saturating_add(width.saturating_mul(ffn_dims).saturating_mul(2));
+        let fixed_parameters = report
+            .condition
+            .embed_dims
+            .saturating_mul(width)
+            .saturating_add(layout.max_row_dims().saturating_mul(width))
+            .saturating_add(rows.saturating_mul(width))
+            .saturating_add(width.saturating_mul(width).saturating_mul(2));
+        let parameter_bytes = report
+            .adapter
+            .flow_layers
+            .saturating_mul(per_layer_parameters)
+            .saturating_add(fixed_parameters)
+            .saturating_mul(std::mem::size_of::<f32>());
+        (
+            graph_bytes,
+            parameter_bytes.saturating_mul(TRAINABLE_TENSOR_COPIES),
+        )
+    } else {
+        (0, 0)
+    };
+
+    let particle_pool_bytes = if report.training.use_particle_pool {
+        report
+            .training
+            .pool_capacity
+            .saturating_mul(report.rollout.particles)
+            .saturating_mul(NpaConfig::growing_2d().state_dims.saturating_add(2))
+            .saturating_mul(std::mem::size_of::<f32>())
+    } else {
+        0
+    };
+    let condition_cache_bytes =
+        if report.condition.device_cache_plan == "complete-set-device-resident" {
+            report.condition.selected_feature_cache_bytes_f32
+        } else {
+            report.condition.dino_batch_input_bytes_f32
+        };
+    let persistent_bytes = particle_pool_bytes.saturating_add(condition_cache_bytes);
+    let total_bytes = rollout_graph_bytes
+        .saturating_add(row_flow_graph_bytes)
+        .saturating_add(trainable_state_bytes)
+        .saturating_add(persistent_bytes)
+        .saturating_add(RUNTIME_RESERVE_BYTES);
+    E2eGpuMemoryProjection {
+        rollout_graph_bytes,
+        row_flow_graph_bytes,
+        trainable_state_bytes,
+        persistent_bytes,
+        runtime_reserve_bytes: RUNTIME_RESERVE_BYTES,
+        total_bytes,
+    }
 }
 
 fn load_burn_e2e_rollout_examples(
@@ -2568,6 +2899,58 @@ fn evaluate_e2e_rollout_gates(
         ));
     }
 
+    if let Some(threshold) = report.gates.min_final_p10_composited_rgb_psnr_db {
+        let observed = training
+            .quality_validation
+            .as_ref()
+            .map(|quality| quality.p10_composited_rgb_psnr_db);
+        results.push(minimum_quality_gate(
+            "min_final_p10_composited_rgb_psnr_db",
+            observed,
+            threshold,
+            "final p10 composited RGB PSNR",
+            "dB",
+        ));
+    }
+
+    if let Some(threshold) = report
+        .gates
+        .min_final_condition_shuffle_composited_psnr_gap_db
+    {
+        let observed = training
+            .quality_validation
+            .as_ref()
+            .and_then(|quality| quality.condition_shuffle_composited_psnr_gap_db);
+        results.push(minimum_quality_gate(
+            "min_final_condition_shuffle_composited_psnr_gap_db",
+            observed,
+            threshold,
+            "final correct-vs-shuffled condition composited PSNR gap",
+            "dB",
+        ));
+    }
+
+    if let Some(threshold) = report
+        .gates
+        .min_final_generated_adapter_composited_psnr_gain_db
+    {
+        let observed = training
+            .quality_validation
+            .as_ref()
+            .map(|quality| quality.generated_adapter_composited_psnr_gain_db);
+        results.push(minimum_quality_gate(
+            "min_final_generated_adapter_composited_psnr_gain_db",
+            observed,
+            threshold,
+            "final generated-NPA gain over the shared trunk",
+            "dB",
+        ));
+    }
+
+    if let Some(threshold) = report.gates.max_final_p90_gap_to_matched_oracle_db {
+        results.push(matched_oracle_gate(report, training, threshold));
+    }
+
     if report
         .gates
         .require_validation_interval_at_least_report_interval
@@ -2586,6 +2969,203 @@ fn evaluate_e2e_rollout_gates(
     }
 
     results
+}
+
+fn minimum_quality_gate(
+    gate: &'static str,
+    observed: Option<f32>,
+    threshold: f32,
+    label: &str,
+    unit: &str,
+) -> E2eRolloutGateResultReport {
+    gate_result(
+        gate,
+        observed.is_some_and(|value| value >= threshold),
+        observed
+            .map(|value| serde_json::json!(value))
+            .unwrap_or(serde_json::Value::Null),
+        serde_json::json!(threshold),
+        observed.map_or_else(
+            || format!("{label} was not present in final quality validation"),
+            |value| format!("{label} {value:.3} {unit}; required >= {threshold:.3} {unit}"),
+        ),
+    )
+}
+
+fn matched_oracle_gate(
+    report: &E2eRolloutReport,
+    training: &BurnE2eRolloutOutput,
+    threshold: f32,
+) -> E2eRolloutGateResultReport {
+    let failed = |message: String, observed: serde_json::Value| {
+        gate_result(
+            "max_final_p90_gap_to_matched_oracle_db",
+            false,
+            observed,
+            serde_json::json!(threshold),
+            message,
+        )
+    };
+    let Some(current) = training.quality_validation.as_ref() else {
+        return failed(
+            "final quality validation was not present for matched-oracle comparison".to_string(),
+            serde_json::Value::Null,
+        );
+    };
+    let Some(path) = report.validation.oracle_report.as_deref() else {
+        return failed(
+            "validation.oracle_report is required by the matched-oracle gate".to_string(),
+            serde_json::Value::Null,
+        );
+    };
+    let value = match std::fs::read_to_string(path)
+        .map_err(|err| err.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|err| err.to_string())
+        }) {
+        Ok(value) => value,
+        Err(err) => {
+            return failed(
+                format!("failed to read matched oracle report {path}: {err}"),
+                serde_json::Value::Null,
+            );
+        }
+    };
+    let oracle = value
+        .pointer("/training_result/quality_validation")
+        .filter(|value| value.is_object())
+        .or_else(|| {
+            value
+                .pointer("/quality_validation")
+                .filter(|value| value.is_object())
+        });
+    let Some(oracle) = oracle else {
+        return failed(
+            format!("matched oracle report {path} has no quality validation object"),
+            serde_json::Value::Null,
+        );
+    };
+    let comparison = match compare_matched_oracle_quality(
+        current.particle_count,
+        current.rollout_steps,
+        current.seed,
+        current.update_prob,
+        &current.entries,
+        oracle,
+    ) {
+        Ok(comparison) => comparison,
+        Err(err) => {
+            return failed(
+                format!("matched oracle report {path} is invalid: {err}"),
+                serde_json::Value::Null,
+            );
+        }
+    };
+    let passed = comparison.contract_matched
+        && comparison.all_oracles_matched
+        && comparison
+            .p90_gap_db
+            .is_some_and(|value| value <= threshold);
+    gate_result(
+        "max_final_p90_gap_to_matched_oracle_db",
+        passed,
+        serde_json::json!({
+            "report": path,
+            "contract_matched": comparison.contract_matched,
+            "all_oracles_matched": comparison.all_oracles_matched,
+            "oracle_entries": comparison.oracle_entries,
+            "matched_entries": comparison.matched_entries,
+            "mean_gap_db": comparison.mean_gap_db,
+            "p90_gap_db": comparison.p90_gap_db,
+        }),
+        serde_json::json!(threshold),
+        if let Some(p90_gap) = comparison.p90_gap_db {
+            format!(
+                "matched-oracle p90 PSNR gap {p90_gap:.3} dB over {} samples; required <= {threshold:.3} dB with identical particles, horizon, seed, and update probability",
+                comparison.matched_entries,
+            )
+        } else {
+            "matched-oracle comparison produced no matched per-sample PSNR values".to_string()
+        },
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MatchedOracleComparison {
+    contract_matched: bool,
+    all_oracles_matched: bool,
+    oracle_entries: usize,
+    matched_entries: usize,
+    mean_gap_db: Option<f32>,
+    p90_gap_db: Option<f32>,
+}
+
+fn compare_matched_oracle_quality(
+    particle_count: usize,
+    rollout_steps: usize,
+    seed: u64,
+    update_prob: f32,
+    entries: &[BurnE2eRolloutQualityEntry],
+    oracle: &serde_json::Value,
+) -> Result<MatchedOracleComparison, &'static str> {
+    let oracle_particles = oracle
+        .get("particle_count")
+        .and_then(serde_json::Value::as_u64);
+    let oracle_steps = oracle
+        .get("rollout_steps")
+        .and_then(serde_json::Value::as_u64);
+    let oracle_seed = oracle.get("seed").and_then(serde_json::Value::as_u64);
+    let oracle_update_prob = oracle
+        .get("update_prob")
+        .and_then(serde_json::Value::as_f64);
+    let contract_matched = oracle_particles == Some(particle_count as u64)
+        && oracle_steps == Some(rollout_steps as u64)
+        && oracle_seed == Some(seed)
+        && oracle_update_prob.is_some_and(|value| (value - update_prob as f64).abs() <= 1.0e-6);
+    let oracle_entries = oracle
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("missing per-sample entries")?;
+    let mut gaps = Vec::with_capacity(oracle_entries.len());
+    let mut malformed_entries = 0usize;
+    for oracle_entry in oracle_entries {
+        let Some(slug) = oracle_entry.get("slug").and_then(serde_json::Value::as_str) else {
+            malformed_entries += 1;
+            continue;
+        };
+        let Some(oracle_psnr) = oracle_entry
+            .get("composited_rgb_psnr_db")
+            .and_then(serde_json::Value::as_f64)
+        else {
+            malformed_entries += 1;
+            continue;
+        };
+        if let Some(generated) = entries.iter().find(|entry| entry.slug == slug) {
+            gaps.push(oracle_psnr as f32 - generated.composited_rgb_psnr_db);
+        }
+    }
+    gaps.sort_by(f32::total_cmp);
+    Ok(MatchedOracleComparison {
+        contract_matched,
+        all_oracles_matched: !oracle_entries.is_empty()
+            && malformed_entries == 0
+            && gaps.len() == oracle_entries.len(),
+        oracle_entries: oracle_entries.len(),
+        matched_entries: gaps.len(),
+        mean_gap_db: (!gaps.is_empty()).then(|| gaps.iter().sum::<f32>() / gaps.len() as f32),
+        p90_gap_db: percentile(&gaps, 0.9),
+    })
+}
+
+fn percentile(sorted: &[f32], quantile: f32) -> Option<f32> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let position = quantile.clamp(0.0, 1.0) * sorted.len().saturating_sub(1) as f32;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    let blend = position - lower as f32;
+    Some(sorted[lower] * (1.0 - blend) + sorted[upper] * blend)
 }
 
 fn gate_result(
@@ -3200,6 +3780,7 @@ mod tests {
             spatial_condition_control_scale: None,
             spatial_condition_control_sigma: None,
             spatial_condition_state_control: None,
+            row_flow: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.0],
                 token_b: vec![0.0],
@@ -3212,6 +3793,7 @@ mod tests {
                 condition_control_w: Vec::new(),
                 condition_control_b: Vec::new(),
                 condition_control_state_w: Vec::new(),
+                row_flow: Vec::new(),
             },
         }
     }
@@ -3547,6 +4129,199 @@ mod tests {
     }
 
     #[test]
+    fn verified_conditional_row_flow_configs_preserve_endpoint_contract() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/verified/2d/hyper_e2e");
+        for (name, steps, batch, width, layers, heads, ffn_dims, sample_steps) in [
+            ("smoke_conditional_row_flow.toml", 1, 2, 64, 2, 4, 128, 2),
+            (
+                "production_contract_growing_catalog_row_flow_pretrain.toml",
+                100_000,
+                10,
+                768,
+                12,
+                12,
+                3_072,
+                8,
+            ),
+        ] {
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+            assert_eq!(config.training.steps, Some(steps));
+            assert_eq!(config.training.example_batch_size, Some(batch));
+            assert_eq!(config.training.task_loss_weight, Some(0.0));
+            assert_eq!(config.training.flow_matching_weight, Some(1.0));
+            assert_eq!(
+                config.training.objective.as_deref(),
+                Some("conditional-row-flow-matching")
+            );
+            assert_eq!(config.model.shared_base_trainable, Some(false));
+            assert_eq!(
+                config.model.oracle_model_dir.as_deref(),
+                Some(Path::new("models/catalog/growing"))
+            );
+            assert_eq!(
+                config.condition.encoder.as_deref(),
+                Some("dino-vits-full-tokens")
+            );
+            assert_eq!(config.condition.dino_image_size, Some(224));
+            assert_eq!(config.condition.dino_patch_size, Some(14));
+            assert_eq!(config.condition.rgb_channels, Some(true));
+            assert_eq!(config.condition.alpha_channel, Some(true));
+            assert_eq!(config.condition.token_attention_heads, Some(heads));
+            assert_eq!(
+                config.adapter.generator.as_deref(),
+                Some("conditional-row-flow")
+            );
+            assert_eq!(
+                config.adapter.parameterization.as_deref(),
+                Some("dense-npa-row-residual")
+            );
+            assert_eq!(config.adapter.flow_hidden, Some(width));
+            assert_eq!(config.adapter.flow_layers, Some(layers));
+            assert_eq!(config.adapter.flow_ffn_dims, Some(ffn_dims));
+            assert_eq!(config.adapter.flow_sample_steps, Some(sample_steps));
+        }
+    }
+
+    #[test]
+    fn verified_teacher_free_row_flow_configs_preserve_e2e_contract() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/verified/2d/hyper_e2e");
+        for (name, source_limit, trainable, final_particles) in [
+            ("smoke_conditional_row_flow_e2e.toml", 4, true, None),
+            (
+                "production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml",
+                1000,
+                true,
+                Some(4096),
+            ),
+        ] {
+            let text = std::fs::read_to_string(root.join(name)).unwrap();
+            let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+            assert_eq!(config.source.source_limit, Some(source_limit));
+            assert_eq!(
+                config.training.objective.as_deref(),
+                Some("conditional-row-flow-e2e")
+            );
+            assert_eq!(config.training.task_loss_weight, Some(1.0));
+            assert_eq!(config.training.flow_matching_weight, Some(0.0));
+            assert_eq!(config.training.flow_self_rectification_weight, Some(0.05));
+            assert_eq!(config.model.shared_base_trainable, Some(trainable));
+            assert!(config.model.oracle_model_dir.is_none());
+            assert_eq!(
+                config.condition.encoder.as_deref(),
+                Some("dino-vits-full-tokens")
+            );
+            assert_eq!(config.condition.dino_image_size, Some(224));
+            assert_eq!(config.condition.dino_patch_size, Some(14));
+            assert_eq!(
+                config.adapter.generator.as_deref(),
+                Some("conditional-row-flow")
+            );
+            assert_eq!(
+                config.adapter.parameterization.as_deref(),
+                Some("dense-npa-row-residual")
+            );
+            assert_eq!(config.adapter.flow_source_scale, Some(1.0e-3));
+            assert_eq!(config.validation.final_particles, final_particles);
+            if final_particles.is_some() {
+                assert_eq!(config.training.example_batch_size, Some(16));
+                assert_eq!(config.training.rollouts_per_example, Some(32));
+                assert_eq!(config.training.pool_slots_per_example, Some(32));
+                assert_eq!(config.training.pool_capacity, Some(32_000));
+                assert_eq!(
+                    config.training.credit_assignment.as_deref(),
+                    Some("full-bptt")
+                );
+                assert_eq!(
+                    config.training.max_full_bptt_particle_steps,
+                    Some(33_554_432)
+                );
+                assert_eq!(config.training.gpu_memory_budget_gb, Some(90.0));
+                assert_eq!(config.adapter.flow_sample_steps, Some(4));
+                assert_eq!(config.training.inject_seed_interval, Some(4));
+                assert_eq!(config.training.seed_replacements_per_interval, Some(2));
+                assert_eq!(config.training.seed_trajectory_interval, Some(16));
+                assert_eq!(config.model.shared_base_train_start_step, Some(5_000));
+                assert_eq!(config.rollout.particles, Some(512));
+                assert_eq!(config.rollout.step_min, Some(96));
+                assert_eq!(config.rollout.steps, Some(96));
+                assert_eq!(
+                    config.gates.min_final_p10_composited_rgb_psnr_db,
+                    Some(26.0)
+                );
+                assert_eq!(
+                    config
+                        .gates
+                        .min_final_condition_shuffle_composited_psnr_gap_db,
+                    Some(1.0)
+                );
+                assert_eq!(
+                    config
+                        .gates
+                        .min_final_generated_adapter_composited_psnr_gain_db,
+                    Some(1.0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matched_oracle_percentile_uses_interpolated_tail() {
+        assert_eq!(percentile(&[], 0.9), None);
+        assert_eq!(percentile(&[2.0], 0.9), Some(2.0));
+        assert_eq!(percentile(&[0.0, 1.0, 2.0], 0.5), Some(1.0));
+        assert!((percentile(&[0.0, 1.0, 2.0], 0.9).unwrap() - 1.8).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn matched_oracle_comparison_requires_identical_contract_and_sample_ids() {
+        let entry = |slug: &str, psnr: f32| BurnE2eRolloutQualityEntry {
+            slug: slug.to_string(),
+            total_loss: 0.0,
+            splat_loss: 0.0,
+            color_loss: 0.0,
+            density_loss: 0.0,
+            render_rgb_mse: 0.0,
+            render_rgb_psnr_db: psnr,
+            composited_rgb_mse: 0.0,
+            composited_rgb_psnr_db: psnr,
+            foreground_rgb_mse: 0.0,
+            foreground_rgb_psnr_db: psnr,
+            density_mse: 0.0,
+            density_psnr_db: 0.0,
+            density_soft_iou: 0.0,
+            passed: true,
+        };
+        let entries = [entry("a", 25.0), entry("b", 27.0)];
+        let oracle = serde_json::json!({
+            "particle_count": 4096,
+            "rollout_steps": 512,
+            "seed": 42,
+            "update_prob": 0.5,
+            "entries": [
+                {"slug": "a", "composited_rgb_psnr_db": 26.0},
+                {"slug": "b", "composited_rgb_psnr_db": 28.5},
+            ],
+        });
+        let comparison =
+            compare_matched_oracle_quality(4096, 512, 42, 0.5, &entries, &oracle).unwrap();
+        assert!(comparison.contract_matched);
+        assert!(comparison.all_oracles_matched);
+        assert_eq!(comparison.matched_entries, 2);
+        assert!((comparison.mean_gap_db.unwrap() - 1.25).abs() < 1.0e-6);
+        assert!((comparison.p90_gap_db.unwrap() - 1.45).abs() < 1.0e-6);
+
+        let mismatched =
+            compare_matched_oracle_quality(2048, 512, 42, 0.5, &entries[..1], &oracle).unwrap();
+        assert!(!mismatched.contract_matched);
+        assert!(!mismatched.all_oracles_matched);
+    }
+
+    #[test]
     fn verified_quality_scale_throughput_config_preserves_hot_path_contract() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -3666,6 +4441,9 @@ mod tests {
             [gpu]
             backend = "burn-wgpu"
 
+            [optimizer]
+            warmup_steps = 100
+
             [rollout]
             particles = 512
             step_min = 8
@@ -3689,6 +4467,7 @@ mod tests {
         assert_eq!(report.training.tbptt_intermediate_loss_weight, 0.25);
         assert_eq!(report.training.tbptt_final_loss_weight, 1.0);
         assert_eq!(report.training.credit_assignment, "detached-tbptt");
+        assert_eq!(report.optimizer.warmup_steps, 100);
         assert!(report.training.use_particle_pool);
         assert_eq!(report.training.pool_slots_per_example, 2);
         assert_eq!(report.training.planned_rollout_trajectories, 10);
@@ -3908,6 +4687,55 @@ mod tests {
             .to_string();
         assert!(err.contains("must stay below 2.00 GiB"));
         assert!(err.contains("sharded pool storage"));
+    }
+
+    #[test]
+    fn active_gpu_preflight_accounts_for_row_flow_and_rollout_graphs() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+            [source]
+            target_images = ["assets/reference_targets/lizard_upstream_120.png"]
+            [condition]
+            encoder = "sample-id-onehot"
+            [training]
+            steps = 1
+            example_batch_size = 1
+            [rollout]
+            particles = 512
+            steps = 96
+            "#,
+        )
+        .unwrap();
+        let mut report = build_e2e_rollout_report(Path::new("inline.toml"), &config).unwrap();
+        report.training.gpu_memory_budget_gb = Some(90.0);
+        report.training.credit_assignment = "full-bptt".to_string();
+        report.training.example_batch_size = 16;
+        report.training.rollouts_per_example = 32;
+        report.training.use_particle_pool = false;
+        report.adapter.generator = E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW.to_string();
+        report.adapter.flow_hidden = 768;
+        report.adapter.flow_layers = 12;
+        report.adapter.flow_ffn_dims = 3072;
+        report.adapter.flow_sample_steps = 8;
+        report.condition.embed_dims = 384;
+        report.condition.token_count = 257;
+        report.condition.token_attention_heads = 12;
+        report.training.flow_self_rectification_weight = 0.05;
+
+        let oversized = projected_active_training_gpu_memory(&report);
+        assert!(bytes_to_gib(oversized.total_bytes) > 90.0);
+        let err = check_condition_preload_memory_budget(&report)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("projected active HyperNPA GPU peak"));
+        assert!(err.contains("row-flow graph"));
+
+        report.training.example_batch_size = 8;
+        report.training.rollouts_per_example = 64;
+        let bounded = projected_active_training_gpu_memory(&report);
+        assert!(bytes_to_gib(bounded.total_bytes) < 90.0);
+        check_condition_preload_memory_budget(&report).unwrap();
     }
 
     #[test]

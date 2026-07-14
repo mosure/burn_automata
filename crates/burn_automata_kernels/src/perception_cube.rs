@@ -17,8 +17,8 @@ use cubecl::{CubeDim, CubeLaunch, calculate_cube_count_elemwise, cube, prelude::
 
 use crate::{KernelError, KernelResult};
 
-const PERCEPTION_ADJOINT_OP: &str = "burn_automata.perception.adjoint.v1";
-const PERCEPTION_FORWARD_OP: &str = "burn_automata.perception.forward.v1";
+const PERCEPTION_ADJOINT_OP: &str = "burn_automata.perception.adjoint.v2";
+const PERCEPTION_FORWARD_OP: &str = "burn_automata.perception.forward.v2";
 const LOG_NORMALIZE_EPSILON: f32 = 1.0e-6;
 const MAX_SPARSE_PLANES_PER_CUBE: u32 = 4;
 
@@ -457,7 +457,7 @@ where
         .register(
             streams,
             OperationIr::Custom(CustomOpIr::new(
-                "burn_automata.perception.forward_prepared.v1",
+                "burn_automata.perception.forward_prepared.v2",
                 &inputs,
                 &outputs,
             )),
@@ -695,7 +695,7 @@ where
         .register(
             streams,
             OperationIr::Custom(CustomOpIr::new(
-                "burn_automata.perception.adjoint_prepared.v1",
+                "burn_automata.perception.adjoint_prepared.v2",
                 &inputs,
                 &outputs,
             )),
@@ -1213,6 +1213,7 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
                 state_gradient_inverse_arg.into_tensor_arg(),
                 args_forward,
                 retain_adjoint_state,
+                cfg.density_grad,
                 dtype.into(),
             );
         } else {
@@ -1529,7 +1530,7 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
             );
         }
     } else {
-        perception_precompute_adjoint_kernel::launch(
+        perception_precompute_adjoint_kernel_v2::launch(
             &client,
             precompute_cube_count,
             precompute_cube_dim,
@@ -1595,6 +1596,7 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
                     grid.permutation.clone().into_tensor_arg(),
                     state_grad.clone().into_tensor_arg(),
                     args_state,
+                    cfg.state_grad,
                     dtype.into(),
                 );
             } else {
@@ -1891,15 +1893,39 @@ fn density_adjoint_from_volume<F: Float>(density: F, volume_adjoint: F) -> F {
 }
 
 #[cube]
+fn log1p_over_x<F: Float>(x: F) -> F {
+    let mut out = x.log1p() / x;
+    if x < F::new(1.0e-3_f32) {
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let x4 = x3 * x;
+        let x5 = x4 * x;
+        out = F::new(1.0_f32) - x * F::new(0.5_f32) + x2 / F::new(3.0_f32) - x3 * F::new(0.25_f32)
+            + x4 * F::new(0.2_f32)
+            - x5 / F::new(6.0_f32);
+    }
+    out
+}
+
+#[cube]
 fn log_normalize_adjoint_2<F: Float>(x: F, y: F, adj_x: F, adj_y: F) -> (F, F) {
     let norm = (x * x + y * y + F::new(LOG_NORMALIZE_EPSILON * LOG_NORMALIZE_EPSILON))
         .sqrt()
         .max(F::new(LOG_NORMALIZE_EPSILON));
-    let log1p = (F::new(1.0_f32) + norm).ln();
-    let scale = log1p / norm;
-    let dscale_dnorm = (norm / (F::new(1.0_f32) + norm) - log1p) / (norm * norm);
+    let scale = log1p_over_x::<F>(norm);
     let dot = x * adj_x + y * adj_y;
-    let radial = dscale_dnorm * dot / norm;
+    let mut radial_per_dot = (F::new(1.0_f32) / (F::new(1.0_f32) + norm) - scale) / (norm * norm);
+    if norm < F::new(1.0e-3_f32) {
+        let norm2 = norm * norm;
+        let norm3 = norm2 * norm;
+        let norm4 = norm3 * norm;
+        radial_per_dot = F::new(-0.5_f32) / norm + F::new(2.0_f32 / 3.0_f32)
+            - norm * F::new(0.75_f32)
+            + norm2 * F::new(0.8_f32)
+            - norm3 * F::new(5.0_f32 / 6.0_f32)
+            + norm4 * F::new(6.0_f32 / 7.0_f32);
+    }
+    let radial = radial_per_dot * dot;
     (scale * adj_x + radial * x, scale * adj_y + radial * y)
 }
 
@@ -1908,7 +1934,7 @@ fn log_normalize_2<F: Float>(x: F, y: F) -> (F, F) {
     let norm = (x * x + y * y + F::new(LOG_NORMALIZE_EPSILON * LOG_NORMALIZE_EPSILON))
         .sqrt()
         .max(F::new(LOG_NORMALIZE_EPSILON));
-    let scale = (F::new(1.0_f32) + norm).ln() / norm;
+    let scale = log1p_over_x::<F>(norm);
     (x * scale, y * scale)
 }
 
@@ -2132,8 +2158,9 @@ fn perception_forward_kernel<F: Float>(
                 raw_y += diff * gy;
                 neighbor += 1;
             }
-            let corrected_x = raw_x * inv00 + raw_y * inv10;
-            let corrected_y = raw_x * inv01 + raw_y * inv11;
+            let scale = state_scale::<F>(eps, args);
+            let corrected_x = (raw_x * inv00 + raw_y * inv10) * scale;
+            let corrected_y = (raw_x * inv01 + raw_y * inv11) * scale;
             let (out_x, out_y) = if args.log_norm_grad != 0 {
                 log_normalize_2::<F>(corrected_x, corrected_y)
             } else {
@@ -2625,7 +2652,8 @@ fn perception_density_sparse_kernel<F: Float>(
         terminate!();
     }
     let batch = index / particle_count;
-    let particle = index - batch * particle_count;
+    let slot = index - batch * particle_count;
+    let particle = perception_grid_particle(permutation, batch, slot);
     density[batch * density.stride(0) + particle * density.stride(1)] =
         sparse_density_for::<F>(x, offsets, permutation, batch, particle, args);
 }
@@ -2767,8 +2795,9 @@ fn perception_forward_sparse_channel_kernel<F: Float>(
         let inv01 = inverse[inverse_base + inverse.stride(2)];
         let inv10 = inverse[inverse_base + 2usize * inverse.stride(2)];
         let inv11 = inverse[inverse_base + 3usize * inverse.stride(2)];
-        let corrected_x = raw_x * inv00 + raw_y * inv10;
-        let corrected_y = raw_x * inv01 + raw_y * inv11;
+        let scale = state_scale::<F>(args.eps.get::<F>(), args);
+        let corrected_x = (raw_x * inv00 + raw_y * inv10) * scale;
+        let corrected_y = (raw_x * inv01 + raw_y * inv11) * scale;
         let (out_x, out_y) = if args.log_norm_grad != 0u32 {
             log_normalize_2::<F>(corrected_x, corrected_y)
         } else {
@@ -2792,15 +2821,17 @@ fn perception_forward_sparse_plane_kernel<F: Float>(
     state_gradient_inverse: &mut Tensor<F>,
     args: &PerceptionArgs,
     #[comptime] retain_adjoint_state: bool,
+    #[comptime] density_grad: bool,
     #[define(F)] _dtype: StorageType,
 ) {
     let lane = UNIT_POS_X as usize;
-    let particle = CUBE_POS_X as usize * CUBE_DIM_Y as usize + UNIT_POS_Y as usize;
+    let slot = CUBE_POS_X as usize * CUBE_DIM_Y as usize + UNIT_POS_Y as usize;
     let batch = CUBE_POS_Y as usize;
     let particle_count = x.shape(1);
-    if particle >= particle_count {
+    if slot >= particle_count {
         terminate!();
     }
+    let particle = perception_grid_particle(permutation, batch, slot);
     let state_dims = s.shape(2);
     let active_channel = lane < state_dims;
 
@@ -2832,7 +2863,7 @@ fn perception_forward_sparse_plane_kernel<F: Float>(
         if args.state_grad != 0u32 && args.hybrid_state_gradient != 0u32 {
             (inv00, inv01, inv10, inv11) = inverse_2d::<F>(m00, m01, m11);
         }
-        if args.density_grad != 0u32 {
+        if density_grad {
             let eps = args.eps.get::<F>();
             let scale = density_gradient_scale::<F>(eps, particle_count, args);
             density_x *= scale;
@@ -2892,10 +2923,10 @@ fn perception_forward_sparse_plane_kernel<F: Float>(
     while neighbor_cell < 9usize {
         let (valid, cell) = perception_neighbor_cell(cell_x, cell_y, neighbor_cell, args);
         if valid {
-            let mut slot = perception_grid_offset(offsets, batch, cell);
+            let mut neighbor_slot = perception_grid_offset(offsets, batch, cell);
             let end = perception_grid_offset(offsets, batch, cell + 1usize);
-            while slot < end {
-                let neighbor = perception_grid_particle(permutation, batch, slot);
+            while neighbor_slot < end {
+                let neighbor = perception_grid_particle(permutation, batch, neighbor_slot);
                 let mut blur_weight = F::new(0.0_f32);
                 let mut gx = F::new(0.0_f32);
                 let mut gy = F::new(0.0_f32);
@@ -2921,7 +2952,7 @@ fn perception_forward_sparse_plane_kernel<F: Float>(
                         raw_y += diff * gy;
                     }
                 }
-                slot += 1usize;
+                neighbor_slot += 1usize;
             }
         }
         neighbor_cell += 1usize;
@@ -2937,8 +2968,9 @@ fn perception_forward_sparse_plane_kernel<F: Float>(
         }
         write_feature::<F>(features, batch, particle, state_dims + lane, blur);
         if args.state_grad != 0u32 {
-            let corrected_x = raw_x * inv00 + raw_y * inv10;
-            let corrected_y = raw_x * inv01 + raw_y * inv11;
+            let scale = state_scale::<F>(eps, args);
+            let corrected_x = (raw_x * inv00 + raw_y * inv10) * scale;
+            let corrected_y = (raw_x * inv01 + raw_y * inv11) * scale;
             let (out_x, out_y) = if args.log_norm_grad != 0u32 {
                 log_normalize_2::<F>(corrected_x, corrected_y)
             } else {
@@ -3116,11 +3148,12 @@ fn perception_precompute_adjoint_sparse_plane_kernel<F: Float>(
     #[define(F)] _dtype: StorageType,
 ) {
     let lane = UNIT_POS_X as usize;
-    let particle = CUBE_POS_X as usize * CUBE_DIM_Y as usize + UNIT_POS_Y as usize;
+    let slot = CUBE_POS_X as usize * CUBE_DIM_Y as usize + UNIT_POS_Y as usize;
     let batch = CUBE_POS_Y as usize;
-    if particle >= x.shape(1) {
+    if slot >= x.shape(1) {
         terminate!();
     }
+    let particle = perception_grid_particle(permutation, batch, slot);
     let state_dims = s.shape(2);
     let active_channel = lane < state_dims;
 
@@ -3291,14 +3324,16 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
     permutation: &Tensor<u32>,
     state_grad: &mut Tensor<F>,
     args: &PerceptionArgs,
+    #[comptime] state_grad_enabled: bool,
     #[define(F)] _dtype: StorageType,
 ) {
     let lane = UNIT_POS_X as usize;
-    let particle = CUBE_POS_X as usize * CUBE_DIM_Y as usize + UNIT_POS_Y as usize;
+    let slot = CUBE_POS_X as usize * CUBE_DIM_Y as usize + UNIT_POS_Y as usize;
     let batch = CUBE_POS_Y as usize;
-    if particle >= x.shape(1) {
+    if slot >= x.shape(1) {
         terminate!();
     }
+    let particle = perception_grid_particle(permutation, batch, slot);
     let state_dims = s.shape(2);
     let active_channel = lane < state_dims;
     let eps = args.eps.get::<F>();
@@ -3316,10 +3351,10 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
     while neighbor_cell < 9usize {
         let (valid, cell) = perception_neighbor_cell(cell_x, cell_y, neighbor_cell, args);
         if valid {
-            let mut slot = perception_grid_offset(offsets, batch, cell);
+            let mut neighbor_slot = perception_grid_offset(offsets, batch, cell);
             let end = perception_grid_offset(offsets, batch, cell + 1usize);
-            while slot < end {
-                let neighbor = perception_grid_particle(permutation, batch, slot);
+            while neighbor_slot < end {
+                let neighbor = perception_grid_particle(permutation, batch, neighbor_slot);
                 let mut blur_weight = F::new(0.0_f32);
                 let mut incoming_gx = F::new(0.0_f32);
                 let mut incoming_gy = F::new(0.0_f32);
@@ -3330,7 +3365,7 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
                     let dy = yi - x_value::<F>(x, batch, neighbor, 1);
                     let r2 = dx * dx + dy * dy;
                     blur_weight = poly6::<F>(r2, eps) * volume_i;
-                    if args.state_grad != 0u32 && neighbor != particle {
+                    if state_grad_enabled && neighbor != particle {
                         (incoming_gx, incoming_gy) = spiky_gradient::<F>(dx, dy, r2, eps, volume_i);
                         let volume_neighbor =
                             recip_finite::<F>(density_value::<F>(density, batch, neighbor));
@@ -3351,7 +3386,7 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
                 if active_channel {
                     out += feature::<F>(feature_grad, batch, neighbor, blur_cursor + lane)
                         * blur_weight;
-                    if args.state_grad != 0u32 && neighbor != particle {
+                    if state_grad_enabled && neighbor != particle {
                         out += raw_state_adjoint_value::<F>(
                             raw_state_adjoint,
                             batch,
@@ -3382,7 +3417,7 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
                             ) * outgoing_gy;
                     }
                 }
-                slot += 1usize;
+                neighbor_slot += 1usize;
             }
         }
         neighbor_cell += 1usize;
@@ -3465,7 +3500,7 @@ fn moment_position_delta<F: Float>(
 }
 
 #[cube(launch, address_type = "dynamic")]
-fn perception_precompute_adjoint_kernel<F: Float>(
+fn perception_precompute_adjoint_kernel_v2<F: Float>(
     x: &Tensor<F>,
     s: &Tensor<F>,
     feature_grad: &Tensor<F>,

@@ -43,3 +43,11 @@
 *.bin
 *.wasm
 *.pdf
+
+# Top-level LaTeX intermediates. Paper source, bibliography, and figures remain tracked.
+/docs/*.aux
+/docs/*.bbl
+/docs/*.blg
+/docs/*.fdb_latexmk
+/docs/*.fls
+/docs/*.out

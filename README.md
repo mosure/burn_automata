@@ -126,14 +126,19 @@ updated every `--checkpoint-interval-seconds` seconds, with optional
 Canonical 2D HyperNPA configs live under `configs/verified/2d/hyper_e2e/`.
 The maintained trainer is `train-hyper2d-e2e-rollout` (alias
 `train-hypernpa2d`), which conditions on online DINO tokens and optimizes the
-generated LoRA plus shared-base NPA rollout image loss directly. Its
+generated structured NPA residual plus shared-base NPA rollout image loss
+directly. Legacy LoRA generators remain available for controlled comparisons;
+the canonical row-flow path emits identifiable dense controller rows instead
+of regressing non-identifiable LoRA factors. Its
 `[validation].interval` is intentionally separate from `[training].report_interval`
 so expensive holdout PSNR checks remain bounded. Use
 `[gpu].condition_device_cache_max_bytes` to cap resident DINO-token cache memory,
 and use `[model].shared_base_train_start_step` plus the base/generator optimizer
 overrides for warmup or different shared-trunk versus hypernetwork learning
 rates. Checked-in HyperNPA TOMLs also include `[gates]` for minimum reported
-particle throughput, bounded validation overhead, and optional PSNR gates; gate
+particle throughput, bounded validation overhead, held-out p10 PSNR,
+condition-shuffle separation, generated-controller gain, and optional strict
+matched-oracle gaps; gate
 failures are written into the JSON report and fail the command when
 `fail_on_violation = true`. Exploratory TOMLs belong in gitignored
 `configs/sandbox/`.

@@ -11,12 +11,19 @@ pub mod dino;
 pub mod e2e;
 #[cfg(feature = "cli")]
 pub mod e2e_rollout;
-#[cfg(any(feature = "cli", test))]
+#[cfg(any(
+    feature = "cli",
+    feature = "backend_wgpu",
+    feature = "backend_cuda",
+    test
+))]
+#[cfg_attr(not(feature = "cli"), allow(dead_code, unused_imports))]
 pub(crate) mod e2e_training;
 pub mod hypernet;
 pub mod inference;
 pub mod prior;
 pub mod quality;
+pub mod row_flow;
 pub mod training;
 
 pub use adapter_layout::{
@@ -36,6 +43,10 @@ pub use dino::{
     DINO_CONDITION_BACKGROUND_RGB, DinoVitsConditionContract, DinoVitsConditionEncoder,
     decode_condition_image, load_condition_image,
 };
+#[cfg(feature = "backend_cuda")]
+pub use e2e::generate_e2e_conditioned_npa_2d_cuda;
+#[cfg(feature = "backend_wgpu")]
+pub use e2e::generate_e2e_conditioned_npa_2d_wgpu;
 pub use e2e::{
     E2eConditionedNpa2d, E2eHyperNpa2d, E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights,
     PerceptionRolloutBackend, Target2dLossBackend, generate_e2e_conditioned_npa_2d,
@@ -50,6 +61,10 @@ pub use hypernet::{
 pub use inference::{ConditionedNpa2d, generate_conditioned_npa_2d};
 pub use prior::{ParticlePrior2d, ParticlePriorConfig};
 pub use quality::{AlphaAwareImageMetrics, alpha_aware_image_metrics};
+pub use row_flow::{
+    CONDITIONAL_ROW_FLOW_ARCHITECTURE, CONDITIONAL_ROW_FLOW_SOLVER_HEUN, ConditionalRowFlowConfig,
+    NpaParameterRow2d, NpaParameterRowLayout2d, NpaParameterRowModule2d,
+};
 pub use training::{
     HyperAdapterExample2d, HyperAdapterTrainingReport, HyperFlowExample2d,
     hyper_adapter_regression_loss, hyper_adapter_regression_train_step, hyper_rectified_flow_loss,

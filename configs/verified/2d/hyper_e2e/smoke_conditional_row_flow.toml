@@ -1,0 +1,114 @@
+# Bounded device smoke for the structured conditional rectified-flow path.
+preset = "growing-2d"
+
+[source]
+target_image_dirs = [".cache/selforg_npa/targets/growing"]
+image_extensions = ["png"]
+source_limit = 2
+
+[output]
+output_dir = "artifacts/hyper2d_verified_row_flow_smoke"
+
+[condition]
+encoder = "dino-vits-full-tokens"
+dino_model = "models/dino/dino_vits.mpk"
+dino_image_size = 224
+dino_patch_size = 14
+dino_batch_size = 2
+online = true
+token_attention_heads = 4
+rgb_channels = true
+alpha_channel = true
+
+[model]
+shared_base = "models/catalog/growing/lizard.bpk"
+oracle_model_dir = "models/catalog/growing"
+shared_base_trainable = false
+hidden_dims = 128
+output_activation = "identity"
+
+[training]
+backend = "gpu"
+objective = "conditional-row-flow-matching"
+steps = 1
+report_interval = 1
+example_batch_size = 2
+credit_assignment = "full-bptt"
+task_loss_weight = 0.0
+flow_matching_weight = 1.0
+max_full_bptt_particle_steps = 1024
+use_particle_pool = false
+target2d_loss_backend = "tiled-adjoint"
+perception_backend = "auto"
+max_dense_train_particles = 32
+system_memory_budget_gb = 12.0
+gpu_memory_budget_gb = 8.0
+seed = 42
+
+[gpu]
+backend = "burn-wgpu"
+max_dense_chunk_floats = 262144
+max_splat_chunk_floats = 262144
+condition_device_cache_max_bytes = 1073741824
+
+[adapter]
+rank = 66
+alpha = 66.0
+generator = "conditional-row-flow"
+parameterization = "dense-npa-row-residual"
+attention_normalization = "softmax"
+flow_hidden = 64
+flow_layers = 2
+flow_ffn_dims = 128
+flow_sample_steps = 2
+flow_source_seed = 42
+flow_source_scale = 1.0
+
+[rollout]
+particles = 32
+steps = 1
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "uniform-circle"
+
+[target]
+points = 128
+threshold = 0.05
+loss_image_size = 32
+splat_sigma = 1.0
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[optimizer]
+base_learning_rate = 0.0
+generator_learning_rate = 1.0e-4
+base_weight_decay = 0.0
+generator_weight_decay = 0.01
+base_grad_clip_norm = 0.0
+generator_grad_clip_norm = 1.0
+per_parameter_grad_normalization = false
+base_per_parameter_grad_normalization = false
+generator_per_parameter_grad_normalization = false
+lr_schedule = "constant"
+min_lr_scale = 1.0
+
+[validation]
+initial_examples = 0
+examples = 1
+interval = 1
+particles = 32
+steps = 2
+horizons = [2]
+update_prob = 0.5
+seed = 42
+psnr_threshold_db = 26.0
+
+[gates]
+max_quality_validation_evaluations = 2
+max_quality_validation_elapsed_fraction = 1.0
+fail_on_violation = false

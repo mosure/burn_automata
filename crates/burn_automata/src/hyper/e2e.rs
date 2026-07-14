@@ -5,6 +5,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{AutomataError, AutomataResult, NpaConfig, NpaLowRankAdapter, NpaModel};
 
+use super::row_flow::{
+    CONDITIONAL_ROW_FLOW_ARCHITECTURE, CONDITIONAL_ROW_FLOW_ARCHITECTURE_LEGACY,
+    ConditionalRowFlowConfig, ConditionalRowFlowWeights, NpaParameterRowLayout2d,
+};
+
 const E2E_HYPER_BPK_MAGIC: [u8; 8] = *b"BAUTHYP1";
 const E2E_HYPER_BPK_HEADER_LEN: usize = 8 + 4 + 8 + 8 + 32;
 const E2E_HYPER_BPK_CONTAINER_VERSION: u32 = 1;
@@ -15,10 +20,12 @@ pub const E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2: &str = "module_token_cross_att
 pub const E2E_HYPER_ARCH_MODULE_TOKEN_DECODER: &str =
     "module_token_multihead_cross_attention_lora_v3";
 pub const E2E_HYPER_ARCH_SAMPLE_ID_TABLE: &str = "sample_id_adapter_table_v1";
+pub const E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW: &str = CONDITIONAL_ROW_FLOW_ARCHITECTURE;
 pub const E2E_HYPER_ATTENTION_TANH_EXP: &str = "tanh-exp";
 pub const E2E_HYPER_ATTENTION_SOFTMAX: &str = "softmax";
 pub const E2E_HYPER_ADAPTER_FACTORIZED: &str = "factorized";
 pub const E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK: &str = "canonical-full-rank";
+pub const E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL: &str = "dense-npa-row-residual";
 pub const DEFAULT_E2E_HYPER_ADAPTER_CHUNK_SIZE: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +34,7 @@ pub enum E2eHyperGeneratorKind {
     SpatialTokenFlow,
     ModuleTokenDecoderV2,
     ModuleTokenDecoder,
+    ConditionalRowFlow,
     SampleIdTable,
 }
 
@@ -37,6 +45,7 @@ impl E2eHyperGeneratorKind {
             Self::SpatialTokenFlow => E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW,
             Self::ModuleTokenDecoderV2 => E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2,
             Self::ModuleTokenDecoder => E2E_HYPER_ARCH_MODULE_TOKEN_DECODER,
+            Self::ConditionalRowFlow => E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW,
             Self::SampleIdTable => E2E_HYPER_ARCH_SAMPLE_ID_TABLE,
         }
     }
@@ -71,11 +80,15 @@ impl E2eHyperGeneratorKind {
             | "structured-token-decoder"
             | "module-token-decoder-v3"
             | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER => Ok(Self::ModuleTokenDecoder),
+            "conditional-row-flow"
+            | "row-flow"
+            | E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW
+            | CONDITIONAL_ROW_FLOW_ARCHITECTURE_LEGACY => Ok(Self::ConditionalRowFlow),
             "sample-id-table" | "adapter-table" | E2E_HYPER_ARCH_SAMPLE_ID_TABLE => {
                 Ok(Self::SampleIdTable)
             }
             other => Err(AutomataError::InvalidArgument(format!(
-                "unknown HyperNPA adapter generator {other:?}; expected module-token-decoder, module-token-decoder-v2, sample-id-table, spatial-token-flow, or pooled-token-flow"
+                "unknown HyperNPA adapter generator {other:?}; expected conditional-row-flow, module-token-decoder, module-token-decoder-v2, sample-id-table, spatial-token-flow, or pooled-token-flow"
             ))),
         }
     }
@@ -205,6 +218,8 @@ pub struct E2eHyperNpa2d {
     pub spatial_condition_control_sigma: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_condition_state_control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_flow: Option<ConditionalRowFlowConfig>,
     pub weights: E2eHyperNpa2dWeights,
 }
 
@@ -224,6 +239,8 @@ pub struct E2eHyperNpa2dWeights {
     pub condition_control_b: Vec<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub condition_control_state_w: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_flow: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -278,6 +295,8 @@ struct E2eHyperNpa2dBinaryMetadata {
     spatial_condition_control_sigma: Option<f32>,
     #[serde(default)]
     spatial_condition_state_control: Option<bool>,
+    #[serde(default)]
+    row_flow: Option<ConditionalRowFlowConfig>,
     weight_lens: E2eHyperNpa2dWeightLens,
 }
 
@@ -297,6 +316,8 @@ struct E2eHyperNpa2dWeightLens {
     condition_control_b: usize,
     #[serde(default)]
     condition_control_state_w: usize,
+    #[serde(default)]
+    row_flow: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -444,9 +465,41 @@ pub fn generate_e2e_conditioned_npa_2d(
     Ok(E2eConditionedNpa2d { adapter, model })
 }
 
+#[cfg(feature = "backend_wgpu")]
+pub fn generate_e2e_conditioned_npa_2d_wgpu(
+    base_model: &NpaModel,
+    hyper: &E2eHyperNpa2d,
+    condition_tokens: &[f32],
+) -> AutomataResult<E2eConditionedNpa2d> {
+    base_model.validate()?;
+    let adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_wgpu(
+        hyper,
+        &base_model.config,
+        condition_tokens,
+    )?;
+    let model = adapter.apply_to_model(base_model)?;
+    Ok(E2eConditionedNpa2d { adapter, model })
+}
+
+#[cfg(feature = "backend_cuda")]
+pub fn generate_e2e_conditioned_npa_2d_cuda(
+    base_model: &NpaModel,
+    hyper: &E2eHyperNpa2d,
+    condition_tokens: &[f32],
+) -> AutomataResult<E2eConditionedNpa2d> {
+    base_model.validate()?;
+    let adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_cuda(
+        hyper,
+        &base_model.config,
+        condition_tokens,
+    )?;
+    let model = adapter.apply_to_model(base_model)?;
+    Ok(E2eConditionedNpa2d { adapter, model })
+}
+
 impl E2eHyperNpa2d {
     pub fn validate(&self) -> AutomataResult<()> {
-        if self.version > 1 {
+        if self.version > 2 {
             return Err(AutomataError::InvalidFormat(format!(
                 "unsupported E2E HyperNPA version {}",
                 self.version
@@ -458,6 +511,8 @@ impl E2eHyperNpa2d {
                 | E2E_HYPER_ARCH_SPATIAL_TOKEN_FLOW
                 | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER_V2
                 | E2E_HYPER_ARCH_MODULE_TOKEN_DECODER
+                | E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW
+                | CONDITIONAL_ROW_FLOW_ARCHITECTURE_LEGACY
                 | E2E_HYPER_ARCH_SAMPLE_ID_TABLE
         ) {
             return Err(AutomataError::InvalidFormat(format!(
@@ -517,18 +572,20 @@ impl E2eHyperNpa2d {
         if let Some(parameterization) = self.adapter_parameterization.as_deref()
             && !matches!(
                 parameterization,
-                E2E_HYPER_ADAPTER_FACTORIZED | E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+                E2E_HYPER_ADAPTER_FACTORIZED
+                    | E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+                    | E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
             )
         {
             return Err(AutomataError::InvalidModel(format!(
                 "unsupported E2E HyperNPA adapter_parameterization {parameterization:?}"
             )));
         }
-        if self.uses_canonical_full_rank_lora()
+        if (self.uses_canonical_full_rank_lora() || self.uses_dense_row_residual())
             && (self.adapter_rank.is_none() || self.adapter_alpha.is_none())
         {
             return Err(AutomataError::InvalidModel(
-                "canonical-full-rank HyperNPA artifacts require adapter_rank and adapter_alpha"
+                "dense or canonical HyperNPA artifacts require adapter_rank and adapter_alpha"
                     .to_string(),
             ));
         }
@@ -678,6 +735,66 @@ impl E2eHyperNpa2d {
                     .to_string(),
             ));
         }
+        if self.is_conditional_row_flow() {
+            let flow = self.row_flow.as_ref().ok_or_else(|| {
+                AutomataError::InvalidModel(
+                    "conditional row flow artifact is missing its flow contract".to_string(),
+                )
+            })?;
+            flow.validate()?;
+            if self.version != 2
+                || self.hidden_dims != flow.width
+                || self.token_attention_heads != flow.heads
+                || self.sample_steps != flow.sample_steps
+                || self.condition_token_count != Some(flow.condition_tokens)
+                || self.condition_embed_dims != Some(flow.condition_dims)
+                || self.output_dims == 0
+            {
+                return Err(AutomataError::InvalidModel(
+                    "conditional row flow artifact metadata does not match its flow contract"
+                        .to_string(),
+                ));
+            }
+            if !matches!(
+                self.adapter_parameterization.as_deref(),
+                Some(E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL)
+                    | Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK)
+            ) || self.has_spatial_condition_control()
+            {
+                return Err(AutomataError::InvalidModel(
+                    "conditional row flow requires a static dense NPA row-residual controller"
+                        .to_string(),
+                ));
+            }
+            let legacy_empty = self.weights.token_w.is_empty()
+                && self.weights.token_b.is_empty()
+                && self.weights.token_gate_w.is_empty()
+                && self.weights.token_gate_b.is_empty()
+                && self.weights.state_w.is_empty()
+                && self.weights.time_w.is_empty()
+                && self.weights.output_w.is_empty()
+                && self.weights.output_b.is_empty()
+                && self.weights.condition_control_w.is_empty()
+                && self.weights.condition_control_b.is_empty()
+                && self.weights.condition_control_state_w.is_empty();
+            if !legacy_empty {
+                return Err(AutomataError::InvalidModel(
+                    "conditional row flow artifacts cannot contain legacy decoder weights"
+                        .to_string(),
+                ));
+            }
+            ConditionalRowFlowWeights {
+                values: self.weights.row_flow.clone(),
+            }
+            .validate(flow)?;
+            return self.weights.ensure_finite();
+        }
+        if self.row_flow.is_some() || !self.weights.row_flow.is_empty() {
+            return Err(AutomataError::InvalidModel(
+                "legacy HyperNPA architecture cannot contain conditional row flow weights"
+                    .to_string(),
+            ));
+        }
         if let Some(embed_dims) = self.condition_embed_dims
             && embed_dims != self.embed_dims()?
         {
@@ -770,6 +887,13 @@ impl E2eHyperNpa2d {
     }
 
     pub fn embed_dims(&self) -> AutomataResult<usize> {
+        if let Some(flow) = self
+            .row_flow
+            .as_ref()
+            .filter(|_| self.is_conditional_row_flow())
+        {
+            return Ok(flow.condition_dims);
+        }
         let projection_rows = if self.is_sample_id_table() {
             self.output_dims
         } else {
@@ -792,6 +916,24 @@ impl E2eHyperNpa2d {
     }
 
     pub fn adapter_spec(&self, config: &NpaConfig) -> AutomataResult<E2eHyperNpa2dAdapterSpec> {
+        if self.is_conditional_row_flow() {
+            let flow = self.row_flow.as_ref().ok_or_else(|| {
+                AutomataError::InvalidModel(
+                    "conditional row flow artifact is missing its flow contract".to_string(),
+                )
+            })?;
+            let layout = NpaParameterRowLayout2d::new(config);
+            layout.validate_flow_config(flow)?;
+            let rank = layout.canonical_rank();
+            let alpha = rank as f32;
+            if self.adapter_rank != Some(rank) || self.adapter_alpha != Some(alpha) {
+                return Err(AutomataError::InvalidModel(format!(
+                    "conditional row flow adapter metadata {:?}/{:?} does not match canonical rank/alpha {rank}/{alpha}",
+                    self.adapter_rank, self.adapter_alpha
+                )));
+            }
+            return Ok(E2eHyperNpa2dAdapterSpec { rank, alpha });
+        }
         let inferred_rank = self.infer_adapter_rank(config)?;
         if let Some(rank) = self.adapter_rank
             && rank != inferred_rank
@@ -861,6 +1003,13 @@ impl E2eHyperNpa2d {
         self.architecture == E2E_HYPER_ARCH_SAMPLE_ID_TABLE
     }
 
+    pub fn is_conditional_row_flow(&self) -> bool {
+        matches!(
+            self.architecture.as_str(),
+            E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW | CONDITIONAL_ROW_FLOW_ARCHITECTURE_LEGACY
+        )
+    }
+
     pub fn is_chunked_token_generator(&self) -> bool {
         self.is_spatial_token_flow() || self.is_module_token_decoder()
     }
@@ -871,6 +1020,10 @@ impl E2eHyperNpa2d {
 
     pub fn uses_canonical_full_rank_lora(&self) -> bool {
         self.adapter_parameterization.as_deref() == Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK)
+    }
+
+    pub fn uses_dense_row_residual(&self) -> bool {
+        self.adapter_parameterization.as_deref() == Some(E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL)
     }
 
     fn normalized_attention_weights(&self, logits: &[f32]) -> AutomataResult<Vec<f32>> {
@@ -924,6 +1077,31 @@ impl E2eHyperNpa2d {
             return Err(AutomataError::InvalidModel(
                 "E2E HyperNPA artifact uses spatial condition control and cannot be collapsed to a static LoRA adapter".to_string(),
             ));
+        }
+        if self.is_conditional_row_flow() {
+            let flow = self.row_flow.as_ref().expect("validated row flow contract");
+            let layout = NpaParameterRowLayout2d::new(config);
+            layout.validate_flow_config(flow)?;
+            if self.output_dims != layout.parameter_count() {
+                return Err(AutomataError::InvalidModel(format!(
+                    "conditional row flow output_dims {} does not match dense NPA parameter count {}",
+                    self.output_dims,
+                    layout.parameter_count()
+                )));
+            }
+            let packed = ConditionalRowFlowWeights {
+                values: self.weights.row_flow.clone(),
+            }
+            .predict_packed(flow, config, condition_tokens)?;
+            let adapter = layout.packed_to_canonical_adapter(&packed)?;
+            if self.adapter_rank != Some(adapter.rank) || self.adapter_alpha != Some(adapter.alpha)
+            {
+                return Err(AutomataError::InvalidModel(format!(
+                    "conditional row flow canonical adapter metadata {:?}/{:?} does not match derived {}/{}",
+                    self.adapter_rank, self.adapter_alpha, adapter.rank, adapter.alpha
+                )));
+            }
+            return Ok(adapter);
         }
         if self.is_sample_id_table() {
             return self.predict_sample_id_table_adapter(config, condition_tokens);
@@ -1225,6 +1403,7 @@ impl E2eHyperNpa2dWeights {
                 "condition_control_state_w",
                 self.condition_control_state_w.as_slice(),
             ),
+            ("row_flow", self.row_flow.as_slice()),
         ];
         for (name, values) in checks {
             if !values.iter().all(|value| value.is_finite()) {
@@ -1249,6 +1428,7 @@ impl E2eHyperNpa2dWeights {
             condition_control_w: self.condition_control_w.len(),
             condition_control_b: self.condition_control_b.len(),
             condition_control_state_w: self.condition_control_state_w.len(),
+            row_flow: self.row_flow.len(),
         }
     }
 
@@ -1263,7 +1443,8 @@ impl E2eHyperNpa2dWeights {
             + self.output_b.len()
             + self.condition_control_w.len()
             + self.condition_control_b.len()
-            + self.condition_control_state_w.len();
+            + self.condition_control_state_w.len()
+            + self.row_flow.len();
         let mut bytes = Vec::with_capacity(value_count * 4);
         for values in [
             self.token_w.as_slice(),
@@ -1277,6 +1458,7 @@ impl E2eHyperNpa2dWeights {
             self.condition_control_w.as_slice(),
             self.condition_control_b.as_slice(),
             self.condition_control_state_w.as_slice(),
+            self.row_flow.as_slice(),
         ] {
             for value in values {
                 bytes.extend_from_slice(&value.to_le_bytes());
@@ -1323,6 +1505,7 @@ impl E2eHyperNpa2dBinaryMetadata {
             spatial_condition_control_scale: hyper.spatial_condition_control_scale,
             spatial_condition_control_sigma: hyper.spatial_condition_control_sigma,
             spatial_condition_state_control: hyper.spatial_condition_state_control,
+            row_flow: hyper.row_flow.clone(),
             weight_lens: hyper.weights.lens(),
         }
     }
@@ -1358,6 +1541,7 @@ impl E2eHyperNpa2dBinaryMetadata {
                 "condition_control_state_w",
                 self.weight_lens.condition_control_state_w,
             )?,
+            row_flow: cursor.take("row_flow", self.weight_lens.row_flow)?,
         };
         cursor.finish()?;
         let hyper = E2eHyperNpa2d {
@@ -1393,6 +1577,7 @@ impl E2eHyperNpa2dBinaryMetadata {
             spatial_condition_control_scale: self.spatial_condition_control_scale,
             spatial_condition_control_sigma: self.spatial_condition_control_sigma,
             spatial_condition_state_control: self.spatial_condition_state_control,
+            row_flow: self.row_flow,
             weights,
         };
         hyper.validate()?;
@@ -1501,6 +1686,7 @@ mod tests {
             spatial_condition_control_scale: None,
             spatial_condition_control_sigma: None,
             spatial_condition_state_control: None,
+            row_flow: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.01; hidden_dims * embed_dims],
                 token_b: vec![0.0; hidden_dims],
@@ -1513,6 +1699,7 @@ mod tests {
                 condition_control_w: Vec::new(),
                 condition_control_b: Vec::new(),
                 condition_control_state_w: Vec::new(),
+                row_flow: Vec::new(),
             },
         }
     }
@@ -1558,6 +1745,7 @@ mod tests {
             spatial_condition_control_scale: None,
             spatial_condition_control_sigma: None,
             spatial_condition_state_control: None,
+            row_flow: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.0; hidden_dims * embed_dims],
                 token_b: vec![0.0; hidden_dims],
@@ -1570,6 +1758,7 @@ mod tests {
                 condition_control_w: Vec::new(),
                 condition_control_b: Vec::new(),
                 condition_control_state_w: Vec::new(),
+                row_flow: Vec::new(),
             },
         }
     }
@@ -1620,6 +1809,7 @@ mod tests {
             spatial_condition_control_scale: None,
             spatial_condition_control_sigma: None,
             spatial_condition_state_control: None,
+            row_flow: None,
             weights: E2eHyperNpa2dWeights {
                 token_w: vec![0.0; hidden_dims * embed_dims],
                 token_b: vec![0.0; hidden_dims],
@@ -1632,6 +1822,7 @@ mod tests {
                 condition_control_w: Vec::new(),
                 condition_control_b: Vec::new(),
                 condition_control_state_w: Vec::new(),
+                row_flow: Vec::new(),
             },
         }
     }
@@ -1681,6 +1872,7 @@ mod tests {
             spatial_condition_control_scale: None,
             spatial_condition_control_sigma: None,
             spatial_condition_state_control: None,
+            row_flow: None,
             weights: E2eHyperNpa2dWeights {
                 token_w,
                 token_b: vec![0.0],
@@ -1693,6 +1885,7 @@ mod tests {
                 condition_control_w: Vec::new(),
                 condition_control_b: Vec::new(),
                 condition_control_state_w: Vec::new(),
+                row_flow: Vec::new(),
             },
         }
     }
@@ -1820,6 +2013,101 @@ mod tests {
                 .to_parameter_vector(),
             adapter.to_parameter_vector()
         );
+    }
+
+    #[test]
+    fn conditional_row_flow_artifact_round_trips_and_predicts_dense_controller() {
+        let config = NpaConfig::growing_2d();
+        let layout = NpaParameterRowLayout2d::new(&config);
+        let rank = layout.canonical_rank();
+        let flow = ConditionalRowFlowConfig {
+            layers: 1,
+            width: 8,
+            heads: 2,
+            ffn_dims: 16,
+            condition_dims: 3,
+            condition_tokens: 2,
+            row_count: layout.row_count(),
+            max_row_dims: layout.max_row_dims(),
+            row_value_dims: layout.rows().iter().map(|row| row.value_dims).collect(),
+            sample_steps: 2,
+            source_seed: 17,
+            source_scale: 1.0,
+            solver: crate::hyper::row_flow::CONDITIONAL_ROW_FLOW_SOLVER_HEUN.to_string(),
+            row_rms: vec![0.01; layout.row_count()],
+        };
+        let weights = ConditionalRowFlowWeights::seeded(&flow, 23).unwrap();
+        let hyper = E2eHyperNpa2d {
+            version: 2,
+            architecture: E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW.to_string(),
+            backend: Some("test".to_string()),
+            condition_encoder: Some("dino-vits-full-tokens".to_string()),
+            condition_token_count: Some(flow.condition_tokens),
+            condition_embed_dims: Some(flow.condition_dims),
+            condition_token_grid_width: Some(1),
+            condition_token_grid_height: Some(1),
+            condition_image_size: Some(224),
+            condition_alpha_mode: Some("composite-white".to_string()),
+            condition_rgb_channels: Some(false),
+            condition_rgb_channel_scale: Some(1.0),
+            condition_alpha_channel: Some(false),
+            condition_alpha_channel_scale: Some(1.0),
+            condition_l2_normalize_features: Some(false),
+            condition_resize_mode: Some("stretch".to_string()),
+            condition_application: Some("static-adapter".to_string()),
+            shared_base_sha256: None,
+            hidden_dims: flow.width,
+            token_attention_heads: flow.heads,
+            attention_normalization: Some(E2E_HYPER_ATTENTION_SOFTMAX.to_string()),
+            output_dims: layout.parameter_count(),
+            sample_steps: flow.sample_steps,
+            output_scale: flow.source_scale,
+            adapter_rank: Some(rank),
+            adapter_alpha: Some(rank as f32),
+            adapter_parameterization: Some(E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL.to_string()),
+            adapter_chunk_size: None,
+            spatial_condition_control: None,
+            spatial_condition_control_scale: None,
+            spatial_condition_control_sigma: None,
+            spatial_condition_state_control: None,
+            row_flow: Some(flow),
+            weights: E2eHyperNpa2dWeights {
+                token_w: Vec::new(),
+                token_b: Vec::new(),
+                token_gate_w: Vec::new(),
+                token_gate_b: Vec::new(),
+                state_w: Vec::new(),
+                time_w: Vec::new(),
+                output_w: Vec::new(),
+                output_b: Vec::new(),
+                condition_control_w: Vec::new(),
+                condition_control_b: Vec::new(),
+                condition_control_state_w: Vec::new(),
+                row_flow: weights.values,
+            },
+        };
+        let condition = vec![0.1, -0.2, 0.3, 0.4, 0.5, -0.6];
+        let expected = hyper
+            .predict_adapter(&config, &condition)
+            .unwrap()
+            .to_parameter_vector();
+        let encoded = encode_e2e_hyper_npa_2d(&hyper).unwrap();
+        let decoded = decode_e2e_hyper_npa_2d(&encoded).unwrap();
+        assert!(decoded.uses_dense_row_residual());
+        let actual = decoded
+            .predict_adapter(&config, &condition)
+            .unwrap()
+            .to_parameter_vector();
+        assert_eq!(actual, expected);
+
+        let mut legacy = hyper;
+        legacy.architecture = CONDITIONAL_ROW_FLOW_ARCHITECTURE_LEGACY.to_string();
+        legacy.adapter_parameterization = Some(E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK.to_string());
+        legacy.validate().unwrap();
+        let legacy_decoded =
+            decode_e2e_hyper_npa_2d(&encode_e2e_hyper_npa_2d(&legacy).unwrap()).unwrap();
+        assert!(legacy_decoded.is_conditional_row_flow());
+        assert!(legacy_decoded.uses_canonical_full_rank_lora());
     }
 
     #[test]
