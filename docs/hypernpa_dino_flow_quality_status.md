@@ -50,13 +50,18 @@ estimating the shared-trunk-plus-adapter ceiling, and optionally pretraining a
 trunk. It memorizes one free vector per training identity and has no operation
 that maps a new image to an adapter.
 
-At quality scale, the table reached 20.71 dB aggregate and 17.93 dB
-worst-horizon p10 after the 512/1,024/2,048-particle exposure campaign. A
-4,096-particle continuation selected its initial checkpoint, so density alone
-did not help. Frozen-trunk table-only refinement reached 23.58 dB aggregate but
-only 18.98 dB worst-horizon p10. The table therefore remains a valuable
-diagnostic while also showing that the current substrate/optimizer is not yet
-a 26 dB oracle.
+The historical quality-scale table reached 23.58 dB aggregate, but that
+artifact trained a per-image output bias. The released Growing NPA has no final
+output bias, so those results are retained only as a legacy optimization
+diagnostic and cannot establish an upstream-compatible adapter ceiling. A
+bounded matched control now exists: an upstream-seeded shared rule with
+zero-output-bias rank-82 per-ID controllers, 4,096 particles, eight trajectories
+per identity, and sampled 32--95-step rollouts reached 11.63 dB aggregate and
+10.52 dB p10 at 1,024 steps after 2,000 updates. The correct-vs-shuffled gap was
+3.77 dB, so the controller path was active. This run represents only 16,000
+trajectories per identity, or 6.67% of the released 240,000-trajectory exposure;
+it is not a converged ceiling. Full-exposure oracle parity remains required
+before assigning the remaining gap to DINO or rectified-flow amortization.
 
 ## Bottleneck
 

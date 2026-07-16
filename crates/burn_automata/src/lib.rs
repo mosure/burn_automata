@@ -82,9 +82,12 @@ pub use target_geometry::{
 pub use target2d::{
     TARGET_2D_COLOR_GATE_GRADIENT, Target2dColorGateGradient, Target2dLossConfig,
     Target2dLossOutput, Target2dLossReport, Target2dTrainingConfig, Target2dTrainingHistoryEntry,
-    Target2dTrainingReport, TargetImage2d, TargetImage2dExtractConfig, target_2d_loss,
-    target_2d_loss_with_adjoint, target_2d_rollout_loss_with_gradients, train_target_2d,
-    upstream_growing_2d_hashgrid, upstream_growing_2d_model,
+    Target2dTrainingReport, Target2dUpstreamOneStepOutput, TargetImage2d,
+    TargetImage2dExtractConfig, foreground_alpha_count_upstream, load_rgba_thumbnail_upstream,
+    load_target_image_2d_upstream, target_2d_loss, target_2d_loss_with_adjoint,
+    target_2d_rollout_loss_with_gradients, target_2d_upstream_one_step_with_gradients,
+    train_target_2d, upstream_adaptive_target_image_size, upstream_growing_2d_hashgrid,
+    upstream_growing_2d_model,
 };
 pub use training::{
     AdamWConfig, AdamWState, LowRankAdapterGradients, SgdConfig, SupervisedBatch,

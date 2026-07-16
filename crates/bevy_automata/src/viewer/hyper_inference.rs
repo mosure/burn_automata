@@ -333,7 +333,8 @@ fn generate_model_for_source(
             hyper.condition_rgb_channel_scale.unwrap_or(1.0),
             hyper.condition_alpha_channel.unwrap_or(false),
             hyper.condition_alpha_channel_scale.unwrap_or(1.0),
-        ),
+        )
+        .with_patch_pixels(hyper.condition_patch_pixels.unwrap_or(false)),
     )?;
     let condition_tokens = encoded
         .pop()

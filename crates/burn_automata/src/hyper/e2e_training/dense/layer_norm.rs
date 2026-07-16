@@ -105,16 +105,19 @@ pub(super) fn modulated_layer_norm3(
     .map(|output| {
         output.unwrap_or_else(|err| panic!("modulated layer norm CubeCL forward failed: {err}"))
     });
-    #[cfg(not(any(feature = "backend_wgpu", feature = "backend_cuda")))]
-    let device_output: Option<
-        burn_automata_kernels::ModulatedLayerNormCubeForwardOutput<InnerBackend>,
-    > = None;
-
+    #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
     let (output, stats) = if let Some(output) = device_output {
         (output.output, output.stats)
     } else {
-        modulated_layer_norm_inner(input_inner.clone(), shift_inner, scale_inner.clone())
+        modulated_layer_norm_inner(
+            input_inner.clone(),
+            shift_inner.clone(),
+            scale_inner.clone(),
+        )
     };
+    #[cfg(not(any(feature = "backend_wgpu", feature = "backend_cuda")))]
+    let (output, stats) =
+        modulated_layer_norm_inner(input_inner.clone(), shift_inner, scale_inner.clone());
     let output = output.into_primitive().tensor();
     let state = ModulatedLayerNormAdjointState {
         input: input_inner,

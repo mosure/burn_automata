@@ -451,8 +451,6 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
     let pixel_units = batches * pixels;
     let pixel_cube_dim = CubeDim::new(&client, pixel_units);
     let pixel_cube_count = calculate_cube_count_elemwise(&client, pixel_units, pixel_cube_dim);
-    let batch_cube_dim = CubeDim::new(&client, batches);
-    let batch_cube_count = calculate_cube_count_elemwise(&client, batches, batch_cube_dim);
 
     denominator_kernel::launch(
         &client,
@@ -543,10 +541,10 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
             dtype.into(),
         );
     }
-    reduce_loss_kernel::launch(
+    reduce_loss_tiled_v2_kernel::launch(
         &client,
-        batch_cube_count,
-        batch_cube_dim,
+        CubeCount::Static(batches as u32, 1, 1),
+        CubeDim::new_1d(256),
         AddressType::U32,
         pixel_loss.clone().into_tensor_arg(),
         splat.clone().into_tensor_arg(),
@@ -1068,7 +1066,7 @@ fn write_pixel_loss<F: Float>(
 }
 
 #[cube(launch, address_type = "dynamic")]
-fn reduce_loss_kernel<F: Float>(
+fn reduce_loss_tiled_v2_kernel<F: Float>(
     pixel_loss: &Tensor<F>,
     splat: &mut Tensor<F>,
     color: &mut Tensor<F>,
@@ -1080,7 +1078,8 @@ fn reduce_loss_kernel<F: Float>(
     composited_rgb_loss_weight: InputScalar,
     #[define(F)] _dtype: StorageType,
 ) {
-    let batch = ABSOLUTE_POS;
+    let batch = CUBE_POS_X as usize;
+    let unit = UNIT_POS as usize;
     if batch >= pixel_loss.shape(0) {
         terminate!();
     }
@@ -1090,7 +1089,7 @@ fn reduce_loss_kernel<F: Float>(
     let mut background_sum = F::new(0.0_f32);
     let mut foreground_sum = F::new(0.0_f32);
     let mut composited_rgb_sum = F::new(0.0_f32);
-    let mut pixel = 0usize;
+    let mut pixel = unit;
     while pixel < pixels {
         let base = batch * pixel_loss.stride(0) + pixel * pixel_loss.stride(1);
         color_sum += pixel_loss[base];
@@ -1098,15 +1097,47 @@ fn reduce_loss_kernel<F: Float>(
         background_sum += pixel_loss[base + 2 * pixel_loss.stride(2)];
         foreground_sum += pixel_loss[base + 3 * pixel_loss.stride(2)];
         composited_rgb_sum += pixel_loss[base + 4 * pixel_loss.stride(2)];
-        pixel += 1;
+        pixel += 256usize;
     }
-    color[batch] = color_sum;
-    density[batch] = density_sum;
-    splat[batch] = color_loss_weight.get::<F>() * color_sum
-        + density_loss_weight.get::<F>() * density_sum
-        + background_density_loss_weight.get::<F>() * background_sum
-        + foreground_density_loss_weight.get::<F>() * foreground_sum
-        + composited_rgb_loss_weight.get::<F>() * composited_rgb_sum;
+
+    let mut color_shared = SharedMemory::<F>::new(256usize);
+    let mut density_shared = SharedMemory::<F>::new(256usize);
+    let mut background_shared = SharedMemory::<F>::new(256usize);
+    let mut foreground_shared = SharedMemory::<F>::new(256usize);
+    let mut composited_rgb_shared = SharedMemory::<F>::new(256usize);
+    color_shared[unit] = color_sum;
+    density_shared[unit] = density_sum;
+    background_shared[unit] = background_sum;
+    foreground_shared[unit] = foreground_sum;
+    composited_rgb_shared[unit] = composited_rgb_sum;
+    sync_cube();
+
+    let mut stride = 128usize;
+    while stride > 0usize {
+        if unit < stride {
+            let color_other = color_shared[unit + stride];
+            let density_other = density_shared[unit + stride];
+            let background_other = background_shared[unit + stride];
+            let foreground_other = foreground_shared[unit + stride];
+            let composited_rgb_other = composited_rgb_shared[unit + stride];
+            color_shared[unit] += color_other;
+            density_shared[unit] += density_other;
+            background_shared[unit] += background_other;
+            foreground_shared[unit] += foreground_other;
+            composited_rgb_shared[unit] += composited_rgb_other;
+        }
+        sync_cube();
+        stride /= 2usize;
+    }
+    if unit == 0usize {
+        color[batch] = color_shared[0];
+        density[batch] = density_shared[0];
+        splat[batch] = color_loss_weight.get::<F>() * color_shared[0]
+            + density_loss_weight.get::<F>() * density_shared[0]
+            + background_density_loss_weight.get::<F>() * background_shared[0]
+            + foreground_density_loss_weight.get::<F>() * foreground_shared[0]
+            + composited_rgb_loss_weight.get::<F>() * composited_rgb_shared[0];
+    }
 }
 
 #[cube(launch, address_type = "dynamic")]

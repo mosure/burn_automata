@@ -67,6 +67,7 @@ pub struct DinoVitsConditionContract {
     pub rgb_channel_scale: f32,
     pub append_alpha_channel: bool,
     pub alpha_channel_scale: f32,
+    pub append_patch_pixels: bool,
 }
 
 impl DinoVitsConditionContract {
@@ -88,7 +89,13 @@ impl DinoVitsConditionContract {
             rgb_channel_scale,
             append_alpha_channel,
             alpha_channel_scale,
+            append_patch_pixels: false,
         }
+    }
+
+    pub const fn with_patch_pixels(mut self, append_patch_pixels: bool) -> Self {
+        self.append_patch_pixels = append_patch_pixels;
+        self
     }
 }
 
@@ -326,6 +333,7 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
                 rgb_channel_scale: 1.0,
                 append_alpha_channel: true,
                 alpha_channel_scale,
+                append_patch_pixels: false,
             },
         )
     }
@@ -364,6 +372,7 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
                 rgb_channel_scale: 1.0,
                 append_alpha_channel: false,
                 alpha_channel_scale: 1.0,
+                append_patch_pixels: false,
             },
         )
     }
@@ -402,6 +411,7 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
                 rgb_channel_scale: 1.0,
                 append_alpha_channel: false,
                 alpha_channel_scale: 1.0,
+                append_patch_pixels: false,
             },
         )
     }
@@ -420,6 +430,7 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
             rgb_channel_scale,
             append_alpha_channel,
             alpha_channel_scale,
+            append_patch_pixels,
         } = contract;
         if !rgb_channel_scale.is_finite() || rgb_channel_scale <= 0.0 {
             return Err(std::io::Error::other(
@@ -491,21 +502,39 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
             )
             .into());
         }
-        if append_rgb_channels {
-            let rgb =
-                rgb_token_grid_tensor(prepared, token_grid_width, token_grid_height, &self.device)?
-                    .mul_scalar(rgb_channel_scale);
-            encoded = Tensor::cat(vec![encoded, rgb], 2);
-        }
-        if append_alpha_channel {
-            let alpha = alpha_token_grid_tensor(
+        if append_patch_pixels {
+            let pixels = patch_pixel_token_grid_tensor(
                 prepared,
                 token_grid_width,
                 token_grid_height,
+                PatchPixelChannels {
+                    rgb_scale: append_rgb_channels.then_some(rgb_channel_scale),
+                    alpha_scale: append_alpha_channel.then_some(alpha_channel_scale),
+                },
                 &self.device,
-            )?
-            .mul_scalar(alpha_channel_scale);
-            encoded = Tensor::cat(vec![encoded, alpha], 2);
+            )?;
+            encoded = Tensor::cat(vec![encoded, pixels], 2);
+        } else {
+            if append_rgb_channels {
+                let rgb = rgb_token_grid_tensor(
+                    prepared,
+                    token_grid_width,
+                    token_grid_height,
+                    &self.device,
+                )?
+                .mul_scalar(rgb_channel_scale);
+                encoded = Tensor::cat(vec![encoded, rgb], 2);
+            }
+            if append_alpha_channel {
+                let alpha = alpha_token_grid_tensor(
+                    prepared,
+                    token_grid_width,
+                    token_grid_height,
+                    &self.device,
+                )?
+                .mul_scalar(alpha_channel_scale);
+                encoded = Tensor::cat(vec![encoded, alpha], 2);
+            }
         }
         if l2_normalize_features {
             Ok(l2_normalize_tensor(encoded))
@@ -513,6 +542,83 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
             Ok(encoded)
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct PatchPixelChannels {
+    rgb_scale: Option<f32>,
+    alpha_scale: Option<f32>,
+}
+
+fn patch_pixel_token_grid_tensor<B: Backend>(
+    prepared: &DinoVitsPreparedConditionBatch,
+    token_grid_width: usize,
+    token_grid_height: usize,
+    channel_config: PatchPixelChannels,
+    device: &burn::tensor::Device<B>,
+) -> Result<Tensor<B, 3>, Box<dyn std::error::Error>> {
+    if channel_config.rgb_scale.is_none() && channel_config.alpha_scale.is_none() {
+        return Err(std::io::Error::other(
+            "DINO patch-pixel conditioning requires RGB and/or alpha channels",
+        )
+        .into());
+    }
+    let grid_width = token_grid_width.max(1);
+    let grid_height = token_grid_height.max(1);
+    if !prepared.image_size.is_multiple_of(grid_width)
+        || !prepared.image_size.is_multiple_of(grid_height)
+    {
+        return Err(std::io::Error::other(format!(
+            "DINO image size {} must be divisible by patch grid {}x{} for lossless patch pixels",
+            prepared.image_size, grid_width, grid_height
+        ))
+        .into());
+    }
+    let patch_width = prepared.image_size / grid_width;
+    let patch_height = prepared.image_size / grid_height;
+    let mut channels = Vec::with_capacity(2);
+    if let Some(rgb_scale) = channel_config.rgb_scale {
+        channels.push(
+            Tensor::<B, 1>::from_floats(prepared.values.as_slice(), device)
+                .reshape([prepared.batch, prepared.image_size, prepared.image_size, 3])
+                .mul_scalar(rgb_scale),
+        );
+    }
+    if let Some(alpha_scale) = channel_config.alpha_scale {
+        channels.push(
+            Tensor::<B, 1>::from_floats(prepared.alpha_values.as_slice(), device)
+                .reshape([prepared.batch, prepared.image_size, prepared.image_size, 1])
+                .mul_scalar(alpha_scale),
+        );
+    }
+    let rgba = Tensor::cat(channels, 3);
+    let channel_count = rgba.dims()[3];
+    let global = adaptive_avg_pool2d(
+        rgba.clone().permute([0, 3, 1, 2]),
+        [patch_height, patch_width],
+    )
+    .permute([0, 2, 3, 1])
+    .reshape([
+        prepared.batch,
+        1,
+        patch_height * patch_width * channel_count,
+    ]);
+    let patches = rgba
+        .reshape([
+            prepared.batch,
+            grid_height,
+            patch_height,
+            grid_width,
+            patch_width,
+            channel_count,
+        ])
+        .permute([0, 1, 3, 2, 4, 5])
+        .reshape([
+            prepared.batch,
+            grid_height * grid_width,
+            patch_height * patch_width * channel_count,
+        ]);
+    Ok(Tensor::cat(vec![global, patches], 1))
 }
 
 fn rgb_token_grid_tensor<B: Backend>(
@@ -865,6 +971,51 @@ mod tests {
         assert_eq!(
             &values[3..],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn patch_pixels_preserve_native_pixels_in_dino_token_order() {
+        let mut values = Vec::new();
+        let mut alpha_values = Vec::new();
+        for pixel in 0..16 {
+            values.extend([pixel as f32, 0.0, 0.0]);
+            alpha_values.push(1.0);
+        }
+        let prepared = DinoVitsPreparedConditionBatch {
+            values,
+            alpha_values,
+            batch: 1,
+            image_size: 4,
+            input_channels: 3,
+        };
+        let device = burn::tensor::Device::<NdArray<f32>>::default();
+        let pixels = patch_pixel_token_grid_tensor::<NdArray<f32>>(
+            &prepared,
+            2,
+            2,
+            PatchPixelChannels {
+                rgb_scale: Some(1.0),
+                alpha_scale: Some(1.0),
+            },
+            &device,
+        )
+        .unwrap();
+        assert_eq!(pixels.dims(), [1, 5, 16]);
+        let values = pixels.into_data().to_vec::<f32>().unwrap();
+        let first_patch = &values[16..32];
+        assert_eq!(
+            first_patch,
+            &[
+                0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 4.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0, 1.0,
+            ]
+        );
+        let last_patch = &values[64..80];
+        assert_eq!(
+            last_patch,
+            &[
+                10.0, 0.0, 0.0, 1.0, 11.0, 0.0, 0.0, 1.0, 14.0, 0.0, 0.0, 1.0, 15.0, 0.0, 0.0, 1.0,
+            ]
         );
     }
 }

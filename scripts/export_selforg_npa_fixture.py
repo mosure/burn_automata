@@ -139,12 +139,203 @@ def checkpoint_summary(path: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def tensor_values(value: torch.Tensor) -> list[float]:
+    return value.detach().to(device="cpu", dtype=torch.float32).contiguous().view(-1).tolist()
+
+
+def deterministic_values(count: int, scale: float, phase: float = 0.0) -> torch.Tensor:
+    index = torch.arange(count, dtype=torch.float32)
+    return scale * torch.sin(index * 0.017 + phase)
+
+
+def training_step_fixture(
+    upstream_root: pathlib.Path,
+    config: dict[str, Any],
+    target: dict[str, Any],
+    device_name: str,
+) -> dict[str, Any]:
+    """Export one deterministic official forward/backward/AdamW update.
+
+    This fixture deliberately supplies all floating-point inputs and parameters;
+    it does not ask Rust and PyTorch to reproduce each other's RNG streams. The
+    particle batch is first binned by the official hash grid, and that binned
+    order is the canonical input order recorded for the parity replay.
+    """
+
+    sys.path.insert(0, str(upstream_root))
+    from losses import Loss  # type: ignore
+    from models.npa import NPA  # type: ignore
+    from sphops import HashGrid  # type: ignore
+
+    device = torch.device(device_name)
+    npa_cfg = config["npa"]["kwargs"]
+    state_dims = int(npa_cfg["state_dims"])
+    hidden_dims = int(npa_cfg["hidden_dims"])
+    spatial_dims = int(config["hashgrid"]["dim"])
+    particle_count = 24
+    batch_size = 1
+
+    model = NPA(spatial_dims=spatial_dims, **npa_cfg).to(device)
+    with torch.no_grad():
+        w1 = deterministic_values(model.model[0].weight.numel(), 0.006, 0.1).reshape_as(
+            model.model[0].weight
+        )
+        b1 = deterministic_values(model.model[0].bias.numel(), 0.02, 0.7)
+        w2 = deterministic_values(model.model[2].weight.numel(), 0.006, 1.3).reshape_as(
+            model.model[2].weight
+        )
+        model.model[0].weight.copy_(w1.to(device))
+        model.model[0].bias.copy_(b1.to(device))
+        model.model[2].weight.copy_(w2.to(device))
+
+    index = torch.arange(particle_count, dtype=torch.float32)
+    angle = index * (2.0 * math.pi / particle_count) + 0.07
+    radius = 0.035 + 0.145 * ((index.remainder(6.0) + 1.0) / 6.0)
+    positions = torch.stack(
+        [radius * torch.cos(angle) - 0.08, radius * torch.sin(angle) + 0.04], dim=-1
+    ).reshape(batch_size, particle_count, spatial_dims)
+    state_index = torch.arange(particle_count * state_dims, dtype=torch.float32)
+    states = (0.08 * torch.sin(state_index * 0.071 + 0.3)).reshape(
+        batch_size, particle_count, state_dims
+    )
+    positions = positions.to(device)
+    states = states.to(device)
+
+    grid = HashGrid(
+        num_particles=particle_count,
+        batch_size=batch_size,
+        **config["hashgrid"],
+    )
+    features, positions_binned, states_binned, snapshot = model.perceive(
+        positions, states, grid
+    )
+    raw_update = model.model(features)
+    raw_motion = raw_update[..., :spatial_dims]
+    dx = (
+        model.alpha
+        * raw_motion
+        * grid.eps
+        / (1.0 + raw_motion.norm(dim=-1, keepdim=True))
+    )
+    ds = raw_update[..., spatial_dims:]
+    update_mask = (
+        (torch.arange(particle_count, device=device).remainder(3) != 0)
+        .to(torch.float32)
+        .reshape(batch_size, particle_count, 1)
+    )
+    next_positions = positions_binned + dx * update_mask
+    next_states = states_binned + ds * update_mask
+    mean_dx_norm = dx.norm(dim=-1).mean()
+
+    target_tensors = {
+        "positions": torch.tensor(target["positions"], dtype=torch.float32, device=device),
+        "colors": torch.tensor(target["colors"], dtype=torch.float32, device=device),
+        "pixel_size": float(target["pixel_size"]),
+    }
+    loss_fn = Loss(target_tensors, **config["train"]["loss"])
+    optimizer_cfg = dict(config["train"]["optimizer"]["kwargs"])
+    optimizer = torch.optim.AdamW(model.parameters(), **optimizer_cfg)
+    loss, loss_info = loss_fn(
+        {
+            "positions": next_positions,
+            "states": next_states,
+            "outputs": next_states,
+            "sum_dx": mean_dx_norm,
+        },
+        return_info=True,
+        return_summary=False,
+    )
+
+    initial_model = {
+        "w1": tensor_values(model.model[0].weight),
+        "b1": tensor_values(model.model[0].bias),
+        "w2": tensor_values(model.model[2].weight),
+    }
+    forward = {
+        "features": tensor_values(features),
+        "raw_update": tensor_values(raw_update),
+        "dx": tensor_values(dx),
+        "ds": tensor_values(ds),
+        "next_positions": tensor_values(next_positions),
+        "next_states": tensor_values(next_states),
+        "mean_dx_norm": float(mean_dx_norm.detach().cpu()),
+    }
+    loss.backward()
+    raw_gradients = {
+        "w1": tensor_values(model.model[0].weight.grad),
+        "b1": tensor_values(model.model[0].bias.grad),
+        "w2": tensor_values(model.model[2].weight.grad),
+    }
+    model.normalize_grads()
+    normalized_gradients = {
+        "w1": tensor_values(model.model[0].weight.grad),
+        "b1": tensor_values(model.model[0].bias.grad),
+        "w2": tensor_values(model.model[2].weight.grad),
+    }
+    optimizer.step()
+    updated_model = {
+        "w1": tensor_values(model.model[0].weight),
+        "b1": tensor_values(model.model[0].bias),
+        "w2": tensor_values(model.model[2].weight),
+    }
+
+    loss_components = {
+        name: float(info["value"])
+        for name, info in loss_info.items()
+        if info is not None and "value" in info
+    }
+    loss_terms = {
+        f"{name}.{term}": float(value)
+        for name, info in loss_info.items()
+        if info is not None
+        for term, (_weight, value) in info.get("terms", {}).items()
+    }
+    permutation = tensor_values(snapshot.permutation.to(torch.float32))
+
+    return {
+        "device": str(device),
+        "batch_size": batch_size,
+        "particle_count": particle_count,
+        "spatial_dims": spatial_dims,
+        "state_dims": state_dims,
+        "hidden_dims": hidden_dims,
+        "perception_dims": int(model.perception_dim),
+        "update_dims": spatial_dims + state_dims,
+        "architecture": "linear_bias_relu_linear_no_output_bias",
+        "canonical_input_order": "official_hashgrid_binned",
+        "positions": tensor_values(positions_binned),
+        "states": tensor_values(states_binned),
+        "update_mask": tensor_values(update_mask),
+        "permutation": permutation,
+        "model": initial_model,
+        "forward": forward,
+        "loss": {
+            "total": float(loss.detach().cpu()),
+            "components": loss_components,
+            "terms": loss_terms,
+        },
+        "raw_gradients": raw_gradients,
+        "normalized_gradients": normalized_gradients,
+        "optimizer": {
+            "name": "AdamW",
+            "learning_rate": float(optimizer_cfg["lr"]),
+            "weight_decay": float(optimizer_cfg.get("weight_decay", 0.0)),
+            "beta1": float(optimizer.defaults["betas"][0]),
+            "beta2": float(optimizer.defaults["betas"][1]),
+            "epsilon": float(optimizer.defaults["eps"]),
+        },
+        "updated_model": updated_model,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream-root", type=pathlib.Path, default=".cache/selforg_npa/NPA")
     parser.add_argument("--config", type=pathlib.Path, default=None)
     parser.add_argument("--checkpoint", type=pathlib.Path, default=None)
     parser.add_argument("--target-image", type=pathlib.Path)
+    parser.add_argument("--training-step", action="store_true")
+    parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
 
@@ -154,6 +345,7 @@ def main() -> None:
     with config_path.open("r", encoding="utf-8") as handle:
         config = yaml.load(handle, Loader=yaml.FullLoader)
 
+    target = extract_target(upstream_root, config["train"]["target"], args.target_image)
     report = {
         "upstream": {
             "root": str(upstream_root),
@@ -175,9 +367,13 @@ def main() -> None:
             "scheduler": config["train"].get("scheduler"),
             "loss": config["train"]["loss"],
         },
-        "target": extract_target(upstream_root, config["train"]["target"], args.target_image),
+        "target": target,
         "checkpoint": checkpoint_summary(checkpoint_path),
     }
+    if args.training_step:
+        report["training_step"] = training_step_fixture(
+            upstream_root, config, target, args.device
+        )
 
     git_head = upstream_root / ".git" / "HEAD"
     if git_head.exists():

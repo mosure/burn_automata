@@ -188,6 +188,8 @@ pub struct E2eHyperNpa2d {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition_alpha_channel_scale: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_patch_pixels: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition_l2_normalize_features: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition_resize_mode: Option<String>,
@@ -208,6 +210,8 @@ pub struct E2eHyperNpa2d {
     pub adapter_alpha: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_parameterization: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_output_bias: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_chunk_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,6 +271,8 @@ struct E2eHyperNpa2dBinaryMetadata {
     condition_alpha_channel: Option<bool>,
     condition_alpha_channel_scale: Option<f32>,
     #[serde(default)]
+    condition_patch_pixels: Option<bool>,
+    #[serde(default)]
     condition_l2_normalize_features: Option<bool>,
     #[serde(default)]
     condition_resize_mode: Option<String>,
@@ -285,6 +291,8 @@ struct E2eHyperNpa2dBinaryMetadata {
     adapter_alpha: Option<f32>,
     #[serde(default)]
     adapter_parameterization: Option<String>,
+    #[serde(default)]
+    adapter_output_bias: Option<bool>,
     #[serde(default)]
     adapter_chunk_size: Option<usize>,
     #[serde(default)]
@@ -472,11 +480,12 @@ pub fn generate_e2e_conditioned_npa_2d_wgpu(
     condition_tokens: &[f32],
 ) -> AutomataResult<E2eConditionedNpa2d> {
     base_model.validate()?;
-    let adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_wgpu(
+    let mut adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_wgpu(
         hyper,
         &base_model.config,
         condition_tokens,
     )?;
+    hyper.enforce_output_bias_contract(&mut adapter);
     let model = adapter.apply_to_model(base_model)?;
     Ok(E2eConditionedNpa2d { adapter, model })
 }
@@ -488,18 +497,19 @@ pub fn generate_e2e_conditioned_npa_2d_cuda(
     condition_tokens: &[f32],
 ) -> AutomataResult<E2eConditionedNpa2d> {
     base_model.validate()?;
-    let adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_cuda(
+    let mut adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_cuda(
         hyper,
         &base_model.config,
         condition_tokens,
     )?;
+    hyper.enforce_output_bias_contract(&mut adapter);
     let model = adapter.apply_to_model(base_model)?;
     Ok(E2eConditionedNpa2d { adapter, model })
 }
 
 impl E2eHyperNpa2d {
     pub fn validate(&self) -> AutomataResult<()> {
-        if self.version > 2 {
+        if self.version > 3 {
             return Err(AutomataError::InvalidFormat(format!(
                 "unsupported E2E HyperNPA version {}",
                 self.version
@@ -705,6 +715,25 @@ impl E2eHyperNpa2d {
                 "E2E HyperNPA condition_rgb_channel_scale must be positive and finite, got {scale}"
             )));
         }
+        if self.condition_patch_pixels.unwrap_or(false) {
+            if !self.condition_rgb_channels.unwrap_or(false)
+                && !self.condition_alpha_channel.unwrap_or(false)
+            {
+                return Err(AutomataError::InvalidModel(
+                    "E2E HyperNPA patch-pixel conditioning requires RGB and/or alpha channels"
+                        .to_string(),
+                ));
+            }
+            if self.condition_image_size.is_none()
+                || self.condition_token_grid_width.is_none()
+                || self.condition_token_grid_height.is_none()
+            {
+                return Err(AutomataError::InvalidModel(
+                    "E2E HyperNPA patch-pixel conditioning requires image and token-grid dimensions"
+                        .to_string(),
+                ));
+            }
+        }
         if let Some(resize_mode) = &self.condition_resize_mode
             && resize_mode != "stretch"
         {
@@ -742,7 +771,7 @@ impl E2eHyperNpa2d {
                 )
             })?;
             flow.validate()?;
-            if self.version != 2
+            if !matches!(self.version, 2 | 3)
                 || self.hidden_dims != flow.width
                 || self.token_attention_heads != flow.heads
                 || self.sample_steps != flow.sample_steps
@@ -1026,6 +1055,20 @@ impl E2eHyperNpa2d {
         self.adapter_parameterization.as_deref() == Some(E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL)
     }
 
+    /// Existing artifacts predate the explicit output-bias contract and retain
+    /// their serialized behavior. Newly trained upstream-aligned artifacts set
+    /// this to `Some(false)`.
+    pub fn adapter_output_bias_enabled(&self) -> bool {
+        self.adapter_output_bias.unwrap_or(true)
+    }
+
+    fn enforce_output_bias_contract(&self, adapter: &mut NpaLowRankAdapter) {
+        if !self.adapter_output_bias_enabled() {
+            adapter.b2_delta.fill(0.0);
+            adapter.b2_delta_correction.clear();
+        }
+    }
+
     fn normalized_attention_weights(&self, logits: &[f32]) -> AutomataResult<Vec<f32>> {
         if logits.is_empty() || !logits.iter().all(|value| value.is_finite()) {
             return Err(AutomataError::InvalidModel(
@@ -1092,8 +1135,14 @@ impl E2eHyperNpa2d {
             let packed = ConditionalRowFlowWeights {
                 values: self.weights.row_flow.clone(),
             }
-            .predict_packed(flow, config, condition_tokens)?;
-            let adapter = layout.packed_to_canonical_adapter(&packed)?;
+            .predict_packed_with_output_bias(
+                flow,
+                config,
+                condition_tokens,
+                self.adapter_output_bias_enabled(),
+            )?;
+            let mut adapter = layout.packed_to_canonical_adapter(&packed)?;
+            self.enforce_output_bias_contract(&mut adapter);
             if self.adapter_rank != Some(adapter.rank) || self.adapter_alpha != Some(adapter.alpha)
             {
                 return Err(AutomataError::InvalidModel(format!(
@@ -1377,12 +1426,18 @@ impl E2eHyperNpa2d {
     ) -> AutomataResult<NpaLowRankAdapter> {
         let spec = self.adapter_spec(config)?;
         if self.uses_canonical_full_rank_lora() {
-            vector = crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
-                config, spec.rank, spec.alpha,
+            vector = crate::hyper::adapter_layout::CanonicalFullRankLora2d::new_with_output_bias(
+                config,
+                spec.rank,
+                spec.alpha,
+                self.adapter_output_bias_enabled(),
             )?
             .apply(&vector)?;
         }
-        NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, vector)
+        let mut adapter =
+            NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, vector)?;
+        self.enforce_output_bias_contract(&mut adapter);
+        Ok(adapter)
     }
 }
 
@@ -1487,6 +1542,7 @@ impl E2eHyperNpa2dBinaryMetadata {
             condition_rgb_channel_scale: hyper.condition_rgb_channel_scale,
             condition_alpha_channel: hyper.condition_alpha_channel,
             condition_alpha_channel_scale: hyper.condition_alpha_channel_scale,
+            condition_patch_pixels: hyper.condition_patch_pixels,
             condition_l2_normalize_features: hyper.condition_l2_normalize_features,
             condition_resize_mode: hyper.condition_resize_mode.clone(),
             condition_application: hyper.condition_application.clone(),
@@ -1500,6 +1556,7 @@ impl E2eHyperNpa2dBinaryMetadata {
             adapter_rank: hyper.adapter_rank,
             adapter_alpha: hyper.adapter_alpha,
             adapter_parameterization: hyper.adapter_parameterization.clone(),
+            adapter_output_bias: hyper.adapter_output_bias,
             adapter_chunk_size: hyper.adapter_chunk_size,
             spatial_condition_control: hyper.spatial_condition_control,
             spatial_condition_control_scale: hyper.spatial_condition_control_scale,
@@ -1559,6 +1616,7 @@ impl E2eHyperNpa2dBinaryMetadata {
             condition_rgb_channel_scale: self.condition_rgb_channel_scale,
             condition_alpha_channel: self.condition_alpha_channel,
             condition_alpha_channel_scale: self.condition_alpha_channel_scale,
+            condition_patch_pixels: self.condition_patch_pixels,
             condition_l2_normalize_features: self.condition_l2_normalize_features,
             condition_resize_mode: self.condition_resize_mode,
             condition_application: self.condition_application,
@@ -1572,6 +1630,7 @@ impl E2eHyperNpa2dBinaryMetadata {
             adapter_rank: self.adapter_rank,
             adapter_alpha: self.adapter_alpha,
             adapter_parameterization: self.adapter_parameterization,
+            adapter_output_bias: self.adapter_output_bias,
             adapter_chunk_size: self.adapter_chunk_size,
             spatial_condition_control: self.spatial_condition_control,
             spatial_condition_control_scale: self.spatial_condition_control_scale,
@@ -1668,6 +1727,7 @@ mod tests {
             condition_rgb_channel_scale: None,
             condition_alpha_channel: None,
             condition_alpha_channel_scale: None,
+            condition_patch_pixels: None,
             condition_l2_normalize_features: None,
             condition_resize_mode: None,
             condition_application: None,
@@ -1681,6 +1741,7 @@ mod tests {
             adapter_rank: None,
             adapter_alpha: None,
             adapter_parameterization: None,
+            adapter_output_bias: None,
             adapter_chunk_size: None,
             spatial_condition_control: None,
             spatial_condition_control_scale: None,
@@ -1727,6 +1788,7 @@ mod tests {
             condition_rgb_channel_scale: Some(1.0),
             condition_alpha_channel: Some(false),
             condition_alpha_channel_scale: Some(1.0),
+            condition_patch_pixels: None,
             condition_l2_normalize_features: Some(false),
             condition_resize_mode: Some("stretch".to_string()),
             condition_application: Some("static-adapter".to_string()),
@@ -1740,6 +1802,7 @@ mod tests {
             adapter_rank: Some(rank),
             adapter_alpha: Some(rank as f32),
             adapter_parameterization: None,
+            adapter_output_bias: None,
             adapter_chunk_size: Some(chunk_size),
             spatial_condition_control: None,
             spatial_condition_control_scale: None,
@@ -1791,6 +1854,7 @@ mod tests {
             condition_rgb_channel_scale: Some(1.0),
             condition_alpha_channel: Some(false),
             condition_alpha_channel_scale: Some(1.0),
+            condition_patch_pixels: None,
             condition_l2_normalize_features: Some(false),
             condition_resize_mode: Some("stretch".to_string()),
             condition_application: Some("static-adapter".to_string()),
@@ -1804,6 +1868,7 @@ mod tests {
             adapter_rank: Some(rank),
             adapter_alpha: Some(rank as f32),
             adapter_parameterization: None,
+            adapter_output_bias: None,
             adapter_chunk_size: Some(chunk_size),
             spatial_condition_control: None,
             spatial_condition_control_scale: None,
@@ -1854,6 +1919,7 @@ mod tests {
             condition_rgb_channel_scale: Some(1.0),
             condition_alpha_channel: Some(false),
             condition_alpha_channel_scale: Some(1.0),
+            condition_patch_pixels: None,
             condition_l2_normalize_features: Some(false),
             condition_resize_mode: None,
             condition_application: Some("static-adapter".to_string()),
@@ -1867,6 +1933,7 @@ mod tests {
             adapter_rank: Some(rank),
             adapter_alpha: Some(rank as f32),
             adapter_parameterization: None,
+            adapter_output_bias: None,
             adapter_chunk_size: None,
             spatial_condition_control: None,
             spatial_condition_control_scale: None,
@@ -2052,6 +2119,7 @@ mod tests {
             condition_rgb_channel_scale: Some(1.0),
             condition_alpha_channel: Some(false),
             condition_alpha_channel_scale: Some(1.0),
+            condition_patch_pixels: None,
             condition_l2_normalize_features: Some(false),
             condition_resize_mode: Some("stretch".to_string()),
             condition_application: Some("static-adapter".to_string()),
@@ -2065,6 +2133,7 @@ mod tests {
             adapter_rank: Some(rank),
             adapter_alpha: Some(rank as f32),
             adapter_parameterization: Some(E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL.to_string()),
+            adapter_output_bias: None,
             adapter_chunk_size: None,
             spatial_condition_control: None,
             spatial_condition_control_scale: None,
@@ -2099,6 +2168,27 @@ mod tests {
             .unwrap()
             .to_parameter_vector();
         assert_eq!(actual, expected);
+
+        let mut upstream_aligned = hyper.clone();
+        upstream_aligned.adapter_output_bias = Some(false);
+        let upstream_aligned =
+            decode_e2e_hyper_npa_2d(&encode_e2e_hyper_npa_2d(&upstream_aligned).unwrap()).unwrap();
+        assert_eq!(upstream_aligned.adapter_output_bias, Some(false));
+        let adapter = upstream_aligned
+            .predict_adapter(&config, &condition)
+            .unwrap();
+        assert!(adapter.b2_delta.iter().all(|value| *value == 0.0));
+        assert!(adapter.b2_delta_correction.is_empty());
+
+        let mut patch_pixels = hyper.clone();
+        patch_pixels.version = 3;
+        patch_pixels.condition_rgb_channels = Some(true);
+        patch_pixels.condition_patch_pixels = Some(true);
+        let patch_pixels =
+            decode_e2e_hyper_npa_2d(&encode_e2e_hyper_npa_2d(&patch_pixels).unwrap()).unwrap();
+        assert_eq!(patch_pixels.version, 3);
+        assert_eq!(patch_pixels.condition_patch_pixels, Some(true));
+        patch_pixels.validate().unwrap();
 
         let mut legacy = hyper;
         legacy.architecture = CONDITIONAL_ROW_FLOW_ARCHITECTURE_LEGACY.to_string();

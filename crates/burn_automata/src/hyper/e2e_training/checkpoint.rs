@@ -45,6 +45,14 @@ pub(crate) struct E2eTrainingCheckpoint {
     pub(crate) rollouts_per_example: usize,
     pub(crate) base_optimizer_step: usize,
     pub(crate) generator_optimizer_step: usize,
+    #[serde(default)]
+    pub(crate) row_flow_optimizer_step: Option<usize>,
+    #[serde(default)]
+    pub(crate) amortization_optimizer_step: Option<usize>,
+    #[serde(default)]
+    pub(crate) sample_id_optimizer_steps: Vec<usize>,
+    #[serde(default)]
+    pub(crate) amortization_identity_optimizer_steps: Vec<usize>,
     pub(crate) optimizer_tensors: Vec<E2eTensorSnapshot>,
     pub(crate) sampler: E2eIdentitySampler,
     pub(crate) seed_trajectory_counts: Vec<usize>,
@@ -100,6 +108,12 @@ impl E2eTrainingCheckpoint {
                 ))
             })
     }
+
+    pub(crate) fn tensor_optional(&self, name: &str) -> Option<&E2eTensorSnapshot> {
+        self.optimizer_tensors
+            .iter()
+            .find(|tensor| tensor.name == name)
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +140,10 @@ mod tests {
             rollouts_per_example: 2,
             base_optimizer_step: 7,
             generator_optimizer_step: 7,
+            row_flow_optimizer_step: None,
+            amortization_optimizer_step: None,
+            sample_id_optimizer_steps: vec![3, 4, 5, 6],
+            amortization_identity_optimizer_steps: vec![1, 2, 3, 4],
             optimizer_tensors: vec![E2eTensorSnapshot {
                 name: "base.w1.m".to_string(),
                 shape: vec![2, 2],
@@ -147,6 +165,8 @@ mod tests {
         assert_eq!(restored.completed_step, 7);
         assert_eq!(restored.shared_base_sha256, "base-hash");
         assert_eq!(restored.hyper_sha256, "hyper-hash");
+        assert_eq!(restored.sample_id_optimizer_steps, [3, 4, 5, 6]);
+        assert_eq!(restored.amortization_identity_optimizer_steps, [1, 2, 3, 4]);
         assert_eq!(
             restored.tensor("base.w1.m").unwrap().values,
             [1.0, 2.0, 3.0, 4.0]

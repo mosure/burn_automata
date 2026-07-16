@@ -60,9 +60,9 @@ identity-disjoint image-conditioned inference. On a deterministic
 OmniSVG-1k split, the selected model obtains 11.63 dB aggregate composited
 PSNR and 9.32 dB p10 at 2,048 particles and 1,024 steps; correct conditioning
 adds 2.79 dB over shuffled images and generated deltas add 3.26 dB over the
-shared base. A 16-target direct-adapter control reaches 23.58 dB aggregate but
-only 19.30 dB p10, showing that recurrent substrate optimization remains a
-large bottleneck before amortization. On two strictly held-out targets with
+shared base. A historical 16-target direct-adapter run reached 23.58 dB, but
+used a per-image output bias absent from the released Growing NPA and is
+excluded from parity claims. On two strictly held-out targets with
 released NPA checkpoints, HyperNPA obtains 9.63--11.65 dB versus
 27.45--27.93 dB for target-specific oracles. Dense 4,096-particle renderer
 captures expose failures that white-background PSNR can obscure, including
@@ -635,8 +635,9 @@ stages total 250,000 equivalent trajectories per identity, or 104.17\% of the
 released recipe's 240,000. All rows are evaluated at 4,096 particles.
 
 \begin{table}[t]
-\caption{Non-amortized 16-identity capacity control. These are training
-identities, not held-out results. Throughput is median optimizer throughput.}
+\caption{Historical non-amortized 16-identity diagnostic. These runs predate
+the zero-output-bias parity contract and are not valid oracle ceilings.
+Throughput is median optimizer throughput.}
 \label{tab:capacity}
 \centering
 \resizebox{\columnwidth}{!}{%
@@ -648,19 +649,26 @@ Training continuation & Agg. & p10 & Gap & M\particles/s \\
 $+$1024p, 240k traj./ID & 15.87 & 13.24 & 7.79 & 10.21 \\
 $+$2048p, 320k traj./ID & 20.71 & 18.05 & 12.60 & 6.90 \\
 $+$4096p density cycle & 20.71 & 18.05 & 12.60 & 4.11 \\
-frozen base, table refine & \textbf{23.58} & \textbf{19.30} & \textbf{15.46} & 4.03 \\
+frozen base, table refine & 23.58 & 19.30 & 15.46 & 4.03 \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-Increased particle density and exposure produce large gains, proving that the
-shared-base-plus-adapter substrate is substantially more expressive than the
-short 1k run suggests. However, the 4,096-particle continuation selected its
-initial checkpoint, indicating regression rather than benefit. Freezing the
-base and refining only table rows raises aggregate PSNR by 2.88 dB, exposing
-optimizer interference and shared-trunk drift. The remaining 19.30 dB p10 is
-still far below the 26 dB gate and includes no unseen-image inference.
+Increased particle density and exposure produced large gains in this legacy
+control. However, its canonical adapter trained an image-specific output bias,
+whereas the released Growing NPA has no final-layer bias. The entire table is
+therefore retained only as historical optimization evidence and cannot bound
+the zero-bias conditioned architecture. A bounded corrected control used an
+upstream-seeded shared rule, zero-output-bias rank-82 controllers, 4,096
+particles, eight trajectories per identity, and rollout lengths sampled from
+32--95. After 2,000 joint updates (16,000 trajectories per identity, 6.67\% of
+the released exposure), it reached 11.63 dB aggregate and 10.52 dB p10 at
+1,024 steps; its minimum multi-horizon p10 was 10.43 dB. Correct controllers
+outperformed shuffled identities by 3.77 dB, confirming that the substrate was
+active, but the result is far below parity and is not a converged capacity
+ceiling. A full-exposure parity-validated control remains necessary before
+attributing the gap to amortization alone.
 
 \subsection{Metric Failure Modes}
 
@@ -721,9 +729,9 @@ outperform shuffled images by 2.79 dB on OmniSVG, and generated adapters
 outperform the shared base by 3.26 dB. Second, the target representation and
 4,096-particle renderer can express high-quality outputs: direct target splats
 reach 28.08 dB p10 and released rose/fish controllers reach about 27.5 dB.
-Third, the direct table improves dramatically with exposure and particle
-density, reaching 23.58 dB aggregate. Conditional control, runtime
-materialization, and GPU training are therefore alive.
+Third, conditional control, runtime materialization, and GPU training are
+alive. The historical 23.58 dB table result is not counted as parity evidence
+because it used a per-image output bias unavailable to the released NPA.
 
 \subsection{What Has Not Been Demonstrated}
 
@@ -753,9 +761,9 @@ The control ladder suggests the following order:
   damage, optimizer, and 30k iterations; compare one-step values, gradients,
   updates, and long rollouts to the released implementation.
   \item \textbf{Raise the adapter substrate tail.} Continue multi-identity
-  direct-adapter training with a frozen, parity-validated trunk and select on
-  4,096-particle multi-horizon p10. The current 19.30 dB p10 is the immediate
-  ceiling for amortization.
+  direct-adapter training under the zero-output-bias contract with a frozen,
+  parity-validated trunk and select on 4,096-particle multi-horizon p10. No
+  valid 26 dB amortization ceiling has yet been established.
   \item \textbf{Distill function, then fine-tune end to end.} Warm-start the
   v3 token generator from canonical dense deltas or probe-rollout behavior,
   then optimize downstream rollout loss with the trunk frozen before a small
@@ -790,7 +798,7 @@ paper's central evidence comes from:
 \begin{itemize}
   \item OmniSVG-1k: \path{artifacts/hyper2d_omnisvg_1k_dino_canonical_quality_refine/report.json};
   \item catalog holdout: \path{artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/report.json};
-  \item direct table: \path{artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json}; and
+  \item historical non-parity table diagnostic: \path{artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json}; and
   \item throughput: \path{artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json}.
 \end{itemize}
 All paper rollouts were regenerated with the headless export command, 4,096

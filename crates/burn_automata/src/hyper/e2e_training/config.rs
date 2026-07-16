@@ -72,6 +72,39 @@ impl E2eCreditAssignment {
             Self::DetachedTbptt => "detached-tbptt",
         }
     }
+
+    pub(crate) fn effective_tbptt_chunk_steps(
+        self,
+        task_loss_weight: f32,
+        configured_chunk_steps: usize,
+        rollout_steps: usize,
+    ) -> Option<usize> {
+        (task_loss_weight > 0.0 && self == Self::DetachedTbptt)
+            .then(|| configured_chunk_steps.max(1).min(rollout_steps.max(1)))
+    }
+
+    pub(crate) fn rollout_gradient_horizon_max_steps(
+        self,
+        task_loss_weight: f32,
+        configured_chunk_steps: usize,
+        rollout_step_min: usize,
+        rollout_steps: usize,
+    ) -> Option<usize> {
+        if task_loss_weight <= 0.0 {
+            return None;
+        }
+        let rollout_steps = rollout_steps.max(1);
+        let rollout_step_min = rollout_step_min.max(1).min(rollout_steps);
+        let sampled_max = if rollout_step_min < rollout_steps {
+            rollout_steps - 1
+        } else {
+            rollout_steps
+        };
+        Some(match self {
+            Self::FullBptt => sampled_max,
+            Self::DetachedTbptt => sampled_max.min(configured_chunk_steps.max(1)),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,6 +151,7 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) seed_replacements_per_interval: usize,
     pub(crate) seed_trajectory_interval: usize,
     pub(crate) brush_size: f32,
+    pub(crate) pre_rollout_step_min: usize,
     pub(crate) pre_rollout_steps: usize,
     pub(crate) rollout_particles: usize,
     pub(crate) rollout_step_min: usize,
@@ -155,10 +189,27 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) token_attention_heads: usize,
     pub(crate) softmax_token_attention: bool,
     pub(crate) canonical_full_rank_lora: bool,
+    pub(crate) adapter_output_bias: bool,
     pub(crate) generator_sample_steps: usize,
+    pub(crate) generator_train_sample_steps: usize,
     pub(crate) generator_source_seed: u64,
+    pub(crate) generator_default_endpoint_rms: f32,
     pub(crate) flow_matching_weight: f32,
+    pub(crate) flow_match_inference_source: bool,
     pub(crate) flow_self_rectification_weight: f32,
+    pub(crate) amortization_enabled: bool,
+    pub(crate) amortization_substrate_steps: usize,
+    pub(crate) amortization_substrate_only: bool,
+    pub(crate) amortization_residual_scale: f32,
+    pub(crate) amortization_residual_anneal_steps: usize,
+    pub(crate) amortization_hyper_only_fraction: f32,
+    pub(crate) amortization_distillation_weight: f32,
+    pub(crate) amortization_distillation_objective: E2eAdapterTeacherObjective,
+    pub(crate) amortization_distillation_probe_rollout_steps: usize,
+    pub(crate) amortization_initialize_from_teacher: bool,
+    pub(crate) amortization_initialize_from_generator: bool,
+    pub(crate) amortization_learning_rate: f32,
+    pub(crate) amortization_grad_normalization: bool,
     pub(crate) generator_output_scale: f32,
     pub(crate) generator_init_scale: f32,
     pub(crate) generator_condition_init_scale: f32,
@@ -181,6 +232,7 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) dino_rgb_channel_scale: f32,
     pub(crate) dino_alpha_channel: bool,
     pub(crate) dino_alpha_channel_scale: f32,
+    pub(crate) dino_patch_pixels: bool,
     pub(crate) spatial_condition_control: bool,
     pub(crate) spatial_condition_control_scale: f32,
     pub(crate) spatial_condition_control_sigma: f32,
@@ -189,7 +241,9 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) checkpoint_interval_steps: usize,
     pub(crate) checkpoint_interval_seconds: usize,
     pub(crate) resume_checkpoint: Option<&'static str>,
+    pub(crate) curriculum_resume: bool,
     pub(crate) checkpoint_condition_encoder: Option<&'static str>,
+    pub(crate) validation_split: &'static str,
     pub(crate) initial_validation_examples: usize,
     pub(crate) validation_examples: usize,
     pub(crate) validation_interval: usize,

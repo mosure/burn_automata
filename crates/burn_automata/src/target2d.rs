@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,98 @@ pub enum Target2dColorGateGradient {
 
 pub const TARGET_2D_COLOR_GATE_GRADIENT: Target2dColorGateGradient =
     Target2dColorGateGradient::DetachedDensity;
+
+pub fn load_target_image_2d_upstream(
+    path: &Path,
+    threshold: f32,
+    target_points: usize,
+    image_size: Option<usize>,
+) -> AutomataResult<TargetImage2d> {
+    if !threshold.is_finite() || threshold < 0.0 {
+        return Err(AutomataError::InvalidArgument(
+            "target threshold must be finite and non-negative".to_string(),
+        ));
+    }
+    let max_size = match image_size {
+        Some(0) => {
+            return Err(AutomataError::InvalidArgument(
+                "target image size must be greater than zero".to_string(),
+            ));
+        }
+        Some(size) => size,
+        None => upstream_adaptive_target_image_size(path, threshold, target_points)?,
+    };
+    let rgba = load_rgba_thumbnail_upstream(path, max_size)?;
+    let values = rgba
+        .as_raw()
+        .iter()
+        .map(|value| *value as f32 / 255.0)
+        .collect::<Vec<_>>();
+    TargetImage2d::from_rgba_pixels(
+        rgba.width() as usize,
+        rgba.height() as usize,
+        &values,
+        TargetImage2dExtractConfig {
+            threshold,
+            ..TargetImage2dExtractConfig::default()
+        },
+    )
+}
+
+pub fn upstream_adaptive_target_image_size(
+    path: &Path,
+    threshold: f32,
+    target_points: usize,
+) -> AutomataResult<usize> {
+    if target_points == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "target points must be greater than zero".to_string(),
+        ));
+    }
+    let mut size = 128usize;
+    for _ in 0..5 {
+        let image = load_rgba_thumbnail_upstream(path, size)?;
+        let count = foreground_alpha_count_upstream(&image, threshold).max(1);
+        size = ((target_points as f32 / count as f32).sqrt() * size as f32)
+            .round()
+            .clamp(1.0, 2048.0) as usize;
+    }
+    Ok(size)
+}
+
+pub fn load_rgba_thumbnail_upstream(
+    path: &Path,
+    max_size: usize,
+) -> AutomataResult<image::RgbaImage> {
+    if max_size == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "target thumbnail size must be greater than zero".to_string(),
+        ));
+    }
+    let image = image::ImageReader::open(path)?.decode().map_err(|error| {
+        AutomataError::InvalidFormat(format!(
+            "failed to decode target image {}: {error}",
+            path.display()
+        ))
+    })?;
+    if image.width() <= max_size as u32 && image.height() <= max_size as u32 {
+        return Ok(image.to_rgba8());
+    }
+    Ok(image
+        .resize(
+            max_size as u32,
+            max_size as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8())
+}
+
+pub fn foreground_alpha_count_upstream(image: &image::RgbaImage, threshold: f32) -> usize {
+    image
+        .pixels()
+        .filter(|pixel| pixel[3] as f32 / 255.0 >= threshold)
+        .count()
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TargetImage2dExtractConfig {
@@ -217,6 +311,21 @@ pub struct Target2dLossOutput {
     pub report: Target2dLossReport,
     pub position_gradients: Vec<[f32; 4]>,
     pub state_gradients: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Target2dUpstreamOneStepOutput {
+    pub features: Vec<f32>,
+    pub raw_update: Vec<f32>,
+    pub dx: Vec<[f32; 4]>,
+    pub ds: Vec<f32>,
+    pub next_positions: Vec<[f32; 4]>,
+    pub next_states: Vec<f32>,
+    pub mean_dx_norm: f32,
+    pub loss: Target2dLossReport,
+    pub raw_gradients: SupervisedGradients,
+    pub normalized_gradients: SupervisedGradients,
+    pub updated_model: NpaModel,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -891,6 +1000,124 @@ pub fn target_2d_rollout_loss_with_gradients(
         normalize_gradient_tensors(&mut gradients);
     }
     Ok((report, gradients))
+}
+
+/// Replays one explicit official Growing-NPA training step without relying on
+/// either implementation's random-number generator.
+///
+/// The official 2D MLP has no output bias. Burn retains a `b2` tensor in its
+/// general model container for artifact compatibility, so this parity path
+/// requires it to be zero and excludes it from gradient normalization/update.
+#[allow(clippy::too_many_arguments)]
+pub fn target_2d_upstream_one_step_with_gradients(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    target: &TargetImage2d,
+    positions: Vec<[f32; 4]>,
+    states: Vec<f32>,
+    update_mask: Vec<f32>,
+    loss_cfg: Target2dLossConfig,
+    optimizer: AdamWConfig,
+) -> AutomataResult<Target2dUpstreamOneStepOutput> {
+    model.validate()?;
+    if model.config != NpaConfig::growing_2d() {
+        return Err(AutomataError::InvalidArgument(
+            "upstream one-step parity requires the canonical Growing 2D model".to_string(),
+        ));
+    }
+    if model.weights.b2.iter().any(|value| *value != 0.0) {
+        return Err(AutomataError::InvalidArgument(
+            "official Growing 2D parity requires an exactly zero output bias".to_string(),
+        ));
+    }
+    if positions.is_empty() || states.len() != positions.len() * model.config.state_dims {
+        return Err(AutomataError::InvalidArgument(
+            "upstream one-step parity input shapes are inconsistent".to_string(),
+        ));
+    }
+    if update_mask.len() != positions.len() {
+        return Err(AutomataError::InvalidArgument(format!(
+            "upstream one-step parity update mask len {} != particles {}",
+            update_mask.len(),
+            positions.len()
+        )));
+    }
+    if update_mask
+        .iter()
+        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(AutomataError::InvalidArgument(
+            "upstream one-step parity update mask must contain finite values in [0, 1]".to_string(),
+        ));
+    }
+
+    let particle_count = positions.len();
+    let perception = perceive_for_model(model, &positions, &states, 1, particle_count, grid)?;
+    let raw_update = model.forward_update_from_features(&perception.features)?;
+    let (dx, ds) = update_to_dx_ds(model, &raw_update, grid.eps)?;
+    let mean_dx_norm = mean_dx_norm(&dx, model.config.spatial_dims);
+    let (next_positions, next_states) = euler_step(
+        &positions,
+        &states,
+        &dx,
+        &ds,
+        1,
+        particle_count,
+        model.config.state_dims,
+        grid,
+        1.0,
+        Some(&update_mask),
+    )?;
+    let rollout = RolloutForTraining {
+        snapshots: vec![RolloutSnapshot {
+            positions,
+            states,
+            mask: update_mask,
+        }],
+        final_positions: next_positions.clone(),
+        final_states: next_states.clone(),
+        mean_dx_norm_sum: mean_dx_norm,
+        steps: 1,
+        batch_size: 1,
+        particle_count,
+    };
+    let loss = target_2d_loss_with_adjoint(
+        &next_positions,
+        &next_states,
+        1,
+        particle_count,
+        model.config.state_dims,
+        target,
+        loss_cfg,
+        mean_dx_norm,
+        1,
+    )?;
+    let mut raw_gradients = bptt_gradients(model, grid, &rollout, &loss, loss_cfg)?;
+    raw_gradients.b2.fill(0.0);
+    let mut normalized_gradients = raw_gradients.clone();
+    normalize_upstream_growing_gradient_tensors(&mut normalized_gradients);
+    let mut updated_model = model.clone();
+    let mut adamw_state = AdamWState::for_model(&updated_model);
+    apply_adamw_gradients(
+        &mut updated_model,
+        normalized_gradients.clone(),
+        &mut adamw_state,
+        optimizer,
+    )?;
+
+    Ok(Target2dUpstreamOneStepOutput {
+        features: perception.features,
+        raw_update,
+        dx,
+        ds,
+        next_positions,
+        next_states,
+        mean_dx_norm,
+        loss: loss.report,
+        raw_gradients,
+        normalized_gradients,
+        updated_model,
+    })
 }
 
 fn validate_target_loss_inputs(
@@ -1814,6 +2041,13 @@ fn normalize_gradient_tensors(grads: &mut SupervisedGradients) {
     normalize_gradient_tensor(&mut grads.b2);
 }
 
+fn normalize_upstream_growing_gradient_tensors(grads: &mut SupervisedGradients) {
+    normalize_gradient_tensor(&mut grads.w1);
+    normalize_gradient_tensor(&mut grads.b1);
+    normalize_gradient_tensor(&mut grads.w2);
+    grads.b2.fill(0.0);
+}
+
 fn normalize_gradient_tensor(values: &mut [f32]) {
     for value in values.iter_mut() {
         if !value.is_finite() {
@@ -1830,6 +2064,18 @@ fn normalize_gradient_tensor(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_loader_never_upscales_the_reference_lizard() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/reference_targets/lizard_upstream_120.png");
+        let adaptive_size = upstream_adaptive_target_image_size(&path, 0.05, 4096).unwrap();
+        let target = load_target_image_2d_upstream(&path, 0.05, 4096, None).unwrap();
+
+        assert_eq!(adaptive_size, 128);
+        assert_eq!([target.source_width, target.source_height], [120, 120]);
+        assert_eq!(target.point_count(), 4103);
+    }
 
     #[test]
     fn target_image_extracts_foreground_with_y_up_coordinates() {

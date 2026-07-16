@@ -2,10 +2,31 @@
 
 use super::*;
 
+    pub(super) fn validate_warm_start_output_bias_contract(
+        artifact_output_bias: Option<bool>,
+        configured_output_bias: bool,
+    ) -> AutomataResult<()> {
+        let artifact_output_bias = artifact_output_bias.unwrap_or(true);
+        if artifact_output_bias != configured_output_bias {
+            return Err(AutomataError::InvalidModel(format!(
+                "warm-start HyperNPA output-bias contract {artifact_output_bias} does not match configured {configured_output_bias}; legacy artifacts without adapter_output_bias are bias-enabled and cannot warm-start the upstream-aligned zero-bias trainer"
+            )));
+        }
+        Ok(())
+    }
+
     #[derive(Clone, Copy)]
     pub(super) struct AdamWBiasCorrection {
         pub(super) beta1: f32,
         pub(super) beta2: f32,
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct GeneratorAdamWOptions<'a> {
+        pub(super) normalize: bool,
+        pub(super) collect_metrics: bool,
+        pub(super) active_identities: &'a [usize],
+        pub(super) upstream_growing_min_lr_scale: Option<f32>,
     }
 
     impl BurnBaseAdamWState {
@@ -107,23 +128,21 @@ use super::*;
 
     impl BurnE2eGeneratorAdamWState {
         pub(super) fn new(params: &BurnE2eGeneratorParams) -> Self {
-            let (row_flow_m, row_flow_v) = params.row_flow.as_ref().map_or_else(
-                || (Vec::new(), Vec::new()),
-                |flow| {
-                    (
-                        flow.tensors
-                            .iter()
-                            .map(|tensor| tensor.clone().inner().zeros_like())
-                            .collect(),
-                        flow.tensors
-                            .iter()
-                            .map(|tensor| tensor.clone().inner().zeros_like())
-                            .collect(),
-                    )
-                },
-            );
             Self {
                 step: 0,
+                row_flow_step: 0,
+                amortization_step: 0,
+                sample_id_steps: if params.kind == E2eHyperGeneratorKind::SampleIdTable {
+                    vec![0; params.token_w.shape().dims::<2>()[1]]
+                } else {
+                    Vec::new()
+                },
+                amortization_identity_steps: params
+                    .amortization_residual_table
+                    .as_ref()
+                    .map_or_else(Vec::new, |table| {
+                        vec![0; table.shape().dims::<2>()[1]]
+                    }),
             token_w_m: params.token_w.clone().inner().zeros_like(),
             token_w_v: params.token_w.clone().inner().zeros_like(),
             token_b_m: params.token_b.clone().inner().zeros_like(),
@@ -170,13 +189,28 @@ use super::*;
                     .clone()
                     .inner()
                     .zeros_like(),
-                row_flow_m,
-                row_flow_v,
+                // The row flow is much larger than the endpoint table. Allocate
+                // its moments only when the flow first receives gradients so a
+                // substrate warm-up does not reserve or checkpoint idle state.
+                row_flow_m: Vec::new(),
+                row_flow_v: Vec::new(),
+                amortization_residual_m: params
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|table| table.clone().inner().zeros_like()),
+                amortization_residual_v: params
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|table| table.clone().inner().zeros_like()),
             }
         }
 
         pub(super) fn next_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
             next_adamw_bias_correction(&mut self.step, cfg)
+        }
+
+        fn next_row_flow_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
+            next_adamw_bias_correction(&mut self.row_flow_step, cfg)
         }
 
         pub(super) fn snapshots(&self) -> AutomataResult<Vec<E2eTensorSnapshot>> {
@@ -226,6 +260,12 @@ use super::*;
                     tensor,
                 )?);
             }
+            if let Some(tensor) = self.amortization_residual_m.clone() {
+                snapshots.push(tensor2_snapshot("generator.amortization_residual.m", tensor)?);
+            }
+            if let Some(tensor) = self.amortization_residual_v.clone() {
+                snapshots.push(tensor2_snapshot("generator.amortization_residual.v", tensor)?);
+            }
             Ok(snapshots)
         }
 
@@ -233,22 +273,104 @@ use super::*;
             checkpoint: &E2eTrainingCheckpoint,
             params: &BurnE2eGeneratorParams,
             device: &BurnDevice,
+            restore_row_flow: bool,
+            allow_missing_amortization: bool,
         ) -> AutomataResult<Self> {
             let tensor = |name| tensor2_from_snapshot(checkpoint.tensor(name)?, device);
+            let amortization_tensor = |name: &str, table: &Tensor2| {
+                checkpoint.tensor_optional(name).map_or_else(
+                    || {
+                        if allow_missing_amortization {
+                            Ok(table.clone().inner().zeros_like())
+                        } else {
+                            Err(AutomataError::InvalidArgument(format!(
+                                "training checkpoint is missing tensor {name}"
+                            )))
+                        }
+                    },
+                    |snapshot| tensor2_from_snapshot(snapshot, device),
+                )
+            };
             let row_flow_count = params
                 .row_flow
                 .as_ref()
                 .map_or(0, |flow| flow.tensors.len());
             let mut row_flow_m = Vec::with_capacity(row_flow_count);
             let mut row_flow_v = Vec::with_capacity(row_flow_count);
-            for index in 0..row_flow_count {
+            for index in 0..usize::from(restore_row_flow).saturating_mul(row_flow_count) {
                 let m_name = format!("generator.row_flow.{index}.m");
                 let v_name = format!("generator.row_flow.{index}.v");
-                row_flow_m.push(tensor2_from_snapshot(checkpoint.tensor(&m_name)?, device)?);
-                row_flow_v.push(tensor2_from_snapshot(checkpoint.tensor(&v_name)?, device)?);
+                match (
+                    checkpoint.tensor_optional(&m_name),
+                    checkpoint.tensor_optional(&v_name),
+                ) {
+                    (Some(m), Some(v)) => {
+                        row_flow_m.push(tensor2_from_snapshot(m, device)?);
+                        row_flow_v.push(tensor2_from_snapshot(v, device)?);
+                    }
+                    (None, None) if index == 0 => break,
+                    (None, None) => {
+                        return Err(AutomataError::InvalidArgument(
+                            "training checkpoint contains a partial row-flow optimizer state"
+                                .to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(AutomataError::InvalidArgument(format!(
+                            "training checkpoint must contain both {m_name} and {v_name}"
+                        )));
+                    }
+                }
             }
             Ok(Self {
                 step: checkpoint.generator_optimizer_step,
+                row_flow_step: checkpoint
+                    .row_flow_optimizer_step
+                    .unwrap_or(checkpoint.generator_optimizer_step)
+                    * usize::from(restore_row_flow),
+                amortization_step: checkpoint
+                    .amortization_optimizer_step
+                    .unwrap_or(checkpoint.generator_optimizer_step),
+                sample_id_steps: if params.kind == E2eHyperGeneratorKind::SampleIdTable {
+                    let identities = params.token_w.shape().dims::<2>()[1];
+                    if checkpoint.sample_id_optimizer_steps.is_empty() {
+                        vec![checkpoint.generator_optimizer_step; identities]
+                    } else if checkpoint.sample_id_optimizer_steps.len() == identities {
+                        checkpoint.sample_id_optimizer_steps.clone()
+                    } else {
+                        return Err(AutomataError::InvalidArgument(format!(
+                            "training checkpoint has {} sample-ID optimizer steps for {identities} identities",
+                            checkpoint.sample_id_optimizer_steps.len()
+                        )));
+                    }
+                } else {
+                    Vec::new()
+                },
+                amortization_identity_steps: params
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|table| {
+                        let identities = table.shape().dims::<2>()[1];
+                        if checkpoint.amortization_identity_optimizer_steps.is_empty() {
+                            Ok(vec![
+                                checkpoint
+                                    .amortization_optimizer_step
+                                    .unwrap_or(checkpoint.generator_optimizer_step);
+                                identities
+                            ])
+                        } else if checkpoint.amortization_identity_optimizer_steps.len()
+                            == identities
+                        {
+                            Ok(checkpoint.amortization_identity_optimizer_steps.clone())
+                        } else {
+                            Err(AutomataError::InvalidArgument(format!(
+                                "training checkpoint has {} amortization optimizer steps for {identities} identities",
+                                checkpoint.amortization_identity_optimizer_steps.len()
+                            )))
+                        }
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
                 token_w_m: tensor("generator.token_w.m")?,
                 token_w_v: tensor("generator.token_w.v")?,
                 token_b_m: tensor("generator.token_b.m")?,
@@ -277,6 +399,20 @@ use super::*;
                 )?,
                 row_flow_m,
                 row_flow_v,
+                amortization_residual_m: params
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|table| {
+                        amortization_tensor("generator.amortization_residual.m", table)
+                    })
+                    .transpose()?,
+                amortization_residual_v: params
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|table| {
+                        amortization_tensor("generator.amortization_residual.v", table)
+                    })
+                    .transpose()?,
             })
         }
     }
@@ -297,6 +433,7 @@ use super::*;
 
         fn with_row_flow(
             base: &NpaModel,
+            examples: &[BurnE2eRolloutExample],
             config: BurnE2eRolloutTrainConfig,
             row_flow: BurnRowFlowParams,
             device: &BurnDevice,
@@ -314,6 +451,46 @@ use super::*;
                 )));
             }
             let placeholder = || tracked_tensor(vec![0.0], [1, 1], device);
+            let amortization_residual_table = if config.amortization_enabled {
+                if config.generator_optimizer.learning_rate <= 0.0 {
+                    return Err(AutomataError::InvalidArgument(
+                        "amortization requires a positive generator learning rate".to_string(),
+                    ));
+                }
+                let row_values = row_flow.config.row_count * row_flow.config.max_row_dims;
+                let mut values = vec![0.0; row_values * examples.len()];
+                if config.amortization_initialize_from_teacher {
+                    for (identity, example) in examples.iter().enumerate() {
+                        let teacher = example.teacher_adapter.as_ref().ok_or_else(|| {
+                            AutomataError::InvalidArgument(
+                                "teacher-initialized amortization requires every training example to provide an exact adapter"
+                                    .to_string(),
+                            )
+                        })?;
+                        let adapter = NpaLowRankAdapter::from_parameter_vector(
+                            &base.config,
+                            config.adapter_rank,
+                            config.adapter_alpha,
+                            teacher.clone(),
+                        )?;
+                        let packed = layout.adapter_to_packed(&adapter)?;
+                        for (row, value) in packed.into_iter().enumerate() {
+                            values[row * examples.len() + identity] = value;
+                        }
+                    }
+                }
+                Some(tracked_tensor(
+                    values,
+                    [row_values, examples.len()],
+                    device,
+                ))
+            } else {
+                None
+            };
+            let amortization_gradient_layout = Some(PackedNpaGradientLayout::new(
+                &base.config,
+                config.adapter_output_bias,
+            ));
             Ok(Self {
                 kind: E2eHyperGeneratorKind::ConditionalRowFlow,
                 token_w: placeholder(),
@@ -340,6 +517,11 @@ use super::*;
                 adapter_chunk_size: row_flow.config.max_row_dims,
                 output_chunks: row_flow.config.row_count,
                 row_flow: Some(row_flow),
+                amortization_residual_table,
+                amortization_gradient_layout,
+                amortization_learning_rate_scale: config.amortization_learning_rate
+                    / config.generator_optimizer.learning_rate,
+                amortization_grad_normalization: config.amortization_grad_normalization,
             })
         }
 
@@ -351,15 +533,19 @@ use super::*;
             let output_dims =
                 NpaLowRankAdapter::parameter_count_for_config(&base.config, config.adapter_rank);
             let (constants, mask) = if config.canonical_full_rank_lora {
-                let canonical =
-                    crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
-                        &base.config,
-                        config.adapter_rank,
-                        config.adapter_alpha,
-                    )?;
+                let canonical = crate::hyper::adapter_layout::CanonicalFullRankLora2d::new_with_output_bias(
+                    &base.config,
+                    config.adapter_rank,
+                    config.adapter_alpha,
+                    config.adapter_output_bias,
+                )?;
                 (canonical.constants, canonical.trainable_mask)
             } else {
-                (vec![0.0; output_dims], vec![1.0; output_dims])
+                let mut mask = vec![1.0; output_dims];
+                if !config.adapter_output_bias {
+                    mask[output_dims - base.config.update_dims()..].fill(0.0);
+                }
+                (vec![0.0; output_dims], mask)
             };
             Ok((
                 tensor(constants, [1, output_dims], device),
@@ -415,8 +601,17 @@ use super::*;
                     expected_kind.artifact_architecture()
                 )));
             }
+            validate_warm_start_output_bias_contract(
+                initial.adapter_output_bias,
+                config.adapter_output_bias,
+            )?;
             if expected_kind == E2eHyperGeneratorKind::ConditionalRowFlow {
-                let flow = BurnRowFlowParams::from_artifact(initial, &base.config, device)?;
+                let flow = BurnRowFlowParams::from_artifact_with_output_bias(
+                    initial,
+                    &base.config,
+                    config.adapter_output_bias,
+                    device,
+                )?;
                 if flow.config.condition_tokens != first.token_count
                     || flow.config.condition_dims != first.embed_dims
                     || flow.config.layers != config.generator_layers
@@ -430,7 +625,7 @@ use super::*;
                             .to_string(),
                     ));
                 }
-                return Self::with_row_flow(base, config, flow, device);
+                return Self::with_row_flow(base, examples, config, flow, device);
             }
             if initial.uses_canonical_full_rank_lora() != config.canonical_full_rank_lora {
                 return Err(AutomataError::InvalidModel(format!(
@@ -499,11 +694,13 @@ use super::*;
                         - config.dino_alpha_channel_scale)
                         .abs()
                         > f32::EPSILON
+                    || initial.condition_patch_pixels.unwrap_or(false)
+                        != config.dino_patch_pixels
                     || initial.condition_l2_normalize_features.unwrap_or(true)
                         != config.dino_l2_normalize_features)
             {
                 return Err(AutomataError::InvalidModel(
-                    "warm-start HyperNPA DINO RGB/alpha/normalization contract does not match the configured condition pipeline"
+                    "warm-start HyperNPA DINO RGB/alpha/patch-pixel/normalization contract does not match the configured condition pipeline"
                         .to_string(),
                 ));
             }
@@ -567,6 +764,10 @@ use super::*;
                     adapter_chunk_size: output_dims,
                     output_chunks: 1,
                     row_flow: None,
+                    amortization_residual_table: None,
+                    amortization_gradient_layout: None,
+                    amortization_learning_rate_scale: 1.0,
+                    amortization_grad_normalization: false,
                 });
             }
             let adapter_chunk_size = if expected_kind == E2eHyperGeneratorKind::PooledFlow {
@@ -727,6 +928,10 @@ use super::*;
                 adapter_chunk_size,
                 output_chunks,
                 row_flow: None,
+                amortization_residual_table: None,
+                amortization_gradient_layout: None,
+                amortization_learning_rate_scale: 1.0,
+                amortization_grad_normalization: false,
             })
         }
 
@@ -768,7 +973,7 @@ use super::*;
                     embed_dims,
                     device,
                 )?;
-                return Self::with_row_flow(base, config, flow, device);
+                return Self::with_row_flow(base, examples, config, flow, device);
             }
             if kind == E2eHyperGeneratorKind::SampleIdTable {
                 if token_count != 1 {
@@ -833,6 +1038,10 @@ use super::*;
                     adapter_chunk_size: output_dims,
                     output_chunks: 1,
                     row_flow: None,
+                    amortization_residual_table: None,
+                    amortization_gradient_layout: None,
+                    amortization_learning_rate_scale: 1.0,
+                    amortization_grad_normalization: false,
                 });
             }
             let hidden_dims = config.generator_hidden_dims.max(1);
@@ -1068,6 +1277,10 @@ use super::*;
                 adapter_chunk_size,
                 output_chunks,
                 row_flow: None,
+                amortization_residual_table: None,
+                amortization_gradient_layout: None,
+                amortization_learning_rate_scale: 1.0,
+                amortization_grad_normalization: false,
             })
         }
 
@@ -1247,6 +1460,107 @@ use super::*;
             )
         }
 
+        pub(super) fn amortization_residual_rows(
+            &self,
+            indices: &[usize],
+        ) -> Option<Tensor3> {
+            let table = self.amortization_residual_table.as_ref()?;
+            let flow = self
+                .row_flow
+                .as_ref()
+                .expect("amortization is restricted to conditional row flow");
+            let device = table.device();
+            let selected = table.clone().transpose().select(
+                0,
+                Tensor::<BurnBackend, 1, Int>::from_data(
+                    TensorData::new(
+                        indices.iter().map(|index| *index as i64).collect::<Vec<_>>(),
+                        [indices.len()],
+                    ),
+                    &device,
+                ),
+            );
+            Some(selected.reshape([
+                indices.len(),
+                flow.config.row_count,
+                flow.config.max_row_dims,
+            ]))
+        }
+
+        pub(super) fn amortization_snapshot(
+            &self,
+        ) -> AutomataResult<Option<E2eTensorSnapshot>> {
+            self.amortization_residual_table
+                .as_ref()
+                .map(|table| {
+                    tensor2_snapshot(
+                        "generator.amortization_residual.parameter",
+                        table.clone().inner(),
+                    )
+                })
+                .transpose()
+        }
+
+        pub(super) fn restore_amortization(
+            &mut self,
+            checkpoint: &E2eTrainingCheckpoint,
+            device: &BurnDevice,
+            allow_missing: bool,
+        ) -> AutomataResult<bool> {
+            let Some(current) = self.amortization_residual_table.as_ref() else {
+                return Ok(false);
+            };
+            let expected = current.shape().dims::<2>();
+            let Some(snapshot) = checkpoint
+                .tensor_optional("generator.amortization_residual.parameter")
+            else {
+                if allow_missing {
+                    return Ok(false);
+                }
+                return Err(AutomataError::InvalidArgument(
+                    "training checkpoint is missing tensor generator.amortization_residual.parameter"
+                        .to_string(),
+                ));
+            };
+            let restored = tensor2_from_snapshot(snapshot, device)?;
+            if restored.shape().dims::<2>() != expected {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "amortization checkpoint shape {:?} does not match {:?}",
+                    restored.shape().dims::<2>(),
+                    expected,
+                )));
+            }
+            self.amortization_residual_table = Some(track(restored));
+            Ok(true)
+        }
+
+        pub(super) fn initialize_amortization_from_rows(
+            &mut self,
+            rows: Tensor3,
+        ) -> AutomataResult<()> {
+            let table = self.amortization_residual_table.as_ref().ok_or_else(|| {
+                AutomataError::InvalidArgument(
+                    "generator endpoint initialization requires an amortization table"
+                        .to_string(),
+                )
+            })?;
+            let [identities, row_count, row_dims] = rows.shape().dims::<3>();
+            let expected = table.shape().dims::<2>();
+            if [row_count * row_dims, identities] != expected {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "generated endpoint table shape [{}, {}] does not match {:?}",
+                    row_count * row_dims,
+                    identities,
+                    expected,
+                )));
+            }
+            let initialized = rows
+                .reshape([identities, row_count * row_dims])
+                .transpose();
+            self.amortization_residual_table = Some(track(initialized.inner()));
+            Ok(())
+        }
+
         pub(super) fn adapter_batch_with_dense_rows(
             &self,
             condition: Tensor3,
@@ -1258,7 +1572,11 @@ use super::*;
             Option<BurnRowFlowCondition>,
         ) {
             if let Some(flow) = &self.row_flow {
-                let (rows, prepared) = flow.sample_rows_with_prepared(condition, npa_config);
+                let (rows, prepared) = flow.sample_rows_with_prepared_steps(
+                    condition,
+                    npa_config,
+                    config.generator_train_sample_steps,
+                );
                 return (
                     BurnAdapterBatch::from_dense_residual_rows(rows.clone(), npa_config),
                     Some(rows),
@@ -1417,18 +1735,163 @@ use super::*;
             grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
             state: &mut BurnE2eGeneratorAdamWState,
             cfg: AdamWConfig,
+            options: GeneratorAdamWOptions<'_>,
+        ) -> AutomataResult<(f32, f32, f32)> {
+            let tensors = self.take_gradients(grads);
+            self.apply_adamw_gradients(tensors, state, cfg, options)
+        }
+
+        pub(super) fn apply_row_flow_adamw(
+            &mut self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+            state: &mut BurnE2eGeneratorAdamWState,
+            cfg: AdamWConfig,
             normalize: bool,
             collect_metrics: bool,
         ) -> AutomataResult<(f32, f32)> {
-            if let Some(flow) = &mut self.row_flow {
-                if state.row_flow_m.len() != flow.tensors.len()
-                    || state.row_flow_v.len() != flow.tensors.len()
-                {
-                    return Err(AutomataError::InvalidArgument(
-                        "conditional row flow optimizer state does not match model tensors"
-                            .to_string(),
-                    ));
-                }
+            let flow = self.row_flow.as_mut().ok_or_else(|| {
+                AutomataError::InvalidArgument(
+                    "row-flow-only optimizer update requires conditional-row-flow".to_string(),
+                )
+            })?;
+            let tensors = flow
+                .tensors
+                .iter()
+                .map(|tensor| {
+                    tensor
+                        .grad_remove(grads)
+                        .unwrap_or_else(|| tensor.clone().inner().zeros_like())
+                })
+                .collect();
+            Self::apply_row_flow_gradients(
+                flow,
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+            )
+        }
+
+        fn apply_row_flow_gradients(
+            flow: &mut BurnRowFlowParams,
+            mut tensors: Vec<Tensor2Inner>,
+            state: &mut BurnE2eGeneratorAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(f32, f32)> {
+            if state.row_flow_m.is_empty() && state.row_flow_v.is_empty() {
+                state.row_flow_m = flow
+                    .tensors
+                    .iter()
+                    .map(|tensor| tensor.clone().inner().zeros_like())
+                    .collect();
+                state.row_flow_v = flow
+                    .tensors
+                    .iter()
+                    .map(|tensor| tensor.clone().inner().zeros_like())
+                    .collect();
+            }
+            if state.row_flow_m.len() != flow.tensors.len()
+                || state.row_flow_v.len() != flow.tensors.len()
+                || tensors.len() != flow.tensors.len()
+            {
+                return Err(AutomataError::InvalidArgument(
+                    "conditional row flow optimizer state does not match model tensors"
+                        .to_string(),
+                ));
+            }
+            let (norm, scale, scale_tensor) = prepare_grad_group(
+                &mut tensors,
+                cfg.grad_clip_norm,
+                normalize,
+                collect_metrics,
+            )?;
+            let bias = state.next_row_flow_bias_correction(cfg);
+            for (index, gradient) in tensors.into_iter().enumerate() {
+                flow.tensors[index] = track(apply_adamw_tensor(
+                    flow.tensors[index].clone().inner(),
+                    gradient,
+                    &mut state.row_flow_m[index],
+                    &mut state.row_flow_v[index],
+                    cfg,
+                    scale_tensor.clone(),
+                    bias,
+                ));
+            }
+            state.step = state.step.max(state.row_flow_step);
+            Ok((norm, scale))
+        }
+
+        pub(super) fn apply_amortization_adamw(
+            &mut self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+            state: &mut BurnE2eGeneratorAdamWState,
+            cfg: AdamWConfig,
+            collect_metrics: bool,
+            active_identities: &[usize],
+            upstream_growing_min_lr_scale: Option<f32>,
+        ) -> AutomataResult<f32> {
+            let table = self.amortization_residual_table.as_mut().ok_or_else(|| {
+                AutomataError::InvalidArgument(
+                    "amortization-only update requires an endpoint table".to_string(),
+                )
+            })?;
+            let mut gradient = table
+                .grad_remove(grads)
+                .unwrap_or_else(|| table.clone().inner().zeros_like());
+            if self.amortization_grad_normalization {
+                gradient = normalize_packed_npa_table_gradient(
+                    gradient,
+                    self.amortization_gradient_layout
+                        .expect("amortization table has an NPA gradient layout"),
+                );
+            }
+            let table_cfg = AdamWConfig {
+                learning_rate: cfg.learning_rate * self.amortization_learning_rate_scale,
+                weight_decay: 0.0,
+                ..cfg
+            };
+            let (norm, _, scale) = prepare_grad_group(
+                std::slice::from_mut(&mut gradient),
+                table_cfg.grad_clip_norm,
+                false,
+                collect_metrics,
+            )?;
+            let moment = state.amortization_residual_m.as_mut().ok_or_else(|| {
+                AutomataError::InvalidArgument(
+                    "amortization optimizer is missing first moments".to_string(),
+                )
+            })?;
+            let velocity = state.amortization_residual_v.as_mut().ok_or_else(|| {
+                AutomataError::InvalidArgument(
+                    "amortization optimizer is missing second moments".to_string(),
+                )
+            })?;
+            *table = track(apply_sparse_column_adamw_tensor(
+                table.clone().inner(),
+                gradient,
+                moment,
+                velocity,
+                table_cfg,
+                scale,
+                SparseIdentityAdamW {
+                    identity_steps: &mut state.amortization_identity_steps,
+                    active_identities,
+                    upstream_growing_min_lr_scale,
+                },
+            )?);
+            state.amortization_step = state.amortization_step.saturating_add(1);
+            state.step = state.step.max(state.amortization_step);
+            Ok(norm)
+        }
+
+        pub(super) fn take_gradients(
+            &self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+        ) -> Vec<Tensor2Inner> {
+            if let Some(flow) = &self.row_flow {
                 let mut tensors = flow
                     .tensors
                     .iter()
@@ -1438,27 +1901,16 @@ use super::*;
                             .unwrap_or_else(|| tensor.clone().inner().zeros_like())
                     })
                     .collect::<Vec<_>>();
-                let (norm, scale, scale_tensor) = prepare_grad_group(
-                    &mut tensors,
-                    cfg.grad_clip_norm,
-                    normalize,
-                    collect_metrics,
-                )?;
-                let bias = state.next_bias_correction(cfg);
-                for (index, gradient) in tensors.into_iter().enumerate() {
-                    flow.tensors[index] = track(apply_adamw_tensor(
-                        flow.tensors[index].clone().inner(),
-                        gradient,
-                        &mut state.row_flow_m[index],
-                        &mut state.row_flow_v[index],
-                        cfg,
-                        scale_tensor.clone(),
-                        bias,
-                    ));
+                if let Some(table) = &self.amortization_residual_table {
+                    tensors.push(
+                        table
+                            .grad_remove(grads)
+                            .unwrap_or_else(|| table.clone().inner().zeros_like()),
+                    );
                 }
-                return Ok((norm, scale));
+                return tensors;
             }
-            let mut tensors = vec![
+            vec![
                 self.token_w
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.token_w.clone().inner().zeros_like()),
@@ -1494,7 +1946,105 @@ use super::*;
                     .unwrap_or_else(|| {
                         self.condition_control_state_w.clone().inner().zeros_like()
                     }),
-            ];
+            ]
+        }
+
+        pub(super) fn apply_adamw_gradients(
+            &mut self,
+            mut tensors: Vec<Tensor2Inner>,
+            state: &mut BurnE2eGeneratorAdamWState,
+            cfg: AdamWConfig,
+            options: GeneratorAdamWOptions<'_>,
+        ) -> AutomataResult<(f32, f32, f32)> {
+            let GeneratorAdamWOptions {
+                normalize,
+                collect_metrics,
+                active_identities,
+                upstream_growing_min_lr_scale,
+            } = options;
+            if let Some(flow) = &mut self.row_flow {
+                let table_gradient = self
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|_| tensors.pop().expect("amortization gradient is present"));
+                let (norm, scale) = Self::apply_row_flow_gradients(
+                    flow,
+                    tensors,
+                    state,
+                    cfg,
+                    normalize,
+                    collect_metrics,
+                )?;
+                let amortization_grad_norm = if let Some(mut gradient) = table_gradient {
+                    let table = self
+                        .amortization_residual_table
+                        .as_mut()
+                        .expect("amortization table matches its gradient");
+                    let table_cfg = AdamWConfig {
+                        learning_rate: cfg.learning_rate
+                            * self.amortization_learning_rate_scale,
+                        weight_decay: 0.0,
+                        ..cfg
+                    };
+                    let moment = state.amortization_residual_m.as_mut().ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "amortization optimizer is missing first moments".to_string(),
+                        )
+                    })?;
+                    let velocity = state.amortization_residual_v.as_mut().ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "amortization optimizer is missing second moments".to_string(),
+                        )
+                    })?;
+                    if self.amortization_grad_normalization {
+                        gradient = normalize_packed_npa_table_gradient(
+                            gradient,
+                            self.amortization_gradient_layout
+                                .expect("amortization table has an NPA gradient layout"),
+                        );
+                    }
+                    let (table_norm, _, table_scale) = prepare_grad_group(
+                        std::slice::from_mut(&mut gradient),
+                        table_cfg.grad_clip_norm,
+                        false,
+                        collect_metrics,
+                    )?;
+                    *table = track(apply_sparse_column_adamw_tensor(
+                        table.clone().inner(),
+                        gradient,
+                        moment,
+                        velocity,
+                        table_cfg,
+                        table_scale,
+                        SparseIdentityAdamW {
+                            identity_steps: &mut state.amortization_identity_steps,
+                            active_identities,
+                            upstream_growing_min_lr_scale,
+                        },
+                    )?);
+                    state.amortization_step = state.amortization_step.saturating_add(1);
+                    table_norm
+                } else if state.amortization_residual_m.is_some()
+                    || state.amortization_residual_v.is_some()
+                {
+                    return Err(AutomataError::InvalidArgument(
+                        "amortization optimizer state exists without a residual table".to_string(),
+                    ));
+                } else {
+                    0.0
+                };
+                state.step = state
+                    .step
+                    .max(state.row_flow_step)
+                    .max(state.amortization_step);
+                return Ok((norm, scale, amortization_grad_norm));
+            }
+            if tensors.len() != 11 {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "HyperNPA generator expected 11 gradient tensors, got {}",
+                    tensors.len()
+                )));
+            }
             let normalize_sample_table = normalize && self.kind == E2eHyperGeneratorKind::SampleIdTable;
             let original_table_norm = (normalize_sample_table && collect_metrics)
                 .then(|| group_norm_tensor(&tensors));
@@ -1519,15 +2069,31 @@ use super::*;
                 prepared_norm
             };
             let bias = state.next_bias_correction(cfg);
-            self.token_w = track(apply_adamw_tensor(
-                self.token_w.clone().inner(),
-                tensors.remove(0),
-                &mut state.token_w_m,
-                &mut state.token_w_v,
-                cfg,
-                scale_tensor.clone(),
-                bias,
-            ));
+            self.token_w = track(if self.kind == E2eHyperGeneratorKind::SampleIdTable {
+                apply_sparse_column_adamw_tensor(
+                    self.token_w.clone().inner(),
+                    tensors.remove(0),
+                    &mut state.token_w_m,
+                    &mut state.token_w_v,
+                    cfg,
+                    scale_tensor.clone(),
+                    SparseIdentityAdamW {
+                        identity_steps: &mut state.sample_id_steps,
+                        active_identities,
+                        upstream_growing_min_lr_scale,
+                    },
+                )?
+            } else {
+                apply_adamw_tensor(
+                    self.token_w.clone().inner(),
+                    tensors.remove(0),
+                    &mut state.token_w_m,
+                    &mut state.token_w_v,
+                    cfg,
+                    scale_tensor.clone(),
+                    bias,
+                )
+            });
             self.token_b = track(apply_adamw_tensor(
                 self.token_b.clone().inner(),
                 tensors.remove(0),
@@ -1618,13 +2184,13 @@ use super::*;
                 scale_tensor,
                 bias,
             ));
-            Ok((norm, scale))
+            Ok((norm, scale, 0.0))
         }
 
         pub(super) fn to_hyper(&self, config: BurnE2eRolloutTrainConfig) -> AutomataResult<E2eHyperNpa2d> {
             if let Some(flow) = &self.row_flow {
                 return Ok(E2eHyperNpa2d {
-                    version: 2,
+                    version: if config.dino_patch_pixels { 3 } else { 2 },
                     architecture: E2E_HYPER_ARCH_CONDITIONAL_ROW_FLOW.to_string(),
                     backend: Some(format!("{BACKEND}_e2e_rollout")),
                     condition_encoder: None,
@@ -1638,6 +2204,7 @@ use super::*;
                     condition_rgb_channel_scale: Some(config.dino_rgb_channel_scale),
                     condition_alpha_channel: Some(config.dino_alpha_channel),
                     condition_alpha_channel_scale: Some(config.dino_alpha_channel_scale),
+                    condition_patch_pixels: Some(config.dino_patch_pixels),
                     condition_l2_normalize_features: Some(config.dino_l2_normalize_features),
                     condition_resize_mode: Some("stretch".to_string()),
                     condition_application: Some("static-adapter".to_string()),
@@ -1653,6 +2220,7 @@ use super::*;
                     adapter_parameterization: Some(
                         E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL.to_string(),
                     ),
+                    adapter_output_bias: Some(config.adapter_output_bias),
                     adapter_chunk_size: None,
                     spatial_condition_control: None,
                     spatial_condition_control_scale: None,
@@ -1693,6 +2261,7 @@ use super::*;
                 condition_alpha_channel: image_conditioned.then_some(config.dino_alpha_channel),
                 condition_alpha_channel_scale: image_conditioned
                     .then_some(config.dino_alpha_channel_scale),
+                condition_patch_pixels: image_conditioned.then_some(config.dino_patch_pixels),
                 condition_l2_normalize_features: image_conditioned
                     .then_some(config.dino_l2_normalize_features),
                 condition_resize_mode: image_conditioned.then(|| "stretch".to_string()),
@@ -1725,6 +2294,7 @@ use super::*;
                     }
                     .to_string(),
                 ),
+                adapter_output_bias: Some(config.adapter_output_bias),
                 adapter_chunk_size: matches!(
                     self.kind,
                     E2eHyperGeneratorKind::SpatialTokenFlow
@@ -1799,6 +2369,13 @@ use super::*;
                 adapter_chunk_size: self.adapter_chunk_size,
                 output_chunks: self.output_chunks,
                 row_flow: self.row_flow.as_ref().map(BurnRowFlowParams::detached),
+                amortization_residual_table: self
+                    .amortization_residual_table
+                    .as_ref()
+                    .map(|table| detach2(table.clone())),
+                amortization_gradient_layout: self.amortization_gradient_layout,
+                amortization_learning_rate_scale: self.amortization_learning_rate_scale,
+                amortization_grad_normalization: self.amortization_grad_normalization,
             }
         }
     }
@@ -1827,7 +2404,11 @@ use super::*;
                     [config.update_dims(), config.hidden_dims],
                     device,
                 ),
-                b2: tracked_tensor(model.weights.b2.clone(), [1, config.update_dims()], device),
+                b2: tracked_tensor(
+                    vec![0.0; config.update_dims()],
+                    [1, config.update_dims()],
+                    device,
+                ),
             })
         }
 
@@ -1852,12 +2433,9 @@ use super::*;
                     .matmul(adapter.w2_down.clone())
                     .mul_scalar(scale);
             let b1 = self.b1.clone() + adapter.b1_delta.clone();
-            let b2 = self.b2.clone() + adapter.b2_delta.clone();
             let hidden_dims = b1.shape().dims::<2>()[1];
-            let output_dims = b2.shape().dims::<2>()[1];
             relu(features.matmul(w1.transpose()) + b1.expand([rows, hidden_dims]))
                 .matmul(w2.transpose())
-                + b2.expand([rows, output_dims])
         }
 
         pub(super) fn forward_adapter_batch(
@@ -1906,7 +2484,6 @@ use super::*;
                     .mul_scalar(scale)
             };
             let hidden_dims = self.b1.shape().dims::<2>()[1];
-            let output_dims = self.b2.shape().dims::<2>()[1];
             let b1 = self
                 .b1
                 .clone()
@@ -1916,16 +2493,7 @@ use super::*;
                     .b1_delta
                     .clone()
                     .expand([adapter_batches, rows, hidden_dims]);
-            let b2 = self
-                .b2
-                .clone()
-                .unsqueeze_dim::<3>(0)
-                .expand([adapter_batches, rows, output_dims])
-                + adapter
-                    .b2_delta
-                    .clone()
-                    .expand([adapter_batches, rows, output_dims]);
-            relu(features.matmul(w1.swap_dims(1, 2)) + b1).matmul(w2.swap_dims(1, 2)) + b2
+            relu(features.matmul(w1.swap_dims(1, 2)) + b1).matmul(w2.swap_dims(1, 2))
         }
 
         pub(super) fn apply_adamw(
@@ -1936,7 +2504,15 @@ use super::*;
             normalize: bool,
             collect_metrics: bool,
         ) -> AutomataResult<(f32, f32)> {
-            let mut tensors = vec![
+            let tensors = self.take_gradients(grads);
+            self.apply_adamw_gradients(tensors, state, cfg, normalize, collect_metrics)
+        }
+
+        pub(super) fn take_gradients(
+            &self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+        ) -> Vec<Tensor2Inner> {
+            vec![
                 self.w1
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.w1.clone().inner().zeros_like()),
@@ -1949,7 +2525,23 @@ use super::*;
                 self.b2
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.b2.clone().inner().zeros_like()),
-            ];
+            ]
+        }
+
+        pub(super) fn apply_adamw_gradients(
+            &mut self,
+            mut tensors: Vec<Tensor2Inner>,
+            state: &mut BurnBaseAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(f32, f32)> {
+            if tensors.len() != 4 {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "NPA base expected 4 gradient tensors, got {}",
+                    tensors.len()
+                )));
+            }
             let (norm, scale, scale_tensor) =
                 prepare_grad_group(&mut tensors, cfg.grad_clip_norm, normalize, collect_metrics)?;
             let bias = state.next_bias_correction(cfg);
@@ -1980,15 +2572,10 @@ use super::*;
                 scale_tensor.clone(),
                 bias,
             ));
-            self.b2 = track(apply_adamw_tensor(
-                self.b2.clone().inner(),
-                tensors.remove(0),
-                &mut state.b2_m,
-                &mut state.b2_v,
-                cfg,
-                scale_tensor,
-                bias,
-            ));
+            let _unused_output_bias_gradient = tensors.remove(0);
+            self.b2 = track(self.b2.clone().inner().zeros_like());
+            state.b2_m = state.b2_m.clone().zeros_like();
+            state.b2_v = state.b2_v.clone().zeros_like();
             Ok((norm, scale))
         }
 
@@ -1997,7 +2584,7 @@ use super::*;
                 w1: tensor_vec(self.w1.clone().inner())?,
                 b1: tensor_vec(self.b1.clone().inner())?,
                 w2: tensor_vec(self.w2.clone().inner())?,
-                b2: tensor_vec(self.b2.clone().inner())?,
+                b2: vec![0.0; model.config.update_dims()],
             };
             model.validate()
         }
@@ -2052,10 +2639,7 @@ use super::*;
                 )
                 .require_grad(),
                 b2: tensor3(
-                    models
-                        .iter()
-                        .flat_map(|model| model.weights.b2.iter().copied())
-                        .collect(),
+                    vec![0.0; model_count * output_dims],
                     [model_count, 1, output_dims],
                     device,
                 )
@@ -2098,6 +2682,23 @@ use super::*;
             let hidden_dims = self.w1.shape().dims::<3>()[1];
             let output_dims = self.w2.shape().dims::<3>()[1];
 
+            if model_count == 1 {
+                let w1 = self
+                    .w1
+                    .clone()
+                    .expand([trajectory_count, hidden_dims, input_dims]);
+                let b1 = self
+                    .b1
+                    .clone()
+                    .expand([trajectory_count, particles, hidden_dims]);
+                let w2 = self
+                    .w2
+                    .clone()
+                    .expand([trajectory_count, output_dims, hidden_dims]);
+                return relu(features.matmul(w1.swap_dims(1, 2)) + b1)
+                    .matmul(w2.swap_dims(1, 2));
+            }
+
             // Keep each model's parameters once and expose its trajectories as the
             // row dimension of a strided batched GEMM. This maps directly to the
             // backend's optimized matrix-multiplication path and accumulates one
@@ -2110,12 +2711,9 @@ use super::*;
                         .clone()
                         .expand([model_count, rows_per_model, hidden_dims]),
             );
-            (hidden.matmul(self.w2.clone().swap_dims(1, 2))
-                + self
-                    .b2
-                    .clone()
-                    .expand([model_count, rows_per_model, output_dims]))
-            .reshape([trajectory_count, particles, output_dims])
+            hidden
+                .matmul(self.w2.clone().swap_dims(1, 2))
+                .reshape([trajectory_count, particles, output_dims])
         }
 
         pub(super) fn apply_adamw(
@@ -2174,15 +2772,10 @@ use super::*;
                 scale_tensor.clone(),
                 bias,
             ));
-            self.b2 = track3(apply_adamw_tensor3(
-                self.b2.clone().inner(),
-                tensors.remove(0),
-                &mut state.b2_m,
-                &mut state.b2_v,
-                cfg,
-                scale_tensor,
-                bias,
-            ));
+            let _unused_output_bias_gradient = tensors.remove(0);
+            self.b2 = track3(self.b2.clone().inner().zeros_like());
+            state.b2_m = state.b2_m.clone().zeros_like();
+            state.b2_v = state.b2_v.clone().zeros_like();
             Ok((norms, scales))
         }
 
@@ -2197,16 +2790,14 @@ use super::*;
             let w1 = tensor3_vec(self.w1.clone().inner())?;
             let b1 = tensor3_vec(self.b1.clone().inner())?;
             let w2 = tensor3_vec(self.w2.clone().inner())?;
-            let b2 = tensor3_vec(self.b2.clone().inner())?;
             let w1_len = models[0].weights.w1.len();
             let b1_len = models[0].weights.b1.len();
             let w2_len = models[0].weights.w2.len();
-            let b2_len = models[0].weights.b2.len();
             for (index, model) in models.iter_mut().enumerate() {
                 model.weights.w1 = w1[index * w1_len..(index + 1) * w1_len].to_vec();
                 model.weights.b1 = b1[index * b1_len..(index + 1) * b1_len].to_vec();
                 model.weights.w2 = w2[index * w2_len..(index + 1) * w2_len].to_vec();
-                model.weights.b2 = b2[index * b2_len..(index + 1) * b2_len].to_vec();
+                model.weights.b2.fill(0.0);
                 model.validate()?;
             }
             Ok(())
@@ -2261,7 +2852,7 @@ use super::*;
                 ),
                 b1_delta: tracked_tensor(adapter.b1_delta.clone(), [1, config.hidden_dims], device),
                 b2_delta: tracked_tensor(
-                    adapter.b2_delta.clone(),
+                    vec![0.0; config.update_dims()],
                     [1, config.update_dims()],
                     device,
                 ),
@@ -2277,7 +2868,7 @@ use super::*;
                 w2_down: tensor_vec(self.w2_down.clone().inner())?,
                 w2_up: tensor_vec(self.w2_up.clone().inner())?,
                 b1_delta: tensor_vec(self.b1_delta.clone().inner())?,
-                b2_delta: tensor_vec(self.b2_delta.clone().inner())?,
+                b2_delta: vec![0.0; self.b2_delta.shape().dims::<2>()[1]],
                 b1_delta_correction: Vec::new(),
                 b2_delta_correction: Vec::new(),
             })
@@ -2290,7 +2881,6 @@ use super::*;
                 self.w2_down.clone(),
                 self.w2_up.clone(),
                 self.b1_delta.clone(),
-                self.b2_delta.clone(),
             ];
             let mut total = None::<Tensor1>;
             for tensor in terms {
@@ -2300,7 +2890,7 @@ use super::*;
                     None => value,
                 });
             }
-            total.expect("adapter has parameters").div_scalar(6.0)
+            total.expect("adapter has parameters").div_scalar(5.0)
         }
 
         pub(super) fn apply_adamw(
@@ -2385,15 +2975,10 @@ use super::*;
                 scale_tensor.clone(),
                 bias,
             ));
-            self.b2_delta = track(apply_adamw_tensor(
-                self.b2_delta.clone().inner(),
-                tensors.remove(0),
-                &mut state.b2_delta_m,
-                &mut state.b2_delta_v,
-                cfg,
-                scale_tensor,
-                bias,
-            ));
+            let _unused_output_bias_gradient = tensors.remove(0);
+            self.b2_delta = track(self.b2_delta.clone().inner().zeros_like());
+            state.b2_delta_m = state.b2_delta_m.clone().zeros_like();
+            state.b2_delta_v = state.b2_delta_v.clone().zeros_like();
             Ok((norm, scale))
         }
 

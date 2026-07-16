@@ -262,6 +262,38 @@ use super::*;
         })
     }
 
+    fn initialize_e2e_amortization_from_generator(
+        generator: &mut BurnE2eGeneratorParams,
+        conditions: &BurnE2eConditionCache,
+        npa_config: &NpaConfig,
+        batch_size: usize,
+    ) -> AutomataResult<()> {
+        let detached = generator.detached();
+        let flow = detached.row_flow.as_ref().ok_or_else(|| {
+            AutomataError::InvalidArgument(
+                "generator endpoint initialization requires conditional-row-flow".to_string(),
+            )
+        })?;
+        let batch_size = batch_size.max(1);
+        let batch_count = conditions.examples.div_ceil(batch_size);
+        let mut endpoint_batches = Vec::with_capacity(batch_count);
+        for batch in 0..batch_count {
+            let start = batch * batch_size;
+            let end = (start + batch_size).min(conditions.examples);
+            let indices = (start..end).collect::<Vec<_>>();
+            let condition = conditions.select(&indices)?;
+            endpoint_batches.push(detach3(flow.sample_rows(condition, npa_config)));
+            if batch + 1 == batch_count || (batch + 1).is_multiple_of(8) {
+                eprintln!(
+                    "initialized generated endpoint batch {}/{}",
+                    batch + 1,
+                    batch_count,
+                );
+            }
+        }
+        generator.initialize_amortization_from_rows(Tensor::cat(endpoint_batches, 0))
+    }
+
     pub(crate) fn train_e2e_rollout_burn_dense(
         base: &mut NpaModel,
         train_examples: &mut [BurnE2eRolloutExample],
@@ -301,6 +333,9 @@ use super::*;
             .resume_checkpoint
             .map(|path| load_e2e_training_checkpoint(path, train_examples, &base.config, config))
             .transpose()?;
+        let completed_step = resume_checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.completed_step);
         let mut resumed_generator = None;
         if let Some(resume_path) = config.resume_checkpoint {
             let requested = Path::new(resume_path);
@@ -313,8 +348,10 @@ use super::*;
                     )
                 })?
             };
-            let shared_base_path = checkpoint_dir.join("current_shared_base.bpk");
-            let hyper_path = checkpoint_dir.join("current_hyper_2d.bpk");
+            let artifact_label = e2e_training_checkpoint_artifact_label(requested);
+            let shared_base_path =
+                checkpoint_dir.join(format!("{artifact_label}_shared_base.bpk"));
+            let hyper_path = checkpoint_dir.join(format!("{artifact_label}_hyper_2d.bpk"));
             *base = crate::import::load_manifest(&shared_base_path)?.into_model();
             resumed_generator = Some(crate::load_e2e_hyper_npa_2d(&hyper_path)?);
         }
@@ -336,18 +373,37 @@ use super::*;
             initial_generator,
             &device,
         )?;
+        let amortization_restored = if let Some(checkpoint) = &resume_checkpoint {
+            let restored = generator.restore_amortization(
+                checkpoint,
+                &device,
+                config.curriculum_resume,
+            )?;
+            if config.amortization_enabled
+                && !restored
+                && !config.amortization_initialize_from_generator
+            {
+                eprintln!(
+                    "hyper2d curriculum initialized a new zero endpoint table; the resumed checkpoint predates amortization"
+                );
+            }
+            restored
+        } else {
+            false
+        };
         let mut generator_optimizer = if let Some(checkpoint) = &resume_checkpoint {
-            BurnE2eGeneratorAdamWState::restore(checkpoint, &generator, &device)?
+            BurnE2eGeneratorAdamWState::restore(
+                checkpoint,
+                &generator,
+                &device,
+                checkpoint.completed_step >= config.amortization_substrate_steps,
+                config.curriculum_resume,
+            )?
         } else {
             BurnE2eGeneratorAdamWState::new(&generator)
         };
         let mut particle_pool = if config.use_particle_pool {
-            Some(if let Some(snapshot) = resume_checkpoint
-                .as_ref()
-                .and_then(|checkpoint| checkpoint.particle_pool.as_ref())
-            {
-                BurnE2eDeviceParticlePool::restore(snapshot, config, &device)?
-            } else {
+            let fresh_pool = || {
                 BurnE2eDeviceParticlePool::new(
                     config.pool_capacity,
                     config.rollout_particles,
@@ -355,7 +411,29 @@ use super::*;
                     config.pool_slots_per_example,
                     &device,
                 )
-            })
+            };
+            Some(
+                if let Some(snapshot) = resume_checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.particle_pool.as_ref())
+                {
+                    match BurnE2eDeviceParticlePool::restore(snapshot, config, &device) {
+                        Ok(pool) => {
+                            eprintln!("hyper2d restored compatible particle pool from checkpoint");
+                            pool
+                        }
+                        Err(error) if config.curriculum_resume => {
+                            eprintln!(
+                                "hyper2d curriculum particle pool is incompatible ({error}); starting a fresh pool"
+                            );
+                            fresh_pool()
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    fresh_pool()
+                },
+            )
         } else {
             None
         };
@@ -372,34 +450,87 @@ use super::*;
                 config.condition_device_cache_max_bytes,
                 config,
             )?;
+        if config.amortization_initialize_from_generator && !amortization_restored {
+            initialize_e2e_amortization_from_generator(
+                &mut generator,
+                &train_conditions,
+                &npa_config,
+                config.dino_batch_size,
+            )?;
+            eprintln!(
+                "hyper2d initialized {} training-only endpoint latents from the conditioned row-flow generator",
+                train_conditions.examples,
+            );
+        }
         let train_condition_cache_bytes = train_conditions.feature_bytes();
         let holdout_condition_cache_bytes = holdout_conditions.feature_bytes();
         let condition_cache_bytes =
             train_condition_cache_bytes.saturating_add(holdout_condition_cache_bytes);
-        let train_condition_pairwise_l2 = train_conditions.mean_pairwise_l2()?;
-        let train_teacher_pairwise_l2 = train_conditions.mean_teacher_pairwise_l2()?;
-        eprintln!(
-            "hyper2d condition diagnostics examples={} condition_pairwise_l2={:.6} teacher_pairwise_l2={:.6}",
-            train_conditions.examples,
-            train_condition_pairwise_l2.unwrap_or_default(),
-            train_teacher_pairwise_l2.unwrap_or_default(),
-        );
+        let endpoint_only_run = config.amortization_enabled
+            && completed_step <= config.amortization_substrate_steps
+            && config.steps <= config.amortization_substrate_steps;
+        if endpoint_only_run {
+            eprintln!(
+                "hyper2d condition diagnostics skipped for endpoint-only substrate training"
+            );
+        } else {
+            let condition_l2 = train_conditions.mean_pairwise_l2()?;
+            let teacher_l2 = train_conditions.mean_teacher_pairwise_l2()?;
+            eprintln!(
+                "hyper2d condition diagnostics examples={} sampled_rows={} condition_pairwise_l2={:.6} teacher_pairwise_l2={:.6}",
+                train_conditions.examples,
+                condition_diagnostic_indices(train_conditions.examples).len(),
+                condition_l2.unwrap_or_default(),
+                teacher_l2.unwrap_or_default(),
+            );
+        }
         check_process_memory_budget("e2e_rollout:start", direct_config_view(config))?;
         check_gpu_memory_budget("e2e_rollout:start", direct_config_view(config))?;
-        let initial_quality_validation = evaluate_e2e_rollout_quality(
-            &params.detached(),
-            &generator.detached(),
-            &npa_config,
-            train_examples,
-            holdout_examples,
-            &train_conditions,
-            &holdout_conditions,
-            BurnE2eRolloutTrainConfig {
-                validation_examples: config.initial_validation_examples,
-                ..config
-            },
-            &device,
-        )?;
+        let initial_validation_config = BurnE2eRolloutTrainConfig {
+            validation_examples: config.initial_validation_examples,
+            ..config
+        };
+        let initial_is_amortization_substrate = config.amortization_enabled
+            && completed_step <= config.amortization_substrate_steps;
+        let checkpoint_selection_uses_generated_rollout =
+            e2e_checkpoint_selection_uses_generated_rollout(config);
+        let initial_amortization_quality = if initial_is_amortization_substrate {
+            evaluate_e2e_amortization_quality(
+                &params.detached(),
+                &generator.detached(),
+                &npa_config,
+                train_examples,
+                &train_conditions,
+                initial_validation_config,
+                &device,
+            )?
+        } else {
+            None
+        };
+        let initial_quality_validation = if checkpoint_selection_uses_generated_rollout
+            || !initial_is_amortization_substrate
+        {
+            evaluate_e2e_rollout_quality(
+                &params.detached(),
+                &generator.detached(),
+                &npa_config,
+                train_examples,
+                holdout_examples,
+                &train_conditions,
+                &holdout_conditions,
+                initial_validation_config,
+                &device,
+            )?
+        } else {
+            None
+        };
+        if let Some(quality) = &initial_amortization_quality {
+            eprintln!(
+                "hyper2d e2e rollout initial amortization quality composited_psnr={:.3}dB p10={:.3}dB",
+                quality.aggregate_composited_rgb_psnr_db,
+                quality.p10_composited_rgb_psnr_db,
+            );
+        }
         if let Some(quality) = &initial_quality_validation {
             eprintln!(
                 "hyper2d e2e rollout initial {} quality composited_psnr={:.3}dB p10={:.3}dB density_psnr={:.3}dB soft_iou={:.3} mean_loss={:.6e}",
@@ -416,14 +547,41 @@ use super::*;
             .map_or(0usize, |_| 1usize);
         let mut quality_validation_elapsed_ms = initial_quality_validation
             .as_ref()
-            .map_or(0.0_f64, |quality| quality.elapsed_ms);
+            .map_or(0.0_f64, |quality| quality.elapsed_ms)
+            + initial_amortization_quality
+                .as_ref()
+                .map_or(0.0_f64, |quality| quality.elapsed_ms);
 
         let mut sampler_init_rng = StdRng::seed_from_u64(config.seed);
         let condition_batch_size =
             normalized_batch_size(config.example_batch_size, train_examples.len());
         let rollout_replicas = config.rollouts_per_example.max(1);
         let batch_size = condition_batch_size.saturating_mul(rollout_replicas);
-        let mut identity_sampler = resume_checkpoint.as_ref().map_or_else(
+        let sampler_resume_checkpoint = resume_checkpoint.as_ref().filter(|checkpoint| {
+            checkpoint.sampler.is_compatible(
+                train_examples.len(),
+                condition_batch_size,
+                config.sampling_uniform_fraction,
+                config.sampling_priority_ema_beta,
+                config.sampling_priority_min_weight,
+                config.sampling_priority_max_weight,
+            ) && checkpoint.seed_trajectory_counts.len() == train_examples.len()
+        });
+        if resume_checkpoint.is_some() && sampler_resume_checkpoint.is_none() {
+            if !config.curriculum_resume {
+                return Err(AutomataError::InvalidArgument(
+                    "exact resume checkpoint sampler is incompatible with the requested sampling contract"
+                        .to_string(),
+                )
+                .into());
+            }
+            eprintln!(
+                "hyper2d curriculum sampler is incompatible; starting fresh sampling state"
+            );
+        } else if sampler_resume_checkpoint.is_some() {
+            eprintln!("hyper2d restored compatible sampler state from checkpoint");
+        }
+        let mut identity_sampler = sampler_resume_checkpoint.map_or_else(
             || {
                 E2eIdentitySampler::new(
                     train_examples.len(),
@@ -437,21 +595,50 @@ use super::*;
             },
             |checkpoint| checkpoint.sampler.clone(),
         );
-        let mut seed_trajectory_counts = resume_checkpoint.as_ref().map_or_else(
+        let mut seed_trajectory_counts = sampler_resume_checkpoint.map_or_else(
             || vec![0usize; train_examples.len()],
             |checkpoint| checkpoint.seed_trajectory_counts.clone(),
         );
-        let completed_step = resume_checkpoint
-            .as_ref()
-            .map_or(0, |checkpoint| checkpoint.completed_step);
+        if config.amortization_enabled && completed_step <= config.amortization_substrate_steps {
+            identity_sampler.ensure_minimum_trajectory_counts(
+                &generator_optimizer.amortization_identity_steps,
+                rollout_replicas,
+            );
+            for (identity, count) in seed_trajectory_counts.iter_mut().enumerate() {
+                *count = generator_optimizer
+                    .amortization_identity_steps
+                    .get(identity)
+                    .copied()
+                    .unwrap_or_default()
+                    .saturating_mul(rollout_replicas)
+                    % config.seed_trajectory_interval.max(1);
+            }
+        }
+        if config.task_loss_weight == 0.0
+            && config.amortization_enabled
+            && (config.amortization_distillation_weight > 0.0
+                || config.flow_self_rectification_weight > 0.0)
+            && completed_step == 0
+            && !config.amortization_initialize_from_teacher
+        {
+            return Err(AutomataError::InvalidArgument(
+                "rollout-free amortization flow supervision requires a resumed or teacher-initialized endpoint table"
+                    .to_string(),
+            )
+            .into());
+        }
         if completed_step > 0 {
+            let resume_mode = if config.curriculum_resume {
+                "curriculum"
+            } else {
+                "exact"
+            };
+            let restored_pending_batches = sampler_resume_checkpoint
+                .map_or(0, |checkpoint| checkpoint.pending_batches.len());
             eprintln!(
-                "hyper2d resumed exact training state at completed_step={completed_step} optimizer_steps={}/{} pending_batches={}",
+                "hyper2d resumed {resume_mode} training state at completed_step={completed_step} optimizer_steps={}/{} pending_batches={restored_pending_batches}",
                 base_optimizer.step,
                 generator_optimizer.step,
-                resume_checkpoint
-                    .as_ref()
-                    .map_or(0, |checkpoint| checkpoint.pending_batches.len()),
             );
         }
         let train_pixel_xy = burn_e2e_pixel_xy(config, &device);
@@ -482,16 +669,22 @@ use super::*;
         check_gpu_memory_budget("e2e_rollout:after_target_cache", direct_config_view(config))?;
         let prefetch_depth = e2e_cpu_prefetch_depth(batch_size, config.steps);
         let mut prefetch_queue = VecDeque::with_capacity(prefetch_depth);
-        for indices in resume_checkpoint
-            .as_ref()
+        for (offset, indices) in sampler_resume_checkpoint
             .map(|checkpoint| checkpoint.pending_batches.as_slice())
             .unwrap_or_default()
+            .iter()
+            .enumerate()
         {
+            let mut prefetch_config = config;
+            prefetch_config.amortization_substrate_only = completed_step
+                .saturating_add(offset)
+                .saturating_add(1)
+                <= config.amortization_substrate_steps;
             prefetch_queue.push_back(spawn_e2e_cpu_batch_prefetch(
                 train_examples,
                 &train_conditions,
                 indices.clone(),
-                config,
+                prefetch_config,
                 train_target_cache.is_some(),
             )?);
         }
@@ -500,6 +693,9 @@ use super::*;
             .saturating_add(1);
         while next_prefetch_step <= config.steps && prefetch_queue.len() < prefetch_depth {
             let mut sample_rng = e2e_sampling_rng(config.seed, next_prefetch_step);
+            let mut prefetch_config = config;
+            prefetch_config.amortization_substrate_only =
+                next_prefetch_step <= config.amortization_substrate_steps;
             prefetch_queue.push_back(spawn_e2e_cpu_batch_prefetch(
                 train_examples,
                 &train_conditions,
@@ -508,7 +704,7 @@ use super::*;
                     rollout_replicas,
                     &mut sample_rng,
                 ),
-                config,
+                prefetch_config,
                 train_target_cache.is_some(),
             )?);
             next_prefetch_step += 1;
@@ -523,17 +719,59 @@ use super::*;
                 train_loss: quality.mean_total_loss,
                 selection_score: quality.selection_psnr_db,
                 validation_contract: Some(e2e_validation_contract(
-                    BurnE2eRolloutTrainConfig {
-                        validation_examples: config.initial_validation_examples,
-                        ..config
-                    },
+                    initial_validation_config,
                 )),
                 holdout_mean_psnr_db: Some(quality.aggregate_composited_rgb_psnr_db),
                 holdout_mean_loss: Some(quality.mean_total_loss),
                 quality_validation: Some(quality.clone()),
+                amortization_quality_validation: None,
                 params: params.detached(),
                 generator: generator.detached(),
+            })
+            .or_else(|| {
+                initial_amortization_quality
+                    .as_ref()
+                    .filter(|_| !checkpoint_selection_uses_generated_rollout)
+                    .filter(|_| initial_validation_is_checkpoint_comparable(config))
+                    .map(|quality| BurnE2eSelectedCheckpoint {
+                        step: completed_step,
+                        train_loss: 0.0,
+                        selection_score: quality.p10_composited_rgb_psnr_db,
+                        validation_contract: Some(e2e_validation_contract(
+                            initial_validation_config,
+                        )),
+                        holdout_mean_psnr_db: None,
+                        holdout_mean_loss: None,
+                        quality_validation: None,
+                        amortization_quality_validation: Some(quality.clone()),
+                        params: params.detached(),
+                        generator: generator.detached(),
+                    })
             });
+        if let Some(checkpoint) = &best_checkpoint {
+            let _ = write_e2e_rollout_checkpoint(
+                "best",
+                checkpoint.step,
+                &checkpoint.params,
+                &checkpoint.generator,
+                &npa_config,
+                &train_conditions,
+                config,
+            )?;
+            if completed_step > 0
+                && let Some(checkpoint_dir) = config.checkpoint_dir
+            {
+                let checkpoint_dir = Path::new(checkpoint_dir);
+                if checkpoint_dir.join("current_training_state.mpk").is_file() {
+                    promote_current_e2e_training_checkpoint(checkpoint_dir)?;
+                } else if let Some(resume_checkpoint) = config.resume_checkpoint {
+                    promote_resume_e2e_checkpoint(
+                        Path::new(resume_checkpoint),
+                        checkpoint_dir,
+                    )?;
+                }
+            }
+        }
         let mut final_checkpoint_candidate = None::<BurnE2eSelectedCheckpoint>;
         let mut early_stop_step = None::<usize>;
         let validation_interval = config.validation_interval.max(1);
@@ -556,6 +794,9 @@ use super::*;
             } = prepared_batch;
             while next_prefetch_step <= config.steps && prefetch_queue.len() < prefetch_depth {
                 let mut sample_rng = e2e_sampling_rng(config.seed, next_prefetch_step);
+                let mut prefetch_config = config;
+                prefetch_config.amortization_substrate_only =
+                    next_prefetch_step <= config.amortization_substrate_steps;
                 prefetch_queue.push_back(spawn_e2e_cpu_batch_prefetch(
                     train_examples,
                     &train_conditions,
@@ -564,7 +805,7 @@ use super::*;
                         rollout_replicas,
                         &mut sample_rng,
                     ),
-                    config,
+                    prefetch_config,
                     train_target_cache.is_some(),
                 )?);
                 next_prefetch_step += 1;
@@ -574,9 +815,10 @@ use super::*;
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             let report_due =
                 step == config.steps || step.is_multiple_of(config.report_interval.max(1));
-            let validation_due = config.validation_examples > 0
-                && (step == config.steps || step.is_multiple_of(validation_interval));
-            let checkpoint_due = should_write_e2e_checkpoint(step, last_checkpoint_at, config);
+            let validation_due = (step == config.steps && config.final_validation_examples > 0)
+                || (config.validation_examples > 0 && step.is_multiple_of(validation_interval));
+            let checkpoint_due = should_write_e2e_checkpoint(step, last_checkpoint_at, config)
+                || (validation_due && step <= config.amortization_substrate_steps);
             let priority_due = step
                 .is_multiple_of(config.sampling_priority_update_interval.max(1));
             let collect_metrics = report_due || validation_due || checkpoint_due;
@@ -584,6 +826,8 @@ use super::*;
             if config.lr_schedule == E2eLrSchedule::UpstreamGrowing
                 && step > 1
                 && step.saturating_sub(1).is_multiple_of(10_000)
+                && !(config.amortization_enabled
+                    && step <= config.amortization_substrate_steps)
             {
                 base_optimizer = BurnBaseAdamWState::zeros_like(&params);
                 generator_optimizer = BurnE2eGeneratorAdamWState::new(&generator);
@@ -601,12 +845,51 @@ use super::*;
                     "hyper2d upstream-growing repetition reset at optimizer step {step}"
                 );
             }
-            let lr_scale = e2e_lr_scale(config, step);
-            let mut step_config = e2e_config_with_lr_scale(config, lr_scale);
+            let identity_scheduled_substrate = config.amortization_enabled
+                && step <= config.amortization_substrate_steps
+                && config.lr_schedule == E2eLrSchedule::UpstreamGrowing;
+            let optimizer_lr_scale = if identity_scheduled_substrate {
+                1.0
+            } else {
+                e2e_lr_scale(config, step)
+            };
+            let reported_lr_scale = if identity_scheduled_substrate {
+                mean_upstream_growing_identity_lr_scale(
+                    &generator_optimizer.amortization_identity_steps,
+                    &indices,
+                    config.min_lr_scale,
+                )
+            } else {
+                optimizer_lr_scale
+            };
+            let mut step_config = e2e_config_with_lr_scale(config, optimizer_lr_scale);
+            step_config.amortization_substrate_only =
+                step <= config.amortization_substrate_steps;
+            step_config.amortization_residual_scale =
+                e2e_amortization_residual_scale(config, step);
+            if step_config.amortization_substrate_only {
+                step_config.flow_matching_weight = 0.0;
+                step_config.flow_self_rectification_weight = 0.0;
+                step_config.amortization_distillation_weight = 0.0;
+                step_config.amortization_hyper_only_fraction = 0.0;
+                step_config.amortization_residual_scale = 1.0;
+            }
             step_config.shared_base_trainable =
                 config.shared_base_trainable && step >= config.shared_base_train_start_step;
             let pool_batch = if let Some(pool) = particle_pool.as_mut() {
                 let mut pool_rng = e2e_pool_rng(config.seed, step);
+                if identity_scheduled_substrate {
+                    let reset_identities = upstream_growing_repetition_reset_identities(
+                        &indices,
+                        &generator_optimizer.amortization_identity_steps,
+                    );
+                    if !reset_identities.is_empty() {
+                        eprintln!(
+                            "hyper2d upstream-growing per-identity pool reset before step {step}: identities={reset_identities:?}"
+                        );
+                    }
+                    pool.reset_examples(&reset_identities);
+                }
                 let seed_replacement_rows = e2e_seed_replacement_rows(
                     &indices,
                     &mut seed_trajectory_counts,
@@ -660,7 +943,16 @@ use super::*;
                 collect_metrics,
                 collect_per_example_losses,
                 initial_state,
-            )?;
+            )
+            .map_err(|error| {
+                let identities = indices
+                    .chunks(rollout_replicas)
+                    .filter_map(|replicas| replicas.first().copied())
+                    .collect::<Vec<_>>();
+                std::io::Error::other(format!(
+                    "HyperNPA optimizer step {step} failed for identities {identities:?}: {error}"
+                ))
+            })?;
             let step_particle_steps = step_output.particle_steps as u128;
             throughput_interval_particle_steps = throughput_interval_particle_steps
                 .saturating_add(step_particle_steps);
@@ -670,7 +962,9 @@ use super::*;
                 .chunks(rollout_replicas)
                 .filter_map(|replicas| replicas.first().copied())
                 .collect::<Vec<_>>();
-            identity_sampler.record_trajectories(&condition_identities, rollout_replicas);
+            if step_output.particle_steps > 0 {
+                identity_sampler.record_trajectories(&condition_identities, rollout_replicas);
+            }
             if let Some(per_example_losses) = step_output.per_example_losses.as_deref() {
                 identity_sampler.update_losses(&indices, per_example_losses);
             }
@@ -690,9 +984,13 @@ use super::*;
                 stats.elapsed_ms = interval_elapsed_ms;
             }
             stats.step = step;
-            stats.learning_rate_scale = lr_scale;
+            stats.learning_rate_scale = reported_lr_scale;
             stats.base_learning_rate = step_config.base_optimizer.learning_rate;
-            stats.generator_learning_rate = step_config.generator_optimizer.learning_rate;
+            stats.generator_learning_rate = if identity_scheduled_substrate {
+                config.amortization_learning_rate * reported_lr_scale
+            } else {
+                step_config.generator_optimizer.learning_rate
+            };
             stats.pool_seed_replacements = seed_replacements;
             if collect_metrics {
                 final_loss = Some(stats.loss);
@@ -703,7 +1001,16 @@ use super::*;
                         config
                     }
                 });
-                let checkpoint_quality = if let Some(validation_config) = validation_config {
+                let amortization_validation_config = validation_due.then(|| {
+                    if step == config.steps && config.final_validation_examples > 0 {
+                        e2e_final_validation_config(config)
+                    } else {
+                        config
+                    }
+                });
+                let checkpoint_quality = if checkpoint_selection_uses_generated_rollout
+                    && let Some(validation_config) = validation_config
+                {
                     evaluate_e2e_rollout_quality(
                         &params.detached(),
                         &generator.detached(),
@@ -718,9 +1025,33 @@ use super::*;
                 } else {
                     None
                 };
+                let amortization_quality = if let Some(validation_config) =
+                    amortization_validation_config
+                {
+                    evaluate_e2e_amortization_quality(
+                        &params.detached(),
+                        &generator.detached(),
+                        &npa_config,
+                        train_examples,
+                        &train_conditions,
+                        validation_config,
+                        &device,
+                    )?
+                } else {
+                    None
+                };
+                stats.amortization_endpoint_psnr_db = amortization_quality
+                    .as_ref()
+                    .map(|quality| quality.aggregate_composited_rgb_psnr_db);
+                stats.amortization_endpoint_p10_psnr_db = amortization_quality
+                    .as_ref()
+                    .map(|quality| quality.p10_composited_rgb_psnr_db);
                 if let Some(quality) = &checkpoint_quality {
                     quality_validation_evaluations =
                         quality_validation_evaluations.saturating_add(1);
+                    quality_validation_elapsed_ms += quality.elapsed_ms;
+                }
+                if let Some(quality) = &amortization_quality {
                     quality_validation_elapsed_ms += quality.elapsed_ms;
                 }
                 let (holdout_mean_psnr_db, holdout_mean_loss, selection_score) =
@@ -734,18 +1065,32 @@ use super::*;
                             quality.selection_psnr_db,
                         )
                     } else {
-                        (None, None, -stats.loss)
+                        (
+                            None,
+                            None,
+                            amortization_quality
+                                .as_ref()
+                                .map_or(-stats.loss, |quality| {
+                                    quality.p10_composited_rgb_psnr_db
+                                }),
+                        )
                     };
                 if report_due || validation_due {
                     let exposure = identity_sampler.exposure_stats();
                     eprintln!(
-                        "hyper2d e2e rollout step {step}/{} loss={:.6e} task={:.6e} teacher={:.6e} flow={:.6e} self_rect={:.6e} lr_scale={:.3e} exposure_min={} exposure_mean={:.1} exposure_p90={} final_horizon_psnr={} worst_horizon_p10={} validation_due={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e} condition_ms={:.2} rollout_loss_ms={:.2} backward_ms={:.2}",
+                        "hyper2d e2e rollout step {step}/{} loss={:.6e} task={:.6e} teacher={:.6e} flow={:.6e} self_rect={:.6e} amort_distill={:.6e} amort_mix={:.3} amort_rms={:.3e} amort_grad={:.3e} amort_psnr={} amort_p10={} lr_scale={:.3e} exposure_min={} exposure_mean={:.1} exposure_p90={} final_horizon_psnr={} worst_horizon_p10={} validation_due={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e} condition_ms={:.2} rollout_loss_ms={:.2} backward_ms={:.2}",
                         config.steps,
                         stats.loss,
                         stats.task_loss,
                         stats.adapter_teacher_loss,
                         stats.flow_matching_loss,
                         stats.flow_self_rectification_loss,
+                        stats.amortization_distillation_loss,
+                        stats.amortization_residual_scale,
+                        stats.amortization_residual_rms,
+                        stats.amortization_grad_norm,
+                        format_optional_f32(stats.amortization_endpoint_psnr_db),
+                        format_optional_f32(stats.amortization_endpoint_p10_psnr_db),
                         stats.learning_rate_scale,
                         exposure.min,
                         exposure.mean,
@@ -770,12 +1115,14 @@ use super::*;
                         step,
                         train_loss: stats.loss,
                         selection_score,
-                        validation_contract: checkpoint_quality
-                            .as_ref()
-                            .and(validation_config.map(e2e_validation_contract)),
+                        validation_contract: (checkpoint_quality.is_some()
+                            || amortization_quality.is_some())
+                            .then(|| validation_config.map(e2e_validation_contract))
+                            .flatten(),
                         holdout_mean_psnr_db,
                         holdout_mean_loss,
                         quality_validation: checkpoint_quality.clone(),
+                        amortization_quality_validation: amortization_quality.clone(),
                         params: params.detached(),
                         generator: generator.detached(),
                     };
@@ -789,7 +1136,8 @@ use super::*;
                             checkpoint.selection_score,
                         )
                     }) {
-                        wrote_new_best_checkpoint = checkpoint_quality.is_some();
+                        wrote_new_best_checkpoint =
+                            checkpoint_quality.is_some() || amortization_quality.is_some();
                         best_checkpoint = Some(candidate);
                     }
                 }
@@ -805,6 +1153,7 @@ use super::*;
                     )?;
                     write_e2e_training_checkpoint(
                         step,
+                        &generator,
                         &base_optimizer,
                         &generator_optimizer,
                         &identity_sampler,
@@ -832,6 +1181,11 @@ use super::*;
                         &train_conditions,
                         config,
                     )?;
+                    if checkpoint_due
+                        && let Some(checkpoint_dir) = config.checkpoint_dir
+                    {
+                        promote_current_e2e_training_checkpoint(Path::new(checkpoint_dir))?;
+                    }
                 }
                 history.push(stats);
                 throughput_interval_particle_steps = 0;
@@ -853,31 +1207,67 @@ use super::*;
         }
         let final_validation_config = e2e_final_validation_config(config);
         let final_validation_contract = e2e_validation_contract(final_validation_config);
+        let final_candidate_step = final_checkpoint_candidate
+            .as_ref()
+            .map(|checkpoint| checkpoint.step);
+        let final_candidate_selection_score = final_checkpoint_candidate
+            .as_ref()
+            .map(|checkpoint| checkpoint.selection_score);
+        let final_candidate_quality_validation = final_checkpoint_candidate
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.quality_validation.clone());
+        let final_candidate_amortization_quality_validation = final_checkpoint_candidate
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.amortization_quality_validation.clone());
         if let Some(final_candidate) = final_checkpoint_candidate {
             let mut selected = final_candidate;
             if let Some(mut prior_best) = best_checkpoint.take() {
                 if prior_best.validation_contract.as_ref() != Some(&final_validation_contract) {
-                    let quality = evaluate_e2e_rollout_quality(
-                        &prior_best.params.detached(),
-                        &prior_best.generator.detached(),
-                        &npa_config,
-                        train_examples,
-                        holdout_examples,
-                        &train_conditions,
-                        &holdout_conditions,
-                        final_validation_config,
-                        &device,
-                    )?;
-                    if let Some(quality) = quality {
-                        quality_validation_evaluations =
-                            quality_validation_evaluations.saturating_add(1);
-                        quality_validation_elapsed_ms += quality.elapsed_ms;
-                        prior_best.selection_score = quality.selection_psnr_db;
-                        prior_best.validation_contract = Some(final_validation_contract.clone());
-                        prior_best.holdout_mean_psnr_db =
-                            Some(quality.aggregate_composited_rgb_psnr_db);
-                        prior_best.holdout_mean_loss = Some(quality.mean_total_loss);
-                        prior_best.quality_validation = Some(quality);
+                    if checkpoint_selection_uses_generated_rollout {
+                        let quality = evaluate_e2e_rollout_quality(
+                            &prior_best.params.detached(),
+                            &prior_best.generator.detached(),
+                            &npa_config,
+                            train_examples,
+                            holdout_examples,
+                            &train_conditions,
+                            &holdout_conditions,
+                            final_validation_config,
+                            &device,
+                        )?;
+                        if let Some(quality) = quality {
+                            quality_validation_evaluations =
+                                quality_validation_evaluations.saturating_add(1);
+                            quality_validation_elapsed_ms += quality.elapsed_ms;
+                            prior_best.selection_score = quality.selection_psnr_db;
+                            prior_best.validation_contract =
+                                Some(final_validation_contract.clone());
+                            prior_best.holdout_mean_psnr_db =
+                                Some(quality.aggregate_composited_rgb_psnr_db);
+                            prior_best.holdout_mean_loss = Some(quality.mean_total_loss);
+                            prior_best.quality_validation = Some(quality);
+                            prior_best.amortization_quality_validation = None;
+                        }
+                    } else {
+                        let quality = evaluate_e2e_amortization_quality(
+                            &prior_best.params.detached(),
+                            &prior_best.generator.detached(),
+                            &npa_config,
+                            train_examples,
+                            &train_conditions,
+                            final_validation_config,
+                            &device,
+                        )?;
+                        if let Some(quality) = quality {
+                            quality_validation_elapsed_ms += quality.elapsed_ms;
+                            prior_best.selection_score = quality.p10_composited_rgb_psnr_db;
+                            prior_best.validation_contract =
+                                Some(final_validation_contract.clone());
+                            prior_best.holdout_mean_psnr_db = None;
+                            prior_best.holdout_mean_loss = None;
+                            prior_best.quality_validation = None;
+                            prior_best.amortization_quality_validation = Some(quality);
+                        }
                     }
                 }
                 if comparable_selection_score_is_better(
@@ -900,6 +1290,13 @@ use super::*;
                     &train_conditions,
                     config,
                 )?;
+                if let Some(checkpoint_dir) = config.checkpoint_dir {
+                    promote_selected_final_e2e_training_checkpoint(
+                        checkpoint.step,
+                        config.steps,
+                        Path::new(checkpoint_dir),
+                    )?;
+                }
             }
         }
         let selected_checkpoint_step = best_checkpoint.as_ref().map(|checkpoint| checkpoint.step);
@@ -920,12 +1317,24 @@ use super::*;
                 checkpoint.validation_contract.as_ref() == Some(&final_validation_contract)
             })
             .and_then(|checkpoint| checkpoint.quality_validation.clone());
+        let selected_checkpoint_amortization_quality_validation = best_checkpoint
+            .as_ref()
+            .filter(|checkpoint| {
+                checkpoint.validation_contract.as_ref() == Some(&final_validation_contract)
+            })
+            .and_then(|checkpoint| checkpoint.amortization_quality_validation.clone());
         let selected_checkpoint_source = if selected_checkpoint_step == Some(0) {
             "initial_p10_composited_rgb_psnr"
+        } else if selected_checkpoint_step == Some(config.steps)
+            && selected_checkpoint_amortization_quality_validation.is_some()
+        {
+            "final_endpoint_p10_composited_rgb_psnr"
         } else if selected_checkpoint_step == Some(config.steps)
             && selected_checkpoint_quality_validation.is_some()
         {
             "final_common_contract_p10_composited_rgb_psnr"
+        } else if selected_checkpoint_amortization_quality_validation.is_some() {
+            "best_endpoint_p10_composited_rgb_psnr"
         } else if selected_checkpoint_holdout_psnr_db.is_some() {
             "best_common_contract_p10_composited_rgb_psnr"
         } else if selected_checkpoint_step.is_some() {
@@ -940,6 +1349,8 @@ use super::*;
         params.write_to_model(base)?;
         let final_quality_validation_reused_from_selected_checkpoint =
             selected_checkpoint_quality_validation.is_some();
+        let final_amortization_quality_validation_reused_from_selected_checkpoint =
+            selected_checkpoint_amortization_quality_validation.is_some();
         let quality_validation = if let Some(quality_validation) =
             selected_checkpoint_quality_validation
         {
@@ -1030,6 +1441,10 @@ use super::*;
             "optimizer_state_resumed".to_string(),
             json!(resume_checkpoint.is_some()),
         );
+        metrics.insert(
+            "curriculum_resume".to_string(),
+            json!(config.curriculum_resume),
+        );
         metrics.insert("resumed_from_step".to_string(), json!(completed_step));
         metrics.insert(
             "conditioner".to_string(),
@@ -1037,6 +1452,10 @@ use super::*;
         );
         metrics.insert("adapter_rank".to_string(), json!(config.adapter_rank));
         metrics.insert("adapter_alpha".to_string(), json!(config.adapter_alpha));
+        metrics.insert(
+            "adapter_output_bias".to_string(),
+            json!(config.adapter_output_bias),
+        );
         metrics.insert(
             "adapter_parameterization".to_string(),
             json!(if generator.kind == E2eHyperGeneratorKind::ConditionalRowFlow {
@@ -1050,10 +1469,11 @@ use super::*;
         metrics.insert(
             "adapter_effective_output_dims".to_string(),
             json!(if config.canonical_full_rank_lora {
-                crate::hyper::adapter_layout::CanonicalFullRankLora2d::new(
+                crate::hyper::adapter_layout::CanonicalFullRankLora2d::new_with_output_bias(
                     &npa_config,
                     config.adapter_rank,
                     config.adapter_alpha,
+                    config.adapter_output_bias,
                 )?
                 .trainable_parameters
             } else {
@@ -1077,6 +1497,10 @@ use super::*;
             json!(config.generator_sample_steps),
         );
         metrics.insert(
+            "generator_train_sample_steps".to_string(),
+            json!(config.generator_train_sample_steps),
+        );
+        metrics.insert(
             "generator_layers".to_string(),
             json!(config.generator_layers),
         );
@@ -1093,8 +1517,20 @@ use super::*;
             json!(config.flow_matching_weight),
         );
         metrics.insert(
+            "flow_match_inference_source".to_string(),
+            json!(config.flow_match_inference_source),
+        );
+        metrics.insert(
             "flow_self_rectification_weight".to_string(),
             json!(config.flow_self_rectification_weight),
+        );
+        metrics.insert(
+            "flow_self_rectification_target".to_string(),
+            json!(if config.amortization_enabled {
+                "detached_training_endpoint_table"
+            } else {
+                "detached_sampled_endpoint"
+            }),
         );
         metrics.insert("generator_output_dims".to_string(), json!(generator.output_dims));
         metrics.insert(
@@ -1207,6 +1643,28 @@ use super::*;
             "tbptt_chunk_steps".to_string(),
             json!(config.tbptt_chunk_steps),
         );
+        let effective_tbptt_chunk_steps = config.credit_assignment.effective_tbptt_chunk_steps(
+            config.task_loss_weight,
+            config.tbptt_chunk_steps,
+            config.rollout_steps,
+        );
+        metrics.insert(
+            "tbptt_state_detach_active".to_string(),
+            json!(effective_tbptt_chunk_steps.is_some()),
+        );
+        metrics.insert(
+            "effective_tbptt_chunk_steps".to_string(),
+            json!(effective_tbptt_chunk_steps),
+        );
+        metrics.insert(
+            "rollout_gradient_horizon_max_steps".to_string(),
+            json!(config.credit_assignment.rollout_gradient_horizon_max_steps(
+                config.task_loss_weight,
+                config.tbptt_chunk_steps,
+                config.rollout_step_min,
+                config.rollout_steps,
+            )),
+        );
         metrics.insert(
             "validation_interval".to_string(),
             json!(config.validation_interval),
@@ -1289,6 +1747,10 @@ use super::*;
         metrics.insert(
             "max_full_bptt_particle_steps".to_string(),
             json!(config.max_full_bptt_particle_steps),
+        );
+        metrics.insert(
+            "pre_rollout_step_min".to_string(),
+            json!(config.pre_rollout_step_min),
         );
         metrics.insert(
             "pre_rollout_steps".to_string(),
@@ -1384,6 +1846,39 @@ use super::*;
             "stochastic_mask_backend_effective".to_string(),
             json!("device-random-training-host-seeded-eval"),
         );
+        let row_flow_endpoint_vjp_bridge = config.credit_assignment
+            == E2eCreditAssignment::DetachedTbptt
+            && row_flow_endpoint_bridge_enabled(&generator, config);
+        metrics.insert(
+            "row_flow_endpoint_vjp_bridge".to_string(),
+            json!(row_flow_endpoint_vjp_bridge),
+        );
+        metrics.insert(
+            "row_flow_endpoint_reused_for_auxiliaries".to_string(),
+            json!(row_flow_endpoint_vjp_bridge
+                && (config.adapter_teacher_weight > 0.0
+                    || config.flow_matching_weight > 0.0
+                    || config.flow_self_rectification_weight > 0.0
+                    || config.amortization_distillation_weight > 0.0)),
+        );
+        metrics.insert(
+            "sample_keyed_table_optimizer".to_string(),
+            json!({
+                "sample_id_table": generator.kind == E2eHyperGeneratorKind::SampleIdTable,
+                "amortization_endpoint_table": generator.amortization_residual_table.is_some(),
+                "bias_correction": "per-identity",
+                "absent_identity_parameters": "frozen",
+                "absent_identity_moments": "frozen",
+                "identity_steps_checkpointed": true,
+                "upstream_growing_schedule_scope": if config.lr_schedule == E2eLrSchedule::UpstreamGrowing {
+                    "per-identity"
+                } else {
+                    "not-applicable"
+                },
+                "upstream_growing_moment_reset": "per-identity-at-10000-update-boundaries",
+                "upstream_growing_pool_reset": "selected-identity-slots-at-10000-update-boundaries",
+            }),
+        );
         metrics.insert(
             "max_dense_train_particles".to_string(),
             json!(config.max_dense_train_particles),
@@ -1392,15 +1887,43 @@ use super::*;
             "training_graph".to_string(),
             json!(if config.task_loss_weight == 0.0 && config.flow_matching_weight > 0.0 {
                 "condition_tokens_to_row_velocity_no_particle_rollout"
+            } else if config.amortization_enabled && row_flow_endpoint_vjp_bridge {
+                "dino_row_flow_and_training_endpoint_mixture_via_detached_tbptt_vjp_bridge"
+            } else if config.amortization_enabled {
+                "dino_row_flow_and_training_only_endpoint_amortization_to_full_rollout_loss"
             } else {
                 match config.credit_assignment {
                     E2eCreditAssignment::FullBptt => {
                         "generated_adapter_fixed_full_rollout_single_loss_single_update"
                     }
+                    E2eCreditAssignment::DetachedTbptt if row_flow_endpoint_vjp_bridge => {
+                        "single_generated_row_flow_endpoint_tbptt_vjp_bridge_single_generator_backward"
+                    }
                     E2eCreditAssignment::DetachedTbptt => {
                         "generated_adapter_tbptt_chunked_rollout_state_detach_with_optional_sample_keyed_pool"
                     }
                 }
+            }),
+        );
+        metrics.insert(
+            "amortization".to_string(),
+            json!({
+                "enabled": config.amortization_enabled,
+                "substrate_warmup_steps": config.amortization_substrate_steps,
+                "endpoint_mix_initial": config.amortization_residual_scale,
+                "endpoint_mix_anneal_steps": config.amortization_residual_anneal_steps,
+                "hyper_only_trajectory_fraction": config.amortization_hyper_only_fraction,
+                "distillation_weight": config.amortization_distillation_weight,
+                "distillation_objective": config.amortization_distillation_objective.as_str(),
+                "distillation_probe_rollout_steps": config.amortization_distillation_probe_rollout_steps,
+                "flow_matching_weight": config.flow_matching_weight,
+                "flow_self_rectification_weight": config.flow_self_rectification_weight,
+                "initialized_from_exact_teacher": config.amortization_initialize_from_teacher,
+                "learning_rate": config.amortization_learning_rate,
+                "gradient_normalization": config.amortization_grad_normalization,
+                "table_semantics": "training_only_full_dense_adapter_endpoint",
+                "validation_adapter_path": "dino_conditioned_flow_only",
+                "serialized_inference_adapter_path": "dino_conditioned_flow_only",
             }),
         );
         let measured_optimizer_seconds = measured_optimizer_training_ms / 1_000.0;
@@ -1437,6 +1960,22 @@ use super::*;
             json!(selected_checkpoint_source),
         );
         metrics.insert(
+            "final_candidate_step".to_string(),
+            json!(final_candidate_step),
+        );
+        metrics.insert(
+            "final_candidate_selection_score".to_string(),
+            json!(final_candidate_selection_score),
+        );
+        metrics.insert(
+            "final_candidate_quality_validation".to_string(),
+            json!(final_candidate_quality_validation),
+        );
+        metrics.insert(
+            "final_candidate_amortization_quality_validation".to_string(),
+            json!(final_candidate_amortization_quality_validation),
+        );
+        metrics.insert(
             "selected_checkpoint_step".to_string(),
             json!(selected_checkpoint_step),
         );
@@ -1459,6 +1998,10 @@ use super::*;
         metrics.insert(
             "final_quality_validation_reused_from_selected_checkpoint".to_string(),
             json!(final_quality_validation_reused_from_selected_checkpoint),
+        );
+        metrics.insert(
+            "final_amortization_quality_validation_reused_from_selected_checkpoint".to_string(),
+            json!(final_amortization_quality_validation_reused_from_selected_checkpoint),
         );
         metrics.insert("early_stop_step".to_string(), json!(early_stop_step));
         metrics.insert(
@@ -1504,8 +2047,20 @@ use super::*;
             json!(initial_quality_validation.clone()),
         );
         metrics.insert(
+            "initial_amortization_quality".to_string(),
+            json!(initial_amortization_quality.as_ref().map(|quality| json!({
+                "aggregate_composited_rgb_psnr_db": quality.aggregate_composited_rgb_psnr_db,
+                "p10_composited_rgb_psnr_db": quality.p10_composited_rgb_psnr_db,
+                "elapsed_ms": quality.elapsed_ms,
+            }))),
+        );
+        metrics.insert(
             "quality_validation".to_string(),
             json!(quality_validation.clone()),
+        );
+        metrics.insert(
+            "amortization_quality_validation".to_string(),
+            json!(selected_checkpoint_amortization_quality_validation.clone()),
         );
         metrics.insert(
             "stability_validation".to_string(),
@@ -1524,6 +2079,7 @@ use super::*;
             final_loss,
             generator: generator_hyper,
             quality_validation,
+            amortization_quality_validation: selected_checkpoint_amortization_quality_validation,
             stability_validation,
         })
     }
@@ -1533,15 +2089,38 @@ use super::*;
         last_checkpoint_at: Instant,
         config: BurnE2eRolloutTrainConfig,
     ) -> bool {
-        config.checkpoint_dir.is_some()
-            && (step == config.steps
-                || step.is_multiple_of(config.checkpoint_interval_steps.max(1))
-                || last_checkpoint_at.elapsed().as_secs()
-                    >= config.checkpoint_interval_seconds.max(1) as u64)
+        if config.checkpoint_dir.is_none() {
+            return false;
+        }
+        let step_interval = config.checkpoint_interval_steps.max(1);
+        let step_due = step == config.steps || step.is_multiple_of(step_interval);
+        let steps_until_scheduled = step_interval - step % step_interval;
+        let time_due = last_checkpoint_at.elapsed().as_secs()
+            >= config.checkpoint_interval_seconds.max(1) as u64
+            && steps_until_scheduled > config.report_interval.max(1);
+        step_due || time_due
     }
 
     pub(super) fn initial_validation_is_checkpoint_comparable(config: BurnE2eRolloutTrainConfig) -> bool {
         config.initial_validation_examples == config.validation_examples
+    }
+
+    pub(super) fn e2e_checkpoint_selection_uses_generated_rollout(
+        config: BurnE2eRolloutTrainConfig,
+    ) -> bool {
+        e2e_schedule_selects_generated_rollout(
+            config.amortization_enabled,
+            config.steps,
+            config.amortization_substrate_steps,
+        )
+    }
+
+    pub(super) fn e2e_schedule_selects_generated_rollout(
+        amortization_enabled: bool,
+        steps: usize,
+        amortization_substrate_steps: usize,
+    ) -> bool {
+        !amortization_enabled || steps > amortization_substrate_steps
     }
 
     pub(super) fn e2e_validation_contract(
@@ -1596,8 +2175,213 @@ use super::*;
     }
 
     pub(super) struct E2eRolloutCheckpointHashes {
-        shared_base_sha256: String,
-        hyper_sha256: String,
+        pub(super) shared_base_sha256: String,
+        pub(super) hyper_sha256: String,
+    }
+
+    pub(super) fn matching_e2e_checkpoint_artifacts(
+        checkpoint_dir: &Path,
+        label: &str,
+        step: usize,
+    ) -> AutomataResult<Option<E2eRolloutCheckpointHashes>> {
+        let metadata_path = checkpoint_dir.join(format!("{label}_metadata.json"));
+        if !metadata_path.is_file() {
+            return Ok(None);
+        }
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata_path)?)?;
+        if metadata.get("step").and_then(serde_json::Value::as_u64) != Some(step as u64) {
+            return Ok(None);
+        }
+        let shared_base_sha256 = metadata
+            .get("shared_base_sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                AutomataError::InvalidFormat(format!(
+                    "checkpoint metadata {} has no shared-base hash",
+                    metadata_path.display()
+                ))
+            })?
+            .to_string();
+        let hyper_sha256 = metadata
+            .get("hyper_sha256")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                AutomataError::InvalidFormat(format!(
+                    "checkpoint metadata {} has no hypernetwork hash",
+                    metadata_path.display()
+                ))
+            })?
+            .to_string();
+        if !checkpoint_dir
+            .join(format!("{label}_shared_base.bpk"))
+            .is_file()
+            || !checkpoint_dir
+                .join(format!("{label}_hyper_2d.bpk"))
+                .is_file()
+        {
+            return Ok(None);
+        }
+        Ok(Some(E2eRolloutCheckpointHashes {
+            shared_base_sha256,
+            hyper_sha256,
+        }))
+    }
+
+    pub(super) fn promote_matching_current_e2e_checkpoint(
+        checkpoint_dir: &Path,
+        step: usize,
+    ) -> AutomataResult<Option<E2eRolloutCheckpointHashes>> {
+        let current_metadata_path = checkpoint_dir.join("current_metadata.json");
+        let Some(hashes) = matching_e2e_checkpoint_artifacts(checkpoint_dir, "current", step)?
+        else {
+            return Ok(None);
+        };
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&current_metadata_path)?)?;
+        let current_shared_base = checkpoint_dir.join("current_shared_base.bpk");
+        let current_hyper = checkpoint_dir.join("current_hyper_2d.bpk");
+        let best_shared_base = checkpoint_dir.join("best_shared_base.bpk");
+        let best_hyper = checkpoint_dir.join("best_hyper_2d.bpk");
+        copy_checkpoint_file(&current_shared_base, &best_shared_base)?;
+        copy_checkpoint_file(&current_hyper, &best_hyper)?;
+
+        metadata["label"] = json!("best");
+        metadata["source"] = json!(format!(
+            "checkpoint:{BACKEND}:hyper2d-e2e-rollout:label=best:step={step}"
+        ));
+        metadata["shared_base_output"] = json!(best_shared_base);
+        metadata["hyper_output"] = json!(best_hyper);
+        fs::write(
+            checkpoint_dir.join("best_metadata.json"),
+            serde_json::to_vec_pretty(&metadata)?,
+        )?;
+        Ok(Some(hashes))
+    }
+
+    fn copy_checkpoint_file(source: &Path, destination: &Path) -> AutomataResult<()> {
+        let file_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                AutomataError::InvalidArgument(format!(
+                    "checkpoint destination {} has no file name",
+                    destination.display()
+                ))
+            })?;
+        let temporary = destination.with_file_name(format!(".{file_name}.promote.tmp"));
+        let _ = fs::remove_file(&temporary);
+        fs::copy(source, &temporary)?;
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+        fs::rename(temporary, destination)?;
+        Ok(())
+    }
+
+    pub(super) fn promote_current_e2e_training_checkpoint(
+        checkpoint_dir: &Path,
+    ) -> AutomataResult<()> {
+        let current = checkpoint_dir.join("current_training_state.mpk");
+        if !current.is_file() {
+            return Err(AutomataError::InvalidFormat(format!(
+                "cannot promote missing current training checkpoint {}",
+                current.display()
+            )));
+        }
+        copy_checkpoint_file(
+            &current,
+            &checkpoint_dir.join("best_training_state.mpk"),
+        )
+    }
+
+    pub(super) fn promote_selected_final_e2e_training_checkpoint(
+        selected_step: usize,
+        final_step: usize,
+        checkpoint_dir: &Path,
+    ) -> AutomataResult<bool> {
+        if selected_step != final_step
+            || !checkpoint_dir.join("current_training_state.mpk").is_file()
+        {
+            return Ok(false);
+        }
+        promote_current_e2e_training_checkpoint(checkpoint_dir)?;
+        Ok(true)
+    }
+
+    pub(super) fn promote_resume_e2e_checkpoint(
+        resume_checkpoint: &Path,
+        checkpoint_dir: &Path,
+    ) -> AutomataResult<()> {
+        let source_state = if resume_checkpoint.is_dir() {
+            resume_checkpoint.join("current_training_state.mpk")
+        } else {
+            resume_checkpoint.to_path_buf()
+        };
+        if !source_state.is_file() {
+            return Err(AutomataError::InvalidFormat(format!(
+                "cannot promote missing resume training checkpoint {}",
+                source_state.display()
+            )));
+        }
+        let source_dir = source_state.parent().ok_or_else(|| {
+            AutomataError::InvalidArgument(format!(
+                "resume training checkpoint {} has no parent directory",
+                source_state.display()
+            ))
+        })?;
+        let source_label = e2e_training_checkpoint_artifact_label(&source_state);
+        let source_base = source_dir.join(format!("{source_label}_shared_base.bpk"));
+        let source_hyper = source_dir.join(format!("{source_label}_hyper_2d.bpk"));
+        let source_metadata = source_dir.join(format!("{source_label}_metadata.json"));
+        for source in [&source_base, &source_hyper, &source_metadata] {
+            if !source.is_file() {
+                return Err(AutomataError::InvalidFormat(format!(
+                    "cannot promote missing resume checkpoint artifact {}",
+                    source.display()
+                )));
+            }
+        }
+        fs::create_dir_all(checkpoint_dir)?;
+        copy_checkpoint_file(
+            &source_base,
+            &checkpoint_dir.join("best_shared_base.bpk"),
+        )?;
+        copy_checkpoint_file(
+            &source_hyper,
+            &checkpoint_dir.join("best_hyper_2d.bpk"),
+        )?;
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(source_metadata)?)?;
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert("label".to_string(), json!("best"));
+            object.insert(
+                "shared_base_output".to_string(),
+                json!(checkpoint_dir.join("best_shared_base.bpk")),
+            );
+            object.insert(
+                "hyper_output".to_string(),
+                json!(checkpoint_dir.join("best_hyper_2d.bpk")),
+            );
+        }
+        let destination_metadata = checkpoint_dir.join("best_metadata.json");
+        let temporary_metadata = checkpoint_dir.join(".best_metadata.json.promote.tmp");
+        fs::write(&temporary_metadata, serde_json::to_vec_pretty(&metadata)?)?;
+        if destination_metadata.exists() {
+            fs::remove_file(&destination_metadata)?;
+        }
+        fs::rename(temporary_metadata, destination_metadata)?;
+        copy_checkpoint_file(
+            &source_state,
+            &checkpoint_dir.join("best_training_state.mpk"),
+        )
+    }
+
+    pub(super) fn e2e_training_checkpoint_artifact_label(path: &Path) -> &'static str {
+        match path.file_name().and_then(|name| name.to_str()) {
+            Some("best_training_state.mpk") => "best",
+            _ => "current",
+        }
     }
 
     pub(super) fn write_e2e_rollout_checkpoint(
@@ -1614,6 +2398,30 @@ use super::*;
         };
         let checkpoint_dir = Path::new(checkpoint_dir);
         fs::create_dir_all(checkpoint_dir)?;
+        if label == "best"
+            && let Some(hashes) =
+                promote_matching_current_e2e_checkpoint(checkpoint_dir, step)?
+        {
+            eprintln!(
+                "hyper2d e2e rollout checkpoint best step {step} promoted the matching current artifacts without tensor reserialization"
+            );
+            return Ok(Some(hashes));
+        }
+        if label == "best"
+            && let Some(hashes) =
+                matching_e2e_checkpoint_artifacts(checkpoint_dir, "best", step)?
+        {
+            eprintln!(
+                "hyper2d e2e rollout checkpoint best step {step} reused the matching best artifact bundle"
+            );
+            return Ok(Some(hashes));
+        }
+        if label == "best" {
+            // A selected model can be serialized without a matching optimizer
+            // snapshot. Never leave an older resumable state beside new model
+            // artifacts under the same label.
+            let _ = fs::remove_file(checkpoint_dir.join("best_training_state.mpk"));
+        }
         let shared_base_output = checkpoint_dir.join(format!("{label}_shared_base.bpk"));
         let hyper_output = checkpoint_dir.join(format!("{label}_hyper_2d.bpk"));
         let metadata_output = checkpoint_dir.join(format!("{label}_metadata.json"));
@@ -1666,6 +2474,7 @@ use super::*;
             "condition_rgb_channel_scale": config.dino_rgb_channel_scale,
             "condition_alpha_channel": config.dino_alpha_channel,
             "condition_alpha_channel_scale": config.dino_alpha_channel_scale,
+            "condition_patch_pixels": config.dino_patch_pixels,
             "condition_l2_normalize_features": config.dino_l2_normalize_features,
             "condition_resize_mode": "stretch",
         });
@@ -1748,7 +2557,7 @@ use super::*;
         );
         hasher.update(
             format!(
-                "credit={:?}:{}:{:?}:{:.9}:{:.9}:{};warmup={};sampling={:.9}:{:.9}:{:.9}:{:.9}:{};pool={}:{}:{};seed_scale={:.9};pre_rollout={};dynamics={:.9}:{:.9};backends={:?}:{:?};grad_norm={}:{}:{};objectives={:.9}:{:.9}:{:?}:{}:{:.9}:{:.9};base={}:{};flow={}:{}:{}:{}:{}:{:.9};dino={}:{:.9}:{:.9}:{};spatial={}:{:.9}:{:.9}:{}",
+                "credit={:?}:{}:{:?}:{:.9}:{:.9}:{};warmup={};sampling={:.9}:{:.9}:{:.9}:{:.9}:{};pool={}:{}:{};seed_scale={:.9};pre_rollout={}:{};dynamics={:.9}:{:.9};backends={:?}:{:?};grad_norm={}:{}:{};objectives={:.9}:{:.9}:{:?}:{}:{:.9}:{}:{:.9};amortization={}:{}:{:.9}:{}:{:.9}:{:.9}:{:?}:{}:{:.9}:{}:{}:{};base={}:{};flow={}:{}:{}:{}:{}:{}:{}:{:.9}:{:.9};dino={}:{:.9}:{:.9}:{}:{};spatial={}:{:.9}:{:.9}:{};resume={}",
                 config.credit_assignment,
                 config.tbptt_chunk_steps,
                 config.tbptt_loss_mode,
@@ -1765,6 +2574,7 @@ use super::*;
                 config.seed_replacements_per_interval,
                 config.seed_trajectory_interval,
                 config.seed_scale,
+                config.pre_rollout_step_min,
                 config.pre_rollout_steps,
                 config.grid_eps,
                 config.motion_scale,
@@ -1778,23 +2588,41 @@ use super::*;
                 config.adapter_teacher_objective,
                 config.adapter_teacher_probe_rollout_steps,
                 config.flow_matching_weight,
+                config.flow_match_inference_source,
                 config.flow_self_rectification_weight,
+                config.amortization_enabled,
+                config.amortization_substrate_steps,
+                config.amortization_residual_scale,
+                config.amortization_residual_anneal_steps,
+                config.amortization_hyper_only_fraction,
+                config.amortization_distillation_weight,
+                config.amortization_distillation_objective,
+                config.amortization_distillation_probe_rollout_steps,
+                config.amortization_learning_rate,
+                config.amortization_grad_normalization,
+                config.amortization_initialize_from_teacher,
+                config.amortization_initialize_from_generator,
                 config.shared_base_trainable,
                 config.shared_base_train_start_step,
                 config.generator_layers,
                 config.generator_ffn_dims,
                 config.token_attention_heads,
                 config.softmax_token_attention,
+                config.generator_sample_steps,
+                config.generator_train_sample_steps,
                 config.generator_source_seed,
                 config.generator_init_scale,
+                config.generator_default_endpoint_rms,
                 config.dino_l2_normalize_features,
                 config.dino_rgb_channel_scale,
                 config.dino_alpha_channel_scale,
+                config.dino_patch_pixels,
                 config.dino_batch_size,
                 config.spatial_condition_control,
                 config.spatial_condition_control_scale,
                 config.spatial_condition_control_sigma,
                 config.spatial_condition_state_control,
+                config.curriculum_resume,
             )
             .as_bytes(),
         );
@@ -1804,6 +2632,7 @@ use super::*;
     #[allow(clippy::too_many_arguments)]
     pub(super) fn write_e2e_training_checkpoint(
         step: usize,
+        generator: &BurnE2eGeneratorParams,
         base_optimizer: &BurnBaseAdamWState,
         generator_optimizer: &BurnE2eGeneratorAdamWState,
         sampler: &E2eIdentitySampler,
@@ -1819,6 +2648,9 @@ use super::*;
         };
         let mut optimizer_tensors = base_optimizer.snapshots()?;
         optimizer_tensors.extend(generator_optimizer.snapshots()?);
+        if let Some(snapshot) = generator.amortization_snapshot()? {
+            optimizer_tensors.push(snapshot);
+        }
         let checkpoint = E2eTrainingCheckpoint {
             version: E2E_TRAINING_CHECKPOINT_VERSION,
             backend: BACKEND.to_string(),
@@ -1837,6 +2669,12 @@ use super::*;
             rollouts_per_example: config.rollouts_per_example,
             base_optimizer_step: base_optimizer.step,
             generator_optimizer_step: generator_optimizer.step,
+            row_flow_optimizer_step: Some(generator_optimizer.row_flow_step),
+            amortization_optimizer_step: Some(generator_optimizer.amortization_step),
+            sample_id_optimizer_steps: generator_optimizer.sample_id_steps.clone(),
+            amortization_identity_optimizer_steps: generator_optimizer
+                .amortization_identity_steps
+                .clone(),
             optimizer_tensors,
             sampler: sampler.clone(),
             seed_trajectory_counts: seed_trajectory_counts.to_vec(),
@@ -1849,6 +2687,65 @@ use super::*;
             "hyper2d e2e rollout checkpoint current step {step} wrote {}",
             path.display()
         );
+        Ok(())
+    }
+
+    pub(super) fn curriculum_source_order_matches(
+        recorded: &[String],
+        requested: &[String],
+    ) -> bool {
+        recorded == requested
+    }
+
+    fn validate_curriculum_resume_sources(
+        checkpoint_path: &Path,
+        train_examples: &[BurnE2eRolloutExample],
+    ) -> AutomataResult<()> {
+        let report_path = checkpoint_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                AutomataError::InvalidArgument(format!(
+                    "curriculum checkpoint {} has no run directory",
+                    checkpoint_path.display()
+                ))
+            })?
+            .join("report.json");
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(&report_path)?)?;
+        let recorded = report
+            .get("selected_sources")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                AutomataError::InvalidFormat(format!(
+                    "curriculum source report {} has no selected_sources array",
+                    report_path.display()
+                ))
+            })?
+            .iter()
+            .filter(|entry| entry.get("split").and_then(serde_json::Value::as_str) == Some("train"))
+            .map(|entry| {
+                entry
+                    .get("slug")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        AutomataError::InvalidFormat(format!(
+                            "curriculum source report {} has a train entry without a slug",
+                            report_path.display()
+                        ))
+                    })
+            })
+            .collect::<AutomataResult<Vec<_>>>()?;
+        let requested = train_examples
+            .iter()
+            .map(|example| example.slug.clone())
+            .collect::<Vec<_>>();
+        if !curriculum_source_order_matches(&recorded, &requested) {
+            return Err(AutomataError::InvalidArgument(format!(
+                "curriculum checkpoint {} training identities or order differ from the current source selection",
+                checkpoint_path.display()
+            )));
+        }
         Ok(())
     }
 
@@ -1871,8 +2768,9 @@ use super::*;
                 path.display()
             ))
         })?;
+        let artifact_label = e2e_training_checkpoint_artifact_label(&path);
         if !checkpoint.shared_base_sha256.is_empty() {
-            let artifact = checkpoint_dir.join("current_shared_base.bpk");
+            let artifact = checkpoint_dir.join(format!("{artifact_label}_shared_base.bpk"));
             let actual = crate::import::bpk_payload_sha256(&fs::read(&artifact)?)?;
             if actual != checkpoint.shared_base_sha256 {
                 return Err(AutomataError::InvalidFormat(format!(
@@ -1883,7 +2781,7 @@ use super::*;
             }
         }
         if !checkpoint.hyper_sha256.is_empty() {
-            let artifact = checkpoint_dir.join("current_hyper_2d.bpk");
+            let artifact = checkpoint_dir.join(format!("{artifact_label}_hyper_2d.bpk"));
             let actual = crate::hyper::e2e::e2e_hyper_bpk_payload_sha256(&fs::read(&artifact)?)?;
             if actual != checkpoint.hyper_sha256 {
                 return Err(AutomataError::InvalidFormat(format!(
@@ -1893,30 +2791,41 @@ use super::*;
                 )));
             }
         }
-        if checkpoint.backend != BACKEND
-            || (!checkpoint.contract_sha256.is_empty()
+        let common_incompatible = checkpoint.backend != BACKEND
+            || checkpoint.train_examples != train_examples.len()
+            || checkpoint.seed_trajectory_counts.len() != train_examples.len()
+            || npa_config.spatial_dims != 2;
+        let exact_incompatible = !config.curriculum_resume
+            && ((!checkpoint.contract_sha256.is_empty()
                 && checkpoint.contract_sha256
                     != e2e_training_contract_sha256(train_examples, config))
-            || checkpoint.train_examples != train_examples.len()
-            || checkpoint.rollout_particles != config.rollout_particles
-            || checkpoint.rollout_step_min != config.rollout_step_min
-            || checkpoint.rollout_steps != config.rollout_steps
-            || checkpoint.rollouts_per_example != config.rollouts_per_example
-            || checkpoint.seed_trajectory_counts.len() != train_examples.len()
-            || npa_config.spatial_dims != 2
-        {
+                || checkpoint.rollout_particles != config.rollout_particles
+                || checkpoint.rollout_step_min != config.rollout_step_min
+                || checkpoint.rollout_steps != config.rollout_steps
+                || checkpoint.rollouts_per_example != config.rollouts_per_example);
+        if common_incompatible || exact_incompatible {
             return Err(AutomataError::InvalidArgument(format!(
                 "training checkpoint {} is incompatible with backend/data/rollout config",
                 path.display()
             )));
         }
-        if checkpoint.completed_step >= config.steps {
+        if config.curriculum_resume {
+            validate_curriculum_resume_sources(&path, train_examples)?;
+        }
+        validate_e2e_resume_completed_step(checkpoint.completed_step, config.steps)?;
+        Ok(checkpoint)
+    }
+
+    pub(super) fn validate_e2e_resume_completed_step(
+        completed_step: usize,
+        configured_steps: usize,
+    ) -> AutomataResult<()> {
+        if completed_step > configured_steps {
             return Err(AutomataError::InvalidArgument(format!(
-                "training checkpoint completed step {} is not below configured total steps {}",
-                checkpoint.completed_step, config.steps
+                "training checkpoint completed step {completed_step} exceeds configured total steps {configured_steps}",
             )));
         }
-        Ok(checkpoint)
+        Ok(())
     }
 
     pub(crate) fn train_oracle_models_burn_dense(
@@ -1924,9 +2833,67 @@ use super::*;
         examples: &[DirectBasisExample],
         config: DirectBasisTrainConfig,
     ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+        let plan = Target2dOracleTrainPlan {
+            train: config,
+            steps_per_repetition: config.steps,
+            repetitions: 1,
+            optimizer: adamw_from_sgd(config.base_sgd),
+            scheduler_milestones: Vec::new(),
+            scheduler_gamma: 1.0,
+        };
+        train_oracle_models_burn_dense_planned(models, examples, plan, None)
+    }
+
+    pub(crate) fn train_target2d_oracle_burn_dense(
+        model: &mut NpaModel,
+        example: &DirectBasisExample,
+        plan: Target2dOracleTrainPlan,
+        checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+        train_oracle_models_burn_dense_planned(
+            std::slice::from_mut(model),
+            std::slice::from_ref(example),
+            plan,
+            checkpoint,
+        )
+    }
+
+    fn train_oracle_models_burn_dense_planned(
+        models: &mut [NpaModel],
+        examples: &[DirectBasisExample],
+        plan: Target2dOracleTrainPlan,
+        checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+        let config = plan.train;
+        let total_steps = plan.total_steps();
         if models.is_empty() || examples.is_empty() {
             return Err(std::io::Error::other(
                 "Burn dense oracle model batch requires at least one model/example",
+            )
+            .into());
+        }
+        if plan.steps_per_repetition == 0 || plan.repetitions == 0 || total_steps == 0 {
+            return Err(std::io::Error::other(
+                "Burn oracle training requires non-zero steps and repetitions",
+            )
+            .into());
+        }
+        if config.steps != total_steps {
+            return Err(std::io::Error::other(format!(
+                "Burn oracle training plan total {total_steps} does not match configured steps {}",
+                config.steps,
+            ))
+            .into());
+        }
+        if !plan.scheduler_gamma.is_finite() || plan.scheduler_gamma <= 0.0 {
+            return Err(std::io::Error::other(
+                "Burn oracle scheduler gamma must be finite and positive",
+            )
+            .into());
+        }
+        if plan.scheduler_milestones.contains(&0) {
+            return Err(std::io::Error::other(
+                "Burn oracle scheduler milestones must be non-zero",
             )
             .into());
         }
@@ -1971,8 +2938,7 @@ use super::*;
             config,
         )?);
 
-        let mut optimizer = BurnBaseBatchAdamWState::zeros_like(&params);
-        let mut particle_pools = config.use_particle_pool.then(|| {
+        let build_particle_pools = || config.use_particle_pool.then(|| {
             targets
                 .iter()
                 .enumerate()
@@ -1992,6 +2958,9 @@ use super::*;
                 })
                 .collect::<Vec<_>>()
         });
+        let mut optimizer = BurnBaseBatchAdamWState::zeros_like(&params);
+        let mut particle_pools = build_particle_pools();
+        let mut checkpoint_state = checkpoint.map(BurnDenseCheckpointState::new);
         let mut history = Vec::new();
         let mut per_model_history = vec![Vec::new(); models.len()];
         let mut best_train_loss = vec![None::<f32>; models.len()];
@@ -2001,12 +2970,35 @@ use super::*;
         let mut steady_particle_steps = 0.0_f64;
         let mut steady_elapsed_ms = 0.0_f64;
 
-        for step in 1..=config.steps {
+        for step in 1..=total_steps {
+            let (repetition, phase_step, upstream_epoch) =
+                oracle_repetition_position(step, plan.steps_per_repetition);
+            if phase_step == 1 && repetition > 0 {
+                optimizer = BurnBaseBatchAdamWState::zeros_like(&params);
+                particle_pools = build_particle_pools();
+                eprintln!(
+                    "{LOG_BACKEND} target2d oracle repetition {} reset optimizer and particle pool",
+                    repetition + 1,
+                );
+            }
             let should_report =
-                step == config.steps || step.is_multiple_of(config.report_interval.max(1));
+                step == total_steps || step.is_multiple_of(config.report_interval.max(1));
+            let checkpoint_due = checkpoint_state
+                .as_ref()
+                .is_some_and(|state| state.should_write_current(step));
+            let collect_metrics = should_report || checkpoint_due;
             let step_seed = config
                 .seed
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9));
+            let lr_scale = milestone_lr_scale(
+                phase_step,
+                &plan.scheduler_milestones,
+                plan.scheduler_gamma,
+            );
+            let optimizer_config = AdamWConfig {
+                learning_rate: plan.optimizer.learning_rate * lr_scale,
+                ..plan.optimizer
+            };
             let stats = train_oracle_model_batch_step_tbptt(
                 &mut params,
                 &mut optimizer,
@@ -2016,8 +3008,9 @@ use super::*;
                 step_seed,
                 particle_pools.as_deref_mut(),
                 config.use_particle_pool
-                    && step.is_multiple_of(config.inject_seed_interval.max(1)),
-                should_report,
+                    && upstream_epoch.is_multiple_of(config.inject_seed_interval.max(1)),
+                collect_metrics,
+                optimizer_config,
             )?;
             let particle_steps = stats.particle_steps_per_sec * stats.elapsed_ms / 1_000.0;
             measured_particle_steps += particle_steps;
@@ -2046,8 +3039,11 @@ use super::*;
                     .sum::<f32>()
                     / stats.per_model_base_grad_scale.len().max(1) as f32;
                 println!(
-                    "{LOG_BACKEND} oracle-model-batch train step {step}/{} loss={mean_loss:.6} models={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
-                    config.steps,
+                    "{LOG_BACKEND} oracle-model-batch train step {step}/{total_steps} repetition={}/{} phase_step={phase_step}/{} lr={:.3e} loss={mean_loss:.6} models={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
+                    repetition + 1,
+                    plan.repetitions,
+                    plan.steps_per_repetition,
+                    optimizer_config.learning_rate,
                     models.len(),
                     stats.particle_steps_per_sec,
                     stats.elapsed_ms
@@ -2064,10 +3060,12 @@ use super::*;
                     particle_steps_per_sec: stats.particle_steps_per_sec,
                     elapsed_ms: stats.elapsed_ms,
                 });
+                let mut improved = false;
                 for (idx, loss) in stats.per_model_loss.iter().copied().enumerate() {
                     if best_train_loss[idx].is_none_or(|best| loss < best) {
                         best_train_loss[idx] = Some(loss);
                         best_train_step[idx] = step;
+                        improved = true;
                     }
                     per_model_history[idx].push(CliHyper2dDirectBasisHistoryEntry {
                         step,
@@ -2091,6 +3089,32 @@ use super::*;
                     &format!("oracle_batch:report_step:{step}"),
                     config,
                 )?;
+                if improved
+                    && models.len() == 1
+                    && let Some(state) = checkpoint_state.as_mut()
+                {
+                    state.write_best_batch(
+                        &params,
+                        "oracle",
+                        step,
+                        best_train_loss[0],
+                        None,
+                        None,
+                    )?;
+                }
+            }
+            if checkpoint_due
+                && models.len() == 1
+                && let Some(state) = checkpoint_state.as_mut()
+            {
+                state.write_current_batch(
+                    &params,
+                    "oracle",
+                    step,
+                    stats.per_model_loss.first().copied(),
+                    None,
+                    None,
+                )?;
             }
         }
 
@@ -2113,7 +3137,16 @@ use super::*;
                 "brush_size": config.brush_size,
             },
             "particle_count": particle_count,
-            "steps": config.steps,
+            "steps": total_steps,
+            "steps_per_repetition": plan.steps_per_repetition,
+            "repetitions": plan.repetitions,
+            "scheduler": {
+                "milestones": plan.scheduler_milestones,
+                "gamma": plan.scheduler_gamma,
+                "reset_optimizer_each_repetition": true,
+                "reset_particle_pool_each_repetition": config.use_particle_pool,
+            },
+            "optimizer": plan.optimizer,
             "rollout_steps": config.rollout_steps,
             "tbptt_chunk_steps": config.tbptt_chunk_steps,
             "loss_on_final_chunk_only": config.loss_on_final_chunk_only,
@@ -2132,6 +3165,9 @@ use super::*;
             "gpu_memory_budget_gb": config.gpu_memory_budget_gb,
             "process_memory_snapshots": memory_snapshots,
             "gpu_memory_snapshots": gpu_memory_snapshots,
+            "model_checkpoints": checkpoint_state
+                .as_ref()
+                .map(BurnDenseCheckpointState::report_json),
         });
         Ok(BurnDenseOracleBatchOutput {
             backend: BACKEND,
@@ -2254,6 +3290,72 @@ use super::*;
             Ok(())
         }
 
+        pub(super) fn write_current_batch(
+            &mut self,
+            params: &BurnBaseBatch,
+            phase: &str,
+            step: usize,
+            train_loss: Option<f32>,
+            eval_loss: Option<f32>,
+            geometry_score: Option<f32>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.write_batch_model(params, BurnDenseCheckpointWrite {
+                kind: "current",
+                output: self.config.current_model_output.clone(),
+                phase: phase.to_string(),
+                step,
+                train_loss,
+                eval_loss,
+                geometry_score,
+            })?;
+            self.current_writes = self.current_writes.saturating_add(1);
+            self.last_current_write = Instant::now();
+            self.write_metadata()?;
+            Ok(())
+        }
+
+        pub(super) fn write_best_batch(
+            &mut self,
+            params: &BurnBaseBatch,
+            phase: &str,
+            step: usize,
+            train_loss: Option<f32>,
+            eval_loss: Option<f32>,
+            geometry_score: Option<f32>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.write_batch_model(params, BurnDenseCheckpointWrite {
+                kind: "best",
+                output: self.config.best_model_output.clone(),
+                phase: phase.to_string(),
+                step,
+                train_loss,
+                eval_loss,
+                geometry_score,
+            })?;
+            self.best_writes = self.best_writes.saturating_add(1);
+            self.write_metadata()?;
+            Ok(())
+        }
+
+        fn write_batch_model(
+            &mut self,
+            params: &BurnBaseBatch,
+            request: BurnDenseCheckpointWrite,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            if params.model_count() != 1 {
+                return Err(std::io::Error::other(
+                    "target2d checkpointing requires exactly one oracle model",
+                )
+                .into());
+            }
+            let mut model = NpaModel {
+                config: self.config.model_config.clone(),
+                weights: NpaWeights::zeros(&self.config.model_config),
+            };
+            params.write_to_models(std::slice::from_mut(&mut model))?;
+            self.write_npa_model(&model, request)
+        }
+
         pub(super) fn write_model(
             &mut self,
             params: &BurnBaseParams,
@@ -2264,12 +3366,20 @@ use super::*;
                 weights: NpaWeights::zeros(&self.config.model_config),
             };
             params.write_to_model(&mut model)?;
+            self.write_npa_model(&model, request)
+        }
+
+        fn write_npa_model(
+            &mut self,
+            model: &NpaModel,
+            request: BurnDenseCheckpointWrite,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             let source = Some(format!(
                 "{}:checkpoint:{}:phase={}:step={}",
                 self.config.source, request.kind, request.phase, request.step
             ));
             let manifest =
-                crate::import::BpkModelManifest::from_model(&model, self.config.hashgrid.clone(), source);
+                crate::import::BpkModelManifest::from_model(model, self.config.hashgrid.clone(), source);
             let sha256 = atomic_save_manifest(&request.output, &manifest)?;
             let event = BurnDenseCheckpointEvent {
                 kind: request.kind,

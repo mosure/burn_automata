@@ -1564,92 +1564,15 @@ pub(super) fn load_target_image_2d_adaptive(
     target_points: usize,
     image_size: Option<usize>,
 ) -> Result<TargetImage2d, Box<dyn std::error::Error>> {
-    if !threshold.is_finite() || threshold < 0.0 {
-        return Err(
-            std::io::Error::other("--target-threshold must be finite and non-negative").into(),
-        );
-    }
-    let max_size = if let Some(size) = image_size {
-        if size == 0 {
-            return Err(
-                std::io::Error::other("--target-image-size must be greater than zero").into(),
-            );
-        }
-        size
-    } else {
-        adaptive_target_image_size(path, threshold, target_points)?
-    };
-    let rgba = load_rgba_thumbnail(path, max_size)?;
-    let foreground = foreground_alpha_count(&rgba, threshold);
-    let pixels = rgba.width() as usize * rgba.height() as usize;
-    if foreground == pixels {
+    let target = crate::load_target_image_2d_upstream(path, threshold, target_points, image_size)?;
+    if target.point_count() == target.source_width * target.source_height {
         return Err(std::io::Error::other(format!(
             "growing-2d target {} is fully opaque, so upstream alpha-only extraction would train on the entire image rectangle; provide a target with a transparent background",
             path.display()
         ))
         .into());
     }
-    target_from_rgba(&rgba, threshold)
-}
-
-fn adaptive_target_image_size(
-    path: &Path,
-    threshold: f32,
-    target_points: usize,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    if target_points == 0 {
-        return Err(std::io::Error::other("--target-points must be greater than zero").into());
-    }
-    let mut size = 128usize;
-    for _ in 0..5 {
-        let image = load_rgba_thumbnail(path, size)?;
-        let count = foreground_alpha_count(&image, threshold).max(1);
-        size = ((target_points as f32 / count as f32).sqrt() * size as f32)
-            .round()
-            .clamp(1.0, 2048.0) as usize;
-    }
-    Ok(size)
-}
-
-fn load_rgba_thumbnail(
-    path: &Path,
-    max_size: usize,
-) -> Result<image::RgbaImage, Box<dyn std::error::Error>> {
-    let image = image::ImageReader::open(path)?.decode()?;
-    Ok(image
-        .resize(
-            max_size as u32,
-            max_size as u32,
-            image::imageops::FilterType::Lanczos3,
-        )
-        .to_rgba8())
-}
-
-fn foreground_alpha_count(image: &image::RgbaImage, threshold: f32) -> usize {
-    image
-        .pixels()
-        .filter(|pixel| pixel[3] as f32 / 255.0 >= threshold)
-        .count()
-}
-
-fn target_from_rgba(
-    image: &image::RgbaImage,
-    threshold: f32,
-) -> Result<TargetImage2d, Box<dyn std::error::Error>> {
-    let values = image
-        .as_raw()
-        .iter()
-        .map(|value| *value as f32 / 255.0)
-        .collect::<Vec<_>>();
-    Ok(TargetImage2d::from_rgba_pixels(
-        image.width() as usize,
-        image.height() as usize,
-        &values,
-        TargetImage2dExtractConfig {
-            threshold,
-            ..TargetImage2dExtractConfig::default()
-        },
-    )?)
+    Ok(target)
 }
 
 fn write_json_report<T: Serialize>(
@@ -1678,9 +1601,9 @@ mod tests {
         let image = RgbaImage::from_pixel(128, 128, Rgba([255, 255, 255, 255]));
         image.save(&path).unwrap();
 
-        let size = adaptive_target_image_size(&path, 0.05, 2048).unwrap();
-        let resized = load_rgba_thumbnail(&path, size).unwrap();
-        let count = foreground_alpha_count(&resized, 0.05);
+        let size = crate::upstream_adaptive_target_image_size(&path, 0.05, 2048).unwrap();
+        let resized = crate::load_rgba_thumbnail_upstream(&path, size).unwrap();
+        let count = crate::foreground_alpha_count_upstream(&resized, 0.05);
         std::fs::remove_file(&path).ok();
 
         assert_eq!(size, 45);

@@ -1,7 +1,7 @@
 use super::super::{
     BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
     BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput, DirectBasisTrainConfig,
-    DirectBasisTrainingExample, Target2dBurnCheckpointConfig,
+    DirectBasisTrainingExample, Target2dBurnCheckpointConfig, Target2dOracleTrainPlan,
 };
 
 #[cfg(feature = "backend_wgpu")]
@@ -99,6 +99,29 @@ pub(crate) fn train_oracle_models_burn_wgpu(
     super::wgpu_imp::entrypoints::train_oracle_models_burn_dense(models, examples, train_config)
 }
 
+#[cfg(feature = "backend_wgpu")]
+pub(crate) fn train_target2d_oracle_burn_wgpu(
+    model: &mut crate::NpaModel,
+    example: &DirectBasisTrainingExample,
+    plan: Target2dOracleTrainPlan,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    super::wgpu_imp::entrypoints::train_target2d_oracle_burn_dense(model, example, plan, checkpoint)
+}
+
+#[cfg(not(feature = "backend_wgpu"))]
+pub(crate) fn train_target2d_oracle_burn_wgpu(
+    _model: &mut crate::NpaModel,
+    _example: &DirectBasisTrainingExample,
+    _plan: Target2dOracleTrainPlan,
+    _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    Err(std::io::Error::other(
+        "Burn/WGPU target2d oracle training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
+    )
+    .into())
+}
+
 #[cfg(not(feature = "backend_wgpu"))]
 pub(crate) fn train_oracle_models_burn_wgpu(
     _models: &mut [crate::NpaModel],
@@ -186,6 +209,29 @@ pub(crate) fn train_oracle_models_burn_cuda(
     train_config: DirectBasisTrainConfig,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     super::cuda_imp::entrypoints::train_oracle_models_burn_dense(models, examples, train_config)
+}
+
+#[cfg(feature = "backend_cuda")]
+pub(crate) fn train_target2d_oracle_burn_cuda(
+    model: &mut crate::NpaModel,
+    example: &DirectBasisTrainingExample,
+    plan: Target2dOracleTrainPlan,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    super::cuda_imp::entrypoints::train_target2d_oracle_burn_dense(model, example, plan, checkpoint)
+}
+
+#[cfg(not(feature = "backend_cuda"))]
+pub(crate) fn train_target2d_oracle_burn_cuda(
+    _model: &mut crate::NpaModel,
+    _example: &DirectBasisTrainingExample,
+    _plan: Target2dOracleTrainPlan,
+    _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    Err(std::io::Error::other(
+        "Burn/CUDA target2d oracle training requires the backend_cuda feature; rebuild with --features cli,backend_cuda",
+    )
+    .into())
 }
 
 #[cfg(not(feature = "backend_cuda"))]

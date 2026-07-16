@@ -32,3 +32,14 @@ overflow_regularizer_weight = 100.0
 bound_regularizer_weight = 100.0
 max_total_loss = 1000000.0
 target_color_tolerance = 0.02
+
+[training_parity]
+required = true
+max_feature_rmse = 0.0002
+max_forward_rmse = 0.00002
+# CUDA scatter accumulation differs from the deterministic Rust summation by
+# roughly 1.5e-4 relative while the resulting gradient/update remains tighter.
+max_loss_abs = 0.002
+min_raw_gradient_cosine = 0.999
+max_normalized_gradient_rmse = 0.0002
+max_optimizer_rmse = 0.000002

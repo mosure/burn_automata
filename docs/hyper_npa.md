@@ -40,7 +40,8 @@ the paper's quality claim:
 ```text
 224 x 224 RGBA image
   -> frozen DINOv2 ViT-S/14, all 257 spatial/CLS tokens
-  -> per-token-preserved DINO + aligned RGB/alpha condition projection
+  -> 384 DINO features + the aligned 14 x 14 RGBA patch per patch token
+     (1,168 dimensions; zero-padded patch payload on the CLS token)
   -> deterministic seeded source rows for W1+b1 and W2+b2
   -> timestep-conditioned self/cross-attention velocity transformer
   -> eight-step deterministic Heun solve
@@ -59,6 +60,17 @@ for the rollout rather than paying for a second Heun solve. Optional endpoint
 pretraining can still sample Gaussian controller rows and regress toward a
 modest exact-oracle bank, but it is a warm start or control rather than the
 generalization objective.
+
+Detached-TBPTT training generates the conditioned flow endpoint once per
+optimizer step. Rollout chunks backpropagate into a device-resident endpoint
+leaf, their VJPs are accumulated on device, and one final contraction carries
+the summed gradient through the Heun/condition graph. Teacher, flow, and
+self-rectification objectives share that graph. On the matched 16-condition,
+4,096-particle control this raised median optimizer throughput from 1.378M to
+2.053M particle-steps/s without changing the selected checkpoint or objective
+values. Training-only sample-ID and endpoint tables use per-identity Adam
+bias-correction counters; parameters and moments for identities absent from a
+batch remain frozen, and the counters are checkpointed.
 
 Teacher-free runs use a `1e-3` deterministic source-noise scale. This keeps the
 initial residual near the pretrained shared trunk while row-normalized
@@ -134,8 +146,10 @@ tiny-`log1p` lowering previously observed on WGPU.
 | Current broad quality is below parity | 11.63 dB aggregate and 9.32 dB p10 at step 1,024 | 2,048-particle numerical validation; all 16 samples miss 26 dB |
 | Target extraction is not the dominant ceiling | 28.08 dB target-point-splat p10 | 4,096 extracted target points |
 | Released oracles remain much stronger | Rose/fish HyperNPA: 9.63/11.65 dB; released oracles: 27.93/27.45 dB | Same target, seed, 4,096 particles, and 1,024 steps |
-| Shared-base plus deltas has substantial capacity | 16-ID direct table reaches 23.58 dB aggregate and 19.30 dB p10 | Training identities only; this is memorization, not HyperNPA generalization |
+| Historical table result is not parity evidence | A legacy 16-ID table reached 23.58 dB aggregate and 19.30 dB p10 | The artifact trained a forbidden per-image output bias; it is excluded from upstream-compatible capacity claims |
+| Corrected zero-bias table is active but not converged | 11.63 dB aggregate, 10.52 dB p10 at 1,024 steps, and 3.77 dB correct-vs-shuffled gap | Four train identities, 4,096 particles, 2,000 updates, and 16,000 trajectories/ID: 6.67% of released exposure, not a capacity ceiling |
 | Current trainer has a high-throughput path | 17.66M measured and 18.36M median particle-steps/s | v3, CUDA, batch 64, 1,024 particles, 96 full-BPTT steps; quality disabled |
+| Quality-scale row-flow training avoids repeated flow solves | 2.053M median, 2.288M maximum particle-steps/s | CUDA, 16 conditions, 4,096 particles, 32--95 rollout steps, detached-TBPTT-16, teacher/flow/task objectives |
 
 The paper intentionally does **not** claim:
 
@@ -152,7 +166,11 @@ The numerical tables are derived from these immutable local reports:
 ```text
 artifacts/hyper2d_omnisvg_1k_dino_canonical_quality_refine/report.json
 artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/report.json
+# Historical non-parity diagnostic only (nonzero per-image output bias):
 artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json
+# Corrected bounded zero-output-bias control:
+artifacts/hyper2d_omnisvg4_zero_b2_seeded_table_upstream_lr_cuda/report.json
+artifacts/hyper2d_row_flow_omnisvg16_functional_tbptt_trust_p4096_cuda/report.json
 artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json
 ```
 

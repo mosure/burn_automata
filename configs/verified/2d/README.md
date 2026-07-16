@@ -43,15 +43,24 @@ auxiliary that reuses the generated endpoint. It has no oracle directory or
 per-sample adapter targets. Teacher-free configs initialize the deterministic
 source residual at `1e-3` RMS so it does not overwhelm the pretrained trunk;
 velocity learning remains row-normalized. The corresponding quality-scale contract is
-`production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`: 16 independent
-images per optimizer step, 32 trajectories per image, online native-224 DINO
-tokens, four Heun flow steps, fixed 96-step full-BPTT rollouts, deterministic
-global and per-identity fresh-seed injection, a frozen-trunk generator warmup,
-timed checkpoints, long-horizon p10 validation, condition-shuffle and base-only
-controls, and a final 4,096-particle evaluation. The C16 x R32 shape is the
-measured 96 GiB CUDA contract; use a smaller effective batch on lower-memory
-devices rather than raising `gpu_memory_budget_gb`. Endpoint-bank
+`production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`: eight independent
+images per optimizer step, four trajectories per image, native-224 DINO tokens
+with every aligned 14 x 14 RGBA patch, four Heun flow steps, randomly sampled
+32--95-step full-BPTT rollouts, deterministic global and per-identity fresh-seed
+injection, a frozen-trunk generator warmup, timed checkpoints, long-horizon p10
+validation, condition-shuffle and base-only controls, and a final
+4,096-particle evaluation. The C8 x R4 shape is the current 96 GiB CUDA quality
+contract; use a smaller effective batch on lower-memory devices rather than
+raising `gpu_memory_budget_gb`. Endpoint-bank
 pretraining is optional warm-starting, not a required stage of this path.
+
+The detached-TBPTT row-flow path samples one conditioned endpoint per optimizer
+step and accumulates rollout-chunk VJPs into a device leaf before one backward
+contraction through the Heun solver. Condition-level auxiliaries reuse the same
+endpoint and prepared DINO graph. A matched 16-condition, 4,096-particle CUDA
+control measured 2.053M median particle-steps/s, up from 1.378M before endpoint
+and auxiliary reuse. Sample-ID and training-only endpoint tables keep
+per-identity Adam steps and freeze absent columns and moments.
 
 The row flow uses Burn/CubeCL tiled attention and fused modulated layer
 normalization behind explicit analytic autodiff adjoints. Static source, row,

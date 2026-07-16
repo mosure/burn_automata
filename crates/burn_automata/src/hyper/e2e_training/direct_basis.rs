@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::super::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
 use crate::{
-    NpaConfig, NpaLowRankAdapter, ParticleSeed, SgdConfig, Target2dLossConfig, TargetImage2d,
+    AdamWConfig, NpaConfig, NpaLowRankAdapter, ParticleSeed, SgdConfig, Target2dLossConfig,
+    TargetImage2d,
 };
 
 #[derive(Clone)]
@@ -71,6 +72,22 @@ pub(crate) struct Target2dBurnCheckpointConfig {
     pub(crate) source: String,
     pub(crate) interval_steps: usize,
     pub(crate) interval_duration: Option<Duration>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Target2dOracleTrainPlan {
+    pub(crate) train: DirectBasisTrainConfig,
+    pub(crate) steps_per_repetition: usize,
+    pub(crate) repetitions: usize,
+    pub(crate) optimizer: AdamWConfig,
+    pub(crate) scheduler_milestones: Vec<usize>,
+    pub(crate) scheduler_gamma: f32,
+}
+
+impl Target2dOracleTrainPlan {
+    pub(crate) fn total_steps(&self) -> usize {
+        self.steps_per_repetition.saturating_mul(self.repetitions)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

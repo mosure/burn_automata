@@ -63,11 +63,20 @@ use super::*;
             .zip(density)
             .enumerate()
             .map(|(idx, (((total, splat), color), density))| {
+                if !total.is_finite()
+                    || !splat.is_finite()
+                    || !color.is_finite()
+                    || !density.is_finite()
+                {
+                    return Err(AutomataError::InvalidArgument(format!(
+                        "Burn direct loss row {idx} is not finite: total={total:?} splat={splat:?} color={color:?} density={density:?}"
+                    )));
+                }
                 Ok(BurnLossScalars {
-                    total: finite_scalar(&format!("Burn direct total loss[{idx}]"), total)?,
-                    splat: finite_scalar(&format!("Burn direct splat loss[{idx}]"), splat)?,
-                    color: finite_scalar(&format!("Burn direct color loss[{idx}]"), color)?,
-                    density: finite_scalar(&format!("Burn direct density loss[{idx}]"), density)?,
+                    total,
+                    splat,
+                    color,
+                    density,
                 })
             })
             .collect()
@@ -79,6 +88,7 @@ use super::*;
         normalize: bool,
         collect_metrics: bool,
     ) -> AutomataResult<(f32, f32, Tensor1Inner)> {
+        sanitize_nonfinite_gradients(tensors);
         let original_norm_tensor = group_norm_tensor(tensors);
         let original_norm = if collect_metrics {
             finite_scalar(
@@ -115,6 +125,39 @@ use super::*;
             1.0
         };
         Ok((original_norm, scale, scale_tensor))
+    }
+
+    pub(super) fn sanitize_nonfinite_gradients(tensors: &mut [Tensor2Inner]) {
+        for tensor in tensors {
+            let nonfinite = tensor.clone().is_finite().bool_not();
+            *tensor = tensor.clone().mask_fill(nonfinite, 0.0);
+        }
+    }
+
+    pub(super) fn accumulate_gradient_group(
+        accumulated: &mut Option<Vec<Tensor2Inner>>,
+        gradients: Vec<Tensor2Inner>,
+    ) {
+        if let Some(accumulated) = accumulated {
+            assert_eq!(
+                accumulated.len(),
+                gradients.len(),
+                "gradient group shape changed between TBPTT chunks"
+            );
+            for (total, gradient) in accumulated.iter_mut().zip(gradients) {
+                *total = total.clone() + gradient;
+            }
+        } else {
+            *accumulated = Some(gradients);
+        }
+    }
+
+    pub(super) fn scale_gradient_group(gradients: &mut [Tensor2Inner], scale: f32) {
+        if scale != 1.0 {
+            for gradient in gradients {
+                *gradient = gradient.clone().mul_scalar(scale);
+            }
+        }
     }
 
     pub(super) fn prepare_model_batch_grad_group(
@@ -241,6 +284,115 @@ use super::*;
         )
     }
 
+    impl PackedNpaGradientLayout {
+        pub(super) fn new(config: &NpaConfig, output_bias: bool) -> Self {
+            Self {
+                hidden_dims: config.hidden_dims,
+                perception_dims: config.perception_dims(),
+                update_dims: config.update_dims(),
+                max_row_dims: NpaParameterRowLayout2d::new(config).max_row_dims(),
+                output_bias,
+            }
+        }
+
+        fn packed_values(self) -> usize {
+            (self.hidden_dims + self.update_dims) * self.max_row_dims
+        }
+    }
+
+    pub(super) fn normalize_packed_npa_table_gradient(
+        gradient: Tensor2Inner,
+        layout: PackedNpaGradientLayout,
+    ) -> Tensor2Inner {
+        let [packed_values, identities] = gradient.shape().dims::<2>();
+        debug_assert_eq!(packed_values, layout.packed_values());
+        let rows = gradient.reshape([
+            layout.hidden_dims + layout.update_dims,
+            layout.max_row_dims,
+            identities,
+        ]);
+
+        let w1_rows = rows.clone().narrow(0, 0, layout.hidden_dims);
+        let w1 = w1_rows.clone().narrow(1, 0, layout.perception_dims);
+        let b1 = w1_rows.clone().narrow(1, layout.perception_dims, 1);
+        let w1_norm = w1
+            .clone()
+            .mul(w1.clone())
+            .sum_dim(0)
+            .sum_dim(1)
+            .sqrt()
+            .add_scalar(1.0e-8);
+        let b1_norm = b1
+            .clone()
+            .mul(b1.clone())
+            .sum_dim(0)
+            .sum_dim(1)
+            .sqrt()
+            .add_scalar(1.0e-8);
+        let mut normalized_w1 = vec![
+            w1.div(w1_norm.expand([
+                layout.hidden_dims,
+                layout.perception_dims,
+                identities,
+            ])),
+            b1.div(b1_norm.expand([layout.hidden_dims, 1, identities])),
+        ];
+        let w1_padding = layout
+            .max_row_dims
+            .saturating_sub(layout.perception_dims + 1);
+        if w1_padding > 0 {
+            normalized_w1.push(
+                w1_rows
+                    .narrow(1, layout.perception_dims + 1, w1_padding)
+                    .zeros_like(),
+            );
+        }
+        let normalized_w1 = Tensor::cat(normalized_w1, 1);
+
+        let w2_rows = rows.narrow(0, layout.hidden_dims, layout.update_dims);
+        let w2 = w2_rows.clone().narrow(1, 0, layout.hidden_dims);
+        let b2 = w2_rows.clone().narrow(1, layout.hidden_dims, 1);
+        let w2_norm = w2
+            .clone()
+            .mul(w2.clone())
+            .sum_dim(0)
+            .sum_dim(1)
+            .sqrt()
+            .add_scalar(1.0e-8);
+        let normalized_b2 = if layout.output_bias {
+            let b2_norm = b2
+                .clone()
+                .mul(b2.clone())
+                .sum_dim(0)
+                .sum_dim(1)
+                .sqrt()
+                .add_scalar(1.0e-8);
+            b2.div(b2_norm.expand([layout.update_dims, 1, identities]))
+        } else {
+            b2.zeros_like()
+        };
+        let mut normalized_w2 = vec![
+            w2.div(w2_norm.expand([
+                layout.update_dims,
+                layout.hidden_dims,
+                identities,
+            ])),
+            normalized_b2,
+        ];
+        let w2_padding = layout
+            .max_row_dims
+            .saturating_sub(layout.hidden_dims + 1);
+        if w2_padding > 0 {
+            normalized_w2.push(
+                w2_rows
+                    .narrow(1, layout.hidden_dims + 1, w2_padding)
+                    .zeros_like(),
+            );
+        }
+        Tensor::cat(vec![normalized_w1, Tensor::cat(normalized_w2, 1)], 0)
+            .reshape([packed_values, identities])
+    }
+
     pub(super) fn tensor_l2_norm_tensor(tensor: &Tensor2Inner) -> Tensor1Inner {
         tensor.clone().mul(tensor.clone()).sum().sqrt()
     }
@@ -261,6 +413,31 @@ use super::*;
             beta2: 0.999,
             epsilon: 1.0e-8,
         }
+    }
+
+    pub(super) fn milestone_lr_scale(
+        phase_step: usize,
+        milestones: &[usize],
+        gamma: f32,
+    ) -> f32 {
+        let passed = milestones
+            .iter()
+            .filter(|milestone| phase_step > **milestone)
+            .count();
+        gamma.powi(passed.min(i32::MAX as usize) as i32)
+    }
+
+    pub(super) fn oracle_repetition_position(
+        global_step: usize,
+        steps_per_repetition: usize,
+    ) -> (usize, usize, usize) {
+        let steps_per_repetition = steps_per_repetition.max(1);
+        let zero_based_step = global_step.max(1) - 1;
+        let repetition = zero_based_step / steps_per_repetition;
+        let phase_step = zero_based_step % steps_per_repetition + 1;
+        let upstream_epoch = (phase_step - 1)
+            .saturating_add(repetition.saturating_mul(steps_per_repetition - 1));
+        (repetition, phase_step, upstream_epoch)
     }
 
     pub(super) fn apply_adamw_tensor(
@@ -295,6 +472,173 @@ use super::*;
                     .add_scalar(cfg.epsilon),
             );
         decayed - normalized_step.mul_scalar(cfg.learning_rate)
+    }
+
+    pub(super) struct SparseIdentityAdamW<'a> {
+        pub(super) identity_steps: &'a mut [usize],
+        pub(super) active_identities: &'a [usize],
+        pub(super) upstream_growing_min_lr_scale: Option<f32>,
+    }
+
+    pub(super) fn apply_sparse_column_adamw_tensor(
+        param: Tensor2Inner,
+        grad: Tensor2Inner,
+        moment: &mut Tensor2Inner,
+        velocity: &mut Tensor2Inner,
+        cfg: AdamWConfig,
+        scale: Tensor1Inner,
+        sparse: SparseIdentityAdamW<'_>,
+    ) -> AutomataResult<Tensor2Inner> {
+        let SparseIdentityAdamW {
+            identity_steps,
+            active_identities,
+            upstream_growing_min_lr_scale,
+        } = sparse;
+        let [rows, identities] = param.shape().dims::<2>();
+        if identity_steps.len() != identities {
+            return Err(AutomataError::InvalidArgument(format!(
+                "sparse AdamW identity state has {} entries for {identities} parameter columns",
+                identity_steps.len()
+            )));
+        }
+        let mut active = vec![0.0_f32; identities];
+        for &identity in active_identities {
+            let Some(active) = active.get_mut(identity) else {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "sparse AdamW identity {identity} exceeds {identities} parameter columns"
+                )));
+            };
+            *active = 1.0;
+        }
+        let mut beta1_bias = vec![1.0_f32; identities];
+        let mut beta2_bias = vec![1.0_f32; identities];
+        let mut learning_rate_scale = vec![1.0_f32; identities];
+        let mut reset_moments = vec![0.0_f32; identities];
+        for (identity, is_active) in active.iter().enumerate() {
+            if *is_active == 0.0 {
+                continue;
+            }
+            identity_steps[identity] = identity_steps[identity].saturating_add(1);
+            let (step, lr_scale, reset) = upstream_growing_min_lr_scale.map_or_else(
+                || {
+                    (
+                        identity_steps[identity].min(i32::MAX as usize),
+                        1.0,
+                        false,
+                    )
+                },
+                |min_lr_scale| {
+                    upstream_growing_identity_schedule(
+                        identity_steps[identity],
+                        min_lr_scale,
+                    )
+                },
+            );
+            let step = step as i32;
+            beta1_bias[identity] = (1.0 - cfg.beta1.powi(step)).max(f32::MIN_POSITIVE);
+            beta2_bias[identity] = (1.0 - cfg.beta2.powi(step)).max(f32::MIN_POSITIVE);
+            learning_rate_scale[identity] = lr_scale;
+            reset_moments[identity] = if reset { 1.0 } else { 0.0 };
+        }
+
+        let device = param.device();
+        let active = Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(active, [1, identities]),
+            &device,
+        )
+        .expand([rows, identities]);
+        let inactive = active.clone().neg().add_scalar(1.0);
+        let beta1_bias = Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(beta1_bias, [1, identities]),
+            &device,
+        )
+        .expand([rows, identities]);
+        let beta2_bias = Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(beta2_bias, [1, identities]),
+            &device,
+        )
+        .expand([rows, identities]);
+        let learning_rate_scale = Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(learning_rate_scale, [1, identities]),
+            &device,
+        )
+        .expand([rows, identities]);
+        let retain_moments = Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(reset_moments, [1, identities]),
+            &device,
+        )
+        .expand([rows, identities])
+        .neg()
+        .add_scalar(1.0);
+        let grad = grad
+            .mul(scale.expand([rows, identities]))
+            .mul(active.clone());
+        let prior_moment = moment.clone().mul(retain_moments.clone());
+        let prior_velocity = velocity.clone().mul(retain_moments);
+        let next_moment = prior_moment.mul_scalar(cfg.beta1)
+            + grad.clone().mul_scalar(1.0 - cfg.beta1);
+        let next_velocity = prior_velocity.mul_scalar(cfg.beta2)
+            + grad.clone().mul(grad).mul_scalar(1.0 - cfg.beta2);
+        *moment = moment.clone().mul(inactive.clone()) + next_moment.mul(active.clone());
+        *velocity = velocity.clone().mul(inactive) + next_velocity.mul(active.clone());
+
+        let normalized_step = moment
+            .clone()
+            .div(beta1_bias)
+            .div(velocity.clone().div(beta2_bias).sqrt().add_scalar(cfg.epsilon));
+        let update = normalized_step
+            .mul(active.clone())
+            .mul(learning_rate_scale.clone())
+            .mul_scalar(cfg.learning_rate);
+        let decayed = if cfg.weight_decay > 0.0 {
+            param.clone()
+                - param
+                    .clone()
+                    .mul(active)
+                    .mul(learning_rate_scale)
+                    .mul_scalar(cfg.learning_rate * cfg.weight_decay)
+        } else {
+            param
+        };
+        Ok(decayed - update)
+    }
+
+    pub(super) fn upstream_growing_identity_schedule(
+        identity_step: usize,
+        min_lr_scale: f32,
+    ) -> (usize, f32, bool) {
+        let phase_step = identity_step.saturating_sub(1) % 10_000 + 1;
+        let milestones_passed = phase_step.saturating_sub(1).div_euclid(2_000).min(4);
+        let raw_scale = 0.3_f32.powi(milestones_passed as i32);
+        let min_lr_scale = min_lr_scale.clamp(0.0, 1.0);
+        let lr_scale = min_lr_scale + (1.0 - min_lr_scale) * raw_scale;
+        let reset_moments = identity_step > 1 && phase_step == 1;
+        (phase_step, lr_scale, reset_moments)
+    }
+
+    pub(super) fn mean_upstream_growing_identity_lr_scale(
+        identity_steps: &[usize],
+        active_identities: &[usize],
+        min_lr_scale: f32,
+    ) -> f32 {
+        let mut identities = active_identities.to_vec();
+        identities.sort_unstable();
+        identities.dedup();
+        if identities.is_empty() {
+            return 1.0;
+        }
+        identities
+            .iter()
+            .map(|identity| {
+                let next_step = identity_steps
+                    .get(*identity)
+                    .copied()
+                    .unwrap_or_default()
+                    .saturating_add(1);
+                upstream_growing_identity_schedule(next_step, min_lr_scale).1
+            })
+            .sum::<f32>()
+            / identities.len() as f32
     }
 
     pub(super) fn apply_adamw_tensor3(
@@ -487,6 +831,40 @@ use super::*;
                 "{name} is not finite"
             )))
         }
+    }
+
+    pub(super) fn finite_values_summary(name: &str, values: &[f32]) -> String {
+        let mut finite = 0usize;
+        let mut nan = 0usize;
+        let mut positive_infinite = 0usize;
+        let mut negative_infinite = 0usize;
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for value in values.iter().copied() {
+            if value.is_nan() {
+                nan += 1;
+            } else if value == f32::INFINITY {
+                positive_infinite += 1;
+            } else if value == f32::NEG_INFINITY {
+                negative_infinite += 1;
+            } else {
+                finite += 1;
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        if finite == 0 {
+            min = f32::NAN;
+            max = f32::NAN;
+        }
+        format!(
+            "{name}[len={} finite={} nan={} +inf={} -inf={} min={min:.6e} max={max:.6e}]",
+            values.len(),
+            finite,
+            nan,
+            positive_infinite,
+            negative_infinite,
+        )
     }
 
     pub(super) fn check_process_memory_budget(

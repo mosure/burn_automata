@@ -4,12 +4,16 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::prelude::*;
 
+mod training;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Npa2dParityConfig {
     upstream: Npa2dParityUpstreamConfig,
     model: Npa2dParityModelConfig,
     validation: Npa2dParityValidationConfig,
+    #[serde(default)]
+    training_parity: Option<training::Npa2dTrainingParityConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +116,7 @@ struct Npa2dParityValidationReport {
     loss_config: Target2dLossConfig,
     loss: Target2dLossReport,
     max_total_loss: Option<f32>,
+    training_step: Option<training::Npa2dTrainingParityReport>,
 }
 
 #[derive(Serialize)]
@@ -206,7 +211,8 @@ pub(crate) fn run_validate_npa_2d_parity(
         .into());
     }
 
-    let validation = validate_model_and_target(&cfg, &fixture)?;
+    let (validation, training_failures) = validate_model_and_target(&cfg, &fixture)?;
+    failures.extend(training_failures);
     if let Some(max_total_loss) = cfg.validation.max_total_loss
         && validation.loss.total_loss > max_total_loss
     {
@@ -359,7 +365,7 @@ fn fixture_report(
 fn validate_model_and_target(
     cfg: &Npa2dParityConfig,
     fixture: &Npa2dParityFixtureReport,
-) -> Result<Npa2dParityValidationReport, Box<dyn std::error::Error>> {
+) -> Result<(Npa2dParityValidationReport, Vec<String>), Box<dyn std::error::Error>> {
     let seed_mode = SeedModeArg::from_str(&cfg.validation.seed_mode, true)
         .map_err(|err| {
             std::io::Error::other(format!(
@@ -465,21 +471,43 @@ fn validate_model_and_target(
         seed_mode,
     )?;
 
-    Ok(Npa2dParityValidationReport {
-        model: model_report,
-        target: target_report,
-        rollout: Npa2dParityRolloutReport {
-            particles: cfg.validation.particles,
-            steps: cfg.validation.steps,
-            update_prob: cfg.validation.update_prob,
-            seed: cfg.validation.seed,
-            seed_scale: cfg.validation.seed_scale,
-            seed_mode,
+    let training_step = cfg
+        .training_parity
+        .as_ref()
+        .map(|training_config| {
+            training::validate_training_step(
+                &cfg.upstream.fixture,
+                &target,
+                &hashgrid,
+                loss_config,
+                training_config,
+            )
+        })
+        .transpose()?;
+    let training_failures = training_step
+        .as_ref()
+        .map(|report| report.failures.clone())
+        .unwrap_or_default();
+
+    Ok((
+        Npa2dParityValidationReport {
+            model: model_report,
+            target: target_report,
+            rollout: Npa2dParityRolloutReport {
+                particles: cfg.validation.particles,
+                steps: cfg.validation.steps,
+                update_prob: cfg.validation.update_prob,
+                seed: cfg.validation.seed,
+                seed_scale: cfg.validation.seed_scale,
+                seed_mode,
+            },
+            loss_config,
+            loss,
+            max_total_loss: cfg.validation.max_total_loss,
+            training_step,
         },
-        loss_config,
-        loss,
-        max_total_loss: cfg.validation.max_total_loss,
-    })
+        training_failures,
+    ))
 }
 
 fn fixture_target(

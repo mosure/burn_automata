@@ -8,6 +8,12 @@ pub(crate) struct BurnE2eRolloutHistoryEntry {
     pub(crate) adapter_teacher_loss: f32,
     pub(crate) flow_matching_loss: f32,
     pub(crate) flow_self_rectification_loss: f32,
+    pub(crate) amortization_distillation_loss: f32,
+    pub(crate) amortization_residual_scale: f32,
+    pub(crate) amortization_residual_rms: f32,
+    pub(crate) amortization_grad_norm: f32,
+    pub(crate) amortization_endpoint_psnr_db: Option<f32>,
+    pub(crate) amortization_endpoint_p10_psnr_db: Option<f32>,
     pub(crate) learning_rate_scale: f32,
     pub(crate) base_learning_rate: f32,
     pub(crate) generator_learning_rate: f32,
@@ -28,6 +34,13 @@ pub(crate) struct BurnE2eRolloutHistoryEntry {
 }
 
 #[derive(Clone, serde::Serialize)]
+pub(crate) struct BurnE2eAmortizationQualityReport {
+    pub(crate) aggregate_composited_rgb_psnr_db: f32,
+    pub(crate) p10_composited_rgb_psnr_db: f32,
+    pub(crate) elapsed_ms: f64,
+}
+
+#[derive(Clone, serde::Serialize)]
 pub(crate) struct BurnE2eRolloutQualityEntry {
     pub(crate) slug: String,
     pub(crate) total_loss: f32,
@@ -38,6 +51,8 @@ pub(crate) struct BurnE2eRolloutQualityEntry {
     pub(crate) render_rgb_psnr_db: f32,
     pub(crate) composited_rgb_mse: f32,
     pub(crate) composited_rgb_psnr_db: f32,
+    pub(crate) teacher_adapter_composited_rgb_psnr_db: Option<f32>,
+    pub(crate) gap_to_teacher_adapter_db: Option<f32>,
     pub(crate) foreground_rgb_mse: f32,
     pub(crate) foreground_rgb_psnr_db: f32,
     pub(crate) density_mse: f32,
@@ -52,6 +67,9 @@ pub(crate) struct BurnE2eRolloutHorizonSummary {
     pub(crate) aggregate_composited_rgb_psnr_db: f32,
     pub(crate) p10_composited_rgb_psnr_db: f32,
     pub(crate) min_composited_rgb_psnr_db: f32,
+    pub(crate) teacher_adapter_aggregate_composited_rgb_psnr_db: Option<f32>,
+    pub(crate) teacher_adapter_p10_composited_rgb_psnr_db: Option<f32>,
+    pub(crate) p10_gap_to_teacher_adapter_db: Option<f32>,
     pub(crate) target_point_splat_p10_composited_rgb_psnr_db: f32,
     pub(crate) p10_gap_to_target_point_splat_db: f32,
     pub(crate) aggregate_density_psnr_db: f32,
@@ -137,6 +155,9 @@ pub(crate) struct BurnE2eRolloutQualityReport {
     pub(crate) p10_composited_rgb_psnr_db: f32,
     pub(crate) min_composited_rgb_psnr_db: f32,
     pub(crate) max_composited_rgb_psnr_db: f32,
+    pub(crate) teacher_adapter_aggregate_composited_rgb_psnr_db: Option<f32>,
+    pub(crate) teacher_adapter_p10_composited_rgb_psnr_db: Option<f32>,
+    pub(crate) p10_gap_to_teacher_adapter_db: Option<f32>,
     pub(crate) aggregate_foreground_rgb_mse: f32,
     pub(crate) aggregate_foreground_rgb_psnr_db: f32,
     pub(crate) aggregate_density_mse: f32,
@@ -216,5 +237,6 @@ pub(crate) struct BurnE2eRolloutOutput {
     pub(crate) final_loss: Option<f32>,
     pub(crate) generator: E2eHyperNpa2d,
     pub(crate) quality_validation: Option<BurnE2eRolloutQualityReport>,
+    pub(crate) amortization_quality_validation: Option<BurnE2eAmortizationQualityReport>,
     pub(crate) stability_validation: Option<BurnE2eRolloutStabilityReport>,
 }

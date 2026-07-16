@@ -184,6 +184,11 @@ use super::*;
                 aggregate_composited_rgb_psnr_db: report.aggregate_composited_rgb_psnr_db,
                 p10_composited_rgb_psnr_db: report.p10_composited_rgb_psnr_db,
                 min_composited_rgb_psnr_db: report.min_composited_rgb_psnr_db,
+                teacher_adapter_aggregate_composited_rgb_psnr_db: report
+                    .teacher_adapter_aggregate_composited_rgb_psnr_db,
+                teacher_adapter_p10_composited_rgb_psnr_db: report
+                    .teacher_adapter_p10_composited_rgb_psnr_db,
+                p10_gap_to_teacher_adapter_db: report.p10_gap_to_teacher_adapter_db,
                 target_point_splat_p10_composited_rgb_psnr_db: report
                     .target_point_splat_p10_composited_rgb_psnr_db,
                 p10_gap_to_target_point_splat_db: report.p10_gap_to_target_point_splat_db,
@@ -266,7 +271,9 @@ use super::*;
         if config.validation_examples == 0 {
             return Ok(None);
         }
-        let (split, examples, conditions) = if holdout_examples.is_empty() {
+        let (split, examples, conditions) = if config.validation_split == "train"
+            || holdout_examples.is_empty()
+        {
             ("train", train_examples, train_conditions)
         } else {
             ("holdout", holdout_examples, holdout_conditions)
@@ -394,6 +401,8 @@ use super::*;
                     render_rgb_psnr_db,
                     composited_rgb_mse,
                     composited_rgb_psnr_db,
+                    teacher_adapter_composited_rgb_psnr_db: None,
+                    gap_to_teacher_adapter_db: None,
                     foreground_rgb_mse,
                     foreground_rgb_psnr_db,
                     density_mse,
@@ -646,7 +655,63 @@ use super::*;
         let base_only_density_soft_iou = base_only_density_soft_iou_sum * base_only_scale;
         let generated_adapter_composited_psnr_gain_db =
             aggregate_composited_rgb_psnr_db - base_only_composited_rgb_psnr_db;
+        let (
+            teacher_adapter_aggregate_composited_rgb_psnr_db,
+            teacher_adapter_p10_composited_rgb_psnr_db,
+        ) = if conditions.teacher_vectors.is_some() {
+            let mut teacher_mses = Vec::with_capacity(indices.len());
+            let mut teacher_psnrs = Vec::with_capacity(indices.len());
+            let mut entry_offset = 0usize;
+            for (condition_chunk, target_chunk) in indices
+                .chunks(eval_batch_size)
+                .zip(target_indices.chunks(eval_batch_size))
+            {
+                let teacher_vectors = conditions
+                    .select_teacher(condition_chunk)
+                    .expect("teacher validation requires exact adapter endpoints");
+                let quality = batch_e2e_eval_quality(
+                    params,
+                    generator,
+                    npa_config,
+                    conditions,
+                    &targets,
+                    condition_chunk,
+                    target_chunk,
+                    config,
+                    eval_config,
+                    config.validation_seed,
+                    device,
+                    E2eEvalConditionMode::ExplicitAdapter(teacher_vectors),
+                )?;
+                let composited_mses = tensor1_vec(quality.composited_rgb_mse.inner())?;
+                for (local, mse) in composited_mses.into_iter().enumerate() {
+                    let mse = finite_scalar(
+                        "HyperNPA exact-teacher composited RGB MSE",
+                        mse,
+                    )?;
+                    let psnr = psnr_db_from_mse(mse);
+                    let entry = &mut entries[entry_offset + local];
+                    entry.teacher_adapter_composited_rgb_psnr_db = Some(psnr);
+                    entry.gap_to_teacher_adapter_db =
+                        Some(psnr - entry.composited_rgb_psnr_db);
+                    teacher_mses.push(mse);
+                    teacher_psnrs.push(psnr);
+                }
+                entry_offset += condition_chunk.len();
+            }
+            teacher_psnrs.sort_by(f32::total_cmp);
+            (
+                Some(psnr_db_from_mse(
+                    teacher_mses.iter().sum::<f32>() / teacher_mses.len().max(1) as f32,
+                )),
+                Some(sorted_percentile(&teacher_psnrs, 0.1)),
+            )
+        } else {
+            (None, None)
+        };
         let selection_psnr_db = p10_composited_rgb_psnr_db;
+        let p10_gap_to_teacher_adapter_db = teacher_adapter_p10_composited_rgb_psnr_db
+            .map(|teacher| teacher - p10_composited_rgb_psnr_db);
         let p10_gap_to_target_point_splat_db =
             target_point_splat_p10_composited_rgb_psnr_db - p10_composited_rgb_psnr_db;
         let condition_shuffle_psnr_gap_db =
@@ -715,6 +780,9 @@ use super::*;
             p10_composited_rgb_psnr_db,
             min_composited_rgb_psnr_db,
             max_composited_rgb_psnr_db,
+            teacher_adapter_aggregate_composited_rgb_psnr_db,
+            teacher_adapter_p10_composited_rgb_psnr_db,
+            p10_gap_to_teacher_adapter_db,
             aggregate_foreground_rgb_mse,
             aggregate_foreground_rgb_psnr_db,
             aggregate_density_mse,
@@ -1105,6 +1173,7 @@ use super::*;
     #[derive(Clone)]
     pub(super) enum E2eEvalConditionMode {
         Generated,
+        AmortizationEndpoint,
         BaseOnly,
         ExplicitAdapter(Tensor2),
     }
@@ -1136,9 +1205,9 @@ use super::*;
             )
             .into());
         };
-        let condition = conditions.select(condition_indices)?;
         let (adapter_batch, condition_control, adapter_vector) = match condition_mode {
             E2eEvalConditionMode::Generated => {
+                let condition = conditions.select(condition_indices)?;
                 let adapter =
                     generator.adapter_batch(condition.clone(), npa_config, generator_config);
                 let vector = if generator.row_flow.is_some() {
@@ -1151,6 +1220,19 @@ use super::*;
                     generator.condition_control_batch(condition.clone(), generator_config),
                     Some(vector),
                 )
+            }
+            E2eEvalConditionMode::AmortizationEndpoint => {
+                let rows = generator
+                    .amortization_residual_rows(condition_indices)
+                    .ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "amortization endpoint evaluation requires a training table"
+                                .to_string(),
+                        )
+                    })?;
+                let adapter = BurnAdapterBatch::from_dense_residual_rows(rows, npa_config);
+                let vector = adapter.dense_residual_vector(npa_config);
+                (adapter, None, Some(vector))
             }
             E2eEvalConditionMode::BaseOnly => {
                 let parameter_count = NpaLowRankAdapter::parameter_count_for_config(
@@ -1234,6 +1316,80 @@ use super::*;
         Ok(quality)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_e2e_amortization_quality(
+        params: &BurnBaseParams,
+        generator: &BurnE2eGeneratorParams,
+        npa_config: &NpaConfig,
+        train_examples: &[BurnE2eRolloutExample],
+        train_conditions: &BurnE2eConditionCache,
+        config: BurnE2eRolloutTrainConfig,
+        device: &BurnDevice,
+    ) -> Result<Option<BurnE2eAmortizationQualityReport>, Box<dyn std::error::Error>> {
+        if !config.amortization_enabled
+            || config.validation_examples == 0
+            || train_examples.is_empty()
+        {
+            return Ok(None);
+        }
+        let started = Instant::now();
+        let mut indices = (0..train_examples.len()).collect::<Vec<_>>();
+        if config.validation_examples < indices.len() {
+            let mut rng = StdRng::seed_from_u64(config.validation_seed);
+            indices.shuffle(&mut rng);
+            indices.truncate(config.validation_examples);
+            indices.sort_unstable();
+        }
+        let eval_config = validation_direct_config(config);
+        let targets = burn_e2e_targets_for_indices_with_runtime(
+            train_examples,
+            &indices,
+            config,
+            device,
+            Some(config.validation_particles),
+            Some(config.validation_update_prob),
+        )?;
+        let target_indices = (0..targets.len()).collect::<Vec<_>>();
+        let eval_batch_size = normalized_eval_batch_size(eval_config.eval_batch_size, indices.len());
+        let mut composited_mses = Vec::with_capacity(indices.len());
+        for (condition_chunk, target_chunk) in indices
+            .chunks(eval_batch_size)
+            .zip(target_indices.chunks(eval_batch_size))
+        {
+            let quality = batch_e2e_eval_quality(
+                params,
+                generator,
+                npa_config,
+                train_conditions,
+                &targets,
+                condition_chunk,
+                target_chunk,
+                config,
+                eval_config,
+                config.validation_seed,
+                device,
+                E2eEvalConditionMode::AmortizationEndpoint,
+            )?;
+            composited_mses.extend(tensor1_vec(quality.composited_rgb_mse.inner())?);
+        }
+        if composited_mses.is_empty() {
+            return Ok(None);
+        }
+        let aggregate = psnr_db_from_mse(
+            composited_mses.iter().sum::<f32>() / composited_mses.len() as f32,
+        );
+        let mut psnrs = composited_mses
+            .into_iter()
+            .map(psnr_db_from_mse)
+            .collect::<Vec<_>>();
+        psnrs.sort_by(f32::total_cmp);
+        Ok(Some(BurnE2eAmortizationQualityReport {
+            aggregate_composited_rgb_psnr_db: aggregate,
+            p10_composited_rgb_psnr_db: sorted_percentile(&psnrs, 0.1),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        }))
+    }
+
     pub(super) fn normalized_eval_batch_size(requested: usize, examples: usize) -> usize {
         if requested == 0 {
             examples.max(1)
@@ -1283,6 +1439,30 @@ use super::*;
         config.base_optimizer.learning_rate *= lr_scale;
         config.generator_optimizer.learning_rate *= lr_scale;
         config
+    }
+
+    pub(super) fn e2e_amortization_residual_scale(
+        config: BurnE2eRolloutTrainConfig,
+        step: usize,
+    ) -> f32 {
+        if !config.amortization_enabled || config.amortization_residual_scale <= 0.0 {
+            return 0.0;
+        }
+        if step <= config.amortization_substrate_steps {
+            return 1.0;
+        }
+        let step = step.saturating_sub(config.amortization_substrate_steps);
+        let anneal_steps = config.amortization_residual_anneal_steps;
+        if anneal_steps <= 1 {
+            return if step <= 1 {
+                config.amortization_residual_scale
+            } else {
+                0.0
+            };
+        }
+        let progress = step.saturating_sub(1).min(anneal_steps - 1) as f32
+            / (anneal_steps - 1) as f32;
+        config.amortization_residual_scale * (1.0 - progress)
     }
 
     pub(super) fn reported_particle_step_speed_summary(

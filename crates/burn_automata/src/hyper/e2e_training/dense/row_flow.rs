@@ -30,7 +30,13 @@ impl BurnRowFlowParams {
             row_rms,
         };
         let weights = ConditionalRowFlowWeights::seeded(&flow, config.seed ^ 0x726f_7766_6c6f_7734)?;
-        Self::from_values(flow, &weights.values, npa, device)
+        Self::from_values_with_output_bias(
+            flow,
+            &weights.values,
+            npa,
+            config.adapter_output_bias,
+            device,
+        )
     }
 
     pub(super) fn from_artifact(
@@ -52,13 +58,52 @@ impl BurnRowFlowParams {
             values: artifact.weights.row_flow.clone(),
         }
         .validate(&flow)?;
-        Self::from_values(flow, &artifact.weights.row_flow, npa, device)
+        Self::from_values_with_output_bias(
+            flow,
+            &artifact.weights.row_flow,
+            npa,
+            artifact.adapter_output_bias_enabled(),
+            device,
+        )
+    }
+
+    pub(super) fn from_artifact_with_output_bias(
+        artifact: &E2eHyperNpa2d,
+        npa: &NpaConfig,
+        output_bias: bool,
+        device: &BurnDevice,
+    ) -> AutomataResult<Self> {
+        let flow = artifact
+            .row_flow
+            .clone()
+            .ok_or_else(|| AutomataError::InvalidModel("missing row flow contract".to_string()))?;
+        ConditionalRowFlowWeights {
+            values: artifact.weights.row_flow.clone(),
+        }
+        .validate(&flow)?;
+        Self::from_values_with_output_bias(
+            flow,
+            &artifact.weights.row_flow,
+            npa,
+            output_bias,
+            device,
+        )
     }
 
     pub(super) fn from_values(
         config: ConditionalRowFlowConfig,
         values: &[f32],
         npa: &NpaConfig,
+        device: &BurnDevice,
+    ) -> AutomataResult<Self> {
+        Self::from_values_with_output_bias(config, values, npa, true, device)
+    }
+
+    pub(super) fn from_values_with_output_bias(
+        config: ConditionalRowFlowConfig,
+        values: &[f32],
+        npa: &NpaConfig,
+        output_bias: bool,
         device: &BurnDevice,
     ) -> AutomataResult<Self> {
         let layout = NpaParameterRowLayout2d::new(npa);
@@ -80,9 +125,10 @@ impl BurnRowFlowParams {
                 "row flow tensor layout did not consume all artifact weights".to_string(),
             ));
         }
-        let source_rows = static_source_rows(&layout, &config, device);
         let row_scale = static_row_scale(&config, device);
-        let row_mask = static_row_mask(&config, device);
+        let row_mask = static_row_mask(&layout, output_bias, device);
+        let source_rows = static_source_rows(&layout, &config, device).mul(row_mask.clone());
+        let trainable_value_count = layout.trainable_parameter_count(output_bias);
         let time_frequencies = static_time_frequencies(config.width, device);
         Ok(Self {
             config,
@@ -90,6 +136,7 @@ impl BurnRowFlowParams {
             source_rows,
             row_scale,
             row_mask,
+            trainable_value_count,
             time_frequencies,
         })
     }
@@ -101,6 +148,7 @@ impl BurnRowFlowParams {
             source_rows: detach3(self.source_rows.clone()),
             row_scale: detach3(self.row_scale.clone()),
             row_mask: detach3(self.row_mask.clone()),
+            trainable_value_count: self.trainable_value_count,
             time_frequencies: detach2(self.time_frequencies.clone()),
         }
     }
@@ -130,13 +178,22 @@ impl BurnRowFlowParams {
         condition: Tensor3,
         npa: &NpaConfig,
     ) -> (Tensor3, BurnRowFlowCondition) {
+        self.sample_rows_with_prepared_steps(condition, npa, self.config.sample_steps)
+    }
+
+    pub(super) fn sample_rows_with_prepared_steps(
+        &self,
+        condition: Tensor3,
+        npa: &NpaConfig,
+        sample_steps: usize,
+    ) -> (Tensor3, BurnRowFlowCondition) {
         let batches = condition.shape().dims::<3>()[0];
         let device = condition.device();
         let layout = NpaParameterRowLayout2d::new(npa);
         debug_assert_eq!(layout.row_count(), self.config.row_count);
         debug_assert_eq!(layout.max_row_dims(), self.config.max_row_dims);
         let condition = self.prepare_condition(condition);
-        let rows = self.sample_rows_prepared(&condition, batches, &device);
+        let rows = self.sample_rows_prepared_steps(&condition, batches, &device, sample_steps);
         (rows, condition)
     }
 
@@ -148,15 +205,26 @@ impl BurnRowFlowParams {
         ])
     }
 
-    fn sample_rows_prepared(
+    pub(super) fn sample_rows_prepared(
         &self,
         condition: &BurnRowFlowCondition,
         batches: usize,
         device: &BurnDevice,
     ) -> Tensor3 {
+        self.sample_rows_prepared_steps(condition, batches, device, self.config.sample_steps)
+    }
+
+    pub(super) fn sample_rows_prepared_steps(
+        &self,
+        condition: &BurnRowFlowCondition,
+        batches: usize,
+        device: &BurnDevice,
+        sample_steps: usize,
+    ) -> Tensor3 {
         let mut state = self.source_rows(batches);
-        let dt = 1.0 / self.config.sample_steps as f32;
-        for step in 0..self.config.sample_steps {
+        let sample_steps = sample_steps.max(1);
+        let dt = 1.0 / sample_steps as f32;
+        for step in 0..sample_steps {
             let t0 = Tensor::<BurnBackend, 2>::full(
                 [batches, 1],
                 step as f32 * dt,
@@ -190,7 +258,7 @@ impl BurnRowFlowParams {
         &self,
         condition: &BurnRowFlowCondition,
         endpoint: Tensor3,
-        npa: &NpaConfig,
+        _npa: &NpaConfig,
         seed: u64,
     ) -> Tensor1 {
         let batches = endpoint.shape().dims::<3>()[0];
@@ -228,7 +296,7 @@ impl BurnRowFlowParams {
             .clone()
             .mul(residual)
             .sum()
-            .div_scalar((batches * row_valid_value_count(npa)) as f32)
+            .div_scalar((batches * self.trainable_value_count) as f32)
     }
 
     pub(super) fn flow_matching_loss(
@@ -238,7 +306,7 @@ impl BurnRowFlowParams {
         npa: &NpaConfig,
         adapter_rank: usize,
         adapter_alpha: f32,
-        _seed: u64,
+        match_inference_source: bool,
     ) -> Tensor1 {
         let prepared = self.prepare_condition(condition);
         self.flow_matching_loss_prepared(
@@ -247,6 +315,7 @@ impl BurnRowFlowParams {
             npa,
             adapter_rank,
             adapter_alpha,
+            match_inference_source,
         )
     }
 
@@ -257,6 +326,7 @@ impl BurnRowFlowParams {
         npa: &NpaConfig,
         adapter_rank: usize,
         adapter_alpha: f32,
+        match_inference_source: bool,
     ) -> Tensor1 {
         let target = BurnAdapterBatch::from_parameter_vector(
             teacher,
@@ -270,14 +340,18 @@ impl BurnRowFlowParams {
         let row_dims = [batches, self.config.row_count, self.config.max_row_dims];
         let scale = self.row_scale.clone().expand(row_dims);
         let mask = self.row_mask.clone().expand(row_dims);
-        let source = Tensor::<BurnBackend, 3>::random(
-            [batches, self.config.row_count, self.config.max_row_dims],
-            Distribution::Normal(0.0, 1.0),
-            &device,
-        )
-        .mul(scale.clone())
-        .mul_scalar(self.config.source_scale)
-        .mul(mask.clone());
+        let source = if match_inference_source {
+            self.source_rows(batches)
+        } else {
+            Tensor::<BurnBackend, 3>::random(
+                [batches, self.config.row_count, self.config.max_row_dims],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            )
+            .mul(scale.clone())
+            .mul_scalar(self.config.source_scale)
+            .mul(mask.clone())
+        };
         let time = Tensor::<BurnBackend, 2>::random(
             [batches, 1],
             Distribution::Uniform(1.0e-4, 1.0 - 1.0e-4),
@@ -300,10 +374,68 @@ impl BurnRowFlowParams {
             .clone()
             .mul(residual)
             .sum()
-            .div_scalar((batches * row_valid_value_count(npa)) as f32)
+            .div_scalar((batches * self.trainable_value_count) as f32)
     }
 
-    fn prepare_condition(&self, condition: Tensor3) -> BurnRowFlowCondition {
+    pub(super) fn endpoint_reconstruction_loss(
+        &self,
+        sampled_rows: Tensor3,
+        teacher: Tensor2,
+        npa: &NpaConfig,
+        adapter_rank: usize,
+        adapter_alpha: f32,
+    ) -> Tensor1 {
+        let target = BurnAdapterBatch::from_parameter_vector(
+            teacher,
+            npa,
+            adapter_rank,
+            adapter_alpha,
+        )
+        .dense_residual_rows(npa);
+        let batches = target.shape().dims::<3>()[0];
+        let row_dims = [batches, self.config.row_count, self.config.max_row_dims];
+        let scale = self.row_scale.clone().expand(row_dims);
+        let mask = self.row_mask.clone().expand(row_dims);
+        let residual = (sampled_rows - target).div(scale).mul(mask);
+        residual
+            .clone()
+            .mul(residual)
+            .sum()
+            .div_scalar((batches * self.trainable_value_count) as f32)
+    }
+
+    pub(super) fn amortization_distillation_loss(
+        &self,
+        generated_rows: Tensor3,
+        teacher_rows: Tensor3,
+        _npa: &NpaConfig,
+    ) -> Tensor1 {
+        let batches = generated_rows.shape().dims::<3>()[0];
+        let row_dims = [batches, self.config.row_count, self.config.max_row_dims];
+        debug_assert_eq!(teacher_rows.shape().dims::<3>(), row_dims);
+        let scale = self.row_scale.clone().expand(row_dims);
+        let mask = self.row_mask.clone().expand(row_dims);
+        let residual = (generated_rows - detach3(teacher_rows)).div(scale).mul(mask);
+        residual
+            .clone()
+            .mul(residual)
+            .sum()
+            .div_scalar((batches * self.trainable_value_count) as f32)
+    }
+
+    pub(super) fn endpoint_rms(&self, rows: Tensor3, _npa: &NpaConfig) -> Tensor1 {
+        let batches = rows.shape().dims::<3>()[0];
+        let row_dims = [batches, self.config.row_count, self.config.max_row_dims];
+        let mask = self.row_mask.clone().expand(row_dims);
+        let rows = rows.mul(mask);
+        rows.clone()
+            .mul(rows)
+            .sum()
+            .div_scalar((batches * self.trainable_value_count) as f32)
+            .sqrt()
+    }
+
+    pub(super) fn prepare_condition(&self, condition: Tensor3) -> BurnRowFlowCondition {
         let hidden = linear3(
             condition,
             self.tensors[0].clone(),
@@ -537,7 +669,7 @@ fn endpoint_row_rms(
         })
         .collect::<AutomataResult<Vec<_>>>()?;
     if endpoints.is_empty() {
-        return Ok(vec![1.0; layout.row_count()]);
+        return Ok(vec![config.generator_default_endpoint_rms; layout.row_count()]);
     }
     Ok(layout
         .rows()
@@ -657,14 +789,14 @@ fn static_row_scale(flow: &ConditionalRowFlowConfig, device: &BurnDevice) -> Ten
     )
 }
 
-fn static_row_mask(flow: &ConditionalRowFlowConfig, device: &BurnDevice) -> Tensor3 {
-    let mut values = vec![0.0; flow.row_count * flow.max_row_dims];
-    for (row, value_dims) in flow.row_value_dims.iter().copied().enumerate() {
-        let start = row * flow.max_row_dims;
-        values[start..start + value_dims].fill(1.0);
-    }
+fn static_row_mask(
+    layout: &NpaParameterRowLayout2d,
+    output_bias: bool,
+    device: &BurnDevice,
+) -> Tensor3 {
+    let values = layout.trainable_mask(output_bias);
     Tensor::<BurnBackend, 3>::from_data(
-        TensorData::new(values, [1, flow.row_count, flow.max_row_dims]),
+        TensorData::new(values, [1, layout.row_count(), layout.max_row_dims()]),
         device,
     )
 }
@@ -681,10 +813,6 @@ fn static_source_rows(
         ),
         device,
     )
-}
-
-fn row_valid_value_count(npa: &NpaConfig) -> usize {
-    NpaParameterRowLayout2d::new(npa).parameter_count()
 }
 
 fn canonical_identity(

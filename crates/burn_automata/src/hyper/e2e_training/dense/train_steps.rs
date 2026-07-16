@@ -694,6 +694,80 @@ use super::*;
             .map(|condition| (condition, Some(expansion)))
     }
 
+    fn select_tensor3_rows(tensor: Tensor3, rows: &[usize]) -> Tensor3 {
+        if rows.is_empty() {
+            return tensor;
+        }
+        let device = tensor.device();
+        tensor.select(
+            0,
+            Tensor::<BurnBackend, 1, Int>::from_data(
+                TensorData::new(
+                    rows.iter().map(|row| *row as i64).collect::<Vec<_>>(),
+                    [rows.len()],
+                ),
+                &device,
+            ),
+        )
+    }
+
+    pub(super) fn generator_condition_indices(
+        condition_indices: &[usize],
+        expansion: Option<&[usize]>,
+        rollouts_per_example: usize,
+    ) -> Vec<usize> {
+        if expansion.is_none() {
+            return condition_indices.to_vec();
+        }
+        condition_indices
+            .chunks(rollouts_per_example.max(1))
+            .filter_map(|rows| rows.first().copied())
+            .collect()
+    }
+
+    pub(super) fn e2e_amortization_mix_scales(
+        batch_len: usize,
+        rollouts_per_example: usize,
+        hyper_only_fraction: f32,
+        endpoint_mix: f32,
+    ) -> Vec<f32> {
+        let replicas = rollouts_per_example.max(1);
+        let hyper_only = ((replicas as f32 * hyper_only_fraction.clamp(0.0, 1.0)).ceil()
+            as usize)
+            .min(replicas);
+        (0..batch_len)
+            .map(|row| {
+                if row % replicas < hyper_only {
+                    0.0
+                } else {
+                    endpoint_mix.clamp(0.0, 1.0)
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn e2e_amortization_active_identities(
+        condition_indices: &[usize],
+        rollouts_per_example: usize,
+        hyper_only_fraction: f32,
+        endpoint_mix: f32,
+        substrate_only: bool,
+    ) -> Vec<usize> {
+        if substrate_only {
+            return condition_indices.to_vec();
+        }
+        e2e_amortization_mix_scales(
+            condition_indices.len(),
+            rollouts_per_example,
+            hyper_only_fraction,
+            endpoint_mix,
+        )
+        .into_iter()
+        .zip(condition_indices.iter().copied())
+        .filter_map(|(mix, identity)| (mix > 0.0).then_some(identity))
+        .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn train_e2e_homogeneous_step_tbptt(
         params: &mut BurnBaseParams,
@@ -759,21 +833,104 @@ use super::*;
         });
         let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
         let mut particle_steps = 0.0_f64;
-        if config.pre_rollout_steps > 0 {
+        let (condition, expansion) = select_rollout_conditions(
+            conditions,
+            condition_indices,
+            prepared_dino,
+            config.rollouts_per_example,
+        )?;
+        let generator_indices = generator_condition_indices(
+            condition_indices,
+            expansion.as_deref(),
+            config.rollouts_per_example,
+        );
+        let amortization_active_identities = if config.amortization_enabled {
+            e2e_amortization_active_identities(
+                condition_indices,
+                config.rollouts_per_example,
+                config.amortization_hyper_only_fraction,
+                config.amortization_residual_scale,
+                config.amortization_substrate_only,
+            )
+        } else {
+            condition_indices.to_vec()
+        };
+        let mut endpoint_bridge = if config.amortization_substrate_only {
+            let rows = generator
+                .amortization_residual_rows(&generator_indices)
+                .expect("amortization substrate has endpoint rows");
+            Some(BurnRowFlowEndpointBridge::new(rows))
+        } else {
+            row_flow_endpoint_bridge_enabled(generator, config).then(|| {
+                let (generated_rows, prepared_condition) = generator
+                    .row_flow
+                    .as_ref()
+                    .expect("enabled endpoint bridge has a row flow")
+                    .sample_rows_with_prepared_steps(
+                        condition.clone(),
+                        npa_config,
+                        config.generator_train_sample_steps,
+                    );
+                if config.amortization_enabled {
+                    let expanded_generated = expansion.as_deref().map_or_else(
+                        || generated_rows.clone(),
+                        |rows| select_tensor3_rows(generated_rows.clone(), rows),
+                    );
+                    let endpoint_rows = generator
+                        .amortization_residual_rows(condition_indices)
+                        .expect("amortized flow training has endpoint rows");
+                    let mix = Tensor::<BurnBackend, 3>::from_data(
+                        TensorData::new(
+                            e2e_amortization_mix_scales(
+                                batch_len,
+                                config.rollouts_per_example,
+                                config.amortization_hyper_only_fraction,
+                                config.amortization_residual_scale,
+                            ),
+                            [batch_len, 1, 1],
+                        ),
+                        device,
+                    )
+                    .expand(expanded_generated.shape().dims::<3>());
+                    let mixed_rows = expanded_generated
+                        .mul(mix.clone().neg().add_scalar(1.0))
+                        + endpoint_rows.mul(mix);
+                    BurnRowFlowEndpointBridge::with_mixed_endpoint(
+                        generated_rows,
+                        mixed_rows,
+                        prepared_condition,
+                    )
+                } else {
+                    BurnRowFlowEndpointBridge::with_prepared_condition(
+                        generated_rows,
+                        prepared_condition,
+                    )
+                }
+            })
+        };
+        let pre_rollout_steps = sampled_pre_rollout_steps(
+            config.pre_rollout_step_min,
+            config.pre_rollout_steps,
+            step_seed,
+        );
+        if pre_rollout_steps > 0 {
             let detached_params = params.detached();
             let detached_generator = generator.detached();
-            let (condition, expansion) = select_rollout_conditions(
-                conditions,
-                condition_indices,
-                prepared_dino,
-                config.rollouts_per_example,
-            )?;
-            let adapter_batch = detached_generator
-                .adapter_batch(condition.clone(), npa_config, config)
-                .select_rows_or_identity(expansion.as_deref());
-            let condition_control = detached_generator
-                .condition_control_batch(condition.clone(), config)
-                .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+            let adapter_batch = endpoint_bridge.as_ref().map_or_else(
+                || {
+                    detached_generator
+                        .adapter_batch(condition.clone(), npa_config, config)
+                        .select_rows_or_identity(expansion.as_deref())
+                },
+                |bridge| {
+                    bridge.detached_adapter_batch(npa_config, expansion.as_deref())
+                },
+            );
+            let condition_control = endpoint_bridge.is_none().then(|| {
+                detached_generator
+                    .condition_control_batch(condition.clone(), config)
+                    .map(|control| control.select_rows_or_identity(expansion.as_deref()))
+            }).flatten();
             let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
             let (next_x, next_s, _) = rollout_batch_chunk(
                 &detached_params,
@@ -785,14 +942,13 @@ use super::*;
                 direct_config,
                 particle_count,
                 &mut rng,
-                config.pre_rollout_steps,
+                pre_rollout_steps,
                 displacement,
                 condition_control.as_ref(),
             );
             x = detach3(next_x);
             s = detach3(next_s);
-            particle_steps +=
-                batch_len as f64 * particle_count as f64 * config.pre_rollout_steps as f64;
+            particle_steps += batch_len as f64 * particle_count as f64 * pre_rollout_steps as f64;
         }
         let chunk_steps = tbptt_chunk_steps(direct_config);
         let rollout_steps = sampled_training_rollout_steps(direct_config, step_seed);
@@ -806,13 +962,54 @@ use super::*;
         let mut generator_grad_norm_sum = 0.0_f32;
         let mut generator_grad_scale_sum = 0.0_f32;
         let mut grad_metric_chunks = 0usize;
-        let (condition, expansion) = select_rollout_conditions(
-            conditions,
-            condition_indices,
-            prepared_dino,
-            config.rollouts_per_example,
-        )?;
+        let mut accumulated_base_gradients = None::<Vec<Tensor2Inner>>;
+        let mut accumulated_generator_gradients = None::<Vec<Tensor2Inner>>;
+        let mut accumulated_gradient_weight = 0.0_f32;
+        let auxiliary_x = detach3(x.clone());
+        let auxiliary_s = detach3(s.clone());
         let mut remaining_steps = rollout_steps;
+        let final_only = config.loss_on_final_chunk_only
+            || config.tbptt_loss_mode == E2eTbpttLossMode::FinalOnly;
+        let frozen_params = (!config.shared_base_trainable).then(|| params.detached());
+        if final_only && remaining_steps > chunk_steps {
+            let prefix_steps = remaining_steps - chunk_steps;
+            let detached_params = params.detached();
+            let detached_generator = generator.detached();
+            let adapter_batch = endpoint_bridge.as_ref().map_or_else(
+                || {
+                    detached_generator
+                        .adapter_batch(condition.clone(), npa_config, config)
+                        .select_rows_or_identity(expansion.as_deref())
+                },
+                |bridge| {
+                    bridge.detached_adapter_batch(npa_config, expansion.as_deref())
+                },
+            );
+            let condition_control = endpoint_bridge.is_none().then(|| {
+                detached_generator
+                    .condition_control_batch(condition.clone(), config)
+                    .map(|control| control.select_rows_or_identity(expansion.as_deref()))
+            }).flatten();
+            let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
+            let (next_x, next_s, _) = rollout_batch_chunk(
+                &detached_params,
+                &adapter_batch,
+                targets,
+                target_indices,
+                x,
+                s,
+                direct_config,
+                particle_count,
+                &mut rng,
+                prefix_steps,
+                displacement,
+                condition_control.as_ref(),
+            );
+            x = detach3(next_x);
+            s = detach3(next_s);
+            particle_steps += batch_len as f64 * particle_count as f64 * prefix_steps as f64;
+            remaining_steps = chunk_steps;
+        }
         while remaining_steps > 0 {
             let steps = remaining_steps.min(chunk_steps);
             let final_chunk = remaining_steps <= chunk_steps;
@@ -820,12 +1017,21 @@ use super::*;
             if loss_weight <= 0.0 {
                 let detached_params = params.detached();
                 let detached_generator = generator.detached();
-                let adapter_batch = detached_generator
-                    .adapter_batch(condition.clone(), npa_config, config)
-                    .select_rows_or_identity(expansion.as_deref());
-                let condition_control = detached_generator
-                    .condition_control_batch(condition.clone(), config)
-                    .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+                let adapter_batch = endpoint_bridge.as_ref().map_or_else(
+                    || {
+                        detached_generator
+                            .adapter_batch(condition.clone(), npa_config, config)
+                            .select_rows_or_identity(expansion.as_deref())
+                    },
+                    |bridge| {
+                        bridge.detached_adapter_batch(npa_config, expansion.as_deref())
+                    },
+                );
+                let condition_control = endpoint_bridge.is_none().then(|| {
+                    detached_generator
+                        .condition_control_batch(condition.clone(), config)
+                        .map(|control| control.select_rows_or_identity(expansion.as_deref()))
+                }).flatten();
                 let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
                 let (next_x, next_s, _) = rollout_batch_chunk(
                     &detached_params,
@@ -847,15 +1053,22 @@ use super::*;
                 remaining_steps -= steps;
                 continue;
             }
-            let adapter_batch = generator
-                .adapter_batch(condition.clone(), npa_config, config)
-                .select_rows_or_identity(expansion.as_deref());
-            let condition_control = generator
-                .condition_control_batch(condition.clone(), config)
-                .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+            let adapter_batch = endpoint_bridge.as_ref().map_or_else(
+                || {
+                    generator
+                        .adapter_batch(condition.clone(), npa_config, config)
+                        .select_rows_or_identity(expansion.as_deref())
+                },
+                |bridge| bridge.adapter_batch(npa_config, expansion.as_deref()),
+            );
+            let condition_control = endpoint_bridge.is_none().then(|| {
+                generator
+                    .condition_control_batch(condition.clone(), config)
+                    .map(|control| control.select_rows_or_identity(expansion.as_deref()))
+            }).flatten();
             let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
             let (next_x, next_s, displacement) = rollout_batch_chunk(
-                params,
+                frozen_params.as_ref().unwrap_or(params),
                 &adapter_batch,
                 targets,
                 target_indices,
@@ -897,37 +1110,144 @@ use super::*;
                 .total
                 .sum()
                 .mul_scalar(loss_weight)
+                .mul_scalar(config.task_loss_weight.max(0.0))
                 .div_scalar(batch_len as f32)
                 .backward();
-            let (base_grad_norm, base_grad_scale) = if config.shared_base_trainable {
-                params.apply_adamw(
-                    &mut grads,
-                    base_optimizer,
-                    config.base_optimizer,
-                    config.base_per_parameter_grad_normalization,
-                    collect_metrics,
-                )?
-            } else {
-                (0.0, 1.0)
-            };
-            let (generator_grad_norm, generator_grad_scale) = generator.apply_adamw(
-                &mut grads,
-                generator_optimizer,
-                config.generator_optimizer,
-                config.generator_per_parameter_grad_normalization,
-                collect_metrics,
-            )?;
-            if collect_metrics {
-                base_grad_norm_sum += base_grad_norm;
-                base_grad_scale_sum += base_grad_scale;
-                generator_grad_norm_sum += generator_grad_norm;
-                generator_grad_scale_sum += generator_grad_scale;
-                grad_metric_chunks += 1;
+            if config.shared_base_trainable {
+                accumulate_gradient_group(
+                    &mut accumulated_base_gradients,
+                    params.take_gradients(&mut grads),
+                );
             }
+            if let Some(bridge) = endpoint_bridge.as_mut() {
+                bridge.accumulate(&mut grads);
+            } else {
+                accumulate_gradient_group(
+                    &mut accumulated_generator_gradients,
+                    generator.take_gradients(&mut grads),
+                );
+            }
+            accumulated_gradient_weight += loss_weight;
             x = detach3(next_x);
             s = detach3(next_s);
             particle_steps += batch_len as f64 * particle_count as f64 * steps as f64;
             remaining_steps -= steps;
+        }
+        let inverse_gradient_weight = accumulated_gradient_weight
+            .max(f32::MIN_POSITIVE)
+            .recip();
+        if let Some(gradients) = accumulated_base_gradients.as_mut() {
+            scale_gradient_group(gradients, inverse_gradient_weight);
+        }
+        if let Some(gradients) = accumulated_generator_gradients.as_mut() {
+            scale_gradient_group(gradients, inverse_gradient_weight);
+        }
+        let amortization_residual_rms = if collect_metrics && config.amortization_enabled {
+            generator
+                .row_flow
+                .as_ref()
+                .expect("amortization uses row flow layout")
+                .endpoint_rms(
+                    generator
+                        .amortization_residual_rows(&generator_indices)
+                        .expect("amortization has endpoint rows"),
+                    npa_config,
+                )
+                .inner()
+                .into_scalar()
+        } else {
+            0.0
+        };
+        let mut generator_objective = endpoint_bridge
+            .as_ref()
+            .and_then(|bridge| bridge.objective(inverse_gradient_weight));
+        let mut adapter_teacher_loss = 0.0_f32;
+        let mut flow_matching_loss = 0.0_f32;
+        let mut flow_self_rectification_loss = 0.0_f32;
+        let mut amortization_distillation_loss = 0.0_f32;
+        if let Some(auxiliary) = e2e_generator_auxiliary_objective(
+            params,
+            generator,
+            npa_config,
+            conditions,
+            condition_indices,
+            prepared_dino,
+            targets,
+            target_indices,
+            particle_count,
+            config,
+            step_seed,
+            auxiliary_x,
+            auxiliary_s,
+            collect_metrics,
+            endpoint_bridge.as_ref(),
+        )? {
+            adapter_teacher_loss = auxiliary.teacher_loss;
+            flow_matching_loss = auxiliary.flow_matching_loss;
+            flow_self_rectification_loss = auxiliary.flow_self_rectification_loss;
+            amortization_distillation_loss = auxiliary.amortization_distillation_loss;
+            particle_steps += auxiliary.particle_steps as f64;
+            generator_objective = Some(match generator_objective {
+                Some(objective) => objective + auxiliary.objective,
+                None => auxiliary.objective,
+            });
+        }
+        let mut amortization_gradients = None;
+        if let Some(objective) = generator_objective {
+            let mut generator_grads = objective.backward();
+            if config.amortization_substrate_only {
+                amortization_gradients = Some(generator_grads);
+            } else {
+                accumulate_gradient_group(
+                    &mut accumulated_generator_gradients,
+                    generator.take_gradients(&mut generator_grads),
+                );
+            }
+        }
+        if let Some(gradients) = accumulated_base_gradients {
+            let (norm, scale) = params.apply_adamw_gradients(
+                gradients,
+                base_optimizer,
+                config.base_optimizer,
+                config.base_per_parameter_grad_normalization,
+                collect_metrics,
+            )?;
+            base_grad_norm_sum = norm;
+            base_grad_scale_sum = scale;
+        }
+        let mut amortization_grad_norm = 0.0_f32;
+        if let Some(mut grads) = amortization_gradients {
+            let norm = generator.apply_amortization_adamw(
+                &mut grads,
+                generator_optimizer,
+                config.generator_optimizer,
+                collect_metrics,
+                condition_indices,
+                (config.lr_schedule == E2eLrSchedule::UpstreamGrowing)
+                    .then_some(config.min_lr_scale),
+            )?;
+            generator_grad_norm_sum = norm;
+            generator_grad_scale_sum = 1.0;
+            amortization_grad_norm = norm;
+            grad_metric_chunks = 1;
+        } else if let Some(gradients) = accumulated_generator_gradients {
+            let (norm, scale, table_grad_norm) = generator.apply_adamw_gradients(
+                gradients,
+                generator_optimizer,
+                config.generator_optimizer,
+                GeneratorAdamWOptions {
+                    normalize: config.generator_per_parameter_grad_normalization,
+                    collect_metrics,
+                    active_identities: &amortization_active_identities,
+                    upstream_growing_min_lr_scale: (config.lr_schedule
+                        == E2eLrSchedule::UpstreamGrowing)
+                        .then_some(config.min_lr_scale),
+                },
+            )?;
+            generator_grad_norm_sum = norm;
+            generator_grad_scale_sum = scale;
+            amortization_grad_norm = table_grad_norm;
+            grad_metric_chunks = 1;
         }
         let elapsed = started.elapsed();
         let grad_metric_chunks = grad_metric_chunks.max(1);
@@ -940,18 +1260,33 @@ use super::*;
         });
         let particle_steps_per_sec =
             particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+        let task_loss = loss_sum.map_or(0.0, |value| {
+            value / batch_len as f32 / loss_weight_count
+        });
         Ok(BurnE2eStepOutput {
             history: BurnE2eRolloutHistoryEntry {
                 step: 0,
-                loss: loss_sum.map_or(0.0, |value| {
-                    value / batch_len as f32 / loss_weight_count
-                }),
-                task_loss: loss_sum.map_or(0.0, |value| {
-                    value / batch_len as f32 / loss_weight_count
-                }),
-                adapter_teacher_loss: 0.0,
-                flow_matching_loss: 0.0,
-                flow_self_rectification_loss: 0.0,
+                loss: task_loss * config.task_loss_weight.max(0.0)
+                    + adapter_teacher_loss * config.adapter_teacher_weight.max(0.0)
+                    + flow_matching_loss * config.flow_matching_weight.max(0.0)
+                    + flow_self_rectification_loss
+                        * config.flow_self_rectification_weight.max(0.0)
+                    + amortization_distillation_loss
+                        * config.amortization_distillation_weight.max(0.0),
+                task_loss,
+                adapter_teacher_loss,
+                flow_matching_loss,
+                flow_self_rectification_loss,
+                amortization_distillation_loss,
+                amortization_residual_scale: if config.amortization_enabled {
+                    config.amortization_residual_scale
+                } else {
+                    0.0
+                },
+                amortization_residual_rms,
+                amortization_grad_norm,
+                amortization_endpoint_psnr_db: None,
+                amortization_endpoint_p10_psnr_db: None,
                 learning_rate_scale: 1.0,
                 base_learning_rate: config.base_optimizer.learning_rate,
                 generator_learning_rate: config.generator_optimizer.learning_rate,
@@ -978,7 +1313,7 @@ use super::*;
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn train_e2e_flow_matching_only_step(
+    fn train_e2e_flow_supervision_step(
         generator: &mut BurnE2eGeneratorParams,
         generator_optimizer: &mut BurnE2eGeneratorAdamWState,
         npa_config: &NpaConfig,
@@ -1009,24 +1344,56 @@ use super::*;
         let condition = conditions.select_prepared(condition_indices, prepared_dino)?;
         let teacher = conditions.select_teacher(condition_indices).ok_or_else(|| {
             AutomataError::InvalidArgument(
-                "conditional flow matching requires teacher adapter endpoints".to_string(),
+                "conditional flow supervision requires teacher adapter endpoints".to_string(),
             )
         })?;
         let flow = generator.row_flow.as_ref().ok_or_else(|| {
             AutomataError::InvalidArgument(
-                "flow_matching_weight requires conditional-row-flow".to_string(),
+                "flow supervision requires conditional-row-flow".to_string(),
             )
         })?;
-        let objective = flow.flow_matching_loss(
-            condition,
-            teacher,
-            npa_config,
-            config.adapter_rank,
-            config.adapter_alpha,
-            step_seed ^ 0x666c_6f77_6d61_7463,
-        );
+        let condition_batches = condition.shape().dims::<3>()[0];
+        let prepared_condition = flow.prepare_condition(condition);
+        let sampled_rows = (config.adapter_teacher_weight > 0.0).then(|| {
+            flow.sample_rows_prepared_steps(
+                &prepared_condition,
+                condition_batches,
+                device,
+                config.generator_train_sample_steps,
+            )
+        });
+        let flow_objective = (config.flow_matching_weight > 0.0).then(|| {
+            flow.flow_matching_loss_prepared(
+                &prepared_condition,
+                teacher.clone(),
+                npa_config,
+                config.adapter_rank,
+                config.adapter_alpha,
+                config.flow_match_inference_source,
+            )
+        });
+        let teacher_objective = (config.adapter_teacher_weight > 0.0).then(|| {
+            flow.endpoint_reconstruction_loss(
+                sampled_rows.expect("endpoint supervision samples flow rows"),
+                teacher,
+                npa_config,
+                config.adapter_rank,
+                config.adapter_alpha,
+            )
+        });
         let flow_loss = if collect_metrics {
-            objective.clone().inner().into_scalar()
+            flow_objective
+                .as_ref()
+                .map(|loss| loss.clone().inner().into_scalar())
+                .unwrap_or_default()
+        } else {
+            0.0
+        };
+        let teacher_loss = if collect_metrics {
+            teacher_objective
+                .as_ref()
+                .map(|loss| loss.clone().inner().into_scalar())
+                .unwrap_or_default()
         } else {
             0.0
         };
@@ -1039,16 +1406,34 @@ use super::*;
             0.0
         };
         let backward_started = Instant::now();
-        let mut grads = objective
-            .mul_scalar(config.flow_matching_weight.max(0.0))
-            .backward();
-        let (generator_grad_norm, generator_grad_scale) = generator.apply_adamw(
-            &mut grads,
-            generator_optimizer,
-            config.generator_optimizer,
-            config.generator_per_parameter_grad_normalization,
-            collect_metrics,
-        )?;
+        let objective = flow_objective
+            .map(|loss| loss.mul_scalar(config.flow_matching_weight.max(0.0)))
+            .into_iter()
+            .chain(
+                teacher_objective
+                    .map(|loss| loss.mul_scalar(config.adapter_teacher_weight.max(0.0))),
+            )
+            .reduce(|left, right| left + right)
+            .ok_or_else(|| {
+                AutomataError::InvalidArgument(
+                    "flow supervision requires a positive flow or endpoint weight".to_string(),
+                )
+            })?;
+        let mut grads = objective.backward();
+        let (generator_grad_norm, generator_grad_scale, amortization_grad_norm) =
+            generator.apply_adamw(
+                &mut grads,
+                generator_optimizer,
+                config.generator_optimizer,
+                GeneratorAdamWOptions {
+                    normalize: config.generator_per_parameter_grad_normalization,
+                    collect_metrics,
+                    active_identities: condition_indices,
+                    upstream_growing_min_lr_scale: (config.lr_schedule
+                        == E2eLrSchedule::UpstreamGrowing)
+                        .then_some(config.min_lr_scale),
+                },
+            )?;
         if collect_metrics {
             sync_training_device(device)?;
         }
@@ -1061,11 +1446,18 @@ use super::*;
         Ok(BurnE2eStepOutput {
             history: BurnE2eRolloutHistoryEntry {
                 step: 0,
-                loss: flow_loss * config.flow_matching_weight.max(0.0),
+                loss: flow_loss * config.flow_matching_weight.max(0.0)
+                    + teacher_loss * config.adapter_teacher_weight.max(0.0),
                 task_loss: 0.0,
-                adapter_teacher_loss: 0.0,
+                adapter_teacher_loss: teacher_loss,
                 flow_matching_loss: flow_loss,
                 flow_self_rectification_loss: 0.0,
+                amortization_distillation_loss: 0.0,
+                amortization_residual_scale: 0.0,
+                amortization_residual_rms: 0.0,
+                amortization_grad_norm,
+                amortization_endpoint_psnr_db: None,
+                amortization_endpoint_p10_psnr_db: None,
                 learning_rate_scale: 1.0,
                 base_learning_rate: 0.0,
                 generator_learning_rate: config.generator_optimizer.learning_rate,
@@ -1124,11 +1516,69 @@ use super::*;
         };
         let started = Instant::now();
         if config.task_loss_weight == 0.0
-            && config.adapter_teacher_weight == 0.0
-            && config.flow_matching_weight > 0.0
+            && config.adapter_teacher_weight > 0.0
+            && config.adapter_teacher_objective != E2eAdapterTeacherObjective::ParameterMse
             && config.flow_self_rectification_weight == 0.0
+            && !config.amortization_enabled
         {
-            return train_e2e_flow_matching_only_step(
+            if config.shared_base_trainable {
+                return Err(std::io::Error::other(
+                    "functional teacher-only supervision requires a frozen shared base",
+                )
+                .into());
+            }
+            return train_e2e_functional_teacher_step(
+                params,
+                generator,
+                generator_optimizer,
+                npa_config,
+                conditions,
+                condition_indices,
+                prepared_dino,
+                targets,
+                target_indices,
+                particle_count,
+                config,
+                step_seed,
+                collect_metrics,
+                initial_state,
+            );
+        }
+        if config.task_loss_weight == 0.0
+            && config.adapter_teacher_weight == 0.0
+            && config.flow_matching_weight == 0.0
+            && config.amortization_enabled
+            && (config.amortization_distillation_weight > 0.0
+                || config.flow_self_rectification_weight > 0.0)
+        {
+            if config.shared_base_trainable {
+                return Err(std::io::Error::other(
+                    "rollout-free amortization distillation requires a frozen shared base",
+                )
+                .into());
+            }
+            return train_e2e_amortization_distillation_step(
+                generator,
+                generator_optimizer,
+                npa_config,
+                conditions,
+                condition_indices,
+                prepared_dino,
+                targets,
+                target_indices,
+                particle_count,
+                config,
+                step_seed,
+                collect_metrics,
+                initial_state,
+            );
+        }
+        if config.task_loss_weight == 0.0
+            && config.flow_self_rectification_weight == 0.0
+            && config.adapter_teacher_objective == E2eAdapterTeacherObjective::ParameterMse
+            && (config.flow_matching_weight > 0.0 || config.adapter_teacher_weight > 0.0)
+        {
+            return train_e2e_flow_supervision_step(
                 generator,
                 generator_optimizer,
                 npa_config,
@@ -1168,21 +1618,37 @@ use super::*;
             )
         });
         let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
-        if config.pre_rollout_steps > 0 {
+        let pre_rollout_steps = sampled_pre_rollout_steps(
+            config.pre_rollout_step_min,
+            config.pre_rollout_steps,
+            step_seed,
+        );
+        if pre_rollout_steps > 0 {
             let detached_params = params.detached();
             let detached_generator = generator.detached();
-            let (condition, expansion) = select_rollout_conditions(
-                conditions,
-                condition_indices,
-                prepared_dino,
-                config.rollouts_per_example,
-            )?;
-            let adapter = detached_generator
-                .adapter_batch(condition.clone(), npa_config, config)
-                .select_rows_or_identity(expansion.as_deref());
-            let condition_control = detached_generator
-                .condition_control_batch(condition, config)
-                .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+            let (adapter, condition_control) = if config.amortization_substrate_only {
+                let rows = detached_generator
+                    .amortization_residual_rows(condition_indices)
+                    .expect("substrate warm-up requires endpoint rows");
+                (
+                    BurnAdapterBatch::from_dense_residual_rows(rows, npa_config),
+                    None,
+                )
+            } else {
+                let (condition, expansion) = select_rollout_conditions(
+                    conditions,
+                    condition_indices,
+                    prepared_dino,
+                    config.rollouts_per_example,
+                )?;
+                let adapter = detached_generator
+                    .adapter_batch(condition.clone(), npa_config, config)
+                    .select_rows_or_identity(expansion.as_deref());
+                let condition_control = detached_generator
+                    .condition_control_batch(condition, config)
+                    .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+                (adapter, condition_control)
+            };
             let displacement = Tensor::<BurnBackend, 1>::zeros([batch_len], device);
             let (next_x, next_s, _) = rollout_batch_chunk(
                 &detached_params,
@@ -1194,7 +1660,7 @@ use super::*;
                 direct_config,
                 particle_count,
                 &mut rng,
-                config.pre_rollout_steps,
+                pre_rollout_steps,
                 displacement,
                 condition_control.as_ref(),
             );
@@ -1206,21 +1672,106 @@ use super::*;
             sync_training_device(device)?;
         }
         let condition_started = Instant::now();
-        let (condition, expansion) = select_rollout_conditions(
-            conditions,
-            condition_indices,
-            prepared_dino,
-            config.rollouts_per_example,
-        )?;
-        let (adapter, generated_dense_rows, prepared_flow_condition) = generator
-            .adapter_batch_with_dense_rows(condition.clone(), npa_config, config);
-        let adapter = adapter.select_rows_or_identity(expansion.as_deref());
-        let condition_control = generator
-            .condition_control_batch(condition, config)
-            .map(|control| control.select_rows_or_identity(expansion.as_deref()));
+        let (generated_adapter, generated_dense_rows, generated_dense_rows_expanded, prepared_flow_condition, rollout_condition, generator_indices, expansion) =
+            if config.amortization_substrate_only {
+                let rows = generator
+                    .amortization_residual_rows(condition_indices)
+                    .expect("substrate warm-up requires endpoint rows");
+                (
+                    BurnAdapterBatch::from_dense_residual_rows(rows.clone(), npa_config),
+                    Some(rows.clone()),
+                    Some(rows),
+                    None,
+                    None,
+                    condition_indices.to_vec(),
+                    None,
+                )
+            } else {
+                let (condition, expansion) = select_rollout_conditions(
+                    conditions,
+                    condition_indices,
+                    prepared_dino,
+                    config.rollouts_per_example,
+                )?;
+                let (generated_adapter, generated_dense_rows, prepared_flow_condition) = generator
+                    .adapter_batch_with_dense_rows(condition.clone(), npa_config, config);
+                let generated_adapter =
+                    generated_adapter.select_rows_or_identity(expansion.as_deref());
+                let generated_dense_rows_expanded = generated_dense_rows.as_ref().map(|rows| {
+                    expansion.as_deref().map_or_else(
+                        || rows.clone(),
+                        |expansion| select_tensor3_rows(rows.clone(), expansion),
+                    )
+                });
+                let generator_indices = generator_condition_indices(
+                    condition_indices,
+                    expansion.as_deref(),
+                    config.rollouts_per_example,
+                );
+                (
+                    generated_adapter,
+                    generated_dense_rows,
+                    generated_dense_rows_expanded,
+                    prepared_flow_condition,
+                    Some(condition),
+                    generator_indices,
+                    expansion,
+                )
+            };
+        let amortization_rows = generator.amortization_residual_rows(condition_indices);
+        let amortization_endpoint_rows = generator.amortization_residual_rows(&generator_indices);
+        let amortization_mix = if amortization_rows.is_some() {
+            let values = e2e_amortization_mix_scales(
+                batch_len,
+                config.rollouts_per_example,
+                config.amortization_hyper_only_fraction,
+                config.amortization_residual_scale,
+            );
+            Some(Tensor::<BurnBackend, 3>::from_data(
+                TensorData::new(values, [batch_len, 1, 1]),
+                device,
+            ))
+        } else {
+            None
+        };
+        let adapter = if config.amortization_substrate_only {
+            BurnAdapterBatch::from_dense_residual_rows(
+                amortization_rows
+                    .as_ref()
+                    .expect("substrate warm-up endpoint rows")
+                    .clone(),
+                npa_config,
+            )
+        } else {
+            match (
+            generated_dense_rows_expanded.as_ref(),
+            amortization_rows.as_ref(),
+            amortization_mix.as_ref(),
+            ) {
+                (Some(generated), Some(teacher), Some(mix)) => {
+                    let dims = generated.shape().dims::<3>();
+                    let mix = mix.clone().expand(dims);
+                    let rows = generated.clone().mul(mix.clone().neg().add_scalar(1.0))
+                        + teacher.clone().mul(mix);
+                    BurnAdapterBatch::from_dense_residual_rows(rows, npa_config)
+                }
+                _ => generated_adapter.clone(),
+            }
+        };
+        let condition_control = if config.amortization_substrate_only {
+            None
+        } else {
+            generator
+                .condition_control_batch(
+                    rollout_condition.expect("generated adapter has a rollout condition"),
+                    config,
+                )
+                .map(|control| control.select_rows_or_identity(expansion.as_deref()))
+        };
+        let generated_teacher_vector = conditions.select_teacher(&generator_indices);
         let teacher_vector = conditions.select_teacher(condition_indices);
         let flow_objective = if config.flow_matching_weight > 0.0 {
-            let teacher = teacher_vector
+            let teacher = generated_teacher_vector
                 .clone()
                 .ok_or_else(|| {
                     AutomataError::InvalidArgument(
@@ -1245,12 +1796,45 @@ use super::*;
                         npa_config,
                         config.adapter_rank,
                         config.adapter_alpha,
+                        config.flow_match_inference_source,
+                    ),
+            )
+        } else {
+            None
+        };
+        let amortization_distillation_objective = if config.amortization_enabled
+            && config.amortization_distillation_weight > 0.0
+        {
+            Some(
+                generator
+                    .row_flow
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "amortization distillation requires conditional-row-flow".to_string(),
+                        )
+                    })?
+                    .amortization_distillation_loss(
+                        generated_dense_rows_expanded
+                            .as_ref()
+                            .expect("amortization generated dense rows")
+                            .clone(),
+                        amortization_rows
+                            .as_ref()
+                            .expect("amortization teacher rows")
+                            .clone(),
+                        npa_config,
                     ),
             )
         } else {
             None
         };
         let flow_self_rectification_objective = if config.flow_self_rectification_weight > 0.0 {
+            let endpoint = amortization_endpoint_rows
+                .as_ref()
+                .or(generated_dense_rows.as_ref())
+                .expect("row flow generated or amortized endpoint rows")
+                .clone();
             Some(
                 generator
                     .row_flow
@@ -1266,10 +1850,7 @@ use super::*;
                             .as_ref()
                             .expect("flow condition was prepared")
                             ,
-                        generated_dense_rows
-                            .as_ref()
-                            .expect("row flow generated dense endpoint rows")
-                            .clone(),
+                        endpoint,
                         npa_config,
                         step_seed ^ 0x7365_6c66_7265_6374,
                     ),
@@ -1277,14 +1858,18 @@ use super::*;
         } else {
             None
         };
-        let teacher_adapter = teacher_vector.clone().map(|teacher| {
-            BurnAdapterBatch::from_parameter_vector(
-                teacher,
-                npa_config,
-                config.adapter_rank,
-                config.adapter_alpha,
-            )
-        });
+        let teacher_adapter = (config.adapter_teacher_weight > 0.0)
+            .then(|| {
+                teacher_vector.clone().map(|teacher| {
+                    BurnAdapterBatch::from_parameter_vector(
+                        teacher,
+                        npa_config,
+                        config.adapter_rank,
+                        config.adapter_alpha,
+                    )
+                })
+            })
+            .flatten();
         let teacher_probe_features = if config.adapter_teacher_weight > 0.0
             && config.adapter_teacher_objective != E2eAdapterTeacherObjective::ParameterMse
         {
@@ -1359,36 +1944,41 @@ use super::*;
             displacement.clone(),
         )?;
         let task_objective = loss.total.clone().sum().div_scalar(batch_len.max(1) as f32);
-        let teacher_objective = teacher_vector.map(|teacher| {
-            let generated_vector = adapter.to_parameter_vector();
-            let parameter_delta = generated_vector - teacher.clone();
-            let parameter_mse = parameter_delta.clone().mul(parameter_delta).mean();
-            if config.adapter_teacher_objective == E2eAdapterTeacherObjective::ParameterMse {
-                return parameter_mse;
-            }
+        let teacher_objective = if config.adapter_teacher_weight > 0.0 {
+            teacher_vector.map(|teacher| {
+                let generated_vector = generated_adapter.to_parameter_vector();
+                let parameter_delta = generated_vector - teacher.clone();
+                let parameter_mse = parameter_delta.clone().mul(parameter_delta).mean();
+                if config.adapter_teacher_objective == E2eAdapterTeacherObjective::ParameterMse {
+                    return parameter_mse;
+                }
 
-            let teacher_adapter = teacher_adapter
-                .as_ref()
-                .expect("functional teacher objective requires teacher adapters");
-            let probes = teacher_probe_features
-                .as_ref()
-                .expect("functional teacher objective prepared perception probes")
-                .clone();
-            let generated_update = params.forward_adapter_batch(probes.clone(), &adapter);
-            let teacher_update = detach3(
-                params
-                    .detached()
-                    .forward_adapter_batch(probes, teacher_adapter),
-            );
-            let functional_delta = generated_update - teacher_update;
-            let functional_mse = functional_delta.clone().mul(functional_delta).mean();
-            if config.adapter_teacher_objective == E2eAdapterTeacherObjective::Hybrid {
-                functional_mse
-                    + parameter_mse.mul_scalar(FUNCTIONAL_TEACHER_PARAMETER_AUX_WEIGHT)
-            } else {
-                functional_mse
-            }
-        });
+                let teacher_adapter = teacher_adapter
+                    .as_ref()
+                    .expect("functional teacher objective requires teacher adapters");
+                let probes = teacher_probe_features
+                    .as_ref()
+                    .expect("functional teacher objective prepared perception probes")
+                    .clone();
+                let generated_update =
+                    params.forward_adapter_batch(probes.clone(), &generated_adapter);
+                let teacher_update = detach3(
+                    params
+                        .detached()
+                        .forward_adapter_batch(probes, teacher_adapter),
+                );
+                let functional_delta = generated_update - teacher_update;
+                let functional_mse = functional_delta.clone().mul(functional_delta).mean();
+                if config.adapter_teacher_objective == E2eAdapterTeacherObjective::Hybrid {
+                    functional_mse
+                        + parameter_mse.mul_scalar(FUNCTIONAL_TEACHER_PARAMETER_AUX_WEIGHT)
+                } else {
+                    functional_mse
+                }
+            })
+        } else {
+            None
+        };
         let teacher_loss_value = if collect_metrics {
             teacher_objective
                 .as_ref()
@@ -1413,6 +2003,25 @@ use super::*;
         } else {
             0.0
         };
+        let amortization_distillation_loss_value = if collect_metrics {
+            amortization_distillation_objective
+                .as_ref()
+                .map(|loss| loss.clone().inner().into_scalar())
+                .unwrap_or_default()
+        } else {
+            0.0
+        };
+        let amortization_residual_rms = if collect_metrics {
+            match (generator.row_flow.as_ref(), amortization_rows.as_ref()) {
+                (Some(flow), Some(rows)) => flow
+                    .endpoint_rms(rows.clone(), npa_config)
+                    .inner()
+                    .into_scalar(),
+                _ => 0.0,
+            }
+        } else {
+            0.0
+        };
         let weighted_task = task_objective.mul_scalar(config.task_loss_weight.max(0.0));
         let objective = teacher_objective.map_or(weighted_task.clone(), |teacher| {
             weighted_task + teacher.mul_scalar(config.adapter_teacher_weight.max(0.0))
@@ -1426,6 +2035,9 @@ use super::*;
                     + self_rectification
                         .mul_scalar(config.flow_self_rectification_weight.max(0.0))
             });
+        let objective = amortization_distillation_objective.map_or(objective.clone(), |distill| {
+            objective + distill.mul_scalar(config.amortization_distillation_weight.max(0.0))
+        });
         if collect_metrics {
             sync_training_device(device)?;
         }
@@ -1435,7 +2047,34 @@ use super::*;
             0.0
         };
         let loss_scalars = if collect_per_example_losses {
-            Some(loss_vector_scalars(loss.clone())?)
+            match loss_vector_scalars(loss.clone()) {
+                Ok(losses) => Some(losses),
+                Err(error) => {
+                    let x_summary = finite_values_summary(
+                        "position",
+                        &tensor3_vec(next_x.clone().inner())?,
+                    );
+                    let state_summary =
+                        finite_values_summary("state", &tensor3_vec(next_s.clone().inner())?);
+                    let displacement_summary = finite_values_summary(
+                        "displacement",
+                        &tensor1_vec(displacement.clone().inner())?,
+                    );
+                    let adapter_summary = generated_dense_rows
+                        .as_ref()
+                        .map(|rows| {
+                            tensor3_vec(rows.clone().inner()).map(|values| {
+                                finite_values_summary("generated_rows", &values)
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or_else(|| "generated_rows[unavailable]".to_string());
+                    return Err(AutomataError::InvalidArgument(format!(
+                        "{error}; rollout_steps={rollout_steps} step_seed={step_seed} {x_summary} {state_summary} {displacement_summary} {adapter_summary}"
+                    ))
+                    .into());
+                }
+            }
         } else {
             None
         };
@@ -1446,7 +2085,9 @@ use super::*;
             + teacher_loss_value * config.adapter_teacher_weight.max(0.0)
             + flow_loss_value * config.flow_matching_weight.max(0.0)
             + flow_self_rectification_loss_value
-                * config.flow_self_rectification_weight.max(0.0);
+                * config.flow_self_rectification_weight.max(0.0)
+            + amortization_distillation_loss_value
+                * config.amortization_distillation_weight.max(0.0);
         let backward_started = Instant::now();
         let mut grads = objective.backward();
         let (base_grad_norm, base_grad_scale) = if config.shared_base_trainable {
@@ -1460,13 +2101,33 @@ use super::*;
         } else {
             (0.0, 1.0)
         };
-        let (generator_grad_norm, generator_grad_scale) = generator.apply_adamw(
-            &mut grads,
-            generator_optimizer,
-            config.generator_optimizer,
-            config.generator_per_parameter_grad_normalization,
-            collect_metrics,
-        )?;
+        let (generator_grad_norm, generator_grad_scale, amortization_grad_norm) =
+            if config.amortization_substrate_only {
+                let norm = generator.apply_amortization_adamw(
+                    &mut grads,
+                    generator_optimizer,
+                    config.generator_optimizer,
+                    collect_metrics,
+                    condition_indices,
+                    (config.lr_schedule == E2eLrSchedule::UpstreamGrowing)
+                        .then_some(config.min_lr_scale),
+                )?;
+                (norm, 1.0, norm)
+            } else {
+                generator.apply_adamw(
+                    &mut grads,
+                    generator_optimizer,
+                    config.generator_optimizer,
+                    GeneratorAdamWOptions {
+                        normalize: config.generator_per_parameter_grad_normalization,
+                        collect_metrics,
+                        active_identities: condition_indices,
+                        upstream_growing_min_lr_scale: (config.lr_schedule
+                            == E2eLrSchedule::UpstreamGrowing)
+                            .then_some(config.min_lr_scale),
+                    },
+                )?
+            };
         if collect_metrics {
             sync_training_device(device)?;
         }
@@ -1478,7 +2139,7 @@ use super::*;
         let elapsed = started.elapsed();
         let measured_particle_steps = batch_len as f64
             * particle_count as f64
-            * (rollout_steps + config.pre_rollout_steps) as f64;
+            * (rollout_steps + pre_rollout_steps) as f64;
         let particle_steps_per_sec =
             measured_particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
         Ok(BurnE2eStepOutput {
@@ -1489,6 +2150,12 @@ use super::*;
                 adapter_teacher_loss: teacher_loss_value,
                 flow_matching_loss: flow_loss_value,
                 flow_self_rectification_loss: flow_self_rectification_loss_value,
+                amortization_distillation_loss: amortization_distillation_loss_value,
+                amortization_residual_scale: config.amortization_residual_scale,
+                amortization_residual_rms,
+                amortization_grad_norm,
+                amortization_endpoint_psnr_db: None,
+                amortization_endpoint_p10_psnr_db: None,
                 learning_rate_scale: 1.0,
                 base_learning_rate: config.base_optimizer.learning_rate,
                 generator_learning_rate: config.generator_optimizer.learning_rate,
@@ -1534,6 +2201,19 @@ use super::*;
         rng.random_range(min_steps..max_steps)
     }
 
+    pub(super) fn sampled_pre_rollout_steps(
+        min_steps: usize,
+        max_steps: usize,
+        seed: u64,
+    ) -> usize {
+        let min_steps = min_steps.min(max_steps);
+        if min_steps == max_steps {
+            return max_steps;
+        }
+        let mut rng = StdRng::seed_from_u64(seed ^ 0x7072_655f_726f_6c6c);
+        rng.random_range(min_steps..max_steps)
+    }
+
     pub(super) fn e2e_chunk_loss_weight(config: BurnE2eRolloutTrainConfig, final_chunk: bool) -> f32 {
         let mode = if config.loss_on_final_chunk_only {
             E2eTbpttLossMode::FinalOnly
@@ -1570,6 +2250,7 @@ use super::*;
         particle_pools: Option<&mut [BurnDeviceParticlePool]>,
         replace_pool_seed: bool,
         collect_metrics: bool,
+        optimizer_config: AdamWConfig,
     ) -> Result<OracleModelBatchStepStats, Box<dyn std::error::Error>> {
         if params.model_count() == 0 || params.model_count() != targets.len() {
             return Err(
@@ -1681,7 +2362,7 @@ use super::*;
             let (grad_norms, grad_scales) = params.apply_adamw(
                 &mut grads,
                 optimizer,
-                adamw_from_sgd(config.base_sgd),
+                optimizer_config,
                 config.per_parameter_grad_normalization,
                 collect_metrics,
             )?;

@@ -175,6 +175,43 @@ impl E2eIdentitySampler {
         }
     }
 
+    pub(crate) fn is_compatible(
+        &self,
+        len: usize,
+        requested_batch_size: usize,
+        uniform_fraction: f32,
+        priority_ema_beta: f32,
+        priority_min_weight: f32,
+        priority_max_weight: f32,
+    ) -> bool {
+        let batch_size = requested_batch_size.max(1).min(len.max(1));
+        self.len == len
+            && self.batch_size == batch_size
+            && (self.uniform_fraction - uniform_fraction.clamp(0.0, 1.0)).abs() <= f32::EPSILON
+            && (self.priority_ema_beta - priority_ema_beta.clamp(0.0, 0.999_999)).abs()
+                <= f32::EPSILON
+            && (self.priority_min_weight - priority_min_weight.max(f32::MIN_POSITIVE)).abs()
+                <= f32::EPSILON
+            && (self.priority_max_weight - priority_max_weight.max(priority_min_weight)).abs()
+                <= f32::EPSILON
+    }
+
+    pub(crate) fn ensure_minimum_trajectory_counts(
+        &mut self,
+        identity_optimizer_steps: &[usize],
+        replicas: usize,
+    ) {
+        let replicas = replicas.max(1) as u64;
+        for (identity, count) in self.trajectory_counts.iter_mut().enumerate() {
+            let minimum = (identity_optimizer_steps
+                .get(identity)
+                .copied()
+                .unwrap_or_default() as u64)
+                .saturating_mul(replicas);
+            *count = (*count).max(minimum);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn trajectory_counts(&self) -> &[u64] {
         &self.trajectory_counts
@@ -245,5 +282,17 @@ mod tests {
         let restored: E2eIdentitySampler = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(restored.exposure_stats(), sampler.exposure_stats());
         assert_eq!(restored.trajectory_counts(), sampler.trajectory_counts());
+    }
+
+    #[test]
+    fn compatible_resume_repairs_historical_exposure_from_identity_steps() {
+        let mut rng = StdRng::seed_from_u64(19);
+        let mut sampler = E2eIdentitySampler::new(4, 4, 0.75, 0.95, 0.5, 4.0, &mut rng);
+        sampler.record_trajectories(&[0, 1, 2, 3], 800);
+        assert!(sampler.is_compatible(4, 4, 0.75, 0.95, 0.5, 4.0));
+        assert!(!sampler.is_compatible(4, 2, 0.75, 0.95, 0.5, 4.0));
+
+        sampler.ensure_minimum_trajectory_counts(&[2_000, 1_500, 100, 0], 8);
+        assert_eq!(sampler.trajectory_counts(), [16_000, 12_000, 800, 800]);
     }
 }

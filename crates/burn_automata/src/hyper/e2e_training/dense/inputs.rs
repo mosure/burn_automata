@@ -2,6 +2,19 @@
 
 use super::*;
 
+    pub(super) const E2E_CONDITION_DIAGNOSTIC_ROWS: usize = 32;
+
+    pub(super) fn condition_diagnostic_indices(examples: usize) -> Vec<usize> {
+        let rows = examples.min(E2E_CONDITION_DIAGNOSTIC_ROWS);
+        match rows {
+            0 => Vec::new(),
+            1 => vec![0],
+            _ => (0..rows)
+                .map(|row| row.saturating_mul(examples - 1) / (rows - 1))
+                .collect(),
+        }
+    }
+
     pub(super) fn burn_targets(
         examples: &[DirectBasisExample],
         config: DirectBasisTrainConfig,
@@ -158,7 +171,15 @@ use super::*;
                 });
             }
         }
-        let condition_paths = conditions.dynamic_dino_paths_for_indices(&indices)?;
+        let (unique_condition_indices, condition_expansion) =
+            deduplicate_condition_indices(&indices);
+        let condition_paths = if config.amortization_substrate_only {
+            None
+        } else {
+            conditions
+                .dynamic_dino_paths_for_indices(&unique_condition_indices)?
+                .map(|paths| (paths, condition_expansion))
+        };
         let pending_indices = indices.clone();
         Ok(BurnE2eCpuBatchPrefetch {
             indices: pending_indices,
@@ -183,7 +204,7 @@ use super::*;
     pub(super) fn prepare_e2e_cpu_batch(
         indices: Vec<usize>,
         target_inputs: Vec<BurnE2eCpuTargetInput>,
-        condition_paths: Option<Vec<PathBuf>>,
+        condition_paths: Option<(Vec<PathBuf>, Vec<usize>)>,
         config: BurnE2eRolloutTrainConfig,
     ) -> Result<BurnE2ePreparedCpuBatch, String> {
         let direct_config = direct_config_view(config);
@@ -197,8 +218,14 @@ use super::*;
                     .collect::<Result<Vec<_>, _>>()
             },
             move || match condition_paths {
-                Some(paths) => prepare_dino_condition_batch_for_prefetch(paths, config.dino_image_size)
-                    .map(Some),
+                Some((paths, expansion)) => {
+                    prepare_dino_condition_batch_for_prefetch(
+                        paths,
+                        expansion,
+                        config.dino_image_size,
+                    )
+                    .map(Some)
+                }
                 None => Ok(None),
             },
         );
@@ -209,6 +236,21 @@ use super::*;
             targets,
             prepared_dino,
         })
+    }
+
+    pub(super) fn deduplicate_condition_indices(indices: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        let mut unique = Vec::new();
+        let mut rows = HashMap::new();
+        let mut expansion = Vec::with_capacity(indices.len());
+        for &identity in indices {
+            let row = *rows.entry(identity).or_insert_with(|| {
+                let row = unique.len();
+                unique.push(identity);
+                row
+            });
+            expansion.push(row);
+        }
+        (unique, expansion)
     }
 
     pub(super) fn prepare_e2e_cpu_target(
@@ -290,19 +332,27 @@ use super::*;
     #[cfg(feature = "dino")]
     pub(super) fn prepare_dino_condition_batch_for_prefetch(
         paths: Vec<PathBuf>,
+        expansion: Vec<usize>,
         image_size: usize,
-    ) -> Result<DinoVitsPreparedConditionBatch, String> {
+    ) -> Result<BurnE2ePreparedDinoBatch, String> {
+        let encoded_rows = paths.len();
         let images = paths
             .into_par_iter()
             .map(|path| load_dino_condition_image(&path).map_err(|err| err.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
-        DinoVitsPreparedConditionBatch::from_conditions(&images, image_size)
-            .map_err(|err| err.to_string())
+        let prepared = DinoVitsPreparedConditionBatch::from_conditions(&images, image_size)
+            .map_err(|err| err.to_string())?;
+        Ok(BurnE2ePreparedDinoBatch {
+            prepared,
+            encoded_rows,
+            expansion,
+        })
     }
 
     #[cfg(not(feature = "dino"))]
     pub(super) fn prepare_dino_condition_batch_for_prefetch(
         _paths: Vec<PathBuf>,
+        _expansion: Vec<usize>,
         _image_size: usize,
     ) -> Result<BurnE2ePreparedDinoBatch, String> {
         Err("DINO prefetch requires the dino feature".to_string())
@@ -486,6 +536,7 @@ use super::*;
                         rgb_channel_scale: config.dino_rgb_channel_scale,
                         alpha_channel: config.dino_alpha_channel,
                         alpha_channel_scale: config.dino_alpha_channel_scale,
+                        patch_pixels: config.dino_patch_pixels,
                     };
                     let values = if device_cache_max_bytes > 0
                         && feature_bytes <= device_cache_max_bytes
@@ -579,13 +630,13 @@ use super::*;
             if self.examples < 2 {
                 return Ok(None);
             }
-            let indices = (0..self.examples).collect::<Vec<_>>();
+            let indices = condition_diagnostic_indices(self.examples);
             let values = tensor3_vec(self.select(&indices)?.inner())?;
             let row_len = self.token_count * self.embed_dims;
             let mut sum = 0.0_f64;
             let mut pairs = 0usize;
-            for lhs in 0..self.examples {
-                for rhs in lhs + 1..self.examples {
+            for lhs in 0..indices.len() {
+                for rhs in lhs + 1..indices.len() {
                     let lhs = &values[lhs * row_len..(lhs + 1) * row_len];
                     let rhs = &values[rhs * row_len..(rhs + 1) * row_len];
                     let distance = lhs
@@ -648,18 +699,22 @@ use super::*;
         }
 
         pub(super) fn mean_teacher_pairwise_l2(&self) -> AutomataResult<Option<f32>> {
-            let Some(teachers) = &self.teacher_vectors else {
+            if self.teacher_vectors.is_none() {
                 return Ok(None);
-            };
+            }
             if self.examples < 2 {
                 return Ok(None);
             }
+            let indices = condition_diagnostic_indices(self.examples);
+            let teachers = self
+                .select_teacher(&indices)
+                .expect("teacher diagnostics require teacher vectors");
             let dims = teachers.shape().dims::<2>();
-            let values = tensor_vec(teachers.clone().inner())?;
+            let values = tensor_vec(teachers.inner())?;
             let mut sum = 0.0_f64;
             let mut pairs = 0usize;
-            for lhs in 0..self.examples {
-                for rhs in lhs + 1..self.examples {
+            for lhs in 0..indices.len() {
+                for rhs in lhs + 1..indices.len() {
                     let lhs = &values[lhs * dims[1]..(lhs + 1) * dims[1]];
                     let rhs = &values[rhs * dims[1]..(rhs + 1) * dims[1]];
                     sum += lhs
@@ -724,7 +779,47 @@ use super::*;
             if let (BurnE2eConditionValues::DynamicDino(source), Some(prepared)) =
                 (&self.values, prepared_dino)
             {
-                return source.encode_preprocessed(prepared, indices.len(), self.token_count, self.embed_dims);
+                if prepared.expansion.len() != indices.len()
+                    || prepared
+                        .expansion
+                        .iter()
+                        .any(|row| *row >= prepared.encoded_rows)
+                {
+                    return Err(AutomataError::InvalidArgument(
+                        "prepared DINO expansion does not match requested condition rows"
+                            .to_string(),
+                    ));
+                }
+                let encoded = source.encode_preprocessed(
+                    &prepared.prepared,
+                    prepared.encoded_rows,
+                    self.token_count,
+                    self.embed_dims,
+                )?;
+                if prepared.encoded_rows == indices.len()
+                    && prepared
+                        .expansion
+                        .iter()
+                        .copied()
+                        .eq(0..indices.len())
+                {
+                    return Ok(encoded);
+                }
+                let device = encoded.device();
+                return Ok(encoded.select(
+                    0,
+                    Tensor::<BurnBackend, 1, Int>::from_data(
+                        TensorData::new(
+                            prepared
+                                .expansion
+                                .iter()
+                                .map(|row| *row as i64)
+                                .collect::<Vec<_>>(),
+                            [prepared.expansion.len()],
+                        ),
+                        &device,
+                    ),
+                ));
             }
             self.select(indices)
         }
@@ -1510,6 +1605,24 @@ use super::*;
         rows
     }
 
+    pub(super) fn upstream_growing_repetition_reset_identities(
+        rollout_identities: &[usize],
+        identity_optimizer_steps: &[usize],
+    ) -> Vec<usize> {
+        let mut identities = rollout_identities
+            .iter()
+            .copied()
+            .filter(|identity| {
+                identity_optimizer_steps
+                    .get(*identity)
+                    .is_some_and(|step| *step > 0 && step.is_multiple_of(10_000))
+            })
+            .collect::<Vec<_>>();
+        identities.sort_unstable();
+        identities.dedup();
+        identities
+    }
+
     pub(super) fn seeded_values(len: usize, scale: f32, rng: &mut StdRng) -> Vec<f32> {
         let scale = scale.abs().max(f32::MIN_POSITIVE);
         (0..len)
@@ -1952,6 +2065,17 @@ use super::*;
             })
         }
 
+        pub(super) fn reset_examples(&mut self, examples: &[usize]) {
+            for &example in examples {
+                for replica in 0..self.slots_per_example {
+                    let key = (example, replica);
+                    if let Some(slot) = self.example_slots.remove(&key) {
+                        self.slot_examples[slot] = None;
+                    }
+                }
+            }
+        }
+
         pub(super) fn update_batch(
             &mut self,
             slots: &[usize],
@@ -1963,7 +2087,11 @@ use super::*;
             }
             let inner_device = self.positions.device();
             let indices = inner_index_tensor(slots, &inner_device);
-            let persisted_x = x.inner().clamp(-1.0, 1.0);
+            let persisted_x = x.inner();
+            let persisted_x = persisted_x
+                .clone()
+                .mask_fill(persisted_x.is_finite().bool_not(), 0.0)
+                .clamp(-1.0, 1.0);
             let position_delta =
                 persisted_x - self.positions.clone().select(0, indices.clone());
             self.positions = self.positions.clone().select_assign(
@@ -1974,7 +2102,11 @@ use super::*;
             );
             // Upstream persists mature recurrent state without amplitude clipping. Keep a
             // generous finite safety bound, but do not erase valid attractor state at +/-1.
-            let persisted_s = s.inner().clamp(-32.0, 32.0);
+            let persisted_s = s.inner();
+            let persisted_s = persisted_s
+                .clone()
+                .mask_fill(persisted_s.is_finite().bool_not(), 0.0)
+                .clamp(-32.0, 32.0);
             let state_delta = persisted_s - self.states.clone().select(0, indices.clone());
             self.states = self.states.clone().select_assign(
                 0,

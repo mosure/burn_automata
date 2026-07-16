@@ -21,6 +21,10 @@ const PERCEPTION_ADJOINT_OP: &str = "burn_automata.perception.adjoint.v2";
 const PERCEPTION_FORWARD_OP: &str = "burn_automata.perception.forward.v2";
 const LOG_NORMALIZE_EPSILON: f32 = 1.0e-6;
 const MAX_SPARSE_PLANES_PER_CUBE: u32 = 4;
+const PERCEPTION_QUERY_BLOCK_PARTICLES: usize = 16;
+const PERCEPTION_TILED_MAX_STATE_DIMS: usize = 16;
+const PERCEPTION_TILED_CUBE_UNITS: u32 = 256;
+const PERCEPTION_TILED_VJP_C4_CUBE_UNITS: u32 = 128;
 
 type FusionCubeBackend<R, F, I, BT> = Fusion<CubeBackend<R, F, I, BT>>;
 type PerceptionForwardFusionOutput<R, F, I, BT> =
@@ -63,6 +67,7 @@ pub struct PerceptionCubePreparedForwardOutput<B: BurnBackendTrait> {
     pub density: BurnTensor<B, 2>,
     pub offsets: BurnTensor<B, 2, burn::tensor::Int>,
     pub permutation: BurnTensor<B, 2, burn::tensor::Int>,
+    pub block_info: BurnTensor<B, 3, burn::tensor::Int>,
     pub raw_state_gradient: BurnTensor<B, 4>,
     pub state_gradient_inverse: BurnTensor<B, 3>,
 }
@@ -108,6 +113,7 @@ pub trait PerceptionCubePreparedBackend: BurnBackendTrait + Sized {
         density: BurnTensor<Self, 2>,
         offsets: BurnTensor<Self, 2, burn::tensor::Int>,
         permutation: BurnTensor<Self, 2, burn::tensor::Int>,
+        block_info: BurnTensor<Self, 3, burn::tensor::Int>,
         raw_state_gradient: BurnTensor<Self, 4>,
         state_gradient_inverse: BurnTensor<Self, 3>,
         cfg: PerceptionCubeAdjointConfig,
@@ -171,6 +177,7 @@ impl PerceptionCubePreparedBackend for burn::backend::Wgpu<f32> {
         density: BurnTensor<Self, 2>,
         offsets: BurnTensor<Self, 2, burn::tensor::Int>,
         permutation: BurnTensor<Self, 2, burn::tensor::Int>,
+        block_info: BurnTensor<Self, 3, burn::tensor::Int>,
         raw_state_gradient: BurnTensor<Self, 4>,
         state_gradient_inverse: BurnTensor<Self, 3>,
         cfg: PerceptionCubeAdjointConfig,
@@ -187,6 +194,7 @@ impl PerceptionCubePreparedBackend for burn::backend::Wgpu<f32> {
             density,
             offsets,
             permutation,
+            block_info,
             raw_state_gradient,
             state_gradient_inverse,
             cfg,
@@ -249,6 +257,7 @@ impl PerceptionCubePreparedBackend for burn::backend::Cuda<f32> {
         density: BurnTensor<Self, 2>,
         offsets: BurnTensor<Self, 2, burn::tensor::Int>,
         permutation: BurnTensor<Self, 2, burn::tensor::Int>,
+        block_info: BurnTensor<Self, 3, burn::tensor::Int>,
         raw_state_gradient: BurnTensor<Self, 4>,
         state_gradient_inverse: BurnTensor<Self, 3>,
         cfg: PerceptionCubeAdjointConfig,
@@ -265,6 +274,7 @@ impl PerceptionCubePreparedBackend for burn::backend::Cuda<f32> {
             density,
             offsets,
             permutation,
+            block_info,
             raw_state_gradient,
             state_gradient_inverse,
             cfg,
@@ -388,6 +398,7 @@ where
     let client = x_fusion.client.clone();
     let dtype = x_fusion.dtype;
     let cell_count = cfg.grid_width as usize * cfg.grid_height as usize;
+    let max_blocks_per_batch = perception_max_blocks_per_batch(particle_count, cfg);
     let features_ir = TensorIr::uninit(
         client.create_empty_handle(),
         Shape::new([
@@ -412,6 +423,11 @@ where
         Shape::new([batches, particle_count]),
         DType::U32,
     );
+    let block_info_ir = TensorIr::uninit(
+        client.create_empty_handle(),
+        Shape::new([batches, max_blocks_per_batch, 3]),
+        DType::U32,
+    );
     let raw_state_gradient_ir = TensorIr::uninit(
         client.create_empty_handle(),
         Shape::new([batches, particle_count, state_dims, 2]),
@@ -428,6 +444,7 @@ where
         density_ir.clone(),
         offsets_ir.clone(),
         permutation_ir.clone(),
+        block_info_ir.clone(),
         raw_state_gradient_ir.clone(),
         state_gradient_inverse_ir.clone(),
     ];
@@ -440,6 +457,7 @@ where
             density: density_ir,
             offsets: offsets_ir,
             permutation: permutation_ir,
+            block_info: block_info_ir,
             raw_state_gradient: raw_state_gradient_ir,
             state_gradient_inverse: state_gradient_inverse_ir,
         },
@@ -451,6 +469,7 @@ where
         density,
         offsets,
         permutation,
+        block_info,
         raw_state_gradient,
         state_gradient_inverse,
     ] = client
@@ -463,7 +482,7 @@ where
             )),
             op,
         )
-        .outputs::<6>();
+        .outputs::<7>();
 
     Ok(PerceptionCubePreparedForwardOutput {
         features: BurnTensor::<FusionCubeBackend<R, F, I, BT>, 3>::from_primitive(
@@ -478,6 +497,10 @@ where
         permutation:
             BurnTensor::<FusionCubeBackend<R, F, I, BT>, 2, burn::tensor::Int>::from_primitive(
                 permutation,
+            ),
+        block_info:
+            BurnTensor::<FusionCubeBackend<R, F, I, BT>, 3, burn::tensor::Int>::from_primitive(
+                block_info,
             ),
         raw_state_gradient: BurnTensor::<FusionCubeBackend<R, F, I, BT>, 4>::from_primitive(
             TensorPrimitive::Float(raw_state_gradient),
@@ -592,6 +615,7 @@ fn perception_cube_adjoint_prepared_fusion<R, F, I, BT>(
     density: BurnTensor<FusionCubeBackend<R, F, I, BT>, 2>,
     offsets: BurnTensor<FusionCubeBackend<R, F, I, BT>, 2, burn::tensor::Int>,
     permutation: BurnTensor<FusionCubeBackend<R, F, I, BT>, 2, burn::tensor::Int>,
+    block_info: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3, burn::tensor::Int>,
     raw_state_gradient: BurnTensor<FusionCubeBackend<R, F, I, BT>, 4>,
     state_gradient_inverse: BurnTensor<FusionCubeBackend<R, F, I, BT>, 3>,
     cfg: PerceptionCubeAdjointConfig,
@@ -608,12 +632,14 @@ where
     let density_dims = density.shape().dims::<2>();
     let offset_dims = offsets.shape().dims::<2>();
     let permutation_dims = permutation.shape().dims::<2>();
+    let block_info_dims = block_info.shape().dims::<3>();
     let raw_state_gradient_dims = raw_state_gradient.shape().dims::<4>();
     let state_gradient_inverse_dims = state_gradient_inverse.shape().dims::<3>();
     let batches = x_dims[0];
     let particle_count = x_dims[1];
     let state_dims = s_dims[2];
     let cell_count = cfg.grid_width as usize * cfg.grid_height as usize;
+    let max_blocks_per_batch = perception_max_blocks_per_batch(particle_count, cfg);
     let expected_feature_dims = perception_feature_dims(state_dims, cfg);
     if x_dims[2] != 2
         || s_dims != [batches, particle_count, state_dims]
@@ -621,11 +647,12 @@ where
         || density_dims != [batches, particle_count]
         || offset_dims != [batches, cell_count + 1]
         || permutation_dims != [batches, particle_count]
+        || block_info_dims != [batches, max_blocks_per_batch, 3]
         || raw_state_gradient_dims != [batches, particle_count, state_dims, 2]
         || state_gradient_inverse_dims != [batches, particle_count, 4]
     {
         return Err(KernelError::InvalidArgument(format!(
-            "prepared perception adjoint tensor shape mismatch: x={x_dims:?} s={s_dims:?} feature_grad={feature_dims:?} density={density_dims:?} offsets={offset_dims:?} permutation={permutation_dims:?} raw_state_gradient={raw_state_gradient_dims:?} state_gradient_inverse={state_gradient_inverse_dims:?}",
+            "prepared perception adjoint tensor shape mismatch: x={x_dims:?} s={s_dims:?} feature_grad={feature_dims:?} density={density_dims:?} offsets={offset_dims:?} permutation={permutation_dims:?} block_info={block_info_dims:?} raw_state_gradient={raw_state_gradient_dims:?} state_gradient_inverse={state_gradient_inverse_dims:?}",
         )));
     }
     if !should_use_sparse_grid(particle_count, cfg) || cfg.compute_position_grad {
@@ -640,6 +667,7 @@ where
     let density_fusion = density.into_primitive().tensor();
     let offsets_fusion = offsets.into_primitive();
     let permutation_fusion = permutation.into_primitive();
+    let block_info_fusion = block_info.into_primitive();
     let raw_state_gradient_fusion = raw_state_gradient.into_primitive().tensor();
     let state_gradient_inverse_fusion = state_gradient_inverse.into_primitive().tensor();
     let client = x_fusion.client.clone();
@@ -661,6 +689,7 @@ where
         density_fusion.clone().into_ir(),
         offsets_fusion.clone().into_ir(),
         permutation_fusion.clone().into_ir(),
+        block_info_fusion.clone().into_ir(),
         raw_state_gradient_fusion.clone().into_ir(),
         state_gradient_inverse_fusion.clone().into_ir(),
     ];
@@ -672,6 +701,7 @@ where
         &density_fusion,
         &offsets_fusion,
         &permutation_fusion,
+        &block_info_fusion,
         &raw_state_gradient_fusion,
         &state_gradient_inverse_fusion,
     ]);
@@ -683,8 +713,9 @@ where
             density: inputs[3].clone(),
             offsets: inputs[4].clone(),
             permutation: inputs[5].clone(),
-            raw_state_gradient: inputs[6].clone(),
-            state_gradient_inverse: inputs[7].clone(),
+            block_info: inputs[6].clone(),
+            raw_state_gradient: inputs[7].clone(),
+            state_gradient_inverse: inputs[8].clone(),
             position_grad: position_grad_ir,
             state_grad: state_grad_ir,
         },
@@ -763,6 +794,7 @@ struct PerceptionPreparedForwardDesc {
     density: TensorIr,
     offsets: TensorIr,
     permutation: TensorIr,
+    block_info: TensorIr,
     raw_state_gradient: TensorIr,
     state_gradient_inverse: TensorIr,
 }
@@ -801,6 +833,9 @@ where
         let grid = output
             .grid
             .expect("prepared perception forward requires a sparse grid");
+        let blocks = output
+            .blocks
+            .expect("prepared perception forward requires retained query blocks");
         let raw_state_gradient = output
             .raw_state_gradient
             .expect("prepared perception forward requires retained raw state gradients");
@@ -812,6 +847,7 @@ where
         handles.register_int_tensor::<Raw<R, F, I, BT>>(&self.desc.offsets.id, grid.offsets);
         handles
             .register_int_tensor::<Raw<R, F, I, BT>>(&self.desc.permutation.id, grid.permutation);
+        handles.register_int_tensor::<Raw<R, F, I, BT>>(&self.desc.block_info.id, blocks.info);
         handles.register_float_tensor::<Raw<R, F, I, BT>>(
             &self.desc.raw_state_gradient.id,
             raw_state_gradient,
@@ -881,6 +917,7 @@ struct PerceptionPreparedAdjointDesc {
     density: TensorIr,
     offsets: TensorIr,
     permutation: TensorIr,
+    block_info: TensorIr,
     raw_state_gradient: TensorIr,
     state_gradient_inverse: TensorIr,
     position_grad: TensorIr,
@@ -921,6 +958,7 @@ where
         let density = handles.get_float_tensor::<Raw<R, F, I, BT>>(&self.desc.density);
         let offsets = handles.get_int_tensor::<Raw<R, F, I, BT>>(&self.desc.offsets);
         let permutation = handles.get_int_tensor::<Raw<R, F, I, BT>>(&self.desc.permutation);
+        let block_info = handles.get_int_tensor::<Raw<R, F, I, BT>>(&self.desc.block_info);
         let raw_state_gradient =
             handles.get_float_tensor::<Raw<R, F, I, BT>>(&self.desc.raw_state_gradient);
         let state_gradient_inverse =
@@ -934,6 +972,7 @@ where
                 offsets,
                 permutation,
             },
+            block_info,
             raw_state_gradient,
             state_gradient_inverse,
             self.cfg,
@@ -958,9 +997,16 @@ struct PerceptionGridRaw<R: CubeRuntime> {
     permutation: CubeTensor<R>,
 }
 
+#[derive(Clone)]
+struct PerceptionBlocksRaw<R: CubeRuntime> {
+    info: CubeTensor<R>,
+    max_blocks_per_batch: usize,
+}
+
 struct PerceptionPreparedAdjointRaw<R: CubeRuntime> {
     density: CubeTensor<R>,
     grid: PerceptionGridRaw<R>,
+    blocks: PerceptionBlocksRaw<R>,
     raw_state_gradient: CubeTensor<R>,
     state_gradient_inverse: CubeTensor<R>,
 }
@@ -969,6 +1015,7 @@ struct PerceptionForwardRawOutput<R: CubeRuntime> {
     features: CubeTensor<R>,
     density: CubeTensor<R>,
     grid: Option<PerceptionGridRaw<R>>,
+    blocks: Option<PerceptionBlocksRaw<R>>,
     raw_state_gradient: Option<CubeTensor<R>>,
     state_gradient_inverse: Option<CubeTensor<R>>,
 }
@@ -999,6 +1046,23 @@ fn perception_sparse_planes_per_cube(particle_count: usize) -> u32 {
     } else {
         1
     }
+}
+
+fn perception_sparse_block_tiled_supported<R: CubeRuntime>(
+    client: &ComputeClient<R>,
+    state_dims: usize,
+) -> bool {
+    state_dims <= PERCEPTION_TILED_MAX_STATE_DIMS
+        && client.properties().hardware.max_units_per_cube >= PERCEPTION_TILED_CUBE_UNITS
+        && std::env::var_os("BURN_AUTOMATA_DISABLE_BLOCK_TILED_PERCEPTION").is_none()
+}
+
+fn perception_max_blocks_per_batch(
+    particle_count: usize,
+    cfg: PerceptionCubeAdjointConfig,
+) -> usize {
+    cfg.grid_width as usize * cfg.grid_height as usize
+        + particle_count.div_ceil(PERCEPTION_QUERY_BLOCK_PARTICLES)
 }
 
 fn launch_perception_grid<R: CubeRuntime>(
@@ -1081,6 +1145,95 @@ fn launch_perception_grid<R: CubeRuntime>(
     }
 }
 
+fn launch_perception_blocks<R: CubeRuntime>(
+    grid: &PerceptionGridRaw<R>,
+    batches: usize,
+    particle_count: usize,
+    cfg: PerceptionCubeAdjointConfig,
+) -> PerceptionBlocksRaw<R> {
+    let cell_count = cfg.grid_width as usize * cfg.grid_height as usize;
+    let max_blocks_per_batch = perception_max_blocks_per_batch(particle_count, cfg);
+    let client = grid.offsets.client.clone();
+    let device = grid.offsets.device.clone();
+    let block_offsets = empty_device_dtype(
+        client.clone(),
+        device.clone(),
+        Shape::new([batches, cell_count + 1]),
+        DType::U32,
+    );
+    let batch_block_offsets = empty_device_dtype(
+        client.clone(),
+        device.clone(),
+        Shape::new([batches + 1]),
+        DType::U32,
+    );
+    let info = empty_device_dtype(
+        client.clone(),
+        device,
+        Shape::new([batches, max_blocks_per_batch, 3]),
+        DType::U32,
+    );
+
+    let info_units = batches * max_blocks_per_batch * 3;
+    let info_cube_dim = CubeDim::new(&client, info_units);
+    let info_cube_count = calculate_cube_count_elemwise(&client, info_units, info_cube_dim);
+    perception_blocks_zero_kernel::launch(
+        &client,
+        info_cube_count,
+        info_cube_dim,
+        AddressType::U32,
+        info.clone().into_tensor_arg(),
+    );
+    if batches <= PERCEPTION_TILED_CUBE_UNITS as usize {
+        perception_blocks_scan_compact_q16_v3_kernel::launch(
+            &client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d((batches as u32).max(32)),
+            AddressType::U32,
+            grid.offsets.clone().into_tensor_arg(),
+            block_offsets.clone().into_tensor_arg(),
+            batch_block_offsets.clone().into_tensor_arg(),
+        );
+    } else {
+        let batch_cube_dim = CubeDim::new(&client, batches);
+        let batch_cube_count = calculate_cube_count_elemwise(&client, batches, batch_cube_dim);
+        perception_blocks_scan_local_q16_v2_kernel::launch(
+            &client,
+            batch_cube_count,
+            batch_cube_dim,
+            AddressType::U32,
+            grid.offsets.clone().into_tensor_arg(),
+            block_offsets.clone().into_tensor_arg(),
+        );
+        perception_blocks_batch_prefix_q16_kernel::launch(
+            &client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            AddressType::U32,
+            block_offsets.clone().into_tensor_arg(),
+            batch_block_offsets.clone().into_tensor_arg(),
+        );
+    }
+    let cell_units = batches * cell_count;
+    let cell_cube_dim = CubeDim::new(&client, cell_units);
+    let cell_cube_count = calculate_cube_count_elemwise(&client, cell_units, cell_cube_dim);
+    perception_blocks_assign_global_q16_kernel::launch(
+        &client,
+        cell_cube_count,
+        cell_cube_dim,
+        AddressType::U32,
+        grid.offsets.clone().into_tensor_arg(),
+        block_offsets.into_tensor_arg(),
+        batch_block_offsets.into_tensor_arg(),
+        info.clone().into_tensor_arg(),
+    );
+
+    PerceptionBlocksRaw {
+        info,
+        max_blocks_per_batch,
+    }
+}
+
 fn launch_perception_forward<R: CubeRuntime>(
     x: CubeTensor<R>,
     s: CubeTensor<R>,
@@ -1133,12 +1286,15 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
     });
     let sparse_grid =
         should_use_sparse_grid(particle_count, cfg).then(|| launch_perception_grid(x.clone(), cfg));
+    let sparse_blocks = sparse_grid.as_ref().and_then(|grid| {
+        retain_adjoint_state.then(|| launch_perception_blocks(grid, batches, particle_count, cfg))
+    });
     let args_density = perception_args(cfg, dtype);
     if let Some(grid) = sparse_grid.as_ref() {
         let units = batches * particle_count;
         let cube_dim = CubeDim::new(&client, units);
         let cube_count = calculate_cube_count_elemwise(&client, units, cube_dim);
-        perception_density_sparse_kernel::launch(
+        perception_density_sparse_precomputed_v2_kernel::launch(
             &client,
             cube_count,
             cube_dim,
@@ -1185,7 +1341,6 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
     let cube_count = calculate_cube_count_elemwise(&client, units, cube_dim);
     if let Some(grid) = sparse_grid.as_ref() {
         if let Some(plane_dim) = perception_sparse_plane_dim(&client, particle_count, state_dims) {
-            let planes_per_cube = perception_sparse_planes_per_cube(particle_count);
             let raw_state_gradient_arg = raw_state_gradient
                 .as_ref()
                 .cloned()
@@ -1194,28 +1349,54 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| density.clone());
-            perception_forward_sparse_plane_kernel::launch(
-                &client,
-                CubeCount::Static(
-                    particle_count.div_ceil(planes_per_cube as usize) as u32,
-                    batches as u32,
-                    1,
-                ),
-                CubeDim::new_2d(plane_dim, planes_per_cube),
-                AddressType::U32,
-                x.clone().into_tensor_arg(),
-                s.clone().into_tensor_arg(),
-                density.clone().into_tensor_arg(),
-                grid.offsets.clone().into_tensor_arg(),
-                grid.permutation.clone().into_tensor_arg(),
-                features.clone().into_tensor_arg(),
-                raw_state_gradient_arg.into_tensor_arg(),
-                state_gradient_inverse_arg.into_tensor_arg(),
-                args_forward,
-                retain_adjoint_state,
-                cfg.density_grad,
-                dtype.into(),
-            );
+            if let Some(blocks) = sparse_blocks
+                .as_ref()
+                .filter(|_| perception_sparse_block_tiled_supported(&client, state_dims))
+            {
+                perception_forward_sparse_block_global_q16_rsqrt_v2_kernel::launch(
+                    &client,
+                    CubeCount::Static((blocks.max_blocks_per_batch * batches) as u32, 1, 1),
+                    CubeDim::new_1d(PERCEPTION_TILED_CUBE_UNITS),
+                    AddressType::U32,
+                    x.clone().into_tensor_arg(),
+                    s.clone().into_tensor_arg(),
+                    density.clone().into_tensor_arg(),
+                    grid.offsets.clone().into_tensor_arg(),
+                    grid.permutation.clone().into_tensor_arg(),
+                    blocks.info.clone().into_tensor_arg(),
+                    features.clone().into_tensor_arg(),
+                    raw_state_gradient_arg.into_tensor_arg(),
+                    state_gradient_inverse_arg.into_tensor_arg(),
+                    args_forward,
+                    retain_adjoint_state,
+                    cfg.density_grad,
+                    dtype.into(),
+                );
+            } else {
+                let planes_per_cube = perception_sparse_planes_per_cube(particle_count);
+                perception_forward_sparse_plane_kernel::launch(
+                    &client,
+                    CubeCount::Static(
+                        particle_count.div_ceil(planes_per_cube as usize) as u32,
+                        batches as u32,
+                        1,
+                    ),
+                    CubeDim::new_2d(plane_dim, planes_per_cube),
+                    AddressType::U32,
+                    x.clone().into_tensor_arg(),
+                    s.clone().into_tensor_arg(),
+                    density.clone().into_tensor_arg(),
+                    grid.offsets.clone().into_tensor_arg(),
+                    grid.permutation.clone().into_tensor_arg(),
+                    features.clone().into_tensor_arg(),
+                    raw_state_gradient_arg.into_tensor_arg(),
+                    state_gradient_inverse_arg.into_tensor_arg(),
+                    args_forward,
+                    retain_adjoint_state,
+                    cfg.density_grad,
+                    dtype.into(),
+                );
+            }
         } else {
             let inverse = state_gradient_inverse.clone().unwrap_or_else(|| {
                 empty_device_dtype(
@@ -1284,6 +1465,7 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
         features,
         density,
         grid: sparse_grid,
+        blocks: sparse_blocks,
         raw_state_gradient,
         state_gradient_inverse,
     }
@@ -1305,6 +1487,7 @@ fn launch_perception_adjoint_prepared<R: CubeRuntime>(
     feature_grad: CubeTensor<R>,
     density: CubeTensor<R>,
     grid: PerceptionGridRaw<R>,
+    block_info: CubeTensor<R>,
     raw_state_gradient: CubeTensor<R>,
     state_gradient_inverse: CubeTensor<R>,
     cfg: PerceptionCubeAdjointConfig,
@@ -1316,6 +1499,10 @@ fn launch_perception_adjoint_prepared<R: CubeRuntime>(
         Some(PerceptionPreparedAdjointRaw {
             density,
             grid,
+            blocks: PerceptionBlocksRaw {
+                max_blocks_per_batch: block_info.shape().dims::<3>()[1],
+                info: block_info,
+            },
             raw_state_gradient,
             state_gradient_inverse,
         }),
@@ -1403,7 +1590,7 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
         let units = batches * particle_count;
         let cube_dim = CubeDim::new(&client, units);
         let cube_count = calculate_cube_count_elemwise(&client, units, cube_dim);
-        perception_density_sparse_kernel::launch(
+        perception_density_sparse_precomputed_v2_kernel::launch(
             &client,
             cube_count,
             cube_dim,
@@ -1577,28 +1764,75 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
         let args_state = perception_args(cfg, dtype);
         if let Some(grid) = sparse_grid.as_ref() {
             if let Some(plane_dim) = sparse_plane_dim {
-                let planes_per_cube = perception_sparse_planes_per_cube(particle_count);
-                perception_state_output_sparse_plane_kernel::launch(
-                    &client,
-                    CubeCount::Static(
-                        particle_count.div_ceil(planes_per_cube as usize) as u32,
-                        batches as u32,
-                        1,
-                    ),
-                    CubeDim::new_2d(plane_dim, planes_per_cube),
-                    AddressType::U32,
-                    x.clone().into_tensor_arg(),
-                    s.clone().into_tensor_arg(),
-                    feature_grad.clone().into_tensor_arg(),
-                    density.clone().into_tensor_arg(),
-                    raw_state_adjoint.clone().into_tensor_arg(),
-                    grid.offsets.clone().into_tensor_arg(),
-                    grid.permutation.clone().into_tensor_arg(),
-                    state_grad.clone().into_tensor_arg(),
-                    args_state,
-                    cfg.state_grad,
-                    dtype.into(),
-                );
+                let prepared_blocks = prepared.as_ref().map(|prepared| prepared.blocks.clone());
+                if let Some(blocks) = prepared_blocks
+                    .filter(|_| perception_sparse_block_tiled_supported(&client, state_dims))
+                {
+                    let cube_count =
+                        CubeCount::Static((blocks.max_blocks_per_batch * batches) as u32, 1, 1);
+                    if state_dims == 16 {
+                        perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel::launch(
+                            &client,
+                            cube_count,
+                            CubeDim::new_1d(PERCEPTION_TILED_VJP_C4_CUBE_UNITS),
+                            AddressType::U32,
+                            x.clone().into_tensor_arg(),
+                            s.clone().into_tensor_arg(),
+                            feature_grad.clone().into_tensor_arg(),
+                            density.clone().into_tensor_arg(),
+                            raw_state_adjoint.clone().into_tensor_arg(),
+                            grid.offsets.clone().into_tensor_arg(),
+                            grid.permutation.clone().into_tensor_arg(),
+                            blocks.info.into_tensor_arg(),
+                            state_grad.clone().into_tensor_arg(),
+                            args_state,
+                            cfg.state_grad,
+                            dtype.into(),
+                        );
+                    } else {
+                        perception_state_output_sparse_block_global_q16_rsqrt_v2_kernel::launch(
+                            &client,
+                            cube_count,
+                            CubeDim::new_1d(PERCEPTION_TILED_CUBE_UNITS),
+                            AddressType::U32,
+                            x.clone().into_tensor_arg(),
+                            s.clone().into_tensor_arg(),
+                            feature_grad.clone().into_tensor_arg(),
+                            density.clone().into_tensor_arg(),
+                            raw_state_adjoint.clone().into_tensor_arg(),
+                            grid.offsets.clone().into_tensor_arg(),
+                            grid.permutation.clone().into_tensor_arg(),
+                            blocks.info.into_tensor_arg(),
+                            state_grad.clone().into_tensor_arg(),
+                            args_state,
+                            cfg.state_grad,
+                            dtype.into(),
+                        );
+                    }
+                } else {
+                    let planes_per_cube = perception_sparse_planes_per_cube(particle_count);
+                    perception_state_output_sparse_plane_kernel::launch(
+                        &client,
+                        CubeCount::Static(
+                            particle_count.div_ceil(planes_per_cube as usize) as u32,
+                            batches as u32,
+                            1,
+                        ),
+                        CubeDim::new_2d(plane_dim, planes_per_cube),
+                        AddressType::U32,
+                        x.clone().into_tensor_arg(),
+                        s.clone().into_tensor_arg(),
+                        feature_grad.clone().into_tensor_arg(),
+                        density.clone().into_tensor_arg(),
+                        raw_state_adjoint.clone().into_tensor_arg(),
+                        grid.offsets.clone().into_tensor_arg(),
+                        grid.permutation.clone().into_tensor_arg(),
+                        state_grad.clone().into_tensor_arg(),
+                        args_state,
+                        cfg.state_grad,
+                        dtype.into(),
+                    );
+                }
             } else {
                 perception_state_output_sparse_kernel::launch(
                     &client,
@@ -1804,6 +2038,145 @@ fn perception_grid_scatter_kernel<F: Float>(
     permutation[batch * permutation.stride(0) + slot * permutation.stride(1)] = particle as u32;
 }
 
+#[cube(launch, address_type = "dynamic")]
+fn perception_blocks_zero_kernel(info: &mut Tensor<u32>) {
+    let index = ABSOLUTE_POS;
+    if index >= info.len() {
+        terminate!();
+    }
+    info[index] = 0u32;
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_blocks_scan_compact_q16_v3_kernel(
+    offsets: &Tensor<u32>,
+    block_offsets: &mut Tensor<u32>,
+    batch_block_offsets: &mut Tensor<u32>,
+) {
+    let unit = UNIT_POS as usize;
+    let batch_count = offsets.shape(0);
+    let cell_count = offsets.shape(1) - 1usize;
+    let mut batch_totals = SharedMemory::<u32>::new(256usize);
+    if unit < batch_count {
+        let mut total = 0u32;
+        block_offsets[unit * block_offsets.stride(0)] = 0u32;
+        let mut cell = 0usize;
+        while cell < cell_count {
+            let base = unit * offsets.stride(0) + cell * offsets.stride(1);
+            let count = offsets[base + offsets.stride(1)] - offsets[base];
+            if count > 0u32 {
+                total += (count - 1u32) / 16u32 + 1u32;
+            }
+            block_offsets
+                [unit * block_offsets.stride(0) + (cell + 1usize) * block_offsets.stride(1)] =
+                total;
+            cell += 1usize;
+        }
+        batch_totals[unit] = total;
+    }
+    sync_cube();
+
+    if unit == 0usize {
+        let mut total = 0u32;
+        batch_block_offsets[0] = 0u32;
+        let mut batch = 0usize;
+        while batch < batch_count {
+            total += batch_totals[batch];
+            batch_block_offsets[(batch + 1usize) * batch_block_offsets.stride(0)] = total;
+            batch += 1usize;
+        }
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_blocks_scan_local_q16_v2_kernel(
+    offsets: &Tensor<u32>,
+    block_offsets: &mut Tensor<u32>,
+) {
+    let batch = ABSOLUTE_POS;
+    if batch >= offsets.shape(0) {
+        terminate!();
+    }
+    let cell_count = offsets.shape(1) - 1usize;
+    let mut total = 0u32;
+    block_offsets[batch * block_offsets.stride(0)] = 0u32;
+    let mut cell = 0usize;
+    while cell < cell_count {
+        let base = batch * offsets.stride(0) + cell * offsets.stride(1);
+        let count = offsets[base + offsets.stride(1)] - offsets[base];
+        if count > 0u32 {
+            total += (count - 1u32) / 16u32 + 1u32;
+        }
+        block_offsets
+            [batch * block_offsets.stride(0) + (cell + 1usize) * block_offsets.stride(1)] = total;
+        cell += 1usize;
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_blocks_batch_prefix_q16_kernel(
+    block_offsets: &Tensor<u32>,
+    batch_block_offsets: &mut Tensor<u32>,
+) {
+    if ABSOLUTE_POS > 0usize {
+        terminate!();
+    }
+    let cell_count = block_offsets.shape(1) - 1usize;
+    let mut total = 0u32;
+    batch_block_offsets[0] = 0u32;
+    let mut batch = 0usize;
+    while batch < block_offsets.shape(0) {
+        total +=
+            block_offsets[batch * block_offsets.stride(0) + cell_count * block_offsets.stride(1)];
+        batch_block_offsets[(batch + 1usize) * batch_block_offsets.stride(0)] = total;
+        batch += 1usize;
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_blocks_assign_global_q16_kernel(
+    offsets: &Tensor<u32>,
+    block_offsets: &Tensor<u32>,
+    batch_block_offsets: &Tensor<u32>,
+    info: &mut Tensor<u32>,
+) {
+    let index = ABSOLUTE_POS;
+    let cell_count = offsets.shape(1) - 1usize;
+    if index >= offsets.shape(0) * cell_count {
+        terminate!();
+    }
+    let batch = index / cell_count;
+    let cell = index - batch * cell_count;
+    let offset_base = batch * offsets.stride(0) + cell * offsets.stride(1);
+    let query_start = offsets[offset_base] as usize;
+    let query_end = offsets[offset_base + offsets.stride(1)] as usize;
+    let query_count = query_end - query_start;
+    let block_base = batch_block_offsets[batch * batch_block_offsets.stride(0)] as usize
+        + block_offsets[batch * block_offsets.stride(0) + cell * block_offsets.stride(1)] as usize;
+    let mut blocks = 0usize;
+    if query_count > 0usize {
+        blocks = (query_count - 1usize) / 16usize + 1usize;
+    }
+    let mut block = 0usize;
+    while block < blocks {
+        let local_start = block * 16usize;
+        let mut local_count = query_count - local_start;
+        if local_count > 16usize {
+            local_count = 16usize;
+        }
+        let info_base = (block_base + block) * info.stride(1);
+        info[info_base] = (batch * cell_count + cell) as u32;
+        info[info_base + info.stride(2)] = (query_start + local_start) as u32;
+        info[info_base + 2usize * info.stride(2)] = local_count as u32;
+        block += 1usize;
+    }
+}
+
+#[cube]
+fn perception_block_info_value(info: &Tensor<u32>, block: usize, field: usize) -> usize {
+    info[block * info.stride(1) + field * info.stride(2)] as usize
+}
+
 #[cube]
 fn poly6<F: Float>(r2: F, eps: F) -> F {
     let eps2 = eps * eps;
@@ -1814,6 +2187,16 @@ fn poly6<F: Float>(r2: F, eps: F) -> F {
             * compact
             * compact
             * compact;
+    }
+    out
+}
+
+#[cube]
+fn poly6_precomputed<F: Float>(r2: F, eps2: F, norm: F) -> F {
+    let mut out = F::new(0.0_f32);
+    if r2 < eps2 {
+        let compact = eps2 - r2;
+        out = norm * compact * compact * compact;
     }
     out
 }
@@ -1842,6 +2225,29 @@ fn spiky_gradient<F: Float>(dx: F, dy: F, r2: F, eps: F, coeff: F) -> (F, F) {
         let r = r2.sqrt();
         let norm = F::new(30.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(5.0_f32)));
         let mag = coeff * norm * (eps - r) * (eps - r) / r;
+        gx = mag * dx;
+        gy = mag * dy;
+    }
+    (gx, gy)
+}
+
+#[cube]
+fn spiky_gradient_precomputed<F: Float>(
+    dx: F,
+    dy: F,
+    r2: F,
+    eps: F,
+    eps2: F,
+    norm: F,
+    coeff: F,
+) -> (F, F) {
+    let mut gx = F::new(0.0_f32);
+    let mut gy = F::new(0.0_f32);
+    if r2 > F::new(0.0_f32) && r2 < eps2 {
+        let inv_r = r2.inverse_sqrt();
+        let r = r2 * inv_r;
+        let compact = eps - r;
+        let mag = coeff * norm * compact * compact * inv_r;
         gx = mag * dx;
         gy = mag * dy;
     }
@@ -2389,6 +2795,8 @@ fn sparse_density_for<F: Float>(
     let yi = x_value::<F>(x, batch, particle, 1);
     let (cell_x, cell_y) = perception_grid_cell::<F>(xi, yi, args);
     let eps = args.eps.get::<F>();
+    let eps2 = eps * eps;
+    let poly6_norm = F::new(4.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(8.0_f32)));
     let mut rho = F::new(0.0_f32);
     let mut neighbor_cell = 0usize;
     while neighbor_cell < 9usize {
@@ -2400,7 +2808,7 @@ fn sparse_density_for<F: Float>(
                 let neighbor = perception_grid_particle(permutation, batch, slot);
                 let dx = x_value::<F>(x, batch, neighbor, 0) - xi;
                 let dy = x_value::<F>(x, batch, neighbor, 1) - yi;
-                rho += poly6::<F>(dx * dx + dy * dy, eps);
+                rho += poly6_precomputed::<F>(dx * dx + dy * dy, eps2, poly6_norm);
                 slot += 1usize;
             }
         }
@@ -2638,7 +3046,7 @@ fn sparse_moment_and_density_gradient_for<F: Float>(
 }
 
 #[cube(launch, address_type = "dynamic")]
-fn perception_density_sparse_kernel<F: Float>(
+fn perception_density_sparse_precomputed_v2_kernel<F: Float>(
     x: &Tensor<F>,
     offsets: &Tensor<u32>,
     permutation: &Tensor<u32>,
@@ -2977,6 +3385,272 @@ fn perception_forward_sparse_plane_kernel<F: Float>(
                 (corrected_x, corrected_y)
             };
             let cursor = feature_state_grad_cursor(state_dims) + lane * 2usize;
+            write_feature::<F>(features, batch, particle, cursor, out_x);
+            write_feature::<F>(features, batch, particle, cursor + 1usize, out_y);
+        }
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_forward_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
+    x: &Tensor<F>,
+    s: &Tensor<F>,
+    density: &Tensor<F>,
+    offsets: &Tensor<u32>,
+    permutation: &Tensor<u32>,
+    block_info: &Tensor<u32>,
+    features: &mut Tensor<F>,
+    raw_state_gradient: &mut Tensor<F>,
+    state_gradient_inverse: &mut Tensor<F>,
+    args: &PerceptionArgs,
+    #[comptime] retain_adjoint_state: bool,
+    #[comptime] density_grad: bool,
+    #[define(F)] _dtype: StorageType,
+) {
+    let unit = UNIT_POS as usize;
+    let block = CUBE_POS_X as usize;
+    let packed_cell = perception_block_info_value(block_info, block, 0usize);
+    let query_start = perception_block_info_value(block_info, block, 1usize);
+    let query_count = perception_block_info_value(block_info, block, 2usize);
+    let particle_count = x.shape(1);
+    let cell_count = args.grid_width as usize * args.grid_height as usize;
+    let batch = packed_cell / cell_count;
+    let cell = packed_cell - batch * cell_count;
+    if query_count == 0usize
+        || query_count > 16usize
+        || query_start + query_count > particle_count
+        || batch >= x.shape(0)
+        || cell >= cell_count
+    {
+        terminate!();
+    }
+
+    let state_dims = s.shape(2);
+    let pair_count = query_count * state_dims;
+    let active_pair = unit < pair_count;
+    let query = unit / state_dims;
+    let channel = unit - query * state_dims;
+    let active_query = unit < query_count;
+    let eps = args.eps.get::<F>();
+    let eps2 = eps * eps;
+    let poly6_norm = F::new(4.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(8.0_f32)));
+    let spiky_norm = F::new(30.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(5.0_f32)));
+
+    let mut query_particle = SharedMemory::<u32>::new(16usize);
+    let mut query_x = SharedMemory::<F>::new(16usize);
+    let mut query_y = SharedMemory::<F>::new(16usize);
+    let mut inverse00 = SharedMemory::<F>::new(16usize);
+    let mut inverse01 = SharedMemory::<F>::new(16usize);
+    let mut inverse10 = SharedMemory::<F>::new(16usize);
+    let mut inverse11 = SharedMemory::<F>::new(16usize);
+    let mut neighbor_particle = SharedMemory::<u32>::new(64usize);
+    let mut neighbor_x = SharedMemory::<F>::new(64usize);
+    let mut neighbor_y = SharedMemory::<F>::new(64usize);
+    let mut neighbor_volume = SharedMemory::<F>::new(64usize);
+    let mut neighbor_state = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_poly6 = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_spiky_x = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_spiky_y = SharedMemory::<F>::new(1024usize);
+
+    if active_query {
+        let particle = perception_grid_particle(permutation, batch, query_start + unit);
+        query_particle[unit] = particle as u32;
+        query_x[unit] = x_value::<F>(x, batch, particle, 0);
+        query_y[unit] = x_value::<F>(x, batch, particle, 1);
+    }
+    sync_cube();
+
+    let mut particle = 0usize;
+    let mut state_i = F::new(0.0_f32);
+    let mut blur = F::new(0.0_f32);
+    let mut raw_x = F::new(0.0_f32);
+    let mut raw_y = F::new(0.0_f32);
+    if active_pair {
+        particle = query_particle[query] as usize;
+        state_i = state_value::<F>(s, batch, particle, channel);
+    }
+
+    let mut m00 = F::new(0.0_f32);
+    let mut m01 = F::new(0.0_f32);
+    let mut m11 = F::new(0.0_f32);
+    let mut density_x = F::new(0.0_f32);
+    let mut density_y = F::new(0.0_f32);
+    let cell_x = cell % args.grid_width as usize;
+    let cell_y = cell / args.grid_width as usize;
+    let mut row: usize = 0usize;
+    while row < 3usize {
+        let neighbor_y_cell = cell_y as i32 + row as i32 - 1i32;
+        if neighbor_y_cell >= 0i32 && neighbor_y_cell < args.grid_height as i32 {
+            let mut neighbor_x_start = cell_x as i32 - 1i32;
+            let mut neighbor_x_end = cell_x as i32 + 1i32;
+            neighbor_x_start = clamp(neighbor_x_start, 0i32, args.grid_width as i32 - 1i32);
+            neighbor_x_end = clamp(neighbor_x_end, 0i32, args.grid_width as i32 - 1i32);
+            let first_cell =
+                neighbor_y_cell as usize * args.grid_width as usize + neighbor_x_start as usize;
+            let last_cell =
+                neighbor_y_cell as usize * args.grid_width as usize + neighbor_x_end as usize;
+            let mut tile_start = perception_grid_offset(offsets, batch, first_cell);
+            let row_end = perception_grid_offset(offsets, batch, last_cell + 1usize);
+            while tile_start < row_end {
+                let mut tile_len = 64usize;
+                if tile_start + tile_len > row_end {
+                    tile_len = row_end - tile_start;
+                }
+                if unit < tile_len {
+                    let neighbor = perception_grid_particle(permutation, batch, tile_start + unit);
+                    neighbor_particle[unit] = neighbor as u32;
+                    neighbor_x[unit] = x_value::<F>(x, batch, neighbor, 0);
+                    neighbor_y[unit] = x_value::<F>(x, batch, neighbor, 1);
+                    neighbor_volume[unit] =
+                        recip_finite::<F>(density_value::<F>(density, batch, neighbor));
+                }
+                let mut value = unit;
+                while value < tile_len * state_dims {
+                    let local = value / state_dims;
+                    let neighbor_channel = value - local * state_dims;
+                    let neighbor = perception_grid_particle(permutation, batch, tile_start + local);
+                    neighbor_state[value] = state_value::<F>(s, batch, neighbor, neighbor_channel);
+                    value += 256usize;
+                }
+                sync_cube();
+
+                if active_query {
+                    let query_particle = query_particle[unit] as usize;
+                    let xi = query_x[unit];
+                    let yi = query_y[unit];
+                    let mut local = 0usize;
+                    while local < tile_len {
+                        let neighbor = neighbor_particle[local] as usize;
+                        let dx = neighbor_x[local] - xi;
+                        let dy = neighbor_y[local] - yi;
+                        let r2 = dx * dx + dy * dy;
+                        let pair = unit * 64usize + local;
+                        neighbor_poly6[pair] = poly6_precomputed::<F>(r2, eps2, poly6_norm);
+                        let mut gx = F::new(0.0_f32);
+                        let mut gy = F::new(0.0_f32);
+                        if neighbor != query_particle && (args.state_grad != 0u32 || density_grad) {
+                            (gx, gy) = spiky_gradient_precomputed::<F>(
+                                dx,
+                                dy,
+                                r2,
+                                eps,
+                                eps2,
+                                spiky_norm,
+                                F::new(1.0_f32),
+                            );
+                        }
+                        neighbor_spiky_x[pair] = gx;
+                        neighbor_spiky_y[pair] = gy;
+                        if neighbor != query_particle {
+                            if density_grad {
+                                density_x += gx;
+                                density_y += gy;
+                            }
+                            if args.state_grad != 0u32 && args.hybrid_state_gradient != 0u32 {
+                                let volume = neighbor_volume[local];
+                                m00 += dx * gx * volume;
+                                m01 += dx * gy * volume;
+                                m11 += dy * gy * volume;
+                            }
+                        }
+                        local += 1usize;
+                    }
+                }
+                sync_cube();
+
+                if active_pair {
+                    let mut local = 0usize;
+                    while local < tile_len {
+                        let neighbor = neighbor_particle[local] as usize;
+                        let volume = neighbor_volume[local];
+                        let neighbor_value = neighbor_state[local * state_dims + channel];
+                        let pair = query * 64usize + local;
+                        blur += neighbor_poly6[pair] * volume * neighbor_value;
+                        if args.state_grad != 0u32 && neighbor != particle {
+                            let diff = neighbor_value - state_i;
+                            raw_x += diff * neighbor_spiky_x[pair] * volume;
+                            raw_y += diff * neighbor_spiky_y[pair] * volume;
+                        }
+                        local += 1usize;
+                    }
+                }
+                sync_cube();
+                tile_start += tile_len;
+            }
+        }
+        row += 1usize;
+    }
+
+    if active_query {
+        let query_particle = query_particle[unit] as usize;
+        let mut inv00 = F::new(1.0_f32);
+        let mut inv01 = F::new(0.0_f32);
+        let mut inv10 = F::new(0.0_f32);
+        let mut inv11 = F::new(1.0_f32);
+        if args.state_grad != 0u32 && args.hybrid_state_gradient != 0u32 {
+            (inv00, inv01, inv10, inv11) = inverse_2d::<F>(m00, m01, m11);
+        }
+        inverse00[unit] = inv00;
+        inverse01[unit] = inv01;
+        inverse10[unit] = inv10;
+        inverse11[unit] = inv11;
+        if retain_adjoint_state {
+            let inverse_base = batch * state_gradient_inverse.stride(0)
+                + query_particle * state_gradient_inverse.stride(1);
+            state_gradient_inverse[inverse_base] = inv00;
+            state_gradient_inverse[inverse_base + state_gradient_inverse.stride(2)] = inv01;
+            state_gradient_inverse[inverse_base + 2usize * state_gradient_inverse.stride(2)] =
+                inv10;
+            state_gradient_inverse[inverse_base + 3usize * state_gradient_inverse.stride(2)] =
+                inv11;
+        }
+        if density_grad {
+            let scale = density_gradient_scale::<F>(eps, particle_count, args);
+            density_x *= scale;
+            density_y *= scale;
+            let (out_x, out_y) = if args.log_norm_density_grad != 0u32 {
+                log_normalize_2::<F>(density_x, density_y)
+            } else {
+                (density_x, density_y)
+            };
+            let cursor = feature_density_grad_cursor(state_dims, args);
+            write_feature::<F>(features, batch, query_particle, cursor, out_x);
+            write_feature::<F>(features, batch, query_particle, cursor + 1usize, out_y);
+        }
+        if args.position_features != 0u32 {
+            let cursor = feature_position_cursor(state_dims, args);
+            write_feature::<F>(features, batch, query_particle, cursor, query_x[unit]);
+            write_feature::<F>(
+                features,
+                batch,
+                query_particle,
+                cursor + 1usize,
+                query_y[unit],
+            );
+        }
+    }
+    sync_cube();
+
+    if active_pair {
+        write_feature::<F>(features, batch, particle, channel, state_i);
+        if retain_adjoint_state {
+            let raw_base = batch * raw_state_gradient.stride(0)
+                + particle * raw_state_gradient.stride(1)
+                + channel * raw_state_gradient.stride(2);
+            raw_state_gradient[raw_base] = raw_x;
+            raw_state_gradient[raw_base + raw_state_gradient.stride(3)] = raw_y;
+        }
+        write_feature::<F>(features, batch, particle, state_dims + channel, blur);
+        if args.state_grad != 0u32 {
+            let scale = state_scale::<F>(eps, args);
+            let corrected_x = (raw_x * inverse00[query] + raw_y * inverse10[query]) * scale;
+            let corrected_y = (raw_x * inverse01[query] + raw_y * inverse11[query]) * scale;
+            let (out_x, out_y) = if args.log_norm_grad != 0u32 {
+                log_normalize_2::<F>(corrected_x, corrected_y)
+            } else {
+                (corrected_x, corrected_y)
+            };
+            let cursor = feature_state_grad_cursor(state_dims) + channel * 2usize;
             write_feature::<F>(features, batch, particle, cursor, out_x);
             write_feature::<F>(features, batch, particle, cursor + 1usize, out_y);
         }
@@ -3427,6 +4101,457 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
         state_grad[batch * state_grad.stride(0)
             + particle * state_grad.stride(1)
             + lane * state_grad.stride(2)] = out;
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
+    x: &Tensor<F>,
+    s: &Tensor<F>,
+    feature_grad: &Tensor<F>,
+    density: &Tensor<F>,
+    raw_state_adjoint: &Tensor<F>,
+    offsets: &Tensor<u32>,
+    permutation: &Tensor<u32>,
+    block_info: &Tensor<u32>,
+    state_grad: &mut Tensor<F>,
+    args: &PerceptionArgs,
+    #[comptime] state_grad_enabled: bool,
+    #[define(F)] _dtype: StorageType,
+) {
+    let unit = UNIT_POS as usize;
+    let block = CUBE_POS_X as usize;
+    let packed_cell = perception_block_info_value(block_info, block, 0usize);
+    let query_start = perception_block_info_value(block_info, block, 1usize);
+    let query_count = perception_block_info_value(block_info, block, 2usize);
+    let particle_count = x.shape(1);
+    let cell_count = args.grid_width as usize * args.grid_height as usize;
+    let batch = packed_cell / cell_count;
+    let cell = packed_cell - batch * cell_count;
+    if query_count == 0usize
+        || query_count > 16usize
+        || query_start + query_count > particle_count
+        || batch >= x.shape(0)
+        || cell >= cell_count
+        || s.shape(2) != 16usize
+    {
+        terminate!();
+    }
+
+    let channel_groups = 4usize;
+    let active_group = unit < query_count * channel_groups;
+    let query = unit / channel_groups;
+    let channel = (unit - query * channel_groups) * 4usize;
+    let eps = args.eps.get::<F>();
+    let eps2 = eps * eps;
+    let poly6_norm = F::new(4.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(8.0_f32)));
+    let spiky_norm = F::new(30.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(5.0_f32)));
+    let blur_cursor = 16usize;
+
+    let mut query_particle = SharedMemory::<u32>::new(16usize);
+    let mut query_x = SharedMemory::<F>::new(16usize);
+    let mut query_y = SharedMemory::<F>::new(16usize);
+    let mut query_volume = SharedMemory::<F>::new(16usize);
+    let mut neighbor_particle = SharedMemory::<u32>::new(64usize);
+    let mut neighbor_x = SharedMemory::<F>::new(64usize);
+    let mut neighbor_y = SharedMemory::<F>::new(64usize);
+    let mut neighbor_volume = SharedMemory::<F>::new(64usize);
+    let mut neighbor_feature = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_raw_x = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_raw_y = SharedMemory::<F>::new(1024usize);
+
+    if unit < query_count {
+        let particle = perception_grid_particle(permutation, batch, query_start + unit);
+        query_particle[unit] = particle as u32;
+        query_x[unit] = x_value::<F>(x, batch, particle, 0);
+        query_y[unit] = x_value::<F>(x, batch, particle, 1);
+        query_volume[unit] = recip_finite::<F>(density_value::<F>(density, batch, particle));
+    }
+    sync_cube();
+
+    let mut particle = 0usize;
+    let mut volume_i = F::new(0.0_f32);
+    let mut out0 = F::new(0.0_f32);
+    let mut out1 = F::new(0.0_f32);
+    let mut out2 = F::new(0.0_f32);
+    let mut out3 = F::new(0.0_f32);
+    let mut own_raw_x0 = F::new(0.0_f32);
+    let mut own_raw_x1 = F::new(0.0_f32);
+    let mut own_raw_x2 = F::new(0.0_f32);
+    let mut own_raw_x3 = F::new(0.0_f32);
+    let mut own_raw_y0 = F::new(0.0_f32);
+    let mut own_raw_y1 = F::new(0.0_f32);
+    let mut own_raw_y2 = F::new(0.0_f32);
+    let mut own_raw_y3 = F::new(0.0_f32);
+    if active_group {
+        particle = query_particle[query] as usize;
+        volume_i = query_volume[query];
+        out0 = feature::<F>(feature_grad, batch, particle, channel);
+        out1 = feature::<F>(feature_grad, batch, particle, channel + 1usize);
+        out2 = feature::<F>(feature_grad, batch, particle, channel + 2usize);
+        out3 = feature::<F>(feature_grad, batch, particle, channel + 3usize);
+        if state_grad_enabled {
+            own_raw_x0 =
+                raw_state_adjoint_value::<F>(raw_state_adjoint, batch, particle, channel, 0);
+            own_raw_x1 = raw_state_adjoint_value::<F>(
+                raw_state_adjoint,
+                batch,
+                particle,
+                channel + 1usize,
+                0,
+            );
+            own_raw_x2 = raw_state_adjoint_value::<F>(
+                raw_state_adjoint,
+                batch,
+                particle,
+                channel + 2usize,
+                0,
+            );
+            own_raw_x3 = raw_state_adjoint_value::<F>(
+                raw_state_adjoint,
+                batch,
+                particle,
+                channel + 3usize,
+                0,
+            );
+            own_raw_y0 =
+                raw_state_adjoint_value::<F>(raw_state_adjoint, batch, particle, channel, 1);
+            own_raw_y1 = raw_state_adjoint_value::<F>(
+                raw_state_adjoint,
+                batch,
+                particle,
+                channel + 1usize,
+                1,
+            );
+            own_raw_y2 = raw_state_adjoint_value::<F>(
+                raw_state_adjoint,
+                batch,
+                particle,
+                channel + 2usize,
+                1,
+            );
+            own_raw_y3 = raw_state_adjoint_value::<F>(
+                raw_state_adjoint,
+                batch,
+                particle,
+                channel + 3usize,
+                1,
+            );
+        }
+    }
+
+    let cell_x = cell % args.grid_width as usize;
+    let cell_y = cell / args.grid_width as usize;
+    let mut row: usize = 0usize;
+    while row < 3usize {
+        let neighbor_y_cell = cell_y as i32 + row as i32 - 1i32;
+        if neighbor_y_cell >= 0i32 && neighbor_y_cell < args.grid_height as i32 {
+            let mut neighbor_x_start = cell_x as i32 - 1i32;
+            let mut neighbor_x_end = cell_x as i32 + 1i32;
+            neighbor_x_start = clamp(neighbor_x_start, 0i32, args.grid_width as i32 - 1i32);
+            neighbor_x_end = clamp(neighbor_x_end, 0i32, args.grid_width as i32 - 1i32);
+            let first_cell =
+                neighbor_y_cell as usize * args.grid_width as usize + neighbor_x_start as usize;
+            let last_cell =
+                neighbor_y_cell as usize * args.grid_width as usize + neighbor_x_end as usize;
+            let mut tile_start = perception_grid_offset(offsets, batch, first_cell);
+            let row_end = perception_grid_offset(offsets, batch, last_cell + 1usize);
+            while tile_start < row_end {
+                let mut tile_len = 64usize;
+                if tile_start + tile_len > row_end {
+                    tile_len = row_end - tile_start;
+                }
+                if unit < tile_len {
+                    let neighbor = perception_grid_particle(permutation, batch, tile_start + unit);
+                    neighbor_particle[unit] = neighbor as u32;
+                    neighbor_x[unit] = x_value::<F>(x, batch, neighbor, 0);
+                    neighbor_y[unit] = x_value::<F>(x, batch, neighbor, 1);
+                    neighbor_volume[unit] =
+                        recip_finite::<F>(density_value::<F>(density, batch, neighbor));
+                }
+                let mut value = unit;
+                while value < tile_len * 16usize {
+                    let local = value / 16usize;
+                    let neighbor_channel = value - local * 16usize;
+                    let neighbor = perception_grid_particle(permutation, batch, tile_start + local);
+                    neighbor_feature[value] = feature::<F>(
+                        feature_grad,
+                        batch,
+                        neighbor,
+                        blur_cursor + neighbor_channel,
+                    );
+                    if state_grad_enabled {
+                        neighbor_raw_x[value] = raw_state_adjoint_value::<F>(
+                            raw_state_adjoint,
+                            batch,
+                            neighbor,
+                            neighbor_channel,
+                            0,
+                        );
+                        neighbor_raw_y[value] = raw_state_adjoint_value::<F>(
+                            raw_state_adjoint,
+                            batch,
+                            neighbor,
+                            neighbor_channel,
+                            1,
+                        );
+                    }
+                    value += 128usize;
+                }
+                sync_cube();
+
+                if active_group {
+                    let xi = query_x[query];
+                    let yi = query_y[query];
+                    let mut local = 0usize;
+                    while local < tile_len {
+                        let neighbor = neighbor_particle[local] as usize;
+                        let dx = xi - neighbor_x[local];
+                        let dy = yi - neighbor_y[local];
+                        let r2 = dx * dx + dy * dy;
+                        let value = local * 16usize + channel;
+                        let blur_weight = poly6_precomputed::<F>(r2, eps2, poly6_norm) * volume_i;
+                        out0 += neighbor_feature[value] * blur_weight;
+                        out1 += neighbor_feature[value + 1usize] * blur_weight;
+                        out2 += neighbor_feature[value + 2usize] * blur_weight;
+                        out3 += neighbor_feature[value + 3usize] * blur_weight;
+                        if state_grad_enabled && neighbor != particle {
+                            let (base_gx, base_gy) = spiky_gradient_precomputed::<F>(
+                                dx,
+                                dy,
+                                r2,
+                                eps,
+                                eps2,
+                                spiky_norm,
+                                F::new(1.0_f32),
+                            );
+                            let volume_neighbor = neighbor_volume[local];
+                            let incoming_gx = base_gx * volume_i;
+                            let incoming_gy = base_gy * volume_i;
+                            let outgoing_gx = F::new(0.0_f32) - base_gx * volume_neighbor;
+                            let outgoing_gy = F::new(0.0_f32) - base_gy * volume_neighbor;
+                            out0 += neighbor_raw_x[value] * incoming_gx
+                                + neighbor_raw_y[value] * incoming_gy;
+                            out1 += neighbor_raw_x[value + 1usize] * incoming_gx
+                                + neighbor_raw_y[value + 1usize] * incoming_gy;
+                            out2 += neighbor_raw_x[value + 2usize] * incoming_gx
+                                + neighbor_raw_y[value + 2usize] * incoming_gy;
+                            out3 += neighbor_raw_x[value + 3usize] * incoming_gx
+                                + neighbor_raw_y[value + 3usize] * incoming_gy;
+                            out0 -= own_raw_x0 * outgoing_gx + own_raw_y0 * outgoing_gy;
+                            out1 -= own_raw_x1 * outgoing_gx + own_raw_y1 * outgoing_gy;
+                            out2 -= own_raw_x2 * outgoing_gx + own_raw_y2 * outgoing_gy;
+                            out3 -= own_raw_x3 * outgoing_gx + own_raw_y3 * outgoing_gy;
+                        }
+                        local += 1usize;
+                    }
+                }
+                sync_cube();
+                tile_start += tile_len;
+            }
+        }
+        row += 1usize;
+    }
+
+    if active_group {
+        let base = batch * state_grad.stride(0)
+            + particle * state_grad.stride(1)
+            + channel * state_grad.stride(2);
+        state_grad[base] = out0;
+        state_grad[base + state_grad.stride(2)] = out1;
+        state_grad[base + 2usize * state_grad.stride(2)] = out2;
+        state_grad[base + 3usize * state_grad.stride(2)] = out3;
+    }
+}
+
+#[cube(launch, address_type = "dynamic")]
+fn perception_state_output_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
+    x: &Tensor<F>,
+    s: &Tensor<F>,
+    feature_grad: &Tensor<F>,
+    density: &Tensor<F>,
+    raw_state_adjoint: &Tensor<F>,
+    offsets: &Tensor<u32>,
+    permutation: &Tensor<u32>,
+    block_info: &Tensor<u32>,
+    state_grad: &mut Tensor<F>,
+    args: &PerceptionArgs,
+    #[comptime] state_grad_enabled: bool,
+    #[define(F)] _dtype: StorageType,
+) {
+    let unit = UNIT_POS as usize;
+    let block = CUBE_POS_X as usize;
+    let packed_cell = perception_block_info_value(block_info, block, 0usize);
+    let query_start = perception_block_info_value(block_info, block, 1usize);
+    let query_count = perception_block_info_value(block_info, block, 2usize);
+    let particle_count = x.shape(1);
+    let cell_count = args.grid_width as usize * args.grid_height as usize;
+    let batch = packed_cell / cell_count;
+    let cell = packed_cell - batch * cell_count;
+    if query_count == 0usize
+        || query_count > 16usize
+        || query_start + query_count > particle_count
+        || batch >= x.shape(0)
+        || cell >= cell_count
+    {
+        terminate!();
+    }
+
+    let state_dims = s.shape(2);
+    let pair_count = query_count * state_dims;
+    let active_pair = unit < pair_count;
+    let query = unit / state_dims;
+    let channel = unit - query * state_dims;
+    let eps = args.eps.get::<F>();
+    let eps2 = eps * eps;
+    let poly6_norm = F::new(4.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(8.0_f32)));
+    let spiky_norm = F::new(30.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(5.0_f32)));
+    let blur_cursor = state_dims;
+
+    let mut query_particle = SharedMemory::<u32>::new(16usize);
+    let mut query_x = SharedMemory::<F>::new(16usize);
+    let mut query_y = SharedMemory::<F>::new(16usize);
+    let mut query_volume = SharedMemory::<F>::new(16usize);
+    let mut neighbor_particle = SharedMemory::<u32>::new(64usize);
+    let mut neighbor_x = SharedMemory::<F>::new(64usize);
+    let mut neighbor_y = SharedMemory::<F>::new(64usize);
+    let mut neighbor_volume = SharedMemory::<F>::new(64usize);
+    let mut neighbor_feature = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_raw_x = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_raw_y = SharedMemory::<F>::new(1024usize);
+
+    if unit < query_count {
+        let particle = perception_grid_particle(permutation, batch, query_start + unit);
+        query_particle[unit] = particle as u32;
+        query_x[unit] = x_value::<F>(x, batch, particle, 0);
+        query_y[unit] = x_value::<F>(x, batch, particle, 1);
+        query_volume[unit] = recip_finite::<F>(density_value::<F>(density, batch, particle));
+    }
+    sync_cube();
+
+    let mut particle = 0usize;
+    let mut volume_i = F::new(0.0_f32);
+    let mut own_raw_x = F::new(0.0_f32);
+    let mut own_raw_y = F::new(0.0_f32);
+    let mut out = F::new(0.0_f32);
+    if active_pair {
+        particle = query_particle[query] as usize;
+        volume_i = query_volume[query];
+        out = feature::<F>(feature_grad, batch, particle, channel);
+        if state_grad_enabled {
+            own_raw_x =
+                raw_state_adjoint_value::<F>(raw_state_adjoint, batch, particle, channel, 0);
+            own_raw_y =
+                raw_state_adjoint_value::<F>(raw_state_adjoint, batch, particle, channel, 1);
+        }
+    }
+
+    let cell_x = cell % args.grid_width as usize;
+    let cell_y = cell / args.grid_width as usize;
+    let mut row: usize = 0usize;
+    while row < 3usize {
+        let neighbor_y_cell = cell_y as i32 + row as i32 - 1i32;
+        if neighbor_y_cell >= 0i32 && neighbor_y_cell < args.grid_height as i32 {
+            let mut neighbor_x_start = cell_x as i32 - 1i32;
+            let mut neighbor_x_end = cell_x as i32 + 1i32;
+            neighbor_x_start = clamp(neighbor_x_start, 0i32, args.grid_width as i32 - 1i32);
+            neighbor_x_end = clamp(neighbor_x_end, 0i32, args.grid_width as i32 - 1i32);
+            let first_cell =
+                neighbor_y_cell as usize * args.grid_width as usize + neighbor_x_start as usize;
+            let last_cell =
+                neighbor_y_cell as usize * args.grid_width as usize + neighbor_x_end as usize;
+            let mut tile_start = perception_grid_offset(offsets, batch, first_cell);
+            let row_end = perception_grid_offset(offsets, batch, last_cell + 1usize);
+            while tile_start < row_end {
+                let mut tile_len = 64usize;
+                if tile_start + tile_len > row_end {
+                    tile_len = row_end - tile_start;
+                }
+                if unit < tile_len {
+                    let neighbor = perception_grid_particle(permutation, batch, tile_start + unit);
+                    neighbor_particle[unit] = neighbor as u32;
+                    neighbor_x[unit] = x_value::<F>(x, batch, neighbor, 0);
+                    neighbor_y[unit] = x_value::<F>(x, batch, neighbor, 1);
+                    neighbor_volume[unit] =
+                        recip_finite::<F>(density_value::<F>(density, batch, neighbor));
+                }
+                let mut value = unit;
+                while value < tile_len * state_dims {
+                    let local = value / state_dims;
+                    let neighbor_channel = value - local * state_dims;
+                    let neighbor = perception_grid_particle(permutation, batch, tile_start + local);
+                    neighbor_feature[value] = feature::<F>(
+                        feature_grad,
+                        batch,
+                        neighbor,
+                        blur_cursor + neighbor_channel,
+                    );
+                    if state_grad_enabled {
+                        neighbor_raw_x[value] = raw_state_adjoint_value::<F>(
+                            raw_state_adjoint,
+                            batch,
+                            neighbor,
+                            neighbor_channel,
+                            0,
+                        );
+                        neighbor_raw_y[value] = raw_state_adjoint_value::<F>(
+                            raw_state_adjoint,
+                            batch,
+                            neighbor,
+                            neighbor_channel,
+                            1,
+                        );
+                    }
+                    value += 256usize;
+                }
+                sync_cube();
+
+                if active_pair {
+                    let xi = query_x[query];
+                    let yi = query_y[query];
+                    let mut local = 0usize;
+                    while local < tile_len {
+                        let neighbor = neighbor_particle[local] as usize;
+                        let dx = xi - neighbor_x[local];
+                        let dy = yi - neighbor_y[local];
+                        let r2 = dx * dx + dy * dy;
+                        let value = local * state_dims + channel;
+                        out += neighbor_feature[value]
+                            * poly6_precomputed::<F>(r2, eps2, poly6_norm)
+                            * volume_i;
+                        if state_grad_enabled && neighbor != particle {
+                            let (base_gx, base_gy) = spiky_gradient_precomputed::<F>(
+                                dx,
+                                dy,
+                                r2,
+                                eps,
+                                eps2,
+                                spiky_norm,
+                                F::new(1.0_f32),
+                            );
+                            let volume_neighbor = neighbor_volume[local];
+                            let incoming_gx = base_gx * volume_i;
+                            let incoming_gy = base_gy * volume_i;
+                            let outgoing_gx = F::new(0.0_f32) - base_gx * volume_neighbor;
+                            let outgoing_gy = F::new(0.0_f32) - base_gy * volume_neighbor;
+                            out += neighbor_raw_x[value] * incoming_gx
+                                + neighbor_raw_y[value] * incoming_gy;
+                            out -= own_raw_x * outgoing_gx + own_raw_y * outgoing_gy;
+                        }
+                        local += 1usize;
+                    }
+                }
+                sync_cube();
+                tile_start += tile_len;
+            }
+        }
+        row += 1usize;
+    }
+
+    if active_pair {
+        state_grad[batch * state_grad.stride(0)
+            + particle * state_grad.stride(1)
+            + channel * state_grad.stride(2)] = out;
     }
 }
 

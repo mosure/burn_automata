@@ -36,14 +36,20 @@ dino_batch_size = 32
 online = true
 token_attention_heads = 12
 rgb_channels = true
-rgb_channel_scale = 4.0
+rgb_channel_scale = 1.0
 alpha_channel = true
 alpha_channel_scale = 1.0
+# Preserve every aligned 14 x 14 RGBA patch alongside its DINO token. This is
+# lossless with respect to the native 224 x 224 condition image.
+patch_pixels = true
 
 [model]
 shared_base = "models/catalog/growing/lizard.bpk"
 shared_base_trainable = true
-shared_base_train_start_step = 5000
+# The frozen-trunk control plateaued in aggregate held-out PSNR by step 1000
+# while condition-shuffle separation continued improving. Start joint trunk
+# adaptation here and retain the step-1000 generated checkpoint as incumbent.
+shared_base_train_start_step = 1000
 hidden_dims = 128
 output_activation = "identity"
 
@@ -52,18 +58,23 @@ backend = "gpu"
 objective = "conditional-row-flow-e2e"
 steps = 100000
 report_interval = 100
-# Upstream-aligned quality shape: 8 independent image conditions x 8
-# trajectories x 4096 particles. This retains the previous aggregate 262144
-# particles per optimizer step while giving each trajectory quality-scale state.
+# Quality-scale shape: 8 independent image conditions x 4 trajectories x 4096
+# particles. Each identity owns eight persistent pool slots and accumulates at
+# least eight independent trajectories across successive visits. Keeping all
+# eight trajectories live in one full-BPTT graph exceeds a 96 GiB device.
 example_batch_size = 8
 credit_assignment = "full-bptt"
 task_loss_weight = 1.0
 flow_matching_weight = 0.0
 flow_self_rectification_weight = 0.05
+flow_train_sample_steps = 4
+# Permit the verified frozen-trunk checkpoint to enter the joint-training
+# curriculum without weakening source/hash validation.
+curriculum_resume = true
 max_full_bptt_particle_steps = 33554432
 use_particle_pool = true
 pool_slots_per_example = 8
-rollouts_per_example = 8
+rollouts_per_example = 4
 # 900 train identities x 8 persistent slots = 7200; retain eviction headroom.
 pool_capacity = 8000
 inject_seed_interval = 4
@@ -82,7 +93,9 @@ seed = 42
 backend = "burn-cuda"
 max_dense_chunk_floats = 1048576
 max_splat_chunk_floats = 1048576
-condition_device_cache_max_bytes = 1073741824
+# The 900-row training split is 1.006 GiB. Keep it device-resident instead of
+# repeating a roughly 330 ms DINO forward on every optimizer step.
+condition_device_cache_max_bytes = 1342177280
 target_device_cache_max_bytes = 1073741824
 
 [adapter]
@@ -119,13 +132,16 @@ splat_sigma = 1.0
 splat_loss_weight = 2.0
 color_loss_weight = 5.0
 density_loss_weight = 1.0
-composited_rgb_loss_weight = 0.0
+# HyperNPA is selected on composited RGB PSNR. The zero-weight control learned
+# conditional separation but plateaued near 12 dB, so train the measured image
+# objective directly while retaining upstream color and density terms.
+composited_rgb_loss_weight = 5.0
 displacement_regularizer_weight = 0.01
 overflow_regularizer_weight = 100.0
 bound_regularizer_weight = 100.0
 
 [optimizer]
-base_learning_rate = 1.0e-6
+base_learning_rate = 1.0e-5
 generator_learning_rate = 1.0e-4
 base_weight_decay = 0.0
 generator_weight_decay = 0.01

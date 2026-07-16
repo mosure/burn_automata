@@ -42,6 +42,15 @@ pub struct CanonicalFullRankLora2d {
 
 impl CanonicalFullRankLora2d {
     pub fn new(config: &NpaConfig, rank: usize, alpha: f32) -> AutomataResult<Self> {
+        Self::new_with_output_bias(config, rank, alpha, true)
+    }
+
+    pub fn new_with_output_bias(
+        config: &NpaConfig,
+        rank: usize,
+        alpha: f32,
+        output_bias: bool,
+    ) -> AutomataResult<Self> {
         if rank == 0 || !alpha.is_finite() || alpha.abs() <= f32::EPSILON {
             return Err(AutomataError::InvalidArgument(format!(
                 "canonical full-rank LoRA requires positive rank and non-zero finite alpha, got rank={rank} alpha={alpha}"
@@ -73,7 +82,9 @@ impl CanonicalFullRankLora2d {
             fixed_identity_scale,
         )?;
         result.enable_group(&layout, AdapterParameterGroup2d::B1);
-        result.enable_group(&layout, AdapterParameterGroup2d::B2);
+        if output_bias {
+            result.enable_group(&layout, AdapterParameterGroup2d::B2);
+        }
         result.trainable_parameters = result
             .trainable_mask
             .iter()
@@ -339,5 +350,27 @@ mod tests {
         let config = NpaConfig::growing_2d();
         let error = CanonicalFullRankLora2d::new(&config, 16, 16.0).unwrap_err();
         assert!(error.to_string().contains("cannot canonically represent"));
+    }
+
+    #[test]
+    fn upstream_aligned_canonical_lora_excludes_output_bias() {
+        let config = NpaConfig::growing_2d();
+        let rank = config.perception_dims().max(config.update_dims());
+        let canonical =
+            CanonicalFullRankLora2d::new_with_output_bias(&config, rank, rank as f32, false)
+                .unwrap();
+        let layout = AdapterParameterLayout2d::new(&config, rank, 1).unwrap();
+        let b2 = layout.segment(AdapterParameterGroup2d::B2);
+        assert!(
+            canonical.trainable_mask[b2.vector_offset..b2.vector_offset + b2.len]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert_eq!(
+            canonical.trainable_parameters,
+            config.hidden_dims * config.perception_dims()
+                + config.update_dims() * config.hidden_dims
+                + config.hidden_dims
+        );
     }
 }

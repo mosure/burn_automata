@@ -222,6 +222,16 @@ impl ConditionalRowFlowWeights {
         npa: &NpaConfig,
         condition: &[f32],
     ) -> AutomataResult<Vec<f32>> {
+        self.predict_packed_with_output_bias(flow, npa, condition, true)
+    }
+
+    pub fn predict_packed_with_output_bias(
+        &self,
+        flow: &ConditionalRowFlowConfig,
+        npa: &NpaConfig,
+        condition: &[f32],
+        output_bias: bool,
+    ) -> AutomataResult<Vec<f32>> {
         self.validate(flow)?;
         let layout = NpaParameterRowLayout2d::new(npa);
         layout.validate_flow_config(flow)?;
@@ -242,15 +252,26 @@ impl ConditionalRowFlowWeights {
             tensors.get("condition.bias"),
             flow.width,
         );
-        let mut state = layout.deterministic_source(flow);
+        let mask = layout.trainable_mask(output_bias);
+        let mut state = layout
+            .deterministic_source(flow)
+            .into_iter()
+            .zip(&mask)
+            .map(|(value, mask)| value * mask)
+            .collect::<Vec<_>>();
         let dt = 1.0 / flow.sample_steps as f32;
         for step in 0..flow.sample_steps {
             let t0 = step as f32 * dt;
-            let v0 = flow_velocity(flow, &layout, &tensors, &condition_hidden, &state, t0);
+            let v0 = flow_velocity(flow, &layout, &tensors, &condition_hidden, &state, t0)
+                .into_iter()
+                .zip(&mask)
+                .map(|(value, mask)| value * mask)
+                .collect::<Vec<_>>();
             let predictor = state
                 .iter()
                 .zip(&v0)
-                .map(|(state, velocity)| state + velocity * dt)
+                .zip(&mask)
+                .map(|((state, velocity), mask)| (state + velocity * dt) * mask)
                 .collect::<Vec<_>>();
             let v1 = flow_velocity(
                 flow,
@@ -259,9 +280,13 @@ impl ConditionalRowFlowWeights {
                 &condition_hidden,
                 &predictor,
                 t0 + dt,
-            );
-            for ((state, first), second) in state.iter_mut().zip(v0).zip(v1) {
-                *state += 0.5 * (first + second) * dt;
+            )
+            .into_iter()
+            .zip(&mask)
+            .map(|(value, mask)| value * mask)
+            .collect::<Vec<_>>();
+            for (((state, first), second), mask) in state.iter_mut().zip(v0).zip(v1).zip(&mask) {
+                *state = (*state + 0.5 * (first + second) * dt) * mask;
             }
         }
         for (row_idx, row) in layout.rows().iter().enumerate() {
@@ -340,6 +365,27 @@ impl NpaParameterRowLayout2d {
 
     pub fn parameter_count(&self) -> usize {
         self.rows.iter().map(|row| row.value_dims).sum()
+    }
+
+    pub fn trainable_mask(&self, output_bias: bool) -> Vec<f32> {
+        let mut mask = vec![0.0; self.row_count() * self.max_row_dims()];
+        for (row_index, row) in self.rows.iter().enumerate() {
+            let trainable_dims = match row.module {
+                NpaParameterRowModule2d::W1 => row.value_dims,
+                NpaParameterRowModule2d::W2 if output_bias => row.value_dims,
+                NpaParameterRowModule2d::W2 => row.value_dims - 1,
+            };
+            let start = row_index * self.max_row_dims();
+            mask[start..start + trainable_dims].fill(1.0);
+        }
+        mask
+    }
+
+    pub fn trainable_parameter_count(&self, output_bias: bool) -> usize {
+        self.trainable_mask(output_bias)
+            .into_iter()
+            .filter(|value| *value != 0.0)
+            .count()
     }
 
     pub fn canonical_rank(&self) -> usize {
@@ -985,5 +1031,25 @@ mod tests {
         layout.validate_flow_config(&flow).unwrap();
         assert!(flow.parameter_count().unwrap() > 10_000_000);
         assert_eq!(flow.source_scale, 1.0e-3);
+    }
+
+    #[test]
+    fn upstream_aligned_row_mask_excludes_w2_bias_coordinates() {
+        let config = NpaConfig::growing_2d();
+        let layout = NpaParameterRowLayout2d::new(&config);
+        let mask = layout.trainable_mask(false);
+        for (row_index, row) in layout.rows().iter().enumerate() {
+            let start = row_index * layout.max_row_dims();
+            let bias = start + row.value_dims - 1;
+            let expected = match row.module {
+                NpaParameterRowModule2d::W1 => 1.0,
+                NpaParameterRowModule2d::W2 => 0.0,
+            };
+            assert_eq!(mask[bias], expected);
+        }
+        assert_eq!(
+            layout.trainable_parameter_count(false),
+            layout.parameter_count() - config.update_dims()
+        );
     }
 }

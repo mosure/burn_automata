@@ -267,6 +267,13 @@ pub(super) fn rollout_batch_eval_chunk(
         let unit_update = batch_update_prob_is_one(targets, indices);
         let mask_stack = if unit_update {
             None
+        } else if params.model_count() == 1 {
+            Some(device_batch_mask_stack(
+                targets,
+                indices,
+                particle_count,
+                steps,
+            ))
         } else {
             Some(host_batch_mask_stack_with_rngs(
                 targets,

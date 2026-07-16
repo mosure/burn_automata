@@ -12,7 +12,8 @@ pub(crate) use backends::predict_conditional_row_flow_adapter_cuda;
 pub(crate) use backends::predict_conditional_row_flow_adapter_wgpu;
 pub(crate) use backends::{
     train_direct_basis_burn_cuda, train_direct_basis_burn_wgpu, train_oracle_models_burn_cuda,
-    train_oracle_models_burn_wgpu,
+    train_oracle_models_burn_wgpu, train_target2d_oracle_burn_cuda,
+    train_target2d_oracle_burn_wgpu,
 };
 pub(crate) use backends::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 
@@ -55,17 +56,18 @@ macro_rules! dense_backend_impl {
         use sha2::{Digest, Sha256};
 
         use super::super::{
-            BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics, BurnE2eNearestTeacherEntry,
-            BurnE2eRolloutExample, BurnE2eRolloutHistoryEntry, BurnE2eRolloutHorizonSummary,
-            BurnE2eRolloutOutput, BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport,
-            BurnE2eRolloutStabilityEntry, BurnE2eRolloutStabilityReport, BurnE2eRolloutTrainConfig,
-            BurnWgpuDirectBasisOutput, DirectBasisStepStats, DirectBasisTrainConfig,
+            BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics,
+            BurnE2eAmortizationQualityReport, BurnE2eNearestTeacherEntry, BurnE2eRolloutExample,
+            BurnE2eRolloutHistoryEntry, BurnE2eRolloutHorizonSummary, BurnE2eRolloutOutput,
+            BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport, BurnE2eRolloutStabilityEntry,
+            BurnE2eRolloutStabilityReport, BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput,
+            DirectBasisStepStats, DirectBasisTrainConfig,
             DirectBasisTrainingExample as DirectBasisExample, E2E_TRAINING_CHECKPOINT_VERSION,
             E2eAdapterTeacherObjective, E2eCreditAssignment, E2eIdentitySampler, E2eLrSchedule,
             E2eParticlePoolSnapshot, E2eTbpttLossMode, E2eTensorSnapshot, E2eTrainingCheckpoint,
             Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
             Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
-            Target2dBurnCheckpointConfig,
+            Target2dBurnCheckpointConfig, Target2dOracleTrainPlan,
         };
         #[cfg(feature = "dino")]
         use crate::ConditionImage2d;
@@ -114,6 +116,7 @@ macro_rules! dense_backend_impl {
         type Tensor4Inner = Tensor<InnerBackend, 4>;
         type Tensor1IntInner = Tensor<InnerBackend, 1, Int>;
         type Tensor2IntInner = Tensor<InnerBackend, 2, Int>;
+        type Tensor3IntInner = Tensor<InnerBackend, 3, Int>;
 
         const BACKEND: &str = $backend_name;
         const DEVICE_LABEL: &str = $device_label;
@@ -240,6 +243,19 @@ macro_rules! dense_backend_impl {
             adapter_chunk_size: usize,
             output_chunks: usize,
             row_flow: Option<BurnRowFlowParams>,
+            amortization_residual_table: Option<Tensor2>,
+            amortization_gradient_layout: Option<PackedNpaGradientLayout>,
+            amortization_learning_rate_scale: f32,
+            amortization_grad_normalization: bool,
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        struct PackedNpaGradientLayout {
+            hidden_dims: usize,
+            perception_dims: usize,
+            update_dims: usize,
+            max_row_dims: usize,
+            output_bias: bool,
         }
 
         #[derive(Clone)]
@@ -249,6 +265,7 @@ macro_rules! dense_backend_impl {
             source_rows: Tensor3,
             row_scale: Tensor3,
             row_mask: Tensor3,
+            trainable_value_count: usize,
             time_frequencies: Tensor2,
         }
 
@@ -259,6 +276,10 @@ macro_rules! dense_backend_impl {
 
         struct BurnE2eGeneratorAdamWState {
             step: usize,
+            row_flow_step: usize,
+            amortization_step: usize,
+            sample_id_steps: Vec<usize>,
+            amortization_identity_steps: Vec<usize>,
             token_w_m: Tensor2Inner,
             token_w_v: Tensor2Inner,
             token_b_m: Tensor2Inner,
@@ -283,6 +304,8 @@ macro_rules! dense_backend_impl {
             condition_control_state_w_v: Tensor2Inner,
             row_flow_m: Vec<Tensor2Inner>,
             row_flow_v: Vec<Tensor2Inner>,
+            amortization_residual_m: Option<Tensor2Inner>,
+            amortization_residual_v: Option<Tensor2Inner>,
         }
 
         #[derive(Clone)]
@@ -336,7 +359,11 @@ macro_rules! dense_backend_impl {
         }
 
         #[cfg(feature = "dino")]
-        type BurnE2ePreparedDinoBatch = DinoVitsPreparedConditionBatch;
+        struct BurnE2ePreparedDinoBatch {
+            prepared: DinoVitsPreparedConditionBatch,
+            encoded_rows: usize,
+            expansion: Vec<usize>,
+        }
 
         #[cfg(not(feature = "dino"))]
         struct BurnE2ePreparedDinoBatch;
@@ -497,6 +524,7 @@ macro_rules! dense_backend_impl {
             rgb_channel_scale: f32,
             alpha_channel: bool,
             alpha_channel_scale: f32,
+            patch_pixels: bool,
         }
 
         #[cfg(feature = "dino")]
@@ -511,6 +539,7 @@ macro_rules! dense_backend_impl {
                     self.alpha_channel,
                     self.alpha_channel_scale,
                 )
+                .with_patch_pixels(self.patch_pixels)
             }
         }
 
@@ -522,6 +551,7 @@ macro_rules! dense_backend_impl {
             holdout_mean_psnr_db: Option<f32>,
             holdout_mean_loss: Option<f32>,
             quality_validation: Option<BurnE2eRolloutQualityReport>,
+            amortization_quality_validation: Option<BurnE2eAmortizationQualityReport>,
             params: BurnBaseParams,
             generator: BurnE2eGeneratorParams,
         }
@@ -590,12 +620,20 @@ macro_rules! dense_backend_impl {
             zero_update_examples: usize,
         }
 
+        #[path = "amortization_distillation.rs"]
+        mod amortization_distillation;
         #[path = "attention.rs"]
         mod attention;
+        #[path = "endpoint_bridge.rs"]
+        mod endpoint_bridge;
         #[path = "entrypoints.rs"]
         pub(super) mod entrypoints;
         #[path = "evaluation.rs"]
         mod evaluation;
+        #[path = "functional_teacher.rs"]
+        mod functional_teacher;
+        #[path = "generator_auxiliary.rs"]
+        mod generator_auxiliary;
         #[path = "inputs.rs"]
         mod inputs;
         #[path = "layer_norm.rs"]
@@ -611,9 +649,13 @@ macro_rules! dense_backend_impl {
         #[path = "train_steps.rs"]
         mod train_steps;
 
+        use amortization_distillation::*;
         use attention::*;
+        use endpoint_bridge::*;
         use entrypoints::*;
         use evaluation::*;
+        use functional_teacher::*;
+        use generator_auxiliary::*;
         use inputs::*;
         use layer_norm::*;
         use parameters::*;

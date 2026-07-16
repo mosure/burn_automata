@@ -22,7 +22,7 @@ pub(in crate::cli::commands::hyper_e2e) use crate::hyper::e2e::{
 use crate::hyper::e2e_training::dense;
 use crate::hyper::e2e_training::{
     DirectBasisStepStats, DirectBasisTrainConfig, DirectBasisTrainingExample,
-    Target2dBurnCheckpointConfig,
+    Target2dBurnCheckpointConfig, Target2dOracleTrainPlan,
 };
 pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
 pub(crate) use psnr_gate::run_validate_hyper_2d_psnr_gate;
@@ -2669,8 +2669,7 @@ pub(crate) fn train_target_2d_burn_oracle(
         last_train_loss: None,
     };
     let rollout_batch_size = training_config.batch_size.max(1);
-    let mut train_examples = vec![example; rollout_batch_size];
-    let mut holdout_examples = Vec::new();
+    let training_example = example.to_training_example();
     let training_steps = training_config
         .epochs
         .saturating_add(1)
@@ -2739,36 +2738,29 @@ pub(crate) fn train_target_2d_burn_oracle(
         max_dense_chunk_floats: chunk_floats,
         max_splat_chunk_floats: chunk_floats,
     };
-    let no_phase_config = DirectBasisTrainConfig {
-        steps: 0,
-        update_base: false,
-        ..train_config
+    let plan = Target2dOracleTrainPlan {
+        train: train_config,
+        steps_per_repetition: training_config.epochs.saturating_add(1),
+        repetitions: training_config.repetitions,
+        optimizer: training_config.optimizer,
+        scheduler_milestones: training_config.scheduler_milestones.clone(),
+        scheduler_gamma: training_config.scheduler_gamma,
     };
-    let mut train_training_examples = direct_basis_training_examples(&train_examples);
-    let mut holdout_training_examples = direct_basis_training_examples(&holdout_examples);
     let burn_report = match backend {
-        DirectBasisOracleBackendArg::Wgpu => dense::train_direct_basis_burn_wgpu(
+        DirectBasisOracleBackendArg::Wgpu => dense::train_target2d_oracle_burn_wgpu(
             model,
-            &mut train_training_examples,
-            &mut holdout_training_examples,
-            train_config,
-            no_phase_config,
-            no_phase_config,
+            &training_example,
+            plan,
             checkpoint_config.as_ref(),
         )?,
-        DirectBasisOracleBackendArg::Cuda => dense::train_direct_basis_burn_cuda(
+        DirectBasisOracleBackendArg::Cuda => dense::train_target2d_oracle_burn_cuda(
             model,
-            &mut train_training_examples,
-            &mut holdout_training_examples,
-            train_config,
-            no_phase_config,
-            no_phase_config,
+            &training_example,
+            plan,
             checkpoint_config.as_ref(),
         )?,
         DirectBasisOracleBackendArg::Cpu => unreachable!("CPU backend rejected above"),
     };
-    sync_direct_basis_training_examples(&mut train_examples, &train_training_examples);
-    sync_direct_basis_training_examples(&mut holdout_examples, &holdout_training_examples);
     let mut metrics = burn_report.metrics;
     metrics["target2d_training_config"] = serde_json::to_value(&training_config)?;
     metrics["rollout_step_min"] = serde_json::json!(training_config.step_min);
@@ -2779,8 +2771,8 @@ pub(crate) fn train_target_2d_burn_oracle(
         device: burn_report.device,
         metrics,
         history: burn_report.history,
-        best_train_loss: burn_report.best_train_loss,
-        best_train_step: burn_report.best_train_step,
+        best_train_loss: burn_report.best_train_loss.into_iter().next().flatten(),
+        best_train_step: burn_report.best_train_step.into_iter().next().unwrap_or(0),
     })
 }
 
