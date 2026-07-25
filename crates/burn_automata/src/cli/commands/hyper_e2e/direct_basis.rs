@@ -5,8 +5,7 @@ use super::shared_basis::{
     sample_example_indices, zero_model_gradients,
 };
 use super::sources::{
-    Hyper2dScratchSource, OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources,
-    sanitize_slug,
+    OmniSvgSourceConfig, ScratchSourceResolveConfig, resolve_scratch_sources, sanitize_slug,
 };
 use super::{Hyper2dE2eSplit, resolve_e2e_splits};
 use crate::cli::commands::hyper_support::write_pretty_json;
@@ -22,7 +21,6 @@ pub(in crate::cli::commands::hyper_e2e) use crate::hyper::e2e::{
 use crate::hyper::e2e_training::dense;
 use crate::hyper::e2e_training::{
     DirectBasisStepStats, DirectBasisTrainConfig, DirectBasisTrainingExample,
-    Target2dBurnCheckpointConfig, Target2dOracleTrainPlan,
 };
 pub(crate) use conditioned::run_train_hyper_2d_adapter_bank;
 pub(crate) use psnr_gate::run_validate_hyper_2d_psnr_gate;
@@ -31,11 +29,6 @@ use oracle::evaluate_direct_basis_oracles;
 
 const DEFAULT_WGPU_VRAM_BUDGET_GB: f32 = 64.0;
 const WGPU_VRAM_ESTIMATE_MULTIPLIER: u64 = 160;
-const TARGET2D_BURN_MAX_TRAIN_PARTICLES: usize = 4096;
-const TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD: usize = 512;
-const TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS: usize = 32;
-const TARGET2D_BURN_DEFAULT_CHUNK_FLOATS: usize = 16_000_000;
-const TARGET2D_BURN_QUALITY_CHUNK_FLOATS: usize = 512 * 1024;
 
 #[derive(Clone)]
 struct DirectBasisExample {
@@ -87,15 +80,6 @@ struct DirectBasisPhaseReport {
     history: Vec<CliHyper2dDirectBasisHistoryEntry>,
     best_loss: Option<f32>,
     best_step: usize,
-}
-
-pub(crate) struct BurnTarget2dOracleTrainingOutput {
-    pub(crate) backend: String,
-    pub(crate) device: String,
-    pub(crate) metrics: serde_json::Value,
-    pub(crate) history: Vec<CliHyper2dDirectBasisHistoryEntry>,
-    pub(crate) best_train_loss: Option<f32>,
-    pub(crate) best_train_step: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2605,185 +2589,6 @@ fn load_direct_basis_examples(
     Ok(examples)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn train_target_2d_burn_oracle(
-    backend: DirectBasisOracleBackendArg,
-    model: &mut NpaModel,
-    hashgrid: &burn_automata_kernels::HashGridConfig,
-    target_image_path: &Path,
-    target: TargetImage2d,
-    training_config: Target2dTrainingConfig,
-    loss_config: Target2dLossConfig,
-    checkpoint_config: Option<Target2dBurnCheckpointConfig>,
-) -> Result<BurnTarget2dOracleTrainingOutput, Box<dyn std::error::Error>> {
-    if backend == DirectBasisOracleBackendArg::Cpu {
-        return Err(std::io::Error::other(
-            "train-target2d --training-device gpu requires --gpu-backend burn-wgpu or burn-cuda",
-        )
-        .into());
-    }
-    if training_config.particle_count > TARGET2D_BURN_MAX_TRAIN_PARTICLES {
-        return Err(std::io::Error::other(format!(
-            "Burn target2d GPU training is capped at {TARGET2D_BURN_MAX_TRAIN_PARTICLES} particles for bounded sparse-backward safety; requested {}.",
-            training_config.particle_count
-        ))
-        .into());
-    }
-    if training_config.step_min == 0 || training_config.step_max == 0 {
-        return Err(
-            std::io::Error::other("target2d GPU training requires non-zero rollout steps").into(),
-        );
-    }
-    if training_config.step_min > training_config.step_max {
-        return Err(std::io::Error::other(format!(
-            "target2d GPU training requires step_min <= step_max, got {} > {}",
-            training_config.step_min, training_config.step_max
-        ))
-        .into());
-    }
-
-    let slug = target_image_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(sanitize_slug)
-        .unwrap_or_else(|| "target2d".to_string());
-    let source = Hyper2dScratchSource {
-        slug,
-        title: target_image_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(ToOwned::to_owned),
-        group: Some("target2d".to_string()),
-        condition_path: target_image_path.to_path_buf(),
-        particles: Some(training_config.particle_count),
-        seed_scale: Some(training_config.seed_scale),
-        update_prob: Some(training_config.update_prob),
-    };
-    let adapter = NpaLowRankAdapter::zeros(&model.config, 1, 1.0);
-    let example = DirectBasisExample {
-        source,
-        split: Hyper2dE2eSplit::Train,
-        bank_split_index: None,
-        target,
-        adapter,
-        last_train_loss: None,
-    };
-    let rollout_batch_size = training_config.batch_size.max(1);
-    let training_example = example.to_training_example();
-    let training_steps = training_config
-        .epochs
-        .saturating_add(1)
-        .saturating_mul(training_config.repetitions);
-    let quality_tiled = training_config.particle_count >= TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD;
-    let automatic_tbptt_chunk_steps = automatic_target2d_tbptt_chunk_steps(
-        training_config.particle_count,
-        training_config.step_max,
-    );
-    let tbptt_chunk_steps = if training_config.tbptt_chunk_steps == 0 {
-        automatic_tbptt_chunk_steps
-    } else {
-        training_config
-            .tbptt_chunk_steps
-            .clamp(1, training_config.step_max)
-    };
-    let chunk_floats = if quality_tiled {
-        TARGET2D_BURN_QUALITY_CHUNK_FLOATS
-    } else {
-        TARGET2D_BURN_DEFAULT_CHUNK_FLOATS
-    };
-    let train_config = DirectBasisTrainConfig {
-        steps: training_steps,
-        report_interval: training_config.report_interval.max(1),
-        example_batch_size: rollout_batch_size,
-        tbptt_chunk_steps,
-        loss_on_final_chunk_only: true,
-        use_particle_pool: true,
-        pool_size: training_config.pool_size.max(rollout_batch_size).max(1),
-        inject_seed_interval: training_config.inject_seed_interval.max(1),
-        brush_size: training_config.brush_size,
-        stopgrad_pos: model.config.stopgrad_pos,
-        stopgrad_state: model.config.stopgrad_state,
-        rollout_particles: training_config.particle_count,
-        rollout_step_min: training_config.step_min,
-        rollout_steps: training_config.step_max,
-        update_prob: training_config.update_prob,
-        seed: training_config.seed,
-        seed_scale: training_config.seed_scale,
-        seed_mode: training_config.seed_mode,
-        grid_eps: hashgrid.eps,
-        motion_scale: model.config.alpha * model.config.motion_eps(hashgrid.eps),
-        loss_config,
-        target2d_loss_backend: Target2dLossBackend::Auto,
-        perception_backend: PerceptionRolloutBackend::Auto,
-        per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
-        base_sgd: SgdConfig {
-            learning_rate: training_config.optimizer.learning_rate,
-            weight_decay: training_config.optimizer.weight_decay,
-            grad_clip_norm: training_config.optimizer.grad_clip_norm,
-        },
-        adapter_sgd: SgdConfig {
-            learning_rate: 0.0,
-            weight_decay: 0.0,
-            grad_clip_norm: 0.0,
-        },
-        adapter_l2_weight: 0.0,
-        update_base: true,
-        eval_examples: 1,
-        eval_interval: training_config.report_interval.max(1),
-        eval_batch_size: 1,
-        eval_seed: training_config.seed,
-        system_memory_budget_gb: Some(24.0),
-        gpu_memory_budget_gb: Some(24.0),
-        max_dense_train_particles: TARGET2D_BURN_MAX_TRAIN_PARTICLES,
-        max_dense_chunk_floats: chunk_floats,
-        max_splat_chunk_floats: chunk_floats,
-    };
-    let plan = Target2dOracleTrainPlan {
-        train: train_config,
-        steps_per_repetition: training_config.epochs.saturating_add(1),
-        repetitions: training_config.repetitions,
-        optimizer: training_config.optimizer,
-        scheduler_milestones: training_config.scheduler_milestones.clone(),
-        scheduler_gamma: training_config.scheduler_gamma,
-    };
-    let burn_report = match backend {
-        DirectBasisOracleBackendArg::Wgpu => dense::train_target2d_oracle_burn_wgpu(
-            model,
-            &training_example,
-            plan,
-            checkpoint_config.as_ref(),
-        )?,
-        DirectBasisOracleBackendArg::Cuda => dense::train_target2d_oracle_burn_cuda(
-            model,
-            &training_example,
-            plan,
-            checkpoint_config.as_ref(),
-        )?,
-        DirectBasisOracleBackendArg::Cpu => unreachable!("CPU backend rejected above"),
-    };
-    let mut metrics = burn_report.metrics;
-    metrics["target2d_training_config"] = serde_json::to_value(&training_config)?;
-    metrics["rollout_step_min"] = serde_json::json!(training_config.step_min);
-    metrics["rollout_step_max"] = serde_json::json!(training_config.step_max);
-
-    Ok(BurnTarget2dOracleTrainingOutput {
-        backend: burn_report.backend.to_string(),
-        device: burn_report.device,
-        metrics,
-        history: burn_report.history,
-        best_train_loss: burn_report.best_train_loss.into_iter().next().flatten(),
-        best_train_step: burn_report.best_train_step.into_iter().next().unwrap_or(0),
-    })
-}
-
-fn automatic_target2d_tbptt_chunk_steps(particle_count: usize, step_max: usize) -> usize {
-    if particle_count >= TARGET2D_BURN_QUALITY_PARTICLE_THRESHOLD {
-        step_max.clamp(1, TARGET2D_BURN_QUALITY_TBPTT_CHUNK_STEPS)
-    } else {
-        step_max.max(1)
-    }
-}
-
 fn split_direct_basis_adapter_bank_entries(
     entries: Vec<DirectBasisAdapterBankLoadEntry>,
 ) -> Result<DirectBasisAdapterBankSplitEntries, Box<dyn std::error::Error>> {
@@ -3487,13 +3292,6 @@ mod tests {
         .to_string();
 
         assert!(err.contains("rollout particles"));
-    }
-
-    #[test]
-    fn target2d_quality_auto_tbptt_preserves_32_step_credit() {
-        assert_eq!(automatic_target2d_tbptt_chunk_steps(4096, 96), 32);
-        assert_eq!(automatic_target2d_tbptt_chunk_steps(512, 16), 16);
-        assert_eq!(automatic_target2d_tbptt_chunk_steps(256, 96), 96);
     }
 
     #[test]

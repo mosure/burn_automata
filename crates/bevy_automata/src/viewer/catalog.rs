@@ -17,7 +17,7 @@ pub(super) const CATALOG_3D_GROWTH_SEED: u64 = 0x0051_a73d;
 pub(super) const AUTOMATA_UI_PANEL_WIDTH: f32 = 540.0;
 #[cfg(feature = "splatting")]
 pub(super) const AUTOMATA_MIN_VIEWPORT_WIDTH: u32 = 256;
-#[cfg(all(feature = "splatting", not(feature = "gpu_wgpu")))]
+#[cfg(feature = "splatting")]
 pub(super) const GAUSSIAN_SH_C0: f32 = 0.282_094_8;
 #[cfg(feature = "splatting")]
 pub(super) const SORTED_ENTRY_MIN_CAPACITY: usize = 16_384;
@@ -572,6 +572,7 @@ pub(super) fn select_catalog_entry(
     };
 
     settings.model_path = next_model_path;
+    settings.adaptive_model_path = None;
     settings.generated_model_label = None;
     settings.preset = entry.preset;
     settings.particle_count = entry.particle_count;
@@ -586,6 +587,8 @@ pub(super) fn select_catalog_entry(
     settings.mark_changed();
 
     runtime.loaded_model_path = None;
+    runtime.loaded_adaptive_model_path = None;
+    runtime.adaptive = None;
     runtime.trace = None;
     runtime.frame = 0;
     runtime.backward_loss = None;

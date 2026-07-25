@@ -11,12 +11,22 @@ pub(crate) use backends::predict_conditional_row_flow_adapter_cuda;
 #[cfg(feature = "backend_wgpu")]
 pub(crate) use backends::predict_conditional_row_flow_adapter_wgpu;
 pub(crate) use backends::{
+    train_adaptive_target2d_burn_cuda, train_adaptive_target2d_burn_wgpu,
     train_direct_basis_burn_cuda, train_direct_basis_burn_wgpu, train_oracle_models_burn_cuda,
     train_oracle_models_burn_wgpu, train_target2d_oracle_burn_cuda,
     train_target2d_oracle_burn_wgpu,
 };
 pub(crate) use backends::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 
+#[cfg(any(
+    feature = "backend_wgpu",
+    feature = "backend_cuda",
+    all(
+        test,
+        feature = "backend_ndarray",
+        not(any(feature = "backend_wgpu", feature = "backend_cuda"))
+    )
+))]
 macro_rules! dense_backend_impl {
     (
         $inner_backend:ty,
@@ -44,7 +54,8 @@ macro_rules! dense_backend_impl {
                 },
             },
             tensor::{
-                Device, Distribution, IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive,
+                Bool, Device, Distribution, IndexingUpdateOp, Int, Tensor, TensorData,
+                TensorPrimitive,
                 activation::{gelu, relu, softmax},
                 backend::Backend,
             },
@@ -56,7 +67,7 @@ macro_rules! dense_backend_impl {
         use sha2::{Digest, Sha256};
 
         use super::super::{
-            BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics,
+            AdaptiveTarget2dBurnConfig, BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics,
             BurnE2eAmortizationQualityReport, BurnE2eNearestTeacherEntry, BurnE2eRolloutExample,
             BurnE2eRolloutHistoryEntry, BurnE2eRolloutHorizonSummary, BurnE2eRolloutOutput,
             BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport, BurnE2eRolloutStabilityEntry,
@@ -67,7 +78,8 @@ macro_rules! dense_backend_impl {
             E2eParticlePoolSnapshot, E2eTbpttLossMode, E2eTensorSnapshot, E2eTrainingCheckpoint,
             Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
             Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
-            Target2dBurnCheckpointConfig, Target2dOracleTrainPlan,
+            TARGET2D_TRAINING_CHECKPOINT_VERSION, Target2dBurnCheckpointConfig,
+            Target2dOracleTrainPlan, Target2dParticlePoolSnapshot, Target2dTrainingCheckpoint,
         };
         #[cfg(feature = "dino")]
         use crate::ConditionImage2d;
@@ -96,8 +108,9 @@ macro_rules! dense_backend_impl {
         use burn_automata_kernels::ModulatedLayerNormCubeBackend;
         #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
         use burn_automata_kernels::{
-            PerceptionCubeAdjointBackend, PerceptionCubeAdjointConfig,
-            PerceptionCubeForwardBackend, PerceptionCubePreparedBackend,
+            AdaptiveNpaPerceptionCubeBackend, PerceptionCubeAdjointBackend,
+            PerceptionCubeAdjointConfig, PerceptionCubeForwardBackend,
+            PerceptionCubePreparedBackend,
         };
         #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
         use burn_automata_kernels::{Target2dCubeAdjointBackend, Target2dCubeLossConfig};
@@ -106,10 +119,12 @@ macro_rules! dense_backend_impl {
         type BurnBackend = Autodiff<InnerBackend>;
         type BurnDevice = Device<BurnBackend>;
         type Tensor1 = Tensor<BurnBackend, 1>;
+        type Tensor1Bool = Tensor<BurnBackend, 1, Bool>;
         type Tensor2 = Tensor<BurnBackend, 2>;
         type Tensor3 = Tensor<BurnBackend, 3>;
         type Tensor4 = Tensor<BurnBackend, 4>;
         type Tensor1Int = Tensor<BurnBackend, 1, Int>;
+        type Tensor2Int = Tensor<BurnBackend, 2, Int>;
         type Tensor1Inner = Tensor<InnerBackend, 1>;
         type Tensor2Inner = Tensor<InnerBackend, 2>;
         type Tensor3Inner = Tensor<InnerBackend, 3>;
@@ -370,8 +385,16 @@ macro_rules! dense_backend_impl {
 
         struct BurnPoolBatch {
             pool_indices: Vec<usize>,
+            ages: Vec<usize>,
             x: Tensor3,
             s: Tensor3,
+        }
+
+        #[derive(Clone, Copy)]
+        struct BurnPoolSampling {
+            fresh_seed_rows: usize,
+            max_age_steps: Option<usize>,
+            age_strata: usize,
         }
 
         #[derive(Clone)]
@@ -479,6 +502,9 @@ macro_rules! dense_backend_impl {
         struct BurnDeviceParticlePool {
             positions: Tensor3Inner,
             states: Tensor3Inner,
+            initial_positions: Tensor3Inner,
+            initial_states: Tensor3Inner,
+            ages: Vec<usize>,
             pool_size: usize,
             particle_count: usize,
             state_dims: usize,
@@ -620,6 +646,14 @@ macro_rules! dense_backend_impl {
             zero_update_examples: usize,
         }
 
+        #[path = "adaptive_perception.rs"]
+        mod adaptive_perception;
+        #[path = "adaptive_target_loss.rs"]
+        mod adaptive_target_loss;
+        #[path = "adaptive_topology.rs"]
+        mod adaptive_topology;
+        #[path = "adaptive_training.rs"]
+        pub(super) mod adaptive_training;
         #[path = "amortization_distillation.rs"]
         mod amortization_distillation;
         #[path = "attention.rs"]
@@ -649,6 +683,8 @@ macro_rules! dense_backend_impl {
         #[path = "train_steps.rs"]
         mod train_steps;
 
+        use adaptive_target_loss::*;
+        use adaptive_topology::*;
         use amortization_distillation::*;
         use attention::*;
         use endpoint_bridge::*;

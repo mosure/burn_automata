@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-22",
+  "status": "failed-diagnostic-not-promoted",
+  "device": {
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "optimizer_backend": "burn-wgpu",
+    "replay_backend": "cpu-reference"
+  },
+  "protocol": {
+    "base_model": "models/catalog/growing/lizard.bpk",
+    "fine_particles": 128,
+    "material_leaves": 95,
+    "rollout_steps": 16,
+    "on_policy_rollouts": 256,
+    "on_policy_rounds": 2,
+    "optimizer_steps_per_round": 2000,
+    "expected_coarse_update_mask": true,
+    "memory_cap_gib": 16,
+    "swap_cap_gib": 2,
+    "timeout_minutes": 15
+  },
+  "correctness_gates": {
+    "four_child_geometry_round_trip_max_abs_error": "<2e-4",
+    "phase_changes_child_geometry": true,
+    "phase_preserves_weighted_centroid_and_covariance": "<2e-5",
+    "counterfactual_independent_of_hidden_teacher_template": "<1e-6",
+    "counterfactual_responds_to_student_phase": true
+  },
+  "ablations": {
+    "expected_mask_with_teacher_geometry_leakage": {
+      "artifact": "artifacts/adaptive_npa/recurrent_closure_128_h16_expected_mask_256/report.failed.json",
+      "total_elapsed_ms": 37004.961872,
+      "heldout_on_policy_physical_nrmse": 0.39928573,
+      "heldout_on_policy_physical_correlation": 0.91675663,
+      "heldout_on_policy_closure_nrmse": 1.0012642,
+      "heldout_on_policy_closure_correlation": 0.16349377,
+      "heldout_on_policy_phase_nrmse": 0.98206687,
+      "heldout_on_policy_state_nrmse": 1.0118271,
+      "mean_teacher_update_error": 0.06709058
+    },
+    "causal_geometry_and_state": {
+      "artifact": "artifacts/adaptive_npa/recurrent_closure_128_h16_causal_geometry_256/report.failed.json",
+      "total_elapsed_ms": 35313.814138,
+      "heldout_on_policy_physical_nrmse": 0.3725888,
+      "heldout_on_policy_physical_correlation": 0.9280071,
+      "heldout_on_policy_closure_nrmse": 0.94842464,
+      "heldout_on_policy_closure_correlation": 0.35005412,
+      "heldout_on_policy_phase_nrmse": 0.87835693,
+      "heldout_on_policy_phase_correlation": 0.46668294,
+      "heldout_on_policy_state_nrmse": 0.9981997,
+      "heldout_on_policy_state_correlation": 0.1816069,
+      "mean_teacher_update_error": 0.034109324,
+      "closure_optimizer_rows_per_second": 19605791.691168603
+    }
+  },
+  "decision": {
+    "quality_gate": {
+      "maximum_closure_nrmse": 0.5,
+      "minimum_closure_correlation": 0.8,
+      "passed": false
+    },
+    "interpretation": "Making geometry causal materially improves replay alignment, but the compact state closure remains near the zero-predictor error scale on held-out recurrent states. Capacity tuning is not justified without a stronger Markov representation or a jointly trained adaptive rule.",
+    "deployment": "CPU-reference diagnostic only; resident WGPU closure deployment is rejected because it does not implement causal phase/state perception and integration.",
+    "next_training_path": "Joint normalized-adaptive NPA training across mixed material resolutions with Target2D and restriction-evolution losses; keep persistent fine modes only as a diagnostic ceiling and the verified LoD baseline."
+  },
+  "paper_claim_boundary": "The supplied budgeted-adaptive paper reports an adaptive-bandwidth pilot and presents learned topology/proxy hierarchy as proposed work. This closure experiment is a repository diagnostic, not a reproduced paper result."
+}

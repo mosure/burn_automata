@@ -304,6 +304,7 @@ pub fn load_pytorch_npa_checkpoint(path: impl AsRef<Path>) -> AutomataResult<Exp
         stopgrad_state: false,
         equivariance: EquivarianceMode::ParticleDensityAndScale,
         position_features: false,
+        auxiliary_input_dims: 0,
         decoder_dims: None,
         output_dims: None,
     };

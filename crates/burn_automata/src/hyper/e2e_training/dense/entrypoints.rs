@@ -2965,6 +2965,12 @@ use super::*;
         let mut per_model_history = vec![Vec::new(); models.len()];
         let mut best_train_loss = vec![None::<f32>; models.len()];
         let mut best_train_step = vec![0usize; models.len()];
+        let mut best_eval_loss = vec![None::<f32>; models.len()];
+        let mut best_eval_step = vec![0usize; models.len()];
+        let mut best_eval_psnr = vec![None::<f32>; models.len()];
+        let mut best_eval_psnr_step = vec![0usize; models.len()];
+        let mut best_eval_aligned_psnr = vec![None::<f32>; models.len()];
+        let mut best_eval_aligned_psnr_step = vec![0usize; models.len()];
         let mut measured_particle_steps = 0.0_f64;
         let mut measured_elapsed_ms = 0.0_f64;
         let mut steady_particle_steps = 0.0_f64;
@@ -2983,6 +2989,8 @@ use super::*;
             }
             let should_report =
                 step == total_steps || step.is_multiple_of(config.report_interval.max(1));
+            let should_eval = config.eval_interval > 0
+                && (step == total_steps || step.is_multiple_of(config.eval_interval.max(1)));
             let checkpoint_due = checkpoint_state
                 .as_ref()
                 .is_some_and(|state| state.should_write_current(step));
@@ -3020,6 +3028,16 @@ use super::*;
                 steady_elapsed_ms += stats.elapsed_ms;
             }
             if should_report {
+                let eval_losses = if should_eval {
+                    Some(evaluate_oracle_model_batch(
+                        &params,
+                        &targets,
+                        config,
+                        config.eval_seed,
+                    )?)
+                } else {
+                    None
+                };
                 let mean_loss = stats
                     .per_model_loss
                     .iter()
@@ -3051,7 +3069,9 @@ use super::*;
                 history.push(CliHyper2dDirectBasisHistoryEntry {
                     step,
                     loss: mean_loss,
-                    eval_loss: None,
+                    eval_loss: eval_losses.as_ref().map(|losses| {
+                        aggregate_loss_summaries(losses)
+                    }),
                     base_grad_norm: mean_base_grad_norm,
                     base_grad_scale: mean_base_grad_scale,
                     mean_adapter_grad_norm: 0.0,
@@ -3060,17 +3080,44 @@ use super::*;
                     particle_steps_per_sec: stats.particle_steps_per_sec,
                     elapsed_ms: stats.elapsed_ms,
                 });
-                let mut improved = false;
+                let mut improved_train = false;
+                let mut improved_eval = false;
                 for (idx, loss) in stats.per_model_loss.iter().copied().enumerate() {
                     if best_train_loss[idx].is_none_or(|best| loss < best) {
                         best_train_loss[idx] = Some(loss);
                         best_train_step[idx] = step;
-                        improved = true;
+                        improved_train = true;
+                    }
+                    let eval_loss = eval_losses
+                        .as_ref()
+                        .and_then(|losses| losses.get(idx))
+                        .map(|eval| eval.loss);
+                    if let Some(eval_loss) = eval_loss
+                        && best_eval_loss[idx]
+                            .is_none_or(|best| eval_loss.mean_total_loss < best)
+                    {
+                        best_eval_loss[idx] = Some(eval_loss.mean_total_loss);
+                        best_eval_step[idx] = step;
+                    }
+                    if let Some(eval) = eval_losses.as_ref().and_then(|losses| losses.get(idx))
+                        && best_eval_psnr[idx]
+                            .is_none_or(|best| eval.render_rgb_psnr_db > best)
+                    {
+                        best_eval_psnr[idx] = Some(eval.render_rgb_psnr_db);
+                        best_eval_psnr_step[idx] = step;
+                        improved_eval = true;
+                    }
+                    if let Some(eval) = eval_losses.as_ref().and_then(|losses| losses.get(idx))
+                        && best_eval_aligned_psnr[idx]
+                            .is_none_or(|best| eval.aligned_render_rgb_psnr_db > best)
+                    {
+                        best_eval_aligned_psnr[idx] = Some(eval.aligned_render_rgb_psnr_db);
+                        best_eval_aligned_psnr_step[idx] = step;
                     }
                     per_model_history[idx].push(CliHyper2dDirectBasisHistoryEntry {
                         step,
                         loss,
-                        eval_loss: None,
+                        eval_loss,
                         base_grad_norm: stats.per_model_base_grad_norm[idx],
                         base_grad_scale: stats.per_model_base_grad_scale[idx],
                         mean_adapter_grad_norm: 0.0,
@@ -3089,7 +3136,12 @@ use super::*;
                     &format!("oracle_batch:report_step:{step}"),
                     config,
                 )?;
-                if improved
+                let improved_checkpoint = if should_eval {
+                    improved_eval
+                } else {
+                    improved_train
+                };
+                if improved_checkpoint
                     && models.len() == 1
                     && let Some(state) = checkpoint_state.as_mut()
                 {
@@ -3097,9 +3149,15 @@ use super::*;
                         &params,
                         "oracle",
                         step,
-                        best_train_loss[0],
-                        None,
-                        None,
+                        stats.per_model_loss.first().copied(),
+                        eval_losses
+                            .as_ref()
+                            .and_then(|losses| losses.first())
+                            .map(|eval| eval.loss.mean_total_loss),
+                        eval_losses
+                            .as_ref()
+                            .and_then(|losses| losses.first())
+                            .map(|eval| eval.render_rgb_psnr_db),
                     )?;
                 }
             }
@@ -3146,6 +3204,12 @@ use super::*;
                 "reset_optimizer_each_repetition": true,
                 "reset_particle_pool_each_repetition": config.use_particle_pool,
             },
+            "best_fresh_seed_eval_loss": best_eval_loss,
+            "best_fresh_seed_eval_step": best_eval_step,
+            "best_fresh_seed_render_rgb_psnr_db": best_eval_psnr,
+            "best_fresh_seed_render_rgb_psnr_step": best_eval_psnr_step,
+            "best_fresh_seed_aligned_render_rgb_psnr_db": best_eval_aligned_psnr,
+            "best_fresh_seed_aligned_render_rgb_psnr_step": best_eval_aligned_psnr_step,
             "optimizer": plan.optimizer,
             "rollout_steps": config.rollout_steps,
             "tbptt_chunk_steps": config.tbptt_chunk_steps,
@@ -3178,6 +3242,155 @@ use super::*;
             best_train_loss,
             best_train_step,
         })
+    }
+
+    #[derive(Clone, Copy)]
+    struct OracleModelEval {
+        loss: CliHyper2dDirectBasisLossSummary,
+        aligned_render_rgb_psnr_db: f32,
+        render_rgb_psnr_db: f32,
+    }
+
+    fn evaluate_oracle_model_batch(
+        params: &BurnBaseBatch,
+        targets: &[BurnTargetExample],
+        config: DirectBasisTrainConfig,
+        seed: u64,
+    ) -> Result<Vec<OracleModelEval>, Box<dyn std::error::Error>> {
+        targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let eval_seed = seed.wrapping_add(index as u64);
+                let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), eval_seed);
+                params.model(index).write_to_model(&mut model)?;
+                let mut grid = crate::upstream_growing_2d_hashgrid();
+                grid.eps = config.grid_eps;
+                let trace = crate::run_rollout(
+                    &model,
+                    &grid,
+                    &crate::RolloutConfig {
+                        batch_size: 1,
+                        particle_count: target.particle_count,
+                        steps: config.rollout_steps,
+                        update_prob: target.update_prob,
+                        seed: eval_seed,
+                        seed_scale: target.seed_scale,
+                        ..crate::RolloutConfig::default()
+                    },
+                    config.seed_mode,
+                )?;
+                let loss = crate::target_2d_loss_with_adjoint(
+                    &trace.positions,
+                    &trace.states,
+                    1,
+                    trace.particle_count,
+                    trace.state_dims,
+                    &target.target_cpu,
+                    config.loss_config,
+                    trace.mean_dx.iter().copied().sum(),
+                    trace.steps,
+                )?
+                .report;
+                let target_render = crate::target2d::render_target_2d_splat(
+                    &target.target_cpu,
+                    config.loss_config,
+                )?;
+                let output_scale =
+                    target.target_points as f32 / target.particle_count.max(1) as f32;
+                let render = crate::target2d::render_rollout_2d_splat(
+                    &trace.positions,
+                    &trace.states,
+                    trace.state_dims,
+                    target.pixel_size,
+                    config.loss_config,
+                    None,
+                    output_scale,
+                )?;
+                let aligned_render = crate::target2d::render_rollout_2d_splat(
+                    &trace.positions,
+                    &trace.states,
+                    trace.state_dims,
+                    target.pixel_size,
+                    config.loss_config,
+                    config
+                        .loss_config
+                        .center
+                        .then(|| target.target_cpu.mean_position()),
+                    output_scale,
+                )?;
+                Ok(OracleModelEval {
+                    loss: CliHyper2dDirectBasisLossSummary {
+                        examples: 1,
+                        mean_total_loss: loss.total_loss,
+                        max_total_loss: loss.total_loss,
+                        mean_splat_loss: loss.splat_loss,
+                        mean_color_loss: loss.color_loss,
+                        mean_density_loss: loss.density_loss,
+                    },
+                    aligned_render_rgb_psnr_db: psnr_db_from_mse(render_mse(
+                        &aligned_render.rgb,
+                        &target_render.rgb,
+                    )?),
+                    render_rgb_psnr_db: psnr_db_from_mse(render_mse(
+                        &render.rgb,
+                        &target_render.rgb,
+                    )?),
+                })
+            })
+            .collect()
+    }
+
+    fn render_mse(left: &[f32], right: &[f32]) -> AutomataResult<f32> {
+        if left.len() != right.len() || left.is_empty() {
+            return Err(AutomataError::InvalidArgument(format!(
+                "Target2D render metric shape mismatch: left={} right={}",
+                left.len(),
+                right.len(),
+            )));
+        }
+        Ok(left
+            .iter()
+            .zip(right)
+            .map(|(left, right)| {
+                let difference = left - right;
+                difference * difference
+            })
+            .sum::<f32>()
+            / left.len() as f32)
+    }
+
+    fn aggregate_loss_summaries(
+        losses: &[OracleModelEval],
+    ) -> CliHyper2dDirectBasisLossSummary {
+        let count = losses.len().max(1) as f32;
+        CliHyper2dDirectBasisLossSummary {
+            examples: losses.len(),
+            mean_total_loss: losses
+                .iter()
+                .map(|eval| eval.loss.mean_total_loss)
+                .sum::<f32>()
+                / count,
+            max_total_loss: losses
+                .iter()
+                .map(|eval| eval.loss.max_total_loss)
+                .fold(0.0_f32, f32::max),
+            mean_splat_loss: losses
+                .iter()
+                .map(|eval| eval.loss.mean_splat_loss)
+                .sum::<f32>()
+                / count,
+            mean_color_loss: losses
+                .iter()
+                .map(|eval| eval.loss.mean_color_loss)
+                .sum::<f32>()
+                / count,
+            mean_density_loss: losses
+                .iter()
+                .map(|eval| eval.loss.mean_density_loss)
+                .sum::<f32>()
+                / count,
+        }
     }
 
     pub(super) struct BurnPhaseReport {
@@ -3408,11 +3621,19 @@ use super::*;
             atomic_write_json(&self.config.metadata_output, &report)
         }
 
+        pub(super) fn last_model_sha256(&self) -> Option<&str> {
+            self.events.last().and_then(|event| event.sha256.as_deref())
+        }
+
         pub(super) fn report_json(&self) -> serde_json::Value {
             json!({
                 "current_model_output": self.config.current_model_output.display().to_string(),
                 "best_model_output": self.config.best_model_output.display().to_string(),
                 "metadata_output": self.config.metadata_output.display().to_string(),
+                "training_state_output": self.config.training_state_output.as_ref().map(|path| path.display().to_string()),
+                "resume_training_state": self.config.resume_training_state.as_ref().map(|path| path.display().to_string()),
+                "curriculum_resume": self.config.curriculum_resume,
+                "include_particle_pool": self.config.include_particle_pool,
                 "interval_steps": self.config.interval_steps,
                 "interval_seconds": self.config.interval_duration.map(|duration| duration.as_secs()),
                 "current_writes": self.current_writes,

@@ -412,8 +412,12 @@ use super::*;
         let mut particle_steps = 0.0_f64;
         let mut remaining_steps = rollout_steps;
         while remaining_steps > 0 {
-            let steps = remaining_steps.min(chunk_steps);
             let final_chunk = remaining_steps <= chunk_steps;
+            let steps = tbptt_next_chunk_steps(
+                remaining_steps,
+                chunk_steps,
+                config.loss_on_final_chunk_only,
+            );
             if config.loss_on_final_chunk_only && !final_chunk {
                 let detached_params = params.detached();
                 let adapter_batch =
@@ -560,8 +564,12 @@ use super::*;
             let mut rng = StdRng::seed_from_u64(step_seed.wrapping_add(idx as u64) ^ 0x005e_ed2d);
             let mut remaining_steps = rollout_steps;
             while remaining_steps > 0 {
-                let steps = remaining_steps.min(chunk_steps);
                 let final_chunk = remaining_steps <= chunk_steps;
+                let steps = tbptt_next_chunk_steps(
+                    remaining_steps,
+                    chunk_steps,
+                    config.loss_on_final_chunk_only,
+                );
                 if config.loss_on_final_chunk_only && !final_chunk {
                     let detached_params = params.detached();
                     let detached_adapter = adapters[idx].detached();
@@ -2300,8 +2308,12 @@ use super::*;
         let mut remaining_steps = rollout_steps;
         let mut displacement = Tensor::<BurnBackend, 1>::zeros([row_count], device);
         while remaining_steps > 0 {
-            let steps = remaining_steps.min(chunk_steps);
             let final_chunk = remaining_steps <= chunk_steps;
+            let steps = tbptt_next_chunk_steps(
+                remaining_steps,
+                chunk_steps,
+                config.loss_on_final_chunk_only,
+            );
             if config.loss_on_final_chunk_only && !final_chunk {
                 let detached_params = params.detached();
                 let (next_x, next_s, next_displacement) = rollout_oracle_model_batch_chunk(
@@ -2541,4 +2553,20 @@ use super::*;
             .tbptt_chunk_steps
             .max(1)
             .min(config.rollout_steps.max(1))
+    }
+
+    pub(super) fn tbptt_next_chunk_steps(
+        remaining_steps: usize,
+        chunk_steps: usize,
+        loss_on_final_chunk_only: bool,
+    ) -> usize {
+        let chunk_steps = chunk_steps.max(1);
+        if loss_on_final_chunk_only && remaining_steps > chunk_steps {
+            // Consume only the detached prefix and reserve a complete suffix
+            // for gradient credit. Taking a full leading chunk would leave a
+            // one-step graph for a 65-step rollout with a 64-step TBPTT cap.
+            (remaining_steps - chunk_steps).min(chunk_steps)
+        } else {
+            remaining_steps.min(chunk_steps)
+        }
     }

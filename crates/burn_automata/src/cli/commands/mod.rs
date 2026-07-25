@@ -1,5 +1,7 @@
 //! Command dispatch and command-local option validation.
 
+mod adaptive;
+mod adaptive_target2d;
 mod basic;
 mod bench_handlers;
 mod dispatch;

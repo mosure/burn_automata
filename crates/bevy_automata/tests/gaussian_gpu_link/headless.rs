@@ -112,6 +112,52 @@ fn viewer_bridge_renders_compact_headless_capture() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn viewer_paused_seed_renders_without_advancing() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = bevy_test_guard();
+    let particles = 512;
+    let mut apps = headless_automata_viewer(particles);
+    apps.main
+        .world_mut()
+        .resource_mut::<AutomataSettings>()
+        .paused = true;
+    let target = add_render_target(&mut apps, 256, 256);
+
+    pump_headless_frame(&mut apps);
+    assign_render_target_to_gaussian_cameras(&mut apps, target.clone());
+    for _ in 0..12 {
+        pump_headless_frame(&mut apps);
+    }
+
+    let diagnostics = render_diagnostics(&apps);
+    assert_eq!(diagnostics.frame, 0, "paused viewer advanced its rollout");
+    assert_eq!(diagnostics.resident_particle_count, particles);
+    apps.main
+        .world_mut()
+        .spawn(Screenshot::image(target.as_image().unwrap().clone()))
+        .observe(
+            |event: On<ScreenshotCaptured>, mut capture: ResMut<RenderCapture>| {
+                capture.captured = true;
+                capture.metrics = capture_metrics(&event.image);
+            },
+        );
+    for _ in 0..10 {
+        pump_headless_frame(&mut apps);
+        if apps.main.world().resource::<RenderCapture>().captured {
+            break;
+        }
+    }
+
+    let capture = apps.main.world().resource::<RenderCapture>();
+    assert!(capture.captured, "paused seed screenshot was not captured");
+    assert_compact_capture(
+        capture
+            .metrics
+            .expect("paused seed screenshot did not return image data"),
+    );
+    Ok(())
+}
+
+#[test]
 fn viewer_lizard_catalog_4096_gpu_path_advances_and_renders()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = bevy_test_guard();

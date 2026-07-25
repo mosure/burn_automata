@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-20",
+  "scope": "deterministic CPU candidate-search correctness and work-count regression",
+  "particles": 784,
+  "spatial_dims": 2,
+  "bandwidth_range": [0.025, 0.2],
+  "bandwidth_distribution": "log-linear across x",
+  "graph_policy": "raw-support",
+  "all_pairs": {
+    "candidate_visits": 614656,
+    "exact_support_messages": 5298
+  },
+  "dyadic": {
+    "support_bin_ratio": 2.0,
+    "candidate_visits": 47337,
+    "exact_support_messages": 5298
+  },
+  "sqrt2": {
+    "support_bin_ratio": 1.4142135,
+    "candidate_visits": 46810,
+    "exact_support_messages": 5298
+  },
+  "candidate_visit_reduction_fraction": 0.011133,
+  "dyadic_reduction_vs_all_pairs_fraction": 0.922986,
+  "perception_values_exactly_equal": true,
+  "interpretation": "Support bins alter broad-phase work only. The exact continuous pair-bandwidth test, graph, and perception output are unchanged. This is not a WGPU throughput result."
+}

@@ -4,6 +4,9 @@ pub(super) fn load_selected_model(
     mut runtime: ResMut<AutomataRuntime>,
     settings: Res<AutomataSettings>,
 ) {
+    if settings.adaptive_model_path.is_some() {
+        return;
+    }
     if let Some(model_path) = &settings.model_path {
         if runtime.loaded_model_path.as_ref() == Some(model_path) {
             return;
@@ -55,7 +58,7 @@ pub(super) fn advance_rollout(
     mut runtime: ResMut<AutomataRuntime>,
     settings: Res<AutomataSettings>,
 ) {
-    if settings.paused {
+    if settings.paused || runtime.adaptive.is_some() {
         return;
     }
     if runtime.trace.is_none() || runtime.frame.is_multiple_of(60) {
@@ -97,7 +100,7 @@ pub(super) fn advance_rollout(
     mut runtime: ResMut<AutomataRuntime>,
     settings: Res<AutomataSettings>,
 ) {
-    if settings.paused {
+    if settings.paused || runtime.adaptive.is_some() {
         return;
     }
     let previous_frame = runtime.frame;
@@ -200,21 +203,6 @@ pub(super) fn trace_gaussian(
     let position = trace.positions[idx];
     let state_base = idx * trace.state_dims;
     let state = &trace.states[state_base..state_base + trace.state_dims];
-    let mut spherical_harmonic = SphericalHarmonicCoefficients::default();
-    let tail = trace.state_dims.saturating_sub(3);
-    let color = if trace.state_dims >= 3 {
-        [
-            (state[tail] + 0.5).clamp(0.0, 1.0),
-            (state[tail + 1] + 0.5).clamp(0.0, 1.0),
-            (state[tail + 2] + 0.5).clamp(0.0, 1.0),
-        ]
-    } else {
-        [0.82, 0.88, 0.92]
-    };
-    spherical_harmonic.coefficients[0] = (color[0] - 0.5) / GAUSSIAN_SH_C0;
-    spherical_harmonic.coefficients[1] = (color[1] - 0.5) / GAUSSIAN_SH_C0;
-    spherical_harmonic.coefficients[2] = (color[2] - 0.5) / GAUSSIAN_SH_C0;
-
     let scale = (runtime.hashgrid.eps * 0.12).max(0.00008);
     let opacity = if runtime.model.config.spatial_dims == 3 {
         growth_3d_material_opacity_channel(trace.state_dims)
@@ -224,39 +212,20 @@ pub(super) fn trace_gaussian(
         1.0
     };
 
-    Gaussian3d {
-        position_visibility: [
-            position[0],
-            position[1],
-            if runtime.model.config.spatial_dims == 3 {
-                position[2]
-            } else {
-                0.0
-            },
-            1.0,
-        ]
-        .into(),
-        spherical_harmonic,
-        rotation: [1.0, 0.0, 0.0, 0.0].into(),
-        scale_opacity: [scale, scale, scale, opacity].into(),
-    }
+    particle_gaussian(
+        position,
+        state,
+        runtime.model.config.spatial_dims,
+        scale,
+        opacity,
+    )
 }
 
 pub(super) fn update_status_label(
     runtime: Res<AutomataRuntime>,
     settings: Res<AutomataSettings>,
-    diagnostics: Option<Res<DiagnosticsStore>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
-    let fps = diagnostics
-        .as_deref()
-        .and_then(|store| store.get(&FrameTimeDiagnosticsPlugin::FPS))
-        .and_then(|diagnostic| diagnostic.smoothed().or_else(|| diagnostic.average()));
-    let frame_text = if let Some(fps) = fps {
-        format!("frame {} | fps {:.1}", runtime.frame, fps)
-    } else {
-        format!("frame {}", runtime.frame)
-    };
     for mut text in &mut labels {
         let mut metrics = Vec::new();
         if settings.visualize_backward {
@@ -286,7 +255,212 @@ pub(super) fn update_status_label(
         } else {
             format!(" | {}", metrics.join(" | "))
         };
-        text.0 = format!("{}\n{}{}", runtime.status, frame_text, metric_text);
+        text.0 = format!("{}{}", runtime.status, metric_text);
+    }
+}
+
+const PERFORMANCE_UI_REFRESH_SECONDS: f64 = 0.25;
+const PERFORMANCE_UI_EMA_ALPHA: f64 = 0.25;
+
+type PerformanceFrameQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<PerformanceFrameLabel>,
+        Without<PerformanceFpsLabel>,
+        Without<PerformanceStepRateLabel>,
+    ),
+>;
+type PerformanceFpsQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<PerformanceFpsLabel>,
+        Without<PerformanceFrameLabel>,
+        Without<PerformanceStepRateLabel>,
+    ),
+>;
+type PerformanceStepRateQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<PerformanceStepRateLabel>,
+        Without<PerformanceFrameLabel>,
+        Without<PerformanceFpsLabel>,
+    ),
+>;
+type AdaptiveDiagnosticsQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Text,
+    (
+        With<AdaptiveDiagnosticsLabel>,
+        Without<PerformanceFrameLabel>,
+        Without<PerformanceFpsLabel>,
+        Without<PerformanceStepRateLabel>,
+    ),
+>;
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_performance_labels(
+    time: Res<Time<Real>>,
+    runtime: Res<AutomataRuntime>,
+    diagnostics: Option<Res<DiagnosticsStore>>,
+    telemetry: Res<AutomataPerformanceTelemetry>,
+    mut state: ResMut<PerformanceUiState>,
+    mut frame_labels: PerformanceFrameQuery,
+    mut fps_labels: PerformanceFpsQuery,
+    mut step_rate_labels: PerformanceStepRateQuery,
+    mut adaptive_labels: AdaptiveDiagnosticsQuery,
+) {
+    let now = time.elapsed_secs_f64();
+    let snapshot = telemetry.snapshot();
+    let completed_steps = if snapshot.render_thread_active {
+        snapshot.completed_steps
+    } else {
+        runtime.frame
+    };
+    if !state.initialized {
+        state.initialized = true;
+        state.last_sample_seconds = now;
+        state.last_completed_steps = completed_steps;
+        write_performance_labels(
+            completed_steps,
+            state.smoothed_fps,
+            state.smoothed_step_rate,
+            &mut frame_labels,
+            &mut fps_labels,
+            &mut step_rate_labels,
+        );
+        write_adaptive_diagnostics(&runtime, &snapshot, &mut adaptive_labels);
+        return;
+    }
+
+    let elapsed = now - state.last_sample_seconds;
+    if elapsed < PERFORMANCE_UI_REFRESH_SECONDS {
+        return;
+    }
+    let fps = diagnostics
+        .as_deref()
+        .and_then(|store| store.get(&FrameTimeDiagnosticsPlugin::FPS))
+        .and_then(|diagnostic| diagnostic.smoothed().or_else(|| diagnostic.average()));
+    state.smoothed_fps = update_ema(state.smoothed_fps, fps);
+    let completed_delta = completed_steps.saturating_sub(state.last_completed_steps);
+    let step_rate = (elapsed > 0.0).then_some(completed_delta as f64 / elapsed);
+    state.smoothed_step_rate = update_ema(state.smoothed_step_rate, step_rate);
+    state.last_sample_seconds = now;
+    state.last_completed_steps = completed_steps;
+
+    write_performance_labels(
+        completed_steps,
+        state.smoothed_fps,
+        state.smoothed_step_rate,
+        &mut frame_labels,
+        &mut fps_labels,
+        &mut step_rate_labels,
+    );
+    write_adaptive_diagnostics(&runtime, &snapshot, &mut adaptive_labels);
+}
+
+fn update_ema(previous: Option<f64>, sample: Option<f64>) -> Option<f64> {
+    sample
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|sample| {
+            previous.map_or(sample, |previous| {
+                previous + PERFORMANCE_UI_EMA_ALPHA * (sample - previous)
+            })
+        })
+        .or(previous)
+}
+
+fn write_performance_labels(
+    completed_steps: usize,
+    fps: Option<f64>,
+    step_rate: Option<f64>,
+    frame_labels: &mut PerformanceFrameQuery,
+    fps_labels: &mut PerformanceFpsQuery,
+    step_rate_labels: &mut PerformanceStepRateQuery,
+) {
+    for mut text in frame_labels {
+        text.0 = format_counter(completed_steps);
+    }
+    for mut text in fps_labels {
+        text.0 = format_rate(fps);
+    }
+    for mut text in step_rate_labels {
+        text.0 = format_rate(step_rate);
+    }
+}
+
+fn write_adaptive_diagnostics(
+    runtime: &AutomataRuntime,
+    snapshot: &AutomataPerformanceSnapshot,
+    labels: &mut AdaptiveDiagnosticsQuery,
+) {
+    let message = if snapshot.render_thread_active && snapshot.adaptive {
+        let min_radius = snapshot.min_material_radius.max(f32::MIN_POSITIVE);
+        let median_ratio = snapshot.median_material_radius / min_radius;
+        let max_ratio = snapshot.max_material_radius / min_radius;
+        format!(
+            "adaptive {}/{} rows | radius 1/{:.2}/{:.2}x | support {}/{} | events +{}/-{}",
+            snapshot.resident_particle_count,
+            snapshot.dynamics_particle_count,
+            median_ratio,
+            max_ratio,
+            snapshot.support_bin_count,
+            snapshot.requested_support_bin_count,
+            snapshot.split_events,
+            snapshot.merge_events,
+        )
+    } else if let Some(adaptive) = runtime.adaptive.as_ref() {
+        let min_radius = adaptive
+            .particles
+            .represented_measure
+            .iter()
+            .map(|measure| {
+                burn_automata::material_footprint_radius(*measure, adaptive.particles.spatial_dims)
+            })
+            .fold(f32::INFINITY, f32::min);
+        let max_radius = adaptive
+            .particles
+            .represented_measure
+            .iter()
+            .map(|measure| {
+                burn_automata::material_footprint_radius(*measure, adaptive.particles.spatial_dims)
+            })
+            .fold(0.0_f32, f32::max);
+        format!(
+            "adaptive {} leaves | radius {:.2}x | GPU diagnostics pending",
+            adaptive.particles.len(),
+            max_radius / min_radius.max(f32::MIN_POSITIVE),
+        )
+    } else {
+        String::new()
+    };
+    for mut text in labels {
+        text.0.clone_from(&message);
+    }
+}
+
+pub(super) fn format_counter(value: usize) -> String {
+    format!("{value:>8}")
+}
+
+pub(super) fn format_rate(value: Option<f64>) -> String {
+    let Some(value) = value.filter(|value| value.is_finite() && *value >= 0.0) else {
+        return "   --.-".to_owned();
+    };
+    if value < 999.95 {
+        format!("{value:>7.1}")
+    } else if value < 999_950.0 {
+        format!("{:>6.2}k", value / 1_000.0)
+    } else if value < 999_950_000.0 {
+        format!("{:>6.2}M", value / 1_000_000.0)
+    } else {
+        "  >999M".to_owned()
     }
 }
 
@@ -329,6 +503,14 @@ pub(super) fn model_display_name(settings: &AutomataSettings) -> String {
         .generated_model_label
         .as_deref()
         .map(ToString::to_string)
+        .or_else(|| {
+            settings
+                .adaptive_model_path
+                .as_deref()
+                .and_then(|path| std::path::Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .map(|name| format!("adaptive {name}"))
+        })
         .or_else(|| {
             settings
                 .model_path
@@ -475,6 +657,8 @@ pub(super) fn apply_preset(runtime: &mut AutomataRuntime, preset: AutomataPreset
     runtime.model = NpaModel::seeded(config, 42);
     runtime.hashgrid = hashgrid;
     runtime.loaded_model_path = None;
+    runtime.loaded_adaptive_model_path = None;
+    runtime.adaptive = None;
     runtime.loaded_preset = Some(preset);
     runtime.trace = None;
     runtime.frame = 0;

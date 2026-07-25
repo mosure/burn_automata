@@ -62,6 +62,18 @@ impl NpaWeights {
         weights
     }
 
+    /// Initializes a trainable residual branch with an exactly zero output.
+    ///
+    /// Keeping the first layer seeded avoids the gradient-dead state produced
+    /// by zeroing both layers, while a zero output projection preserves the
+    /// wrapped model exactly until the residual branch is trained.
+    pub fn zero_output_seeded(config: &NpaConfig, seed: u64) -> Self {
+        let mut weights = Self::upstream_seeded(config, seed);
+        weights.w2.fill(0.0);
+        weights.b2.fill(0.0);
+        weights
+    }
+
     pub fn validate(&self, config: &NpaConfig) -> AutomataResult<()> {
         let expected_w1 = config.hidden_dims * config.perception_dims();
         let expected_w2 = config.update_dims() * config.hidden_dims;

@@ -31,11 +31,20 @@ impl WgpuAutomataExecutor {
             positions,
             WgpuNeighborMode::Auto,
         )?;
+        if batch_size > 1 && is_bvh_neighbor_mode(resolved_neighbor_mode) {
+            return Err(AutomataError::InvalidArgument(
+                "batched WGPU trajectories require a hash-grid neighbor mode".to_owned(),
+            ));
+        }
+        let cell_count = grid.cell_count().checked_mul(batch_size).ok_or_else(|| {
+            AutomataError::InvalidArgument("batched cell count overflow".to_owned())
+        })?;
         let grid_clear_len =
-            grid_clear_len_for_mode(grid.cell_count(), bucket_capacity, resolved_neighbor_mode)?;
+            grid_clear_len_for_mode(cell_count, bucket_capacity, resolved_neighbor_mode)?;
         let params = gpu_params(
             model,
             total,
+            batch_size,
             particle_count,
             grid,
             dt,
@@ -51,10 +60,21 @@ impl WgpuAutomataExecutor {
         let positions_buffer = storage_buffer_f32(&self.device, "positions", &position_values);
         let states_buffer = storage_buffer_f32(&self.device, "states", states);
         let weights_buffer = storage_buffer_f32(&self.device, "weights", &weights);
+        let mut material_values = vec![0.0_f32; total * 12];
+        for index in 0..total {
+            material_values[index * 12] = 1.0;
+            material_values[index * 12 + 10] = 1.0;
+            material_values[index * 12 + 11] = 1.0;
+        }
+        let material_buffer = storage_buffer_f32(
+            &self.device,
+            "burn_automata_unit_material",
+            &material_values,
+        );
         let linked_grid_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("linked_grid"),
             size: byte_len::<u32>(grid_storage_len_for_mode(
-                grid.cell_count(),
+                cell_count,
                 total,
                 bucket_capacity,
                 resolved_neighbor_mode,
@@ -95,6 +115,7 @@ impl WgpuAutomataExecutor {
                 bind_entry(1, &positions_buffer),
                 bind_entry(4, &linked_grid_buffer),
                 bind_entry(8, &indirect_buffer),
+                bind_entry(9, &material_buffer),
             ],
         });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -109,6 +130,7 @@ impl WgpuAutomataExecutor {
                 bind_entry(5, &out_positions_buffer),
                 bind_entry(6, &out_states_buffer),
                 bind_entry(7, &density_buffer),
+                bind_entry(9, &material_buffer),
             ],
         });
 
@@ -124,6 +146,8 @@ impl WgpuAutomataExecutor {
         )?;
         let density_staging =
             staging_read_buffer(&self.device, "burn_automata_density_staging", total)?;
+        let density_pipeline = required_pipeline(&self.density_pipeline, "density")?;
+        let update_pipeline = required_pipeline(&self.update_pipeline, "update")?;
 
         let mut encoder = self
             .device
@@ -153,7 +177,7 @@ impl WgpuAutomataExecutor {
                 label: Some("burn_automata_density_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.density_pipeline);
+            pass.set_pipeline(density_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dispatch_groups(total)?, 1, 1);
         }
@@ -162,7 +186,7 @@ impl WgpuAutomataExecutor {
                 label: Some("burn_automata_update_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.update_pipeline);
+            pass.set_pipeline(update_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dispatch_groups(total)?, 1, 1);
         }

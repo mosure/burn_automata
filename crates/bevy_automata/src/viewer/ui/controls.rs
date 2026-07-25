@@ -41,6 +41,8 @@ pub(in crate::viewer) fn reset_button() -> impl Scene {
         on(|_event: On<Pointer<Press>>, mut settings: ResMut<AutomataSettings>, mut runtime: ResMut<AutomataRuntime>| {
             settings.mark_changed();
             runtime.trace = None;
+            runtime.adaptive = None;
+            runtime.loaded_adaptive_model_path = None;
             runtime.frame = 0;
             runtime.status = "reset requested".to_string();
         })

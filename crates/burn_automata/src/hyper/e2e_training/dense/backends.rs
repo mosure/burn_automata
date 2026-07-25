@@ -1,8 +1,63 @@
 use super::super::{
-    BurnDenseOracleBatchOutput, BurnE2eRolloutExample, BurnE2eRolloutOutput,
-    BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput, DirectBasisTrainConfig,
-    DirectBasisTrainingExample, Target2dBurnCheckpointConfig, Target2dOracleTrainPlan,
+    AdaptiveTarget2dBurnConfig, BurnDenseOracleBatchOutput, BurnE2eRolloutExample,
+    BurnE2eRolloutOutput, BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput,
+    DirectBasisTrainConfig, DirectBasisTrainingExample, Target2dBurnCheckpointConfig,
+    Target2dOracleTrainPlan,
 };
+
+#[cfg(feature = "backend_wgpu")]
+pub(crate) fn train_adaptive_target2d_burn_wgpu(
+    model: &mut crate::NpaModel,
+    example: &DirectBasisTrainingExample,
+    plan: Target2dOracleTrainPlan,
+    adaptive: AdaptiveTarget2dBurnConfig,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    super::wgpu_imp::adaptive_training::train_adaptive_target2d_burn_dense(
+        model, example, plan, adaptive, checkpoint,
+    )
+}
+
+#[cfg(not(feature = "backend_wgpu"))]
+pub(crate) fn train_adaptive_target2d_burn_wgpu(
+    _model: &mut crate::NpaModel,
+    _example: &DirectBasisTrainingExample,
+    _plan: Target2dOracleTrainPlan,
+    _adaptive: AdaptiveTarget2dBurnConfig,
+    _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    Err(
+        std::io::Error::other("adaptive Target2D training requires the backend_wgpu feature")
+            .into(),
+    )
+}
+
+#[cfg(feature = "backend_cuda")]
+pub(crate) fn train_adaptive_target2d_burn_cuda(
+    model: &mut crate::NpaModel,
+    example: &DirectBasisTrainingExample,
+    plan: Target2dOracleTrainPlan,
+    adaptive: AdaptiveTarget2dBurnConfig,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    super::cuda_imp::adaptive_training::train_adaptive_target2d_burn_dense(
+        model, example, plan, adaptive, checkpoint,
+    )
+}
+
+#[cfg(not(feature = "backend_cuda"))]
+pub(crate) fn train_adaptive_target2d_burn_cuda(
+    _model: &mut crate::NpaModel,
+    _example: &DirectBasisTrainingExample,
+    _plan: Target2dOracleTrainPlan,
+    _adaptive: AdaptiveTarget2dBurnConfig,
+    _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    Err(
+        std::io::Error::other("adaptive Target2D training requires the backend_cuda feature")
+            .into(),
+    )
+}
 
 #[cfg(feature = "backend_wgpu")]
 pub(crate) fn predict_conditional_row_flow_adapter_wgpu(

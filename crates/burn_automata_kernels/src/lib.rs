@@ -3,7 +3,9 @@
 //! The CPU implementation is deliberately simple and deterministic. It is the
 //! correctness oracle for future CubeCL/WGPU kernels.
 
+pub mod adaptive;
 pub mod config;
+pub mod fused_sorted_grid;
 pub mod gaussian;
 pub mod hashgrid;
 #[cfg(feature = "cubecl")]
@@ -13,11 +15,30 @@ pub mod perception_cube;
 pub mod reference;
 pub mod spatial;
 pub mod splat;
+pub mod stable_sorted_cells;
 #[cfg(feature = "cubecl")]
 pub mod target2d_cube;
 pub mod tile;
 
+pub use adaptive::{
+    ACTIVE_QUADRATURE_BLEND_WGSL, ACTIVE_QUADRATURE_PROLONG_WGSL, AdaptiveGraphMetrics,
+    AdaptiveGraphPolicy, AdaptiveNpaPerceptionOptions, AdaptivePerceptionConfig,
+    AdaptivePerceptionOutput, AdaptivePerceptionPair, AdaptivePerceptionSemantics,
+    AdaptiveSupportBins, COUPLED_FINE_RECENTER_WGSL, MAX_ADAPTIVE_SUPPORT_BINS,
+    PAIRED_LOCAL_DETAIL_TOPOLOGY_WGSL, PERSISTENT_MODE_RESTRICT_WGSL, adaptive_npa_perceive,
+    adaptive_npa_perceive_all_pairs, adaptive_npa_perceive_state_adjoint,
+    adaptive_npa_perceive_state_adjoint_all_pairs, adaptive_npa_perceive_without_spacing,
+    adaptive_perceive, adaptive_perceive_all_pairs, adaptive_perceive_pair,
+    adaptive_perceive_state_adjoint, adaptive_perceive_state_adjoint_all_pairs,
+    adaptive_perceive_without_spacing, adaptive_proxy_perceive,
+};
+#[cfg(feature = "cubecl")]
+pub use adaptive::{
+    AdaptiveMergeCostCubeBackend, AdaptiveNpaPerceptionCubeAdjointOutput,
+    AdaptiveNpaPerceptionCubeBackend, AdaptiveNpaPerceptionCubeForwardOutput,
+};
 pub use config::{Boundary, HashGridConfig, HashGridMode, KernelError, KernelResult};
+pub use fused_sorted_grid::{FUSED_SORTED_GRID_MAX_CELLS, FUSED_SORTED_GRID_WGSL};
 pub use gaussian::{Gaussian3d, GaussianDecodeConfig, GaussianDecodeMode, decode_gaussians_3d};
 pub use hashgrid::{HashGridSnapshot, build_hashgrid};
 #[cfg(feature = "cubecl")]
@@ -37,6 +58,7 @@ pub use reference::{
 };
 pub use spatial::{SpatialStrategyKind, SpatialStrategyReport, analyze_spatial_strategy};
 pub use splat::{Splat2dConfig, splat_particles_2d};
+pub use stable_sorted_cells::STABLE_SORTED_CELLS_WGSL;
 #[cfg(feature = "cubecl")]
 pub use target2d_cube::{
     Target2dCubeAdjointBackend, Target2dCubeLossConfig, Target2dCubeLossOutput,

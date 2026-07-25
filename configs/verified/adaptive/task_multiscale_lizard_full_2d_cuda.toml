@@ -1,0 +1,428 @@
+report_output = "artifacts/adaptive_npa/task_multiscale_lizard_parity_full/report.json"
+model_output = "artifacts/adaptive_npa/task_multiscale_lizard_parity_full/model.adaptive.bpk"
+seed = 42
+backend = "cuda"
+
+[base_training]
+enabled = true
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+reference_model = "models/catalog/growing/lizard.bpk"
+model_output = "artifacts/adaptive_npa/task_multiscale_lizard_parity_full/base.bpk"
+checkpoint_root = "artifacts/adaptive_npa/task_multiscale_lizard_parity_full/base_checkpoints"
+checkpoint_interval_steps = 250
+checkpoint_interval_seconds = 300
+target_points = 4096
+target_image_size = 120
+target_threshold = 0.05
+
+[base_training.loss]
+image_size = 256
+sigma = 1.0
+lo = -1.0
+hi = 1.0
+center = true
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+background_density_loss_weight = 0.0
+foreground_density_loss_weight = 0.0
+composited_rgb_loss_weight = 0.0
+shape_chamfer_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[[base_training.phases]]
+name = "upstream-random-rollouts"
+particle_count = 4096
+epochs = 9999
+repetitions = 3
+report_interval = 250
+batch_size = 8
+pool_size = 512
+step_min = 32
+step_max = 96
+tbptt_chunk_steps = 96
+inject_seed_interval = 16
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+brush_size = 0.1
+per_parameter_grad_normalization = true
+scheduler_milestones = [2000, 4000, 6000, 8000]
+scheduler_gamma = 0.3
+
+[base_training.phases.optimizer]
+learning_rate = 0.0005
+weight_decay = 0.0
+grad_clip_norm = 0.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[[base_training.phases]]
+name = "fixed-96-refine-a"
+particle_count = 4096
+epochs = 999
+repetitions = 1
+report_interval = 50
+batch_size = 8
+pool_size = 512
+step_min = 96
+step_max = 96
+tbptt_chunk_steps = 96
+inject_seed_interval = 16
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+brush_size = 0.1
+per_parameter_grad_normalization = true
+scheduler_milestones = [250, 500, 750]
+scheduler_gamma = 0.3
+
+[base_training.phases.optimizer]
+learning_rate = 0.0001
+weight_decay = 0.0
+grad_clip_norm = 0.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[[base_training.phases]]
+name = "fixed-96-refine-b"
+particle_count = 4096
+epochs = 499
+repetitions = 1
+report_interval = 50
+batch_size = 8
+pool_size = 512
+step_min = 96
+step_max = 96
+tbptt_chunk_steps = 96
+inject_seed_interval = 16
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+brush_size = 0.1
+per_parameter_grad_normalization = true
+scheduler_milestones = [200, 350, 450]
+scheduler_gamma = 0.3
+
+[base_training.phases.optimizer]
+learning_rate = 0.0001
+weight_decay = 0.0
+grad_clip_norm = 0.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[[base_training.phases]]
+name = "world-frame-align"
+particle_count = 4096
+epochs = 299
+repetitions = 1
+report_interval = 25
+batch_size = 8
+pool_size = 512
+step_min = 96
+step_max = 96
+tbptt_chunk_steps = 96
+inject_seed_interval = 16
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+brush_size = 0.1
+per_parameter_grad_normalization = true
+scheduler_milestones = [150, 250]
+scheduler_gamma = 0.3
+
+[base_training.phases.optimizer]
+learning_rate = 0.00005
+weight_decay = 0.0
+grad_clip_norm = 0.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[base_training.phases.loss]
+image_size = 256
+sigma = 1.0
+lo = -1.0
+hi = 1.0
+center = false
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+background_density_loss_weight = 0.0
+foreground_density_loss_weight = 0.0
+composited_rgb_loss_weight = 0.0
+shape_chamfer_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[gates]
+require_fresh_base_training = true
+max_operator_constant_error = 1.0e-4
+max_operator_affine_error = 1.0e-4
+max_operator_fallback_fraction = 0.0
+max_topology_relative_error = 1.0e-12
+max_topology_spd_failures = 0
+min_topology_events_per_second = 250000.0
+max_validation_mse = 2.0
+min_desired_scale_correlation = 0.25
+min_controller_rows_per_second = 50000000.0
+max_rule_normalized_mean_squared_error = 1.0
+min_rule_update_correlation = -1.0
+max_multiscale_normalized_mean_squared_error = 1.02
+min_multiscale_update_correlation = 0.08
+min_proxy_relative_mse_gain = -1.0
+min_multiscale_dataset_footprint_coefficient_of_variation = 0.25
+min_adaptive_target_psnr_db = 21.4
+max_adaptive_teacher_psnr_gap_db = 0.0
+max_fine_fixed_teacher_psnr_gap_db = 0.0
+min_adaptive_over_budget_fixed_psnr_gain_db = -0.15
+min_adaptive_over_regular_base_psnr_gain_db = -0.12
+min_deployment_over_training_policy_psnr_gain_db = -0.01
+max_task_quality_leaf_relative_error = 0.0
+min_task_quality_footprint_coefficient_of_variation = 0.02
+min_task_quality_footprint_ratio = 3.8
+min_task_quality_topology_events = 2
+min_task_quality_detail_density_correlation = -1.0
+max_task_quality_high_to_low_detail_footprint_ratio = 1.1
+min_task_quality_refinement_defect_density_correlation = -1.0
+min_task_quality_refinement_defect_relative_gain = -0.10
+min_task_quality_controller_oracle_refinement_scale_correlation = 0.80
+min_task_quality_validation_seeds = 8
+min_validation_mean_adaptive_over_regular_base_psnr_gain_db = -0.01
+min_validation_worst_adaptive_over_regular_base_psnr_gain_db = -0.15
+min_validation_mean_adaptive_over_budget_fixed_psnr_gain_db = 0.0
+min_validation_worst_adaptive_over_budget_fixed_psnr_gain_db = -0.08
+min_validation_controller_oracle_refinement_scale_correlation = 0.80
+max_validation_measure_relative_drift = 1.0e-7
+max_validation_leaf_relative_error = 0.0
+max_rollout_target_relative_error = 0.0
+max_rollout_measure_relative_drift = 1.0e-7
+min_rollout_footprint_coefficient_of_variation = 0.02
+min_rollout_particle_steps_per_second = 60000.0
+require_graph_cap_and_search_parity = true
+max_sparse_conservation_error = 1.0e-12
+max_sparse_protected_band_nrmse = 1.0e-12
+min_sparse_largest_cap_count_reduction = 1.05
+max_sparse_boundary_hd95_voxels = 1.5
+
+[adaptive]
+spatial_dims = 2
+controller_hidden_dims = 128
+reference_footprint = 0.003125
+base_rule_footprint = 0.003125
+local_residual_scale = 0.0
+min_footprint = 0.0015625
+max_footprint = 0.025
+min_render_footprint = 0.0028
+max_render_footprint = 0.014
+render_footprint_exponent = 1.0
+min_leaves = 1024
+max_leaves = 4096
+target_leaves = 4096
+initial_leaves = 1024
+hierarchical_bootstrap_seed = true
+topology_interval = 1
+steady_topology_interval = 256
+topology_start_step = 1
+steady_topology_start_step = 240
+runtime_topology_control = "learned-refinement-defect"
+max_events_per_interval = 2
+bootstrap_end_step = 1
+bootstrap_events_per_interval = 1024
+bootstrap_seed_spread = 0.0
+render_transition_steps = 24
+render_footprint_relaxation = 0.20
+min_topology_footprint_ratio = 0.5
+max_topology_footprint_ratio = 2.0
+split_ratio = 0.78
+merge_ratio = 1.15
+split_probability = 0.90
+merge_probability = 0.90
+merge_extent_ratio = 4.0
+spatial_merge_groups_enabled = true
+merge_state_rms_limit = 0.06
+split_state_prolongation_scale = 0.0
+cooldown_steps = 24
+bandwidth_relaxation = 0.20
+domain_min = [-1.25, -1.25, 0.0]
+domain_max = [1.25, 1.25, 0.0]
+rule_perception = "npa-compatible"
+rule_graph_policy = "raw-support"
+
+[adaptive.proxy]
+enabled = true
+branch_factor = 4
+level = 2
+context_scale = 0.0
+bandwidth_scale = 2.5
+
+[adaptive.perception]
+dim = 2
+graph_policy = "directed-top-k"
+max_neighbors = 128
+pair_scale_power = 8.0
+support_bin_ratio = 2.0
+min_bandwidth = 0.01
+max_bandwidth = 0.4
+spacing_target_neighbors = 64.0
+spacing_root_iterations = 12
+shepard_epsilon = 1.0e-8
+moment_regularization = 1.0e-4
+moment_condition_limit = 1.0e5
+log_normalize_gradients = true
+include_position_features = false
+
+[operator]
+side = 17
+side_3d = 9
+jitter = 5.0e-4
+sparse_side_stride = 2
+
+[topology]
+samples = 10000
+
+[graph]
+spatial_dims = [2, 3]
+particle_counts = [512, 2048]
+neighbor_caps = [32, 64]
+all_pairs_baseline_max_particles = 512
+coarse_fraction = 0.25
+fine_bandwidth = 0.035
+coarse_bandwidth = 0.14
+target_fine_degree = 48.0
+warmup_runs = 1
+timed_runs = 3
+
+[scaling]
+resolutions = [16, 24, 32]
+interior_spacing_cap = 0.24
+protected_band_voxels = 2.25
+transition_divisor = 1.65
+retention_samples = 3
+quality_resolution = 24
+quality_spacing_cap_ratios = [2.0, 4.0]
+sphere_outer_radius = 0.85
+sphere_cavity_center = [0.22, -0.12, 0.10]
+sphere_cavity_radius = 0.22
+torus_major_radius = 0.60
+torus_minor_radius = 0.318
+
+[training_data]
+rows = 16384
+spatial_dims = 2
+seed = 42
+reference_footprint = 0.003125
+min_footprint = 0.0015625
+max_footprint = 0.025
+total_measure = 0.12566371
+target_leaf_count = 4096
+boundary_epsilon = 0.003125
+boundary_slope = 0.35
+
+[training]
+steps = 500
+report_interval = 50
+
+[training.optimizer]
+learning_rate = 0.003
+weight_decay = 1.0e-5
+grad_clip_norm = 5.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[multiscale_training]
+enabled = true
+fine_particle_count = 4096
+cut_leaf_counts = [768, 1536, 2048, 3072, 4096]
+rollout_steps = 96
+rollouts = 8
+temporal_samples = 9
+rows_per_cut = 512
+validation_rollouts = 2
+dt = 1.0
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+total_measure = 0.12566371
+bandwidth = 0.1
+steps = 1
+report_interval = 100
+controller_steps = 20000
+freeze_multiscale_rule = true
+freeze_controller = false
+deployment_enabled = false
+deployment_strategy = "fused-local"
+deployment_hidden_dims = 191
+deployment_steps = 600
+deployment_on_policy_rounds = 0
+deployment_on_policy_steps = 400
+deployment_replay_backend = "wgpu-resident"
+gradient_reduction_chunk_rows = 1024
+controller_split_label_ratio = 0.78
+controller_merge_label_ratio = 1.20
+residual_coordinate_weight = 0.0
+local_residual_training_scale = 1.0
+proxy_residual_training_scale = 0.0
+on_policy_rounds = 1
+controller_on_policy_only_replay = true
+on_policy_topology_control = "refinement-defect-oracle"
+on_policy_replay_backend = "wgpu-resident"
+on_policy_rollout_steps = 128
+on_policy_rollouts = 4
+on_policy_snapshot_interval = 8
+on_policy_rows_per_snapshot = 1024
+on_policy_steps = 0
+
+[multiscale_training.optimizer]
+learning_rate = 0.0005
+weight_decay = 1.0e-6
+grad_clip_norm = 5.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[multiscale_training.controller_optimizer]
+learning_rate = 0.001
+weight_decay = 1.0e-5
+grad_clip_norm = 5.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[rollout]
+enabled = true
+particles = 1024
+seed_scale = 0.2
+total_measure = 0.12566371
+
+[rollout.rollout]
+steps = 256
+dt = 1.0
+update_prob = 0.5
+seed = 42
+bandwidth_adaptation_enabled = false
+topology_enabled = true
+snapshot_interval = 64
+
+[task_quality]
+enabled = true
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+reference_model = "models/catalog/growing/lizard.bpk"
+image_size = 128
+rollout_steps = 256
+update_prob = 0.5
+seed = 42
+validation_seeds = [42, 43, 44, 45, 46, 47, 48, 49]
+bandwidth_adaptation_enabled = false
+topology_control = "learned-refinement-defect"

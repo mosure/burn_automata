@@ -16,11 +16,33 @@ pub(in crate::gpu) fn validate_gpu_step(
     dt: f32,
     update_prob: f32,
 ) -> AutomataResult<()> {
+    validate_gpu_step_impl(
+        model,
+        positions,
+        states,
+        batch_size,
+        particle_count,
+        grid,
+        dt,
+        update_prob,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_gpu_step_impl(
+    model: &NpaModel,
+    positions: &[[f32; 4]],
+    states: &[f32],
+    batch_size: usize,
+    particle_count: usize,
+    grid: &HashGridConfig,
+    dt: f32,
+    update_prob: f32,
+) -> AutomataResult<()> {
     validate_gpu_model_config(model, grid)?;
-    if batch_size != 1 {
+    if batch_size == 0 {
         return Err(AutomataError::InvalidArgument(
-            "WGPU step currently supports batch_size=1; hashgrid GPU batching is a follow-up"
-                .to_owned(),
+            "WGPU step requires batch_size greater than zero".to_owned(),
         ));
     }
     if particle_count == 0 {
@@ -106,6 +128,7 @@ pub(in crate::gpu) fn validate_gpu_model_config(
 pub(in crate::gpu) fn gpu_params(
     model: &NpaModel,
     total: usize,
+    batch_size: usize,
     particle_count: usize,
     grid: &HashGridConfig,
     dt: f32,
@@ -125,7 +148,11 @@ pub(in crate::gpu) fn gpu_params(
     params[PARAM_GRID_X] = u32_checked(grid.grid_size[0], "grid_size[0]")?;
     params[PARAM_GRID_Y] = u32_checked(grid.grid_size[1], "grid_size[1]")?;
     params[PARAM_GRID_Z] = u32_checked(grid.grid_size[2], "grid_size[2]")?;
-    params[PARAM_CELL_COUNT] = u32_checked(grid.cell_count(), "cell_count")?;
+    let cell_count = grid
+        .cell_count()
+        .checked_mul(batch_size)
+        .ok_or_else(|| AutomataError::InvalidArgument("batched cell count overflow".to_owned()))?;
+    params[PARAM_CELL_COUNT] = u32_checked(cell_count, "batched cell_count")?;
     params[PARAM_PERIODIC] = u32::from(grid.boundary == Boundary::Periodic);
     params[PARAM_LOG_GRAD] = u32::from(model.config.log_norm_grad);
     params[PARAM_LOG_DENSITY_GRAD] = u32::from(model.config.log_norm_density_grad);
@@ -141,10 +168,23 @@ pub(in crate::gpu) fn gpu_params(
     params[PARAM_MOTION_EPS] = model.config.motion_eps(grid.eps).to_bits();
     params[PARAM_UPDATE_PROB] = update_prob.to_bits();
     params[PARAM_STEP_INDEX] = 0;
-    params[PARAM_RANDOM_SEED] = (seed as u32) ^ ((seed >> 32) as u32);
+    params[PARAM_RANDOM_SEED] = gpu_random_seed(seed);
+    params[PARAM_LANE_SEEDS_START] = gpu_random_seed(seed);
     params[PARAM_PARTICLE_GRID] = u32::from(grid.mode == HashGridMode::Particle);
     params[PARAM_NEIGHBOR_LAYOUT] = neighbor_layout_code(neighbor_mode);
+    params[PARAM_BATCH_SIZE] = u32_checked(batch_size, "batch_size")?;
+    params[PARAM_SCALE_EQUIVARIANT] = u32::from(model.config.scale_equivariant());
+    params[PARAM_SUPPORT_BIN_COUNT] = 1;
+    params[PARAM_SPATIAL_CELL_COUNT] = u32_checked(grid.cell_count(), "spatial cell count")?;
+    params[PARAM_SUPPORT_BIN_MIN] = grid.eps.to_bits();
+    params[PARAM_SUPPORT_BIN_MAX] = grid.eps.to_bits();
+    params[PARAM_SUPPORT_BIN_RATIO] = 2.0_f32.to_bits();
+    params[PARAM_RESIDENT_CAPACITY] = u32_checked(total, "resident capacity")?;
     Ok(params)
+}
+
+pub(in crate::gpu) const fn gpu_random_seed(seed: u64) -> u32 {
+    (seed as u32) ^ ((seed >> 32) as u32)
 }
 
 pub(in crate::gpu) fn smoothing_poly6_normalization(grid: &HashGridConfig) -> f32 {

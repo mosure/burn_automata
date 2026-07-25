@@ -15,11 +15,17 @@ mod helpers;
 mod tests;
 mod types;
 
+pub(crate) use executor::WgpuPendingAdaptiveDiagnostics;
 pub use helpers::GAUSSIAN_SH_COEFF_COUNT;
 pub use types::{
-    WgpuAutomataExecutor, WgpuAutomataState, WgpuGaussianBindGroup, WgpuGaussianBufferRefs,
-    WgpuGaussianReadback, WgpuNeighborMode, WgpuNeighborReport, WgpuOwnedGaussianBuffers,
-    WgpuStepOutput,
+    WGPU_MATERIAL_UPDATE_MASK_MEMBERS, WgpuAutomataExecutor, WgpuAutomataState,
+    WgpuGaussianBindGroup, WgpuGaussianBufferRefs, WgpuGaussianReadback, WgpuMaterialStateInit,
+    WgpuMaterialUpdateMask, WgpuNeighborMode, WgpuNeighborReport, WgpuOwnedGaussianBuffers,
+    WgpuStepOutput, WgpuSupportBinConfig,
+};
+pub(crate) use types::{
+    WgpuActiveQuadratureProlongation, WgpuAdaptiveDiagnostics, WgpuAdaptiveLocalRuleMode,
+    WgpuCoupledFineSnapshot, WgpuPersistentModeRestriction, WgpuTeacherSnapshot,
 };
 
 #[allow(clippy::too_many_arguments)]

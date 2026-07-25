@@ -1,0 +1,85 @@
+backend = "wgpu"
+
+[source]
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+
+[output]
+model = "artifacts/adaptive/recurrent_target2d_lizard_smoke.adaptive.bpk"
+report = "artifacts/adaptive/recurrent_target2d_lizard_smoke.json"
+
+[model]
+rule_seed = 42
+controller_seed = 2902616621
+
+[target]
+points = 128
+threshold = 0.05
+image_size = 32
+
+[hashgrid]
+dim = 2
+boundary = "Clamped"
+mode = "Particle"
+grid_size = [64, 64, 1]
+eps = 0.1
+max_particles_per_block = 32
+
+[training.target2d]
+epochs = 1
+repetitions = 1
+report_interval = 1
+batch_size = 1
+pool_size = 2
+particle_count = 61
+step_min = 4
+step_max = 4
+tbptt_chunk_steps = 2
+inject_seed_interval = 1
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+brush_size = 0.0
+per_parameter_grad_normalization = true
+scheduler_milestones = []
+scheduler_gamma = 0.3
+
+[training.target2d.optimizer]
+learning_rate = 0.0005
+weight_decay = 0.0
+grad_clip_norm = 0.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[training.material]
+reference_particle_count = 64
+total_measure = 0.12566371
+fine_bandwidth = 0.1
+bandwidth_exponent = 0.5
+max_initial_fine_units = 4
+
+[training.topology]
+enabled = true
+start_step = 2
+split_radius_scale = 1.0
+merge_detail_scale = 0.01
+interval_steps = 2
+events_per_interval = 1
+
+[loss]
+image_size = 32
+sigma = 1.0
+lo = -1.0
+hi = 1.0
+center = true
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+background_density_loss_weight = 0.0
+foreground_density_loss_weight = 0.0
+composited_rgb_loss_weight = 0.0
+shape_chamfer_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0

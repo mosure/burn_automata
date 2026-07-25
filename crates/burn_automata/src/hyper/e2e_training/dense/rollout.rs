@@ -4,6 +4,10 @@ use super::*;
 
 pub(super) type DensityLitStats = (usize, Option<[usize; 4]>);
 
+pub(super) fn canonical_eval_mask_rng(seed: u64) -> StdRng {
+    StdRng::seed_from_u64(seed ^ 0x5eed)
+}
+
 fn normalized_motion_2d(
     dx_raw: Tensor2,
     motion_scale: f32,
@@ -61,6 +65,89 @@ pub(super) fn displacement_magnitude_batch(
         .div(denominator.clone().mul(denominator))
         .add_scalar(EPSILON * EPSILON)
         .sqrt()
+}
+
+pub(super) fn normalized_adaptive_motion_batch(
+    dx_raw: Tensor3,
+    motion_scale: f32,
+    bandwidth: Tensor2,
+    eps0: f32,
+    scale_equivariance: bool,
+    batches: usize,
+    particles: usize,
+) -> (Tensor3, Tensor3, Tensor3, Tensor2) {
+    let row_motion_scale = if scale_equivariance {
+        bandwidth.div_scalar(eps0).mul_scalar(motion_scale)
+    } else {
+        bandwidth.mul_scalar(0.0).add_scalar(motion_scale)
+    };
+    let dx_squared = dx_raw.clone().mul(dx_raw.clone()).sum_dim(2);
+    let denominator = dx_squared
+        .clone()
+        .add_scalar(EPSILON * EPSILON)
+        .sqrt()
+        .add_scalar(1.0);
+    let dx = dx_raw
+        .mul(
+            row_motion_scale
+                .clone()
+                .unsqueeze_dim::<3>(2)
+                .expand([batches, particles, 2]),
+        )
+        .div(denominator.clone().expand([batches, particles, 2]));
+    (dx, dx_squared, denominator, row_motion_scale)
+}
+
+pub(super) fn adaptive_displacement_magnitude_batch(
+    dx_squared: Tensor3,
+    denominator: Tensor3,
+    row_motion_scale: Tensor2,
+) -> Tensor3 {
+    dx_squared
+        .mul(
+            row_motion_scale
+                .clone()
+                .mul(row_motion_scale)
+                .unsqueeze_dim::<3>(2),
+        )
+        .div(denominator.clone().mul(denominator))
+        .add_scalar(EPSILON * EPSILON)
+        .sqrt()
+}
+
+fn adaptive_local_detail_from_features(features: Tensor3, state_dims: usize) -> Tensor2 {
+    let [batches, particles, _] = features.shape().dims::<3>();
+    let state_gradient = features
+        .clone()
+        .narrow(2, 2 * state_dims, 2 * state_dims);
+    let occupancy_gradient = features.narrow(2, 4 * state_dims, 2);
+    let state_detail = state_gradient
+        .clone()
+        .mul(state_gradient)
+        .sum_dim(2)
+        .sqrt()
+        .squeeze_dim::<2>(2);
+    let occupancy_detail = occupancy_gradient
+        .clone()
+        .mul(occupancy_gradient)
+        .sum_dim(2)
+        .sqrt()
+        .squeeze_dim::<2>(2);
+    let state_mean = state_detail
+        .clone()
+        .mean_dim(1)
+        .clamp_min(EPSILON)
+        .expand([batches, particles]);
+    let occupancy_mean = occupancy_detail
+        .clone()
+        .mean_dim(1)
+        .clamp_min(EPSILON)
+        .expand([batches, particles]);
+    state_detail
+        .div(state_mean)
+        .mul_scalar(0.25)
+        .add(occupancy_detail.div(occupancy_mean))
+        .clamp_min(EPSILON)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,6 +410,190 @@ pub(super) fn rollout_batch_eval_chunk(
         (x, s, displacement)
     }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rollout_adaptive_oracle_model_batch_chunk(
+    params: &BurnBaseBatch,
+    frozen_base: Option<&BurnBaseBatch>,
+    targets: &[BurnTargetExample],
+    indices: &[usize],
+    mut x: Tensor3,
+    mut s: Tensor3,
+    represented_measure: Tensor2,
+    bandwidth: Tensor2,
+    material_scale_feature: Tensor2,
+    residual_gate: Tensor2,
+    perception: burn_automata_kernels::AdaptivePerceptionConfig,
+    perception_options: burn_automata_kernels::AdaptiveNpaPerceptionOptions,
+    perception_semantics: burn_automata_kernels::AdaptivePerceptionSemantics,
+    residual_perception_semantics: Option<
+        burn_automata_kernels::AdaptivePerceptionSemantics,
+    >,
+    material_scale_conditioning: bool,
+    compatible_residual_material_features: bool,
+    config: DirectBasisTrainConfig,
+    particle_count: usize,
+    rngs: &mut [StdRng],
+    deterministic_masks: bool,
+    wgpu_mask_seeds: Option<&[u64]>,
+    wgpu_material_update_masks: Option<&[crate::adaptive::AdaptiveTarget2dUpdateMask]>,
+    mask_step_offset: usize,
+    steps: usize,
+    mut displacement: Tensor1,
+) -> (Tensor3, Tensor3, Tensor1, Tensor2) {
+    let unit_update = batch_update_prob_is_one(targets, indices);
+    let mask_stack = if unit_update {
+        None
+    } else if let Some(seeds) = wgpu_mask_seeds {
+        Some(host_batch_wgpu_mask_stack(
+            targets,
+            indices,
+            particle_count,
+            steps,
+            mask_step_offset,
+            seeds,
+            wgpu_material_update_masks,
+        ))
+    } else if params.model_count() == 1 && !deterministic_masks {
+        Some(device_batch_mask_stack(
+            targets,
+            indices,
+            particle_count,
+            steps,
+        ))
+    } else {
+        Some(host_batch_mask_stack_with_rngs(
+            targets,
+            indices,
+            particle_count,
+            steps,
+            rngs,
+        ))
+    };
+    let mut last_detail =
+        Tensor::<BurnBackend, 2>::zeros([indices.len(), particle_count], &x.device());
+    for step in 0..steps {
+        let perception_output = adaptive_perception::adaptive_npa_perception_batch(
+            x.clone(),
+            s.clone(),
+            represented_measure.clone(),
+            bandwidth.clone(),
+            perception,
+            perception_options,
+            perception_semantics,
+        );
+        let residual_perception_output = frozen_base.map(|_| {
+            let residual_semantics = residual_perception_semantics
+                .expect("a frozen-base adaptive rollout requires residual perception semantics");
+            if residual_semantics == perception_semantics {
+                perception_output.clone()
+            } else {
+                adaptive_perception::adaptive_npa_perception_batch(
+                    x.clone(),
+                    s.clone(),
+                    represented_measure.clone(),
+                    bandwidth.clone(),
+                    perception,
+                    perception_options,
+                    residual_semantics,
+                )
+            }
+        });
+        let features = perception_output.features.clone();
+        let detail_features = residual_perception_output
+            .as_ref()
+            .map_or_else(|| features.clone(), |output| output.features.clone());
+        last_detail =
+            adaptive_local_detail_from_features(detail_features, s.shape().dims::<3>()[2]);
+        let relative_scale = || {
+            let [batch_size, particle_count] = bandwidth.shape().dims::<2>();
+            material_scale_feature
+                .clone()
+                .clamp(-0.75, 3.0)
+                .reshape([batch_size, particle_count, 1])
+        };
+        let shared_features = if material_scale_conditioning {
+            Tensor::cat(vec![features.clone(), relative_scale()], 2)
+        } else {
+            features.clone()
+        };
+        let update = if let Some(frozen_base) = frozen_base {
+            let output_dims = 2 + s.shape().dims::<3>()[2];
+            let residual_perception_output = residual_perception_output
+                .expect("frozen-base adaptive rollout prepared residual perception");
+            let residual_semantics = residual_perception_semantics
+                .expect("a frozen-base adaptive rollout requires residual perception semantics");
+            let residual_gate = if residual_semantics
+                == burn_automata_kernels::AdaptivePerceptionSemantics::NormalizedAdaptive
+            {
+                residual_gate
+                    .clone()
+                    .max_pair(perception_output.coarse_exposure.clone())
+            } else {
+                perception_output.coarse_exposure.clone() * residual_gate.clone()
+            }
+            .reshape([indices.len(), particle_count, 1])
+            .expand([indices.len(), particle_count, output_dims]);
+            let residual_features = if compatible_residual_material_features {
+                Tensor::cat(
+                    vec![
+                        residual_perception_output.features.clone(),
+                        relative_scale(),
+                        residual_perception_output
+                            .coarse_exposure
+                            .clone()
+                            .reshape([indices.len(), particle_count, 1]),
+                    ],
+                    2,
+                )
+            } else {
+                residual_perception_output.features
+            };
+            frozen_base.forward(features)
+                + params.forward(residual_features) * residual_gate
+        } else {
+            params.forward(shared_features)
+        };
+        let state_dims = s.shape().dims::<3>()[2];
+        let dx_raw = update.clone().narrow(2, 0, 2);
+        let ds = update.narrow(2, 2, state_dims);
+        let (dx, dx_squared, denominator, row_motion_scale) =
+            normalized_adaptive_motion_batch(
+            dx_raw,
+            config.motion_scale,
+            bandwidth.clone(),
+            perception_options.eps0,
+            perception_options.scale_equivariance,
+            indices.len(),
+            particle_count,
+        );
+        if config.loss_config.displacement_regularizer_weight > 0.0 {
+            let dx_norm = adaptive_displacement_magnitude_batch(
+                dx_squared,
+                denominator,
+                row_motion_scale,
+            )
+                    .reshape([indices.len(), particle_count])
+                    .mean_dim(1)
+                    .squeeze_dim::<1>(1);
+            displacement = displacement + dx_norm;
+        }
+        if unit_update {
+            x = x + dx;
+            s = s + ds;
+        } else {
+            let mask = mask_stack
+                .as_ref()
+                .expect("non-unit update_prob should have a mask stack")
+                .clone()
+                .narrow(0, step, 1)
+                .squeeze_dim::<3>(0);
+            x = x + dx.mul(mask.clone().expand([indices.len(), particle_count, 2]));
+            s = s + ds.mul(mask.expand([indices.len(), particle_count, state_dims]));
+        }
+    }
+    (x, s, displacement, last_detail)
+}
+
     pub(super) fn example_eval_loss_bounded(
         params: &BurnBaseParams,
         adapter: &BurnAdapterParams,
@@ -338,7 +609,7 @@ pub(super) fn rollout_batch_eval_chunk(
             seed,
             device,
         );
-        let mut rng = StdRng::seed_from_u64(seed ^ 0x005e_ed2d);
+        let mut rng = canonical_eval_mask_rng(seed);
         let mut displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
         let chunk_steps = tbptt_chunk_steps(config);
         let mut remaining_steps = config.rollout_steps;
@@ -365,6 +636,57 @@ pub(super) fn rollout_batch_eval_chunk(
         target_splat_loss(&x, &s, target, config, adapter, displacement)
     }
 
+    pub(super) fn example_eval_quality_bounded(
+        params: &BurnBaseParams,
+        adapter: &BurnAdapterParams,
+        target: &BurnTargetExample,
+        config: DirectBasisTrainConfig,
+        seed: u64,
+    ) -> BurnE2eQualityBatchTensors {
+        let device = &target.target_rgb.device();
+        let (mut x, mut s) = seed_tensors(
+            target.particle_count,
+            config,
+            target.seed_scale,
+            seed,
+            device,
+        );
+        let mut rng = canonical_eval_mask_rng(seed);
+        let mut displacement = Tensor::<BurnBackend, 1>::zeros([1], device);
+        let chunk_steps = tbptt_chunk_steps(config);
+        let mut remaining_steps = config.rollout_steps;
+        while remaining_steps > 0 {
+            let steps = remaining_steps.min(chunk_steps);
+            (x, s, displacement) = rollout_single_chunk(
+                params,
+                adapter,
+                target,
+                x,
+                s,
+                config,
+                &mut rng,
+                steps,
+                displacement,
+            );
+            remaining_steps -= steps;
+            if remaining_steps > 0 {
+                x = detach2(x);
+                s = detach2(s);
+                displacement = detach1(displacement);
+            }
+        }
+        let adapter_batch = BurnAdapterBatch::from_indices(std::slice::from_ref(adapter), &[0]);
+        target_splat_quality_batch_vector(
+            &x.unsqueeze_dim::<3>(0),
+            &s.unsqueeze_dim::<3>(0),
+            std::slice::from_ref(target),
+            &[0],
+            config,
+            &adapter_batch,
+            displacement,
+        )
+    }
+
     pub(super) fn batch_example_eval_loss(
         params: &BurnBaseParams,
         adapters: &[BurnAdapterParams],
@@ -385,7 +707,7 @@ pub(super) fn rollout_batch_eval_chunk(
             seed_batch_tensors(targets, indices, particle_count, config, seed, device);
         let mut rngs = indices
             .iter()
-            .map(|idx| StdRng::seed_from_u64(seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
+            .map(|idx| canonical_eval_mask_rng(seed.wrapping_add(*idx as u64)))
             .collect::<Vec<_>>();
         let mut displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
         let chunk_steps = tbptt_chunk_steps(config);
@@ -441,7 +763,7 @@ pub(super) fn rollout_batch_eval_chunk(
             seed_batch_tensors(targets, indices, particle_count, config, seed, device);
         let mut rngs = indices
             .iter()
-            .map(|idx| StdRng::seed_from_u64(seed.wrapping_add(*idx as u64) ^ 0x005e_ed2d))
+            .map(|idx| canonical_eval_mask_rng(seed.wrapping_add(*idx as u64)))
             .collect::<Vec<_>>();
         let mut displacement = Tensor::<BurnBackend, 1>::zeros([indices.len()], device);
         let chunk_steps = tbptt_chunk_steps(config);

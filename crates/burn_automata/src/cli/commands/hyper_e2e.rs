@@ -1,5 +1,4 @@
 use crate::cli::prelude::*;
-pub(crate) use crate::hyper::e2e_training::Target2dBurnCheckpointConfig;
 use crate::hyper::{
     hypernet::HyperNpa2dGradients,
     training::{adapter_gradient_vector, apply_hyper_sgd},
@@ -27,7 +26,6 @@ mod sources;
 pub(crate) use direct_basis::{
     run_train_hyper_2d_adapter_bank, run_train_hyper_2d_direct_basis,
     run_validate_hyper_2d_direct_basis_oracles, run_validate_hyper_2d_psnr_gate,
-    train_target_2d_burn_oracle,
 };
 pub(crate) use rollout::run_train_hyper_2d_e2e_rollout;
 

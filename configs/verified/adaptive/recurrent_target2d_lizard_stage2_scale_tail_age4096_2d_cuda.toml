@@ -1,0 +1,138 @@
+# Stage 2 of the validated direct-active lizard curriculum. Extend persistent
+# pool age to 4096 steps and add a final-quarter trajectory objective while
+# continuing to optimize only represented-material scale conditioning.
+backend = "cuda"
+
+[source]
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+rule_model = "artifacts/adaptive/checkpoints/recurrent_lizard_upstreamloss_graded144_scale_age1024_best.bpk"
+oracle_model = "models/catalog/growing/lizard.bpk"
+
+[output]
+model = "artifacts/adaptive/recurrent_target2d_lizard_upstreamloss_graded144_scale_tail25_age4096.adaptive.bpk"
+report = "artifacts/adaptive/recurrent_target2d_lizard_upstreamloss_graded144_scale_tail25_age4096.json"
+
+[model]
+rule_seed = 42
+controller_seed = 2902616621
+
+[target]
+points = 4096
+threshold = 0.05
+image_size = 120
+
+[hashgrid]
+dim = 2
+boundary = "Clamped"
+mode = "Particle"
+grid_size = [64, 64, 1]
+eps = 0.1
+max_particles_per_block = 32
+
+[training]
+rule_training = "shared-scale-conditioned-rule"
+restriction_policy = "dynamics-detail"
+optimize_material_scale_only = true
+log1p_trajectory_loss = false
+trajectory_tail_fraction = 0.25
+trajectory_tail_weight = 1.0
+fresh_seed_trajectories = 1
+checkpoint_seeds = [42, 43, 44, 45, 46, 47, 48, 49]
+checkpoint_horizons = [256, 512, 1024, 2048, 4096]
+max_pool_age_steps = 4096
+backward_loss_scale = 0.000001
+
+[training.target2d]
+epochs = 2047
+repetitions = 1
+report_interval = 256
+batch_size = 16
+pool_size = 256
+particle_count = 3070
+step_min = 32
+step_max = 95
+tbptt_chunk_steps = 95
+inject_seed_interval = 16
+update_prob = 0.5
+seed = 10742
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+brush_size = 0.1
+per_parameter_grad_normalization = true
+scheduler_milestones = [1536]
+scheduler_gamma = 0.3
+
+[training.target2d.optimizer]
+learning_rate = 0.0000003
+weight_decay = 0.0
+grad_clip_norm = 0.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[training.material]
+reference_particle_count = 4096
+total_measure = 0.12566371
+fine_bandwidth = 0.1
+bandwidth_exponent = 0.0
+max_initial_fine_units = 4
+seed_layout = "graded-continuous"
+seed_measure_ratio = 1.44
+
+[training.topology]
+enabled = true
+start_step = 95
+end_step = 475
+split_radius_scale = 1.0
+merge_detail_scale = 0.01
+min_relative_gain = 0.0
+interval_steps = 95
+events_per_interval = 4
+
+[loss]
+image_size = 256
+sigma = 1.0
+lo = -1.0
+hi = 1.0
+center = true
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+background_density_loss_weight = 0.0
+foreground_density_loss_weight = 0.0
+composited_rgb_loss_weight = 0.0
+render_rgb_loss_weight = 0.0
+shape_chamfer_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[checkpoint]
+current_rule = "artifacts/adaptive/checkpoints/recurrent_lizard_upstreamloss_graded144_scale_tail25_age4096_current.bpk"
+best_rule = "artifacts/adaptive/checkpoints/recurrent_lizard_upstreamloss_graded144_scale_tail25_age4096_best.bpk"
+report = "artifacts/adaptive/checkpoints/recurrent_lizard_upstreamloss_graded144_scale_tail25_age4096.json"
+current_training_state = "artifacts/adaptive/checkpoints/recurrent_lizard_upstreamloss_graded144_scale_tail25_age4096_state.mpk"
+include_particle_pool = true
+interval_steps = 256
+interval_seconds = 300
+
+[validation]
+# Narrow graded-scale training control; this stage is not an adaptive-resolution
+# promotion candidate.
+require_adaptive_resolution = false
+seeds = [42, 43, 44, 45, 46, 47, 48, 49]
+horizons = [96, 256, 512, 1024, 2048, 4096]
+update_prob = 0.5
+seed_scale = 0.2
+seed_mode = "UniformCircle"
+dt = 1.0
+topology_enabled = true
+min_adaptive_psnr_db = -100.0
+max_oracle_psnr_gap_db = 100.0
+max_same_rule_fine_psnr_gap_db = 100.0
+max_psnr_drift_db = 100.0
+max_material_relative_error = 0.00002
+max_out_of_bounds_fraction = 1.0
+max_grid_overflow = 4294967295
+max_interaction_work_ratio = 1.0
+max_wall_time_ratio = 100.0

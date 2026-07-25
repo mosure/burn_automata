@@ -64,6 +64,8 @@ pub(in crate::viewer) fn handle_slider_value_change(
                 settings.particle_count = next;
                 settings.mark_changed();
                 runtime.trace = None;
+                runtime.adaptive = None;
+                runtime.loaded_adaptive_model_path = None;
                 runtime.frame = 0;
             }
         }

@@ -4,6 +4,18 @@ use super::*;
 pub(in crate::viewer) struct StatusLabel;
 
 #[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct PerformanceFrameLabel;
+
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct PerformanceFpsLabel;
+
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct PerformanceStepRateLabel;
+
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct AdaptiveDiagnosticsLabel;
+
+#[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct SettingsLabel;
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -104,5 +116,62 @@ pub(in crate::viewer) struct AutomataUiState {
 impl Default for AutomataUiState {
     fn default() -> Self {
         Self { visible: true }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(in crate::viewer) struct AutomataPerformanceSnapshot {
+    pub(in crate::viewer) render_thread_active: bool,
+    pub(in crate::viewer) adaptive: bool,
+    pub(in crate::viewer) completed_steps: usize,
+    pub(in crate::viewer) resident_particle_count: usize,
+    pub(in crate::viewer) dynamics_particle_count: usize,
+    pub(in crate::viewer) support_bin_count: usize,
+    pub(in crate::viewer) requested_support_bin_count: usize,
+    pub(in crate::viewer) min_material_radius: f32,
+    pub(in crate::viewer) median_material_radius: f32,
+    pub(in crate::viewer) max_material_radius: f32,
+    pub(in crate::viewer) split_events: usize,
+    pub(in crate::viewer) merge_events: usize,
+}
+
+#[derive(Resource, Clone, Debug, Default)]
+pub(in crate::viewer) struct AutomataPerformanceTelemetry(
+    std::sync::Arc<std::sync::RwLock<AutomataPerformanceSnapshot>>,
+);
+
+impl AutomataPerformanceTelemetry {
+    pub(in crate::viewer) fn snapshot(&self) -> AutomataPerformanceSnapshot {
+        self.0
+            .read()
+            .map(|snapshot| snapshot.clone())
+            .unwrap_or_default()
+    }
+
+    pub(in crate::viewer) fn publish(&self, snapshot: AutomataPerformanceSnapshot) {
+        if let Ok(mut current) = self.0.write() {
+            *current = snapshot;
+        }
+    }
+}
+
+#[derive(Resource, Clone, Debug)]
+pub(in crate::viewer) struct PerformanceUiState {
+    pub(in crate::viewer) initialized: bool,
+    pub(in crate::viewer) last_sample_seconds: f64,
+    pub(in crate::viewer) last_completed_steps: usize,
+    pub(in crate::viewer) smoothed_fps: Option<f64>,
+    pub(in crate::viewer) smoothed_step_rate: Option<f64>,
+}
+
+impl Default for PerformanceUiState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            last_sample_seconds: 0.0,
+            last_completed_steps: 0,
+            smoothed_fps: None,
+            smoothed_step_rate: None,
+        }
     }
 }

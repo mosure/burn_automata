@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
@@ -255,6 +258,11 @@ pub struct Target2dLossConfig {
     pub foreground_density_loss_weight: f32,
     #[serde(default)]
     pub composited_rgb_loss_weight: f32,
+    /// Direct MSE on the premultiplied RGB render. This is the objective
+    /// aligned with `render_rgb_psnr_db`; it remains opt-in so the upstream
+    /// Target2D parity objective is unchanged.
+    #[serde(default)]
+    pub render_rgb_loss_weight: f32,
     #[serde(default)]
     pub shape_chamfer_loss_weight: f32,
     pub displacement_regularizer_weight: f32,
@@ -276,6 +284,7 @@ impl Default for Target2dLossConfig {
             background_density_loss_weight: 0.0,
             foreground_density_loss_weight: 0.0,
             composited_rgb_loss_weight: 0.0,
+            render_rgb_loss_weight: 0.0,
             shape_chamfer_loss_weight: 0.0,
             displacement_regularizer_weight: 0.01,
             overflow_regularizer_weight: 100.0,
@@ -295,6 +304,8 @@ pub struct Target2dLossReport {
     pub foreground_density_loss: f32,
     #[serde(default)]
     pub composited_rgb_loss: f32,
+    #[serde(default)]
+    pub render_rgb_loss: f32,
     #[serde(default)]
     pub shape_chamfer_loss: f32,
     pub displacement_regularizer: f32,
@@ -329,6 +340,7 @@ pub struct Target2dUpstreamOneStepOutput {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Target2dTrainingConfig {
     pub epochs: usize,
     pub repetitions: usize,
@@ -416,6 +428,315 @@ pub struct Target2dTrainingReport {
     pub total_elapsed_ms: f64,
     pub median_particle_steps_per_sec: f64,
     pub history: Vec<Target2dTrainingHistoryEntry>,
+}
+
+/// Device backend for the canonical Burn Target2D trainer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Target2dGpuBackend {
+    Wgpu,
+    Cuda,
+}
+
+#[derive(Clone, Debug)]
+pub struct Target2dGpuCheckpointConfig {
+    pub current_model_output: PathBuf,
+    pub best_model_output: PathBuf,
+    pub metadata_output: PathBuf,
+    /// Optional binary optimizer/step sidecar written with each current model.
+    pub training_state_output: Option<PathBuf>,
+    /// Optional binary sidecar used to restore optimizer state and global step.
+    pub resume_training_state: Option<PathBuf>,
+    /// Payload hash of the model loaded alongside `resume_training_state`.
+    pub resume_model_sha256: Option<String>,
+    /// Restore optimizer moments while starting a new rollout phase at step
+    /// zero. This permits a deliberate particle-count curriculum but never
+    /// restores the previous phase's particle pool.
+    pub curriculum_resume: bool,
+    /// Persist the resident particle pool in the binary sidecar. This is exact
+    /// but can be large for quality-scale 4,096-particle runs.
+    pub include_particle_pool: bool,
+    pub source: String,
+    pub interval_steps: usize,
+    pub interval_duration: Option<Duration>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Target2dGpuLossSummary {
+    pub examples: usize,
+    pub mean_total_loss: f32,
+    pub max_total_loss: f32,
+    pub mean_splat_loss: f32,
+    pub mean_color_loss: f32,
+    pub mean_density_loss: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Target2dGpuTrainingHistoryEntry {
+    pub step: usize,
+    pub loss: f32,
+    pub eval_loss: Option<Target2dGpuLossSummary>,
+    pub base_grad_norm: f32,
+    pub base_grad_scale: f32,
+    pub examples_seen: usize,
+    pub particle_steps_per_sec: f64,
+    pub elapsed_ms: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Target2dGpuTrainingReport {
+    pub backend: String,
+    pub device: String,
+    pub metrics: serde_json::Value,
+    pub history: Vec<Target2dGpuTrainingHistoryEntry>,
+    pub best_train_loss: Option<f32>,
+    pub best_train_step: usize,
+    pub best_fresh_seed_eval_loss: Option<f32>,
+    pub best_fresh_seed_eval_step: usize,
+    pub best_fresh_seed_render_rgb_psnr_db: Option<f32>,
+    pub best_fresh_seed_render_rgb_psnr_step: usize,
+}
+
+const TARGET2D_GPU_MAX_TRAIN_PARTICLES: usize = 4096;
+const TARGET2D_GPU_QUALITY_PARTICLE_THRESHOLD: usize = 512;
+const TARGET2D_GPU_QUALITY_TBPTT_CHUNK_STEPS: usize = 32;
+const TARGET2D_GPU_DEFAULT_CHUNK_FLOATS: usize = 16_000_000;
+const TARGET2D_GPU_QUALITY_CHUNK_FLOATS: usize = 512 * 1024;
+
+/// Train one shared NPA rule from the image objective on Burn/WGPU or
+/// Burn/CUDA. This is the library-owned implementation used by both the thin
+/// CLI wrapper and adaptive training stages.
+pub fn train_target_2d_gpu(
+    backend: Target2dGpuBackend,
+    model: &mut NpaModel,
+    hashgrid: &HashGridConfig,
+    target: TargetImage2d,
+    training_config: Target2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+    checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
+) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    use crate::hyper::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
+    use crate::hyper::e2e_training::{
+        DirectBasisTrainConfig, DirectBasisTrainingExample, Target2dBurnCheckpointConfig,
+        Target2dOracleTrainPlan, dense,
+    };
+    use crate::{NpaLowRankAdapter, SgdConfig};
+
+    validate_training_config(&training_config)?;
+    model.validate()?;
+    if model.config.spatial_dims != SPATIAL_DIMS_2D || hashgrid.dim != SPATIAL_DIMS_2D {
+        return Err(AutomataError::InvalidArgument(
+            "Target2D GPU training requires a 2D model and hashgrid".to_string(),
+        )
+        .into());
+    }
+    if training_config.particle_count > TARGET2D_GPU_MAX_TRAIN_PARTICLES {
+        return Err(AutomataError::InvalidArgument(format!(
+            "Target2D GPU training is capped at {TARGET2D_GPU_MAX_TRAIN_PARTICLES} particles; requested {}",
+            training_config.particle_count
+        ))
+        .into());
+    }
+
+    let quality_tiled = training_config.particle_count >= TARGET2D_GPU_QUALITY_PARTICLE_THRESHOLD;
+    let automatic_tbptt = automatic_target2d_gpu_tbptt_chunk_steps(
+        training_config.particle_count,
+        training_config.step_max,
+    );
+    let tbptt_chunk_steps = if training_config.tbptt_chunk_steps == 0 {
+        automatic_tbptt
+    } else {
+        training_config
+            .tbptt_chunk_steps
+            .clamp(1, training_config.step_max)
+    };
+    let chunk_floats = if quality_tiled {
+        TARGET2D_GPU_QUALITY_CHUNK_FLOATS
+    } else {
+        TARGET2D_GPU_DEFAULT_CHUNK_FLOATS
+    };
+    let training_example = DirectBasisTrainingExample {
+        target,
+        adapter: NpaLowRankAdapter::zeros(&model.config, 1, 1.0),
+        last_train_loss: None,
+        particle_count: Some(training_config.particle_count),
+        update_prob: Some(training_config.update_prob),
+        seed_scale: Some(training_config.seed_scale),
+    };
+    let total_steps = training_config
+        .epochs
+        .saturating_add(1)
+        .saturating_mul(training_config.repetitions);
+    let direct_config = DirectBasisTrainConfig {
+        steps: total_steps,
+        report_interval: training_config.report_interval.max(1),
+        example_batch_size: training_config.batch_size.max(1),
+        tbptt_chunk_steps,
+        loss_on_final_chunk_only: true,
+        use_particle_pool: true,
+        pool_size: training_config
+            .pool_size
+            .max(training_config.batch_size)
+            .max(1),
+        inject_seed_interval: training_config.inject_seed_interval.max(1),
+        brush_size: training_config.brush_size,
+        stopgrad_pos: model.config.stopgrad_pos,
+        stopgrad_state: model.config.stopgrad_state,
+        rollout_particles: training_config.particle_count,
+        rollout_step_min: training_config.step_min,
+        rollout_steps: training_config.step_max,
+        update_prob: training_config.update_prob,
+        seed: training_config.seed,
+        seed_scale: training_config.seed_scale,
+        seed_mode: training_config.seed_mode,
+        grid_eps: hashgrid.eps,
+        motion_scale: model.config.alpha * model.config.motion_eps(hashgrid.eps),
+        loss_config,
+        target2d_loss_backend: Target2dLossBackend::Auto,
+        perception_backend: PerceptionRolloutBackend::Auto,
+        per_parameter_grad_normalization: training_config.per_parameter_grad_normalization,
+        base_sgd: SgdConfig {
+            learning_rate: training_config.optimizer.learning_rate,
+            weight_decay: training_config.optimizer.weight_decay,
+            grad_clip_norm: training_config.optimizer.grad_clip_norm,
+        },
+        adapter_sgd: SgdConfig {
+            learning_rate: 0.0,
+            weight_decay: 0.0,
+            grad_clip_norm: 0.0,
+        },
+        adapter_l2_weight: 0.0,
+        update_base: true,
+        eval_examples: 1,
+        eval_interval: training_config.report_interval.max(1),
+        eval_batch_size: 1,
+        eval_seed: training_config.seed,
+        system_memory_budget_gb: Some(24.0),
+        gpu_memory_budget_gb: Some(24.0),
+        max_dense_train_particles: TARGET2D_GPU_MAX_TRAIN_PARTICLES,
+        max_dense_chunk_floats: chunk_floats,
+        max_splat_chunk_floats: chunk_floats,
+    };
+    let plan = Target2dOracleTrainPlan {
+        train: direct_config,
+        steps_per_repetition: training_config.epochs.saturating_add(1),
+        repetitions: training_config.repetitions,
+        optimizer: training_config.optimizer,
+        scheduler_milestones: training_config.scheduler_milestones.clone(),
+        scheduler_gamma: training_config.scheduler_gamma,
+    };
+    let checkpoint = checkpoint_config.map(|config| Target2dBurnCheckpointConfig {
+        current_model_output: config.current_model_output.clone(),
+        best_model_output: config.best_model_output.clone(),
+        metadata_output: config.metadata_output.clone(),
+        training_state_output: config.training_state_output.clone(),
+        resume_training_state: config.resume_training_state.clone(),
+        resume_model_sha256: config.resume_model_sha256.clone(),
+        curriculum_resume: config.curriculum_resume,
+        include_particle_pool: config.include_particle_pool,
+        model_config: model.config.clone(),
+        hashgrid: hashgrid.clone(),
+        source: config.source.clone(),
+        interval_steps: config.interval_steps,
+        interval_duration: config.interval_duration,
+    });
+    let output = match backend {
+        Target2dGpuBackend::Wgpu => dense::train_target2d_oracle_burn_wgpu(
+            model,
+            &training_example,
+            plan,
+            checkpoint.as_ref(),
+        )?,
+        Target2dGpuBackend::Cuda => dense::train_target2d_oracle_burn_cuda(
+            model,
+            &training_example,
+            plan,
+            checkpoint.as_ref(),
+        )?,
+    };
+    let promoted_best_checkpoint = if let Some(config) = checkpoint_config
+        && config.best_model_output.is_file()
+    {
+        let manifest = crate::import::load_manifest(&config.best_model_output)?;
+        if manifest.config != model.config || manifest.hashgrid != *hashgrid {
+            return Err(AutomataError::InvalidModel(
+                "Target2D best checkpoint does not match the active model/hashgrid".to_string(),
+            )
+            .into());
+        }
+        *model = manifest.into_model();
+        true
+    } else {
+        false
+    };
+    let best_fresh_seed_eval = output
+        .history
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .eval_loss
+                .map(|loss| (entry.step, loss.mean_total_loss))
+        })
+        .min_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs));
+    let best_fresh_seed_render_rgb_psnr_db = output
+        .metrics
+        .get("best_fresh_seed_render_rgb_psnr_db")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| values.first())
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32);
+    let best_fresh_seed_render_rgb_psnr_step = output
+        .metrics
+        .get("best_fresh_seed_render_rgb_psnr_step")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| values.first())
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut metrics = output.metrics;
+    metrics["target2d_training_config"] = serde_json::to_value(&training_config)?;
+    metrics["rollout_step_min"] = serde_json::json!(training_config.step_min);
+    metrics["rollout_step_max"] = serde_json::json!(training_config.step_max);
+    metrics["promoted_best_checkpoint"] = serde_json::json!(promoted_best_checkpoint);
+    Ok(Target2dGpuTrainingReport {
+        backend: output.backend.to_string(),
+        device: output.device,
+        metrics,
+        history: output
+            .history
+            .into_iter()
+            .map(|entry| Target2dGpuTrainingHistoryEntry {
+                step: entry.step,
+                loss: entry.loss,
+                eval_loss: entry.eval_loss.map(|loss| Target2dGpuLossSummary {
+                    examples: loss.examples,
+                    mean_total_loss: loss.mean_total_loss,
+                    max_total_loss: loss.max_total_loss,
+                    mean_splat_loss: loss.mean_splat_loss,
+                    mean_color_loss: loss.mean_color_loss,
+                    mean_density_loss: loss.mean_density_loss,
+                }),
+                base_grad_norm: entry.base_grad_norm,
+                base_grad_scale: entry.base_grad_scale,
+                examples_seen: entry.examples_seen,
+                particle_steps_per_sec: entry.particle_steps_per_sec,
+                elapsed_ms: entry.elapsed_ms,
+            })
+            .collect(),
+        best_train_loss: output.best_train_loss.into_iter().next().flatten(),
+        best_train_step: output.best_train_step.into_iter().next().unwrap_or(0),
+        best_fresh_seed_eval_loss: best_fresh_seed_eval.map(|(_, loss)| loss),
+        best_fresh_seed_eval_step: best_fresh_seed_eval.map_or(0, |(step, _)| step),
+        best_fresh_seed_render_rgb_psnr_db,
+        best_fresh_seed_render_rgb_psnr_step,
+    })
+}
+
+fn automatic_target2d_gpu_tbptt_chunk_steps(particle_count: usize, step_max: usize) -> usize {
+    if particle_count >= TARGET2D_GPU_QUALITY_PARTICLE_THRESHOLD {
+        step_max.clamp(1, TARGET2D_GPU_QUALITY_TBPTT_CHUNK_STEPS)
+    } else {
+        step_max.max(1)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -518,6 +839,669 @@ pub fn render_rollout_2d_splat(
     splat_render(&positions_2d, &colors, pixel_size, cfg, output_scale)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn render_variable_rollout_2d_splat(
+    positions: &[[f32; 4]],
+    states: &[f32],
+    state_dims: usize,
+    pixel_sizes: &[f32],
+    output_scales: &[f32],
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    if state_dims < 3 || states.len() != positions.len() * state_dims {
+        return Err(AutomataError::InvalidArgument(
+            "variable 2D rollout splat state shape mismatch".to_string(),
+        ));
+    }
+    if pixel_sizes.len() != positions.len()
+        || output_scales.len() != positions.len()
+        || pixel_sizes
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        || output_scales
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(AutomataError::InvalidArgument(
+            "variable 2D rollout splat footprint/scale shape mismatch".to_string(),
+        ));
+    }
+    let positions_2d = if let Some(target_mean) = center {
+        centered_batch_positions(positions, target_mean, true)
+    } else {
+        positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(states, state_dims);
+    splat_render_variable(&positions_2d, &colors, pixel_sizes, output_scales, cfg)
+}
+
+/// Renders one isotropic Gaussian per active adaptive material row with the
+/// exact footprint, output-scale, and represented-measure centering contract
+/// used by recurrent adaptive Target2D training.
+pub fn render_active_material_rollout_2d_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    fine_measure: f32,
+    base_pixel_size: f32,
+    target_point_count: usize,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    particles.validate()?;
+    if particles.spatial_dims != 2
+        || particles.state_dims < 3
+        || !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+        || target_point_count == 0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "active-material 2D splat inputs are invalid".to_owned(),
+        ));
+    }
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(
+            &particles.positions,
+            &particles.represented_measure,
+            target_mean,
+        )
+    } else {
+        particles
+            .positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(&particles.states, particles.state_dims);
+    let pixel_sizes = particles
+        .represented_measure
+        .iter()
+        .map(|measure| base_pixel_size * (*measure / fine_measure).sqrt())
+        .collect::<Vec<_>>();
+    let reference_count = particles.total_measure() as f32 / fine_measure;
+    let output_scale = target_point_count as f32 / reference_count.max(f32::MIN_POSITIVE);
+    let output_scales = vec![output_scale; particles.len()];
+    splat_render_variable(&positions, &colors, &pixel_sizes, &output_scales, cfg)
+}
+
+/// Diagnostic-only covariance-shaped rendering control.
+///
+/// Renders adaptive 2D material using its conservative covariance rather than
+/// collapsing every leaf to an isotropic footprint.
+pub(crate) fn render_adaptive_rollout_2d_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    particles.validate()?;
+    if particles.spatial_dims != 2 || particles.state_dims < 3 {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive 2D splat rendering requires 2D particles with color state".to_string(),
+        ));
+    }
+    if !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive 2D splat rendering requires positive fine measure and pixel size".to_string(),
+        ));
+    }
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(
+            &particles.positions,
+            &particles.represented_measure,
+            target_mean,
+        )
+    } else {
+        particles
+            .positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(&particles.states, particles.state_dims);
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    splat_render_adaptive(
+        &positions,
+        &colors,
+        &particles.represented_measure,
+        &particles.covariance,
+        fine_footprint,
+        base_pixel_size,
+        cfg,
+        None,
+        0.0,
+    )
+}
+
+/// Renders exactly one isotropic Gaussian per adaptive material leaf.
+///
+/// Radius is derived only from represented measure. Conservative covariance
+/// is deliberately excluded from rendering so hierarchy restriction cannot
+/// gain an arbitrary anisotropic shape channel.
+pub fn render_adaptive_rollout_2d_isotropic_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    particles.validate()?;
+    render_adaptive_material_2d_isotropic_splat(
+        &particles.positions,
+        &particles.states,
+        particles.state_dims,
+        &particles.represented_measure,
+        fine_measure,
+        base_pixel_size,
+        cfg,
+        center,
+    )
+}
+
+/// Renders the deployable isotropic adaptive primitive, including transient
+/// scalar footprint interpolation and its represented-measure opacity
+/// compensation. This is the CPU reference for Bevy/WGPU adaptive rendering.
+pub fn render_adaptive_rollout_2d_runtime_isotropic_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    particles.validate()?;
+    if !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive runtime 2D rendering requires positive fine measure and pixel size"
+                .to_string(),
+        ));
+    }
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(
+            &particles.positions,
+            &particles.represented_measure,
+            target_mean,
+        )
+    } else {
+        particles
+            .positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(&particles.states, particles.state_dims);
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    let pixel_sizes = particles
+        .render_footprint
+        .iter()
+        .map(|footprint| base_pixel_size * *footprint / fine_footprint)
+        .collect::<Vec<_>>();
+    let opacity = particles
+        .represented_measure
+        .iter()
+        .zip(&particles.render_footprint)
+        .map(|(measure, footprint)| {
+            crate::adaptive::adaptive_isotropic_gaussian_geometry(*measure, *footprint, 2)
+                .map(|geometry| geometry.opacity)
+        })
+        .collect::<AutomataResult<Vec<_>>>()?;
+    splat_render_variable(&positions, &colors, &pixel_sizes, &opacity, cfg)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_adaptive_material_2d_isotropic_splat(
+    positions: &[[f32; 4]],
+    states: &[f32],
+    state_dims: usize,
+    represented_measure: &[f32],
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    if positions.is_empty()
+        || state_dims < 3
+        || states.len() != positions.len() * state_dims
+        || represented_measure.len() != positions.len()
+        || represented_measure
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive isotropic material splat input shape is invalid".to_string(),
+        ));
+    }
+    if !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive isotropic 2D rendering requires positive fine measure and pixel size"
+                .to_string(),
+        ));
+    }
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(positions, represented_measure, target_mean)
+    } else {
+        positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(states, state_dims);
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    let pixel_sizes = represented_measure
+        .iter()
+        .map(|measure| {
+            base_pixel_size * crate::adaptive::material_footprint_radius(*measure, 2)
+                / fine_footprint
+        })
+        .collect::<Vec<_>>();
+    splat_render_variable(
+        &positions,
+        &colors,
+        &pixel_sizes,
+        &vec![1.0; positions.len()],
+        cfg,
+    )
+}
+
+/// Diagnostic-only compact covariance rendering control.
+///
+/// Renders one unit-opacity Gaussian per material leaf. Covariance determines
+/// anisotropy and orientation, while a dimension-aware isotropic contraction
+/// makes integrated area follow represented measure without a translucent,
+/// over-broad footprint.
+pub(crate) fn render_adaptive_rollout_2d_compact_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+    compactness: f32,
+) -> AutomataResult<Target2dRenderedSplat> {
+    particles.validate()?;
+    render_adaptive_material_2d_compact_splat(
+        &particles.positions,
+        &particles.states,
+        particles.state_dims,
+        &particles.represented_measure,
+        &particles.covariance,
+        fine_measure,
+        base_pixel_size,
+        cfg,
+        center,
+        compactness,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_adaptive_material_2d_compact_splat(
+    positions: &[[f32; 4]],
+    states: &[f32],
+    state_dims: usize,
+    represented_measure: &[f32],
+    covariance: &[[f32; 9]],
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+    compactness: f32,
+) -> AutomataResult<Target2dRenderedSplat> {
+    if positions.is_empty()
+        || state_dims < 3
+        || states.len() != positions.len() * state_dims
+        || represented_measure.len() != positions.len()
+        || covariance.len() != positions.len()
+        || represented_measure
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive material splat input shape is invalid".to_string(),
+        ));
+    }
+    if !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive material splat requires positive fine measure and pixel size".to_string(),
+        ));
+    }
+    if !compactness.is_finite() || !(0.0..=1.0).contains(&compactness) {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive render compactness must be finite and in [0,1]".to_string(),
+        ));
+    }
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(positions, represented_measure, target_mean)
+    } else {
+        positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(states, state_dims);
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    splat_render_adaptive(
+        &positions,
+        &colors,
+        represented_measure,
+        covariance,
+        fine_footprint,
+        base_pixel_size,
+        cfg,
+        None,
+        compactness,
+    )
+}
+
+/// Diagnostic-only affine covariance rendering control.
+///
+/// Renders one anisotropic Gaussian per adaptive leaf while reconstructing RGB
+/// from the retained physical state Jacobian over that Gaussian's footprint.
+pub(crate) fn render_adaptive_rollout_2d_affine_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    physical_state_gradient: &[f32],
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<Target2dRenderedSplat> {
+    particles.validate()?;
+    let gradient_dims = particles.state_dims * particles.spatial_dims;
+    if particles.spatial_dims != 2
+        || particles.state_dims < 3
+        || physical_state_gradient.len() != particles.len() * gradient_dims
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive affine splat rendering requires 2D color particles and one physical state Jacobian per leaf"
+                .to_string(),
+        ));
+    }
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(
+            &particles.positions,
+            &particles.represented_measure,
+            target_mean,
+        )
+    } else {
+        particles
+            .positions
+            .iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(&particles.states, particles.state_dims);
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    splat_render_adaptive(
+        &positions,
+        &colors,
+        &particles.represented_measure,
+        &particles.covariance,
+        fine_footprint,
+        base_pixel_size,
+        cfg,
+        Some((physical_state_gradient, particles.state_dims)),
+        0.0,
+    )
+}
+
+/// Decodes coarse material leaves into canonical fine-scale render quadrature.
+/// Simulation still advances only the active leaves; the returned count makes
+/// the separate rendering budget explicit.
+pub(crate) fn render_adaptive_rollout_2d_quadrature_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    physical_state_gradient: &[f32],
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<(Target2dRenderedSplat, usize)> {
+    particles.validate()?;
+    let gradient_dims = particles.state_dims * particles.spatial_dims;
+    if particles.spatial_dims != 2
+        || particles.state_dims < 3
+        || physical_state_gradient.len() != particles.len() * gradient_dims
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive quadrature decoder requires 2D particles and one physical state Jacobian per leaf"
+                .to_string(),
+        ));
+    }
+    if !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive quadrature decoder requires positive fine measure and pixel size".to_string(),
+        ));
+    }
+
+    let expected_primitives =
+        particles
+            .represented_measure
+            .iter()
+            .try_fold(0_usize, |total, measure| {
+                canonical_render_primitive_count(*measure, fine_measure)
+                    .and_then(|count| total.checked_add(count))
+                    .ok_or_else(|| {
+                        AutomataError::InvalidArgument(
+                            "adaptive quadrature render budget overflowed usize".to_string(),
+                        )
+                    })
+            })?;
+    let mut decoded_positions = Vec::with_capacity(expected_primitives);
+    let mut decoded_colors = Vec::with_capacity(expected_primitives);
+    let mut decoded_measure = Vec::with_capacity(expected_primitives);
+    let mut decoded_covariance = Vec::with_capacity(expected_primitives);
+    for source in 0..particles.len() {
+        let source_primitives =
+            canonical_render_primitive_count(particles.represented_measure[source], fine_measure)
+                .ok_or_else(|| {
+                AutomataError::InvalidArgument(format!(
+                    "adaptive leaf {source} measure is not a power-of-four multiple of fine measure"
+                ))
+            })?;
+        let parent = crate::adaptive::CanonicalMaterial {
+            represented_measure: particles.represented_measure[source] as f64,
+            position: particles.positions[source][..2]
+                .iter()
+                .map(|value| *value as f64)
+                .collect(),
+            covariance: vec![
+                particles.covariance[source][0] as f64,
+                particles.covariance[source][1] as f64,
+                particles.covariance[source][3] as f64,
+                particles.covariance[source][4] as f64,
+            ],
+            extensive: Vec::new(),
+        };
+        let mut leaves = vec![parent];
+        while leaves.len() < source_primitives {
+            let mut refined = Vec::with_capacity(leaves.len() * 4);
+            for leaf in &leaves {
+                refined.extend(crate::adaptive::canonical_split(leaf)?);
+            }
+            leaves = refined;
+        }
+        let state_base = source * particles.state_dims;
+        let gradient_base = source * gradient_dims;
+        for leaf in leaves {
+            let position = [leaf.position[0] as f32, leaf.position[1] as f32];
+            let offset = [
+                position[0] - particles.positions[source][0],
+                position[1] - particles.positions[source][1],
+            ];
+            let mut color = [0.0_f32; 3];
+            for (channel, value) in color.iter_mut().enumerate() {
+                let state_channel = particles.state_dims - 3 + channel;
+                let gradient = gradient_base + state_channel * 2;
+                *value = particles.states[state_base + state_channel]
+                    + 0.5
+                    + physical_state_gradient[gradient] * offset[0]
+                    + physical_state_gradient[gradient + 1] * offset[1];
+            }
+            decoded_positions.push(position);
+            decoded_colors.push(color);
+            decoded_measure.push(leaf.represented_measure as f32);
+            decoded_covariance.push([
+                leaf.covariance[0] as f32,
+                leaf.covariance[1] as f32,
+                0.0,
+                leaf.covariance[2] as f32,
+                leaf.covariance[3] as f32,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ]);
+        }
+    }
+    debug_assert_eq!(decoded_positions.len(), expected_primitives);
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(&decoded_positions, &decoded_measure, target_mean)
+    } else {
+        decoded_positions
+    };
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    let render = splat_render_adaptive(
+        &positions,
+        &decoded_colors,
+        &decoded_measure,
+        &decoded_covariance,
+        fine_footprint,
+        base_pixel_size,
+        cfg,
+        None,
+        0.0,
+    )?;
+    Ok((render, expected_primitives))
+}
+
+/// Renders the exact fine child stencils retained by persistent-quadrature
+/// controls. This is a diagnostic ceiling: both dynamics and rendering retain
+/// the original fine degrees of freedom even though material is reported as a
+/// smaller active hierarchy cut.
+pub(crate) fn render_adaptive_rollout_2d_retained_quadrature_splat(
+    particles: &crate::adaptive::AdaptiveParticleSet,
+    fine_measure: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    center: Option<[f32; 2]>,
+) -> AutomataResult<(Target2dRenderedSplat, usize)> {
+    particles.validate()?;
+    if particles.spatial_dims != 2
+        || particles.state_dims < 3
+        || !fine_measure.is_finite()
+        || fine_measure <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "retained adaptive quadrature requires 2D color particles and positive fine measure/pixel size"
+                .to_string(),
+        ));
+    }
+
+    let templates = particles
+        .bootstrap_templates
+        .iter()
+        .map(|template| (template.parent_id, template))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected_primitives = particles
+        .len()
+        .checked_add(
+            particles
+                .bootstrap_templates
+                .iter()
+                .map(|template| template.children.len().saturating_sub(1))
+                .sum::<usize>(),
+        )
+        .ok_or_else(|| {
+            AutomataError::InvalidArgument(
+                "retained adaptive render budget overflowed usize".to_string(),
+            )
+        })?;
+    let mut positions = Vec::with_capacity(expected_primitives);
+    let mut states = Vec::with_capacity(expected_primitives * particles.state_dims);
+    let mut measure = Vec::with_capacity(expected_primitives);
+    let mut covariance = Vec::with_capacity(expected_primitives);
+    for row in 0..particles.len() {
+        if let Some(template) = templates.get(&particles.particle_id[row]) {
+            for child in &template.children {
+                positions.push(child.position);
+                states.extend_from_slice(&child.state);
+                measure.push(child.represented_measure);
+                covariance.push(child.covariance);
+            }
+        } else {
+            positions.push(particles.positions[row]);
+            states.extend_from_slice(
+                &particles.states[row * particles.state_dims..(row + 1) * particles.state_dims],
+            );
+            measure.push(particles.represented_measure[row]);
+            covariance.push(particles.covariance[row]);
+        }
+    }
+    debug_assert_eq!(positions.len(), expected_primitives);
+    let positions = if let Some(target_mean) = center {
+        centered_weighted_positions(&positions, &measure, target_mean)
+    } else {
+        positions
+            .into_iter()
+            .map(|position| [position[0], position[1]])
+            .collect()
+    };
+    let colors = tail_colors(&states, particles.state_dims);
+    let fine_footprint = crate::adaptive::material_footprint_radius(fine_measure, 2);
+    let render = splat_render_adaptive(
+        &positions,
+        &colors,
+        &measure,
+        &covariance,
+        fine_footprint,
+        base_pixel_size,
+        cfg,
+        None,
+        0.0,
+    )?;
+    Ok((render, expected_primitives))
+}
+
+fn canonical_render_primitive_count(measure: f32, fine_measure: f32) -> Option<usize> {
+    let ratio = measure / fine_measure;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return None;
+    }
+    // Matched fixed-budget controls use one equal-measure primitive whose
+    // measure lies between the native and first canonical 4x level.
+    if ratio < 2.0 {
+        return Some(1);
+    }
+    let mut count = 1_usize;
+    while (count as f32) < ratio * (1.0 - 1.0e-4) {
+        count = count.checked_mul(4)?;
+    }
+    ((count as f32 - ratio).abs() <= 1.0e-3 * ratio.max(1.0)).then_some(count)
+}
+
 pub fn target_2d_loss(
     positions: &[[f32; 4]],
     states: &[f32],
@@ -571,6 +1555,7 @@ pub fn target_2d_loss_with_adjoint(
     let mut background_density_loss = 0.0_f32;
     let mut foreground_density_loss = 0.0_f32;
     let mut composited_rgb_loss = 0.0_f32;
+    let mut render_rgb_loss = 0.0_f32;
     let mut shape_chamfer_loss = 0.0_f32;
     let mut position_gradients = vec![[0.0_f32; 4]; positions.len()];
     let mut state_gradients = vec![0.0_f32; states.len()];
@@ -631,11 +1616,15 @@ pub fn target_2d_loss_with_adjoint(
                 let idx = pixel * 3 + channel;
                 let color_diff = rendered.rgb[idx] - target_render.rgb[idx];
                 color_loss += target_2d_l1l2(color_diff) * color_gate / color_denom;
+                render_rgb_loss += color_diff * color_diff / color_denom;
                 rgb_adjoint[idx] = cfg.splat_loss_weight
                     * cfg.color_loss_weight
                     * color_gate
                     * target_2d_l1l2_grad(color_diff)
                     / color_denom;
+                rgb_adjoint[idx] +=
+                    cfg.splat_loss_weight * cfg.render_rgb_loss_weight * 2.0 * color_diff
+                        / color_denom;
                 if cfg.composited_rgb_loss_weight > 0.0 {
                     let predicted_raw = rendered.rgb[idx] + 1.0 - predicted_alpha;
                     let target_composited =
@@ -722,7 +1711,8 @@ pub fn target_2d_loss_with_adjoint(
         + cfg.density_loss_weight * density_loss
         + cfg.background_density_loss_weight * background_density_loss
         + cfg.foreground_density_loss_weight * foreground_density_loss
-        + cfg.composited_rgb_loss_weight * composited_rgb_loss;
+        + cfg.composited_rgb_loss_weight * composited_rgb_loss
+        + cfg.render_rgb_loss_weight * render_rgb_loss;
     let total_loss = cfg.splat_loss_weight * splat_loss
         + cfg.shape_chamfer_loss_weight * shape_chamfer_loss
         + cfg.displacement_regularizer_weight * displacement_regularizer
@@ -738,6 +1728,7 @@ pub fn target_2d_loss_with_adjoint(
             background_density_loss,
             foreground_density_loss,
             composited_rgb_loss,
+            render_rgb_loss,
             shape_chamfer_loss,
             displacement_regularizer,
             overflow_regularizer,
@@ -1309,6 +2300,30 @@ fn centered_batch_positions(
         .collect()
 }
 
+fn centered_weighted_positions<const D: usize>(
+    positions: &[[f32; D]],
+    weights: &[f32],
+    target_mean: [f32; 2],
+) -> Vec<[f32; 2]> {
+    debug_assert!(D >= 2);
+    debug_assert_eq!(positions.len(), weights.len());
+    let total = weights.iter().copied().sum::<f32>().max(f32::MIN_POSITIVE);
+    let mut mean = [0.0_f32; 2];
+    for (position, weight) in positions.iter().zip(weights) {
+        mean[0] += *weight * position[0] / total;
+        mean[1] += *weight * position[1] / total;
+    }
+    positions
+        .iter()
+        .map(|position| {
+            [
+                position[0] - mean[0] + target_mean[0],
+                position[1] - mean[1] + target_mean[1],
+            ]
+        })
+        .collect()
+}
+
 fn tail_colors(states: &[f32], state_dims: usize) -> Vec<[f32; 3]> {
     states
         .chunks_exact(state_dims)
@@ -1389,7 +2404,7 @@ fn splat_render(
     let mut density = vec![0.0_f32; pixels];
     for (position, color) in positions.iter().zip(colors) {
         let samples = particle_splat_samples(*position, pixel_size, cfg);
-        let denom = samples.iter().map(|sample| sample.g).sum::<f32>() + IMAGE_EPSILON;
+        let denom = particle_splat_denominator(*position, pixel_size, cfg);
         let norm_scale = splat_norm_scale(pixel_size, cfg);
         for sample in samples {
             let weight = output_scale * norm_scale * sample.g / denom;
@@ -1401,6 +2416,413 @@ fn splat_render(
         }
     }
     Ok(RenderedSplat2d { rgb, density })
+}
+
+fn splat_render_variable(
+    positions: &[[f32; 2]],
+    colors: &[[f32; 3]],
+    pixel_sizes: &[f32],
+    output_scales: &[f32],
+    cfg: Target2dLossConfig,
+) -> AutomataResult<RenderedSplat2d> {
+    if positions.len() != colors.len()
+        || positions.len() != pixel_sizes.len()
+        || positions.len() != output_scales.len()
+    {
+        return Err(AutomataError::InvalidArgument(
+            "variable splat arrays have different lengths".to_string(),
+        ));
+    }
+    let pixels = cfg.image_size * cfg.image_size;
+    let mut rgb = vec![0.0_f32; pixels * 3];
+    let mut density = vec![0.0_f32; pixels];
+    for (((position, color), pixel_size), output_scale) in positions
+        .iter()
+        .zip(colors)
+        .zip(pixel_sizes)
+        .zip(output_scales)
+    {
+        let samples = particle_splat_samples(*position, *pixel_size, cfg);
+        let denom = particle_splat_denominator(*position, *pixel_size, cfg);
+        let norm_scale = splat_norm_scale(*pixel_size, cfg);
+        for sample in samples {
+            let weight = *output_scale * norm_scale * sample.g / denom;
+            density[sample.pixel] += weight;
+            let rgb_base = sample.pixel * 3;
+            rgb[rgb_base] += color[0] * weight;
+            rgb[rgb_base + 1] += color[1] * weight;
+            rgb[rgb_base + 2] += color[2] * weight;
+        }
+    }
+    Ok(RenderedSplat2d { rgb, density })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn splat_render_adaptive(
+    positions: &[[f32; 2]],
+    colors: &[[f32; 3]],
+    represented_measure: &[f32],
+    covariance: &[[f32; 9]],
+    fine_footprint: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    affine_state: Option<(&[f32], usize)>,
+    compactness: f32,
+) -> AutomataResult<RenderedSplat2d> {
+    if positions.len() != colors.len()
+        || positions.len() != represented_measure.len()
+        || positions.len() != covariance.len()
+        || affine_state.is_some_and(|(gradient, state_dims)| {
+            state_dims < 3 || gradient.len() != positions.len() * state_dims * 2
+        })
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive splat arrays have different lengths".to_string(),
+        ));
+    }
+    let pixels = cfg.image_size * cfg.image_size;
+    let mut rgb = vec![0.0_f32; pixels * 3];
+    let mut density = vec![0.0_f32; pixels];
+    for index in 0..positions.len() {
+        let (primitive, samples) = adaptive_compact_splat_primitive_with_samples(
+            positions[index],
+            colors[index],
+            represented_measure[index],
+            covariance[index],
+            fine_footprint,
+            base_pixel_size,
+            cfg,
+            compactness,
+        )?;
+        for sample in samples {
+            let weight = primitive.weight_scale * sample.g;
+            density[sample.pixel] += weight;
+            let rgb_base = sample.pixel * 3;
+            for channel in 0..3 {
+                let color =
+                    affine_state.map_or(primitive.color[channel], |(gradient, state_dims)| {
+                        let gradient_base = index * state_dims * 2 + (state_dims - 3 + channel) * 2;
+                        let pixel_to_world = (cfg.hi - cfg.lo) / cfg.image_size as f32;
+                        colors[index][channel]
+                            + gradient[gradient_base] * sample.dx * pixel_to_world
+                            - gradient[gradient_base + 1] * sample.dy * pixel_to_world
+                    });
+                rgb[rgb_base + channel] += color * weight;
+            }
+        }
+    }
+    Ok(RenderedSplat2d { rgb, density })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AdaptiveCompactSplatPrimitive {
+    #[cfg(all(
+        any(feature = "backend_cuda", feature = "backend_wgpu"),
+        any(test, feature = "gpu_wgpu")
+    ))]
+    pub center_pixel: [f32; 2],
+    #[cfg(all(
+        any(feature = "backend_cuda", feature = "backend_wgpu"),
+        any(test, feature = "gpu_wgpu")
+    ))]
+    pub inverse_sigma_squared: [f32; 2],
+    #[cfg(all(
+        any(feature = "backend_cuda", feature = "backend_wgpu"),
+        any(test, feature = "gpu_wgpu")
+    ))]
+    pub sin: f32,
+    #[cfg(all(
+        any(feature = "backend_cuda", feature = "backend_wgpu"),
+        any(test, feature = "gpu_wgpu")
+    ))]
+    pub cos: f32,
+    pub weight_scale: f32,
+    pub color: [f32; 3],
+}
+
+#[cfg(all(
+    any(feature = "backend_cuda", feature = "backend_wgpu"),
+    any(test, feature = "gpu_wgpu")
+))]
+pub(crate) fn adaptive_isotropic_splat_primitive(
+    position: [f32; 2],
+    color: [f32; 3],
+    represented_measure: f32,
+    fine_footprint: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+) -> AutomataResult<AdaptiveCompactSplatPrimitive> {
+    if !represented_measure.is_finite()
+        || represented_measure <= 0.0
+        || !fine_footprint.is_finite()
+        || fine_footprint <= 0.0
+        || !base_pixel_size.is_finite()
+        || base_pixel_size <= 0.0
+    {
+        return Err(AutomataError::InvalidArgument(
+            "adaptive isotropic splat primitive requires positive finite material geometry"
+                .to_string(),
+        ));
+    }
+    let pixel_size = base_pixel_size
+        * crate::adaptive::material_footprint_radius(represented_measure, 2)
+        / fine_footprint;
+    let pixel_size = [pixel_size; 2];
+    let denominator = adaptive_particle_splat_denominator(position, pixel_size, 0.0, cfg);
+    Ok(adaptive_compact_splat_primitive_from_geometry(
+        position,
+        color,
+        pixel_size,
+        0.0,
+        1.0,
+        denominator,
+        cfg,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(
+    any(feature = "backend_cuda", feature = "backend_wgpu"),
+    any(test, feature = "gpu_wgpu")
+))]
+pub(crate) fn adaptive_compact_splat_primitive(
+    position: [f32; 2],
+    color: [f32; 3],
+    represented_measure: f32,
+    covariance: [f32; 9],
+    fine_footprint: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    compactness: f32,
+) -> AutomataResult<AdaptiveCompactSplatPrimitive> {
+    let (pixel_size, angle, opacity) = adaptive_compact_splat_geometry(
+        represented_measure,
+        covariance,
+        fine_footprint,
+        base_pixel_size,
+        compactness,
+    )?;
+    let denominator = adaptive_particle_splat_denominator(position, pixel_size, angle, cfg);
+    Ok(adaptive_compact_splat_primitive_from_geometry(
+        position,
+        color,
+        pixel_size,
+        angle,
+        opacity,
+        denominator,
+        cfg,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adaptive_compact_splat_primitive_with_samples(
+    position: [f32; 2],
+    color: [f32; 3],
+    represented_measure: f32,
+    covariance: [f32; 9],
+    fine_footprint: f32,
+    base_pixel_size: f32,
+    cfg: Target2dLossConfig,
+    compactness: f32,
+) -> AutomataResult<(AdaptiveCompactSplatPrimitive, Vec<ParticleSplatSample>)> {
+    let (pixel_size, angle, opacity) = adaptive_compact_splat_geometry(
+        represented_measure,
+        covariance,
+        fine_footprint,
+        base_pixel_size,
+        compactness,
+    )?;
+    let samples = adaptive_particle_splat_samples(position, pixel_size, angle, cfg);
+    let denominator = adaptive_particle_splat_denominator(position, pixel_size, angle, cfg);
+    let primitive = adaptive_compact_splat_primitive_from_geometry(
+        position,
+        color,
+        pixel_size,
+        angle,
+        opacity,
+        denominator,
+        cfg,
+    );
+    Ok((primitive, samples))
+}
+
+fn adaptive_compact_splat_geometry(
+    represented_measure: f32,
+    covariance: [f32; 9],
+    fine_footprint: f32,
+    base_pixel_size: f32,
+    compactness: f32,
+) -> AutomataResult<([f32; 2], f32, f32)> {
+    let mut geometry = crate::adaptive::diagnostic_covariance_gaussian_geometry(
+        represented_measure,
+        covariance,
+        2,
+    )?;
+    if compactness > 0.0 {
+        let contraction = geometry.opacity.powf(0.5 * compactness);
+        geometry.scale[0] *= contraction;
+        geometry.scale[1] *= contraction;
+        geometry.opacity = geometry.opacity.powf(1.0 - compactness);
+    }
+    Ok((
+        [
+            base_pixel_size * geometry.scale[0] / fine_footprint,
+            base_pixel_size * geometry.scale[1] / fine_footprint,
+        ],
+        -2.0 * geometry.rotation[3].atan2(geometry.rotation[0]),
+        geometry.opacity,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adaptive_compact_splat_primitive_from_geometry(
+    position: [f32; 2],
+    color: [f32; 3],
+    pixel_size: [f32; 2],
+    angle: f32,
+    opacity: f32,
+    denominator: f32,
+    cfg: Target2dLossConfig,
+) -> AdaptiveCompactSplatPrimitive {
+    let weight_scale = (cfg.image_size as f32 / (cfg.hi - cfg.lo)).powi(2)
+        * pixel_size[0]
+        * pixel_size[1]
+        * opacity
+        / denominator;
+    #[cfg(all(
+        any(feature = "backend_cuda", feature = "backend_wgpu"),
+        any(test, feature = "gpu_wgpu")
+    ))]
+    let (center_pixel, inverse_sigma_squared, sin, cos) = {
+        let size = cfg.image_size as f32;
+        let px = (position[0] - cfg.lo) / (cfg.hi - cfg.lo) * (size - 1.0);
+        let py_unflipped = (position[1] - cfg.lo) / (cfg.hi - cfg.lo) * (size - 1.0);
+        let py = (size - 1.0) - py_unflipped;
+        let world_to_pixel = size / (cfg.hi - cfg.lo);
+        let sigma = [
+            (cfg.sigma * world_to_pixel * pixel_size[0]).max(1.0e-4),
+            (cfg.sigma * world_to_pixel * pixel_size[1]).max(1.0e-4),
+        ];
+        let (sin, cos) = angle.sin_cos();
+        (
+            [px, py],
+            [sigma[0].powi(2).recip(), sigma[1].powi(2).recip()],
+            sin,
+            cos,
+        )
+    };
+    #[cfg(not(all(
+        any(feature = "backend_cuda", feature = "backend_wgpu"),
+        any(test, feature = "gpu_wgpu")
+    )))]
+    let _ = (position, angle);
+    AdaptiveCompactSplatPrimitive {
+        #[cfg(all(
+            any(feature = "backend_cuda", feature = "backend_wgpu"),
+            any(test, feature = "gpu_wgpu")
+        ))]
+        center_pixel,
+        #[cfg(all(
+            any(feature = "backend_cuda", feature = "backend_wgpu"),
+            any(test, feature = "gpu_wgpu")
+        ))]
+        inverse_sigma_squared,
+        #[cfg(all(
+            any(feature = "backend_cuda", feature = "backend_wgpu"),
+            any(test, feature = "gpu_wgpu")
+        ))]
+        sin,
+        #[cfg(all(
+            any(feature = "backend_cuda", feature = "backend_wgpu"),
+            any(test, feature = "gpu_wgpu")
+        ))]
+        cos,
+        weight_scale,
+        color,
+    }
+}
+
+fn adaptive_particle_splat_samples(
+    position: [f32; 2],
+    pixel_size: [f32; 2],
+    angle: f32,
+    cfg: Target2dLossConfig,
+) -> Vec<ParticleSplatSample> {
+    let size = cfg.image_size;
+    let world_to_pixel = size as f32 / (cfg.hi - cfg.lo);
+    let sigma = [
+        (cfg.sigma * world_to_pixel * pixel_size[0]).max(1.0e-4),
+        (cfg.sigma * world_to_pixel * pixel_size[1]).max(1.0e-4),
+    ];
+    let radius = (5.0 * sigma[0].max(sigma[1])).ceil().max(1.0) as isize;
+    let px = (position[0] - cfg.lo) / (cfg.hi - cfg.lo) * (size as f32 - 1.0);
+    let py_unflipped = (position[1] - cfg.lo) / (cfg.hi - cfg.lo) * (size as f32 - 1.0);
+    let py = (size as f32 - 1.0) - py_unflipped;
+    let base_x = px.floor() as isize;
+    let base_y = py.floor() as isize;
+    let frac_x = px - base_x as f32;
+    let frac_y = py - base_y as f32;
+    let (sin, cos) = angle.sin_cos();
+    let mut samples = Vec::new();
+    for oy in -radius..=radius {
+        for ox in -radius..=radius {
+            let x = base_x + ox;
+            let y = base_y + oy;
+            if x < 0 || y < 0 || x >= size as isize || y >= size as isize {
+                continue;
+            }
+            let dx = ox as f32 - frac_x;
+            let dy = oy as f32 - frac_y;
+            let major = cos * dx + sin * dy;
+            let minor = -sin * dx + cos * dy;
+            let exponent = major.powi(2) / sigma[0].powi(2) + minor.powi(2) / sigma[1].powi(2);
+            if exponent > 25.0 {
+                continue;
+            }
+            samples.push(ParticleSplatSample {
+                pixel: y as usize * size + x as usize,
+                g: (-0.5 * exponent).exp(),
+                dx,
+                dy,
+            });
+        }
+    }
+    samples
+}
+
+fn adaptive_particle_splat_denominator(
+    position: [f32; 2],
+    pixel_size: [f32; 2],
+    angle: f32,
+    cfg: Target2dLossConfig,
+) -> f32 {
+    let size = cfg.image_size;
+    let world_to_pixel = size as f32 / (cfg.hi - cfg.lo);
+    let sigma = [
+        (cfg.sigma * world_to_pixel * pixel_size[0]).max(1.0e-4),
+        (cfg.sigma * world_to_pixel * pixel_size[1]).max(1.0e-4),
+    ];
+    let radius = (5.0 * sigma[0].max(sigma[1])).ceil().max(1.0) as isize;
+    let px = (position[0] - cfg.lo) / (cfg.hi - cfg.lo) * (size as f32 - 1.0);
+    let py_unflipped = (position[1] - cfg.lo) / (cfg.hi - cfg.lo) * (size as f32 - 1.0);
+    let py = (size as f32 - 1.0) - py_unflipped;
+    let frac_x = px - px.floor();
+    let frac_y = py - py.floor();
+    let (sin, cos) = angle.sin_cos();
+    let mut denominator = IMAGE_EPSILON;
+    for oy in -radius..=radius {
+        for ox in -radius..=radius {
+            let dx = ox as f32 - frac_x;
+            let dy = oy as f32 - frac_y;
+            let major = cos * dx + sin * dy;
+            let minor = -sin * dx + cos * dy;
+            let exponent = major.powi(2) / sigma[0].powi(2) + minor.powi(2) / sigma[1].powi(2);
+            if exponent <= 25.0 {
+                denominator += (-0.5 * exponent).exp();
+            }
+        }
+    }
+    denominator
 }
 
 #[derive(Clone, Debug)]
@@ -1432,26 +2854,34 @@ fn splat_adjoint(
     let norm_scale = splat_norm_scale(pixel_size, cfg) * output_scale;
 
     for (particle, (position, color)) in positions.iter().zip(colors).enumerate() {
-        let samples = particle_splat_samples(*position, pixel_size, cfg);
+        let samples = particle_splat_support_samples(*position, pixel_size, cfg);
         let denom = samples.iter().map(|sample| sample.g).sum::<f32>() + IMAGE_EPSILON;
         let mut weighted_adjoint_sum = 0.0_f32;
-        let mut sample_weight_adjoint = Vec::with_capacity(samples.len());
         for sample in &samples {
-            let rgb_base = sample.pixel * 3;
-            let mut weight_adjoint = density_adjoint[sample.pixel];
+            let Some(pixel) = sample.pixel else {
+                continue;
+            };
+            let rgb_base = pixel * 3;
+            let mut weight_adjoint = density_adjoint[pixel];
             for channel in 0..3 {
                 color_adjoint[particle][channel] +=
                     rgb_adjoint[rgb_base + channel] * norm_scale * sample.g / denom;
                 weight_adjoint += rgb_adjoint[rgb_base + channel] * color[channel];
             }
-            sample_weight_adjoint.push(weight_adjoint);
             weighted_adjoint_sum += weight_adjoint * sample.g;
         }
 
         let mut pix_adjoint = [0.0_f32; 2];
-        for (sample, weight_adjoint) in samples.iter().zip(sample_weight_adjoint.iter()) {
+        for sample in &samples {
+            let weight_adjoint = sample.pixel.map_or(0.0, |pixel| {
+                let rgb_base = pixel * 3;
+                density_adjoint[pixel]
+                    + (0..3)
+                        .map(|channel| rgb_adjoint[rgb_base + channel] * color[channel])
+                        .sum::<f32>()
+            });
             let g_adjoint =
-                norm_scale * (*weight_adjoint / denom - weighted_adjoint_sum / (denom * denom));
+                norm_scale * (weight_adjoint / denom - weighted_adjoint_sum / (denom * denom));
             let g_pos = g_adjoint * sample.g * inv_sigma2;
             pix_adjoint[0] += g_pos * sample.dx;
             pix_adjoint[1] += g_pos * sample.dy;
@@ -1471,6 +2901,32 @@ fn particle_splat_samples(
     pixel_size: f32,
     cfg: Target2dLossConfig,
 ) -> Vec<ParticleSplatSample> {
+    particle_splat_support_samples(position, pixel_size, cfg)
+        .into_iter()
+        .filter_map(|sample| {
+            sample.pixel.map(|pixel| ParticleSplatSample {
+                pixel,
+                g: sample.g,
+                dx: sample.dx,
+                dy: sample.dy,
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ParticleSplatSupportSample {
+    pixel: Option<usize>,
+    g: f32,
+    dx: f32,
+    dy: f32,
+}
+
+fn particle_splat_support_samples(
+    position: [f32; 2],
+    pixel_size: f32,
+    cfg: Target2dLossConfig,
+) -> Vec<ParticleSplatSupportSample> {
     let size = cfg.image_size;
     let sigma = splat_sigma_pixels(pixel_size, cfg);
     let radius = (5.0 * sigma).ceil().max(1.0) as isize;
@@ -1488,21 +2944,26 @@ fn particle_splat_samples(
         for ox in -radius..=radius {
             let x = base_x + ox;
             let y = base_y + oy;
-            if x < 0 || y < 0 || x >= size as isize || y >= size as isize {
-                continue;
-            }
             let dx = ox as f32 - frac_x;
             let dy = oy as f32 - frac_y;
             let g = (-(dx * dx + dy * dy) * inv_two_sigma2).exp();
-            samples.push(ParticleSplatSample {
-                pixel: y as usize * size + x as usize,
-                g,
-                dx,
-                dy,
-            });
+            let pixel = if x >= 0 && y >= 0 && x < size as isize && y < size as isize {
+                Some(y as usize * size + x as usize)
+            } else {
+                None
+            };
+            samples.push(ParticleSplatSupportSample { pixel, g, dx, dy });
         }
     }
     samples
+}
+
+fn particle_splat_denominator(position: [f32; 2], pixel_size: f32, cfg: Target2dLossConfig) -> f32 {
+    particle_splat_support_samples(position, pixel_size, cfg)
+        .iter()
+        .map(|sample| sample.g)
+        .sum::<f32>()
+        + IMAGE_EPSILON
 }
 
 fn splat_sigma_pixels(pixel_size: f32, cfg: Target2dLossConfig) -> f32 {
@@ -2064,6 +3525,292 @@ fn normalize_gradient_tensor(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target2d_quality_auto_tbptt_preserves_32_step_credit() {
+        assert_eq!(automatic_target2d_gpu_tbptt_chunk_steps(4096, 96), 32);
+        assert_eq!(automatic_target2d_gpu_tbptt_chunk_steps(512, 16), 16);
+        assert_eq!(automatic_target2d_gpu_tbptt_chunk_steps(256, 96), 96);
+    }
+
+    #[test]
+    fn variable_splat_matches_uniform_splat_for_equal_material_footprints() {
+        let positions = vec![[-0.2, 0.1, 0.0, 0.0], [0.3, -0.25, 0.0, 0.0]];
+        let mut states = vec![0.0; 2 * 16];
+        states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        states[29..32].copy_from_slice(&[0.8, 0.2, 0.4]);
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let uniform =
+            render_rollout_2d_splat(&positions, &states, 16, 0.05, config, None, 1.25).unwrap();
+        let variable = render_variable_rollout_2d_splat(
+            &positions,
+            &states,
+            16,
+            &[0.05, 0.05],
+            &[1.25, 1.25],
+            config,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(variable.rgb, uniform.rgb);
+        assert_eq!(variable.density, uniform.density);
+    }
+
+    #[test]
+    fn adaptive_covariance_splat_matches_uniform_equal_measure_limit() {
+        let positions = vec![[-0.2, 0.1, 0.0, 0.0], [0.3, -0.25, 0.0, 0.0]];
+        let mut states = vec![0.0; 2 * 16];
+        states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        states[29..32].copy_from_slice(&[0.8, 0.2, 0.4]);
+        let fine_measure = std::f32::consts::PI * 0.02_f32.powi(2);
+        let particles = crate::adaptive::AdaptiveParticleSet::from_equal_measure(
+            positions.clone(),
+            states.clone(),
+            2,
+            16,
+            2.0 * fine_measure,
+            0.1,
+        )
+        .unwrap();
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let uniform =
+            render_rollout_2d_splat(&positions, &states, 16, 0.05, config, None, 1.0).unwrap();
+        let adaptive =
+            render_adaptive_rollout_2d_splat(&particles, fine_measure, 0.05, config, None).unwrap();
+
+        for (actual, expected) in adaptive.rgb.iter().zip(&uniform.rgb) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+        for (actual, expected) in adaptive.density.iter().zip(&uniform.density) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn adaptive_isotropic_splat_ignores_anisotropic_covariance() {
+        let fine_measure = std::f32::consts::PI * 0.02_f32.powi(2);
+        let mut particles = crate::adaptive::AdaptiveParticleSet::from_equal_measure(
+            vec![[0.1, -0.1, 0.0, 0.0]],
+            vec![0.0; 16],
+            2,
+            16,
+            fine_measure,
+            0.1,
+        )
+        .unwrap();
+        particles.states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let expected = render_adaptive_rollout_2d_isotropic_splat(
+            &particles,
+            fine_measure,
+            0.05,
+            config,
+            None,
+        )
+        .unwrap();
+        particles.covariance[0] = [0.04, 0.001, 0.0, 0.001, 0.0001, 0.0, 0.0, 0.0, 0.0001];
+        let actual = render_adaptive_rollout_2d_isotropic_splat(
+            &particles,
+            fine_measure,
+            0.05,
+            config,
+            None,
+        )
+        .unwrap();
+        assert_eq!(actual.rgb, expected.rgb);
+        assert_eq!(actual.density, expected.density);
+    }
+
+    #[test]
+    fn adaptive_runtime_isotropic_splat_matches_measure_radius_limit() {
+        let fine_measure = std::f32::consts::PI * 0.02_f32.powi(2);
+        let mut particles = crate::adaptive::AdaptiveParticleSet::from_equal_measure(
+            vec![[-0.2, 0.1, 0.0, 0.0], [0.3, -0.25, 0.0, 0.0]],
+            vec![0.0; 2 * 16],
+            2,
+            16,
+            2.0 * fine_measure,
+            0.1,
+        )
+        .unwrap();
+        particles.states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        particles.states[29..32].copy_from_slice(&[0.8, 0.2, 0.4]);
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let expected = render_adaptive_rollout_2d_isotropic_splat(
+            &particles,
+            fine_measure,
+            0.05,
+            config,
+            None,
+        )
+        .unwrap();
+        let actual = render_adaptive_rollout_2d_runtime_isotropic_splat(
+            &particles,
+            fine_measure,
+            0.05,
+            config,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(actual.rgb, expected.rgb);
+        assert_eq!(actual.density, expected.density);
+    }
+
+    #[test]
+    fn adaptive_affine_splat_has_an_exact_zero_gradient_limit() {
+        let fine_measure = std::f32::consts::PI * 0.02_f32.powi(2);
+        let mut particles = crate::adaptive::AdaptiveParticleSet::from_equal_measure(
+            vec![[-0.2, 0.1, 0.0, 0.0], [0.3, -0.25, 0.0, 0.0]],
+            vec![0.0; 2 * 16],
+            2,
+            16,
+            2.0 * fine_measure,
+            0.1,
+        )
+        .unwrap();
+        particles.states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        particles.states[29..32].copy_from_slice(&[0.8, 0.2, 0.4]);
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let moment =
+            render_adaptive_rollout_2d_splat(&particles, fine_measure, 0.05, config, None).unwrap();
+        let affine = render_adaptive_rollout_2d_affine_splat(
+            &particles,
+            &vec![0.0; particles.len() * particles.state_dims * 2],
+            fine_measure,
+            0.05,
+            config,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(affine.rgb, moment.rgb);
+        assert_eq!(affine.density, moment.density);
+    }
+
+    #[test]
+    fn adaptive_covariance_splat_matches_material_scaled_uniform_limit() {
+        let positions = vec![[-0.2, 0.1, 0.0, 0.0], [0.3, -0.25, 0.0, 0.0]];
+        let mut states = vec![0.0; 2 * 16];
+        states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        states[29..32].copy_from_slice(&[0.8, 0.2, 0.4]);
+        let fine_radius = 0.02_f32;
+        let fine_measure = std::f32::consts::PI * fine_radius.powi(2);
+        let material_scale = 2.0_f32;
+        let coarse_measure = fine_measure * material_scale.powi(2);
+        let particles = crate::adaptive::AdaptiveParticleSet::from_equal_measure(
+            positions.clone(),
+            states.clone(),
+            2,
+            16,
+            2.0 * coarse_measure,
+            0.1,
+        )
+        .unwrap();
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let material_matched = render_rollout_2d_splat(
+            &positions,
+            &states,
+            16,
+            0.05 * material_scale,
+            config,
+            None,
+            1.0,
+        )
+        .unwrap();
+        let adaptive =
+            render_adaptive_rollout_2d_splat(&particles, fine_measure, 0.05, config, None).unwrap();
+
+        for (actual, expected) in adaptive.rgb.iter().zip(&material_matched.rgb) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+        for (actual, expected) in adaptive.density.iter().zip(&material_matched.density) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn adaptive_centering_uses_represented_measure() {
+        let positions = [[0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 0.0, 0.0]];
+        let weights = [3.0, 1.0];
+        let centered = centered_weighted_positions(&positions, &weights, [0.0, 0.0]);
+        let weighted_mean = centered
+            .iter()
+            .zip(weights)
+            .map(|(position, weight)| position[0] * weight)
+            .sum::<f32>()
+            / weights.iter().sum::<f32>();
+
+        assert!(weighted_mean.abs() <= 1.0e-7);
+        assert_eq!(centered[0][0], -0.5);
+        assert_eq!(centered[1][0], 1.5);
+    }
+
+    #[test]
+    fn canonical_render_quadrature_requires_power_of_four_material_ratio() {
+        let fine = 0.25;
+        assert_eq!(canonical_render_primitive_count(fine, fine), Some(1));
+        assert_eq!(canonical_render_primitive_count(1.5 * fine, fine), Some(1));
+        assert_eq!(canonical_render_primitive_count(4.0 * fine, fine), Some(4));
+        assert_eq!(
+            canonical_render_primitive_count(16.0 * fine, fine),
+            Some(16)
+        );
+        assert_eq!(canonical_render_primitive_count(2.0 * fine, fine), None);
+    }
+
+    #[test]
+    fn canonical_affine_decoder_reports_render_budget() {
+        let fine_radius = 0.02_f32;
+        let fine_measure = std::f32::consts::PI * fine_radius.powi(2);
+        let mut particles = crate::adaptive::AdaptiveParticleSet::from_equal_measure(
+            vec![[0.0, 0.0, 0.0, 0.0]],
+            vec![0.0; 16],
+            2,
+            16,
+            4.0 * fine_measure,
+            0.1,
+        )
+        .unwrap();
+        particles.states[13..16].copy_from_slice(&[0.25, 0.5, 0.75]);
+        let config = Target2dLossConfig {
+            image_size: 32,
+            ..Target2dLossConfig::default()
+        };
+        let gradient = [0.0; 16 * 2];
+        let (render, primitives) = render_adaptive_rollout_2d_quadrature_splat(
+            &particles,
+            &gradient,
+            fine_measure,
+            0.05,
+            config,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(primitives, 4);
+        assert!(render.rgb.iter().all(|value| value.is_finite()));
+        assert!(render.density.iter().all(|value| value.is_finite()));
+    }
 
     #[test]
     fn upstream_loader_never_upscales_the_reference_lizard() {

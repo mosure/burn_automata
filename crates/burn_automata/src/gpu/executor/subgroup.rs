@@ -24,9 +24,13 @@ pub(super) fn create_subgroup_cooperative_pipelines(
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
     supported: bool,
-) -> (Option<wgpu::ComputePipeline>, Option<wgpu::ComputePipeline>) {
+) -> (
+    Option<wgpu::ComputePipeline>,
+    Option<wgpu::ComputePipeline>,
+    Option<wgpu::ComputePipeline>,
+) {
     if !supported {
-        return (None, None);
+        return (None, None, None);
     }
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -53,5 +57,13 @@ pub(super) fn create_subgroup_cooperative_pipelines(
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
     });
-    (Some(density), Some(update))
+    let adaptive_local = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("burn_automata_subgroup_adaptive_local_residual"),
+        layout: Some(pipeline_layout),
+        module: &shader,
+        entry_point: Some("subgroup_adaptive_local_residual_main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    (Some(density), Some(update), Some(adaptive_local))
 }

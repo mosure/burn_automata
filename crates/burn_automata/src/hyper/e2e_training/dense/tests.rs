@@ -1,6 +1,71 @@
 //! Backend-instantiated correctness and throughput regression tests.
 
 use super::*;
+use super::adaptive_training::adaptive_backward_scale;
+
+fn test_adaptive_target2d_seed_bank(
+    pool_size: usize,
+    particle_count: usize,
+    state_dims: usize,
+    config: DirectBasisTrainConfig,
+) -> crate::adaptive::AdaptiveTarget2dSeedBank {
+    let update_masks = |rows: usize| {
+        (0..rows)
+            .flat_map(|_| {
+                (0..particle_count).map(|particle| {
+                    let mut keys = [0; 6];
+                    let mut weights = [0.0; 6];
+                    keys[0] = particle as u32;
+                    weights[0] = 1.0;
+                    crate::adaptive::AdaptiveTarget2dUpdateMask {
+                        keys,
+                        weights,
+                        expected: false,
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let (positions, states) = seed_particles_scaled(
+        pool_size,
+        particle_count,
+        state_dims,
+        2,
+        config.seed,
+        config.seed_mode,
+        0.2,
+    );
+    let (eval_positions, eval_states) = seed_particles_scaled(
+        1,
+        particle_count,
+        state_dims,
+        2,
+        config.eval_seed,
+        config.seed_mode,
+        0.2,
+    );
+    crate::adaptive::AdaptiveTarget2dSeedBank {
+        positions: positions
+            .into_iter()
+            .flat_map(|position| [position[0], position[1]])
+            .collect(),
+        states,
+        update_masks: update_masks(pool_size),
+        eval_positions: eval_positions
+            .into_iter()
+            .flat_map(|position| [position[0], position[1]])
+            .collect(),
+        eval_states,
+        eval_update_masks: update_masks(1),
+        eval_seeds: vec![config.eval_seed],
+        pool_size,
+        particle_count,
+        state_dims,
+        max_measure_relative_error: 0.0,
+        max_centroid_l2_error: 0.0,
+        max_extensive_state_l2_error: 0.0,
+    }
+}
 
 #[test]
 fn e2e_learning_rate_warmup_is_linear_and_bounded() {
@@ -9,6 +74,15 @@ fn e2e_learning_rate_warmup_is_linear_and_bounded() {
     assert_eq!(e2e_lr_warmup_scale(100, 50), 0.5);
     assert_eq!(e2e_lr_warmup_scale(100, 100), 1.0);
     assert_eq!(e2e_lr_warmup_scale(100, 500), 1.0);
+}
+
+#[test]
+fn adaptive_trajectory_tail_count_is_bounded_and_ceil_rounded() {
+    assert_eq!(adaptive_training::adaptive_trajectory_tail_count(0, 0.25), 0);
+    assert_eq!(adaptive_training::adaptive_trajectory_tail_count(16, 0.0), 0);
+    assert_eq!(adaptive_training::adaptive_trajectory_tail_count(16, 0.01), 1);
+    assert_eq!(adaptive_training::adaptive_trajectory_tail_count(16, 0.25), 4);
+    assert_eq!(adaptive_training::adaptive_trajectory_tail_count(16, 1.0), 16);
 }
 
 #[test]
@@ -351,6 +425,91 @@ fn optimizer_boundary_sanitizes_nonfinite_gradients_on_device() {
 }
 
 #[test]
+fn model_batch_optimizer_boundary_sanitizes_nonfinite_gradients_on_device() {
+    let device = BurnDevice::default();
+    let inner_device: Device<InnerBackend> = device;
+    let mut gradients = vec![Tensor::<InnerBackend, 3>::from_data(
+        TensorData::new(
+            vec![1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            [1, 2, 2],
+        ),
+        &inner_device,
+    )];
+    sanitize_nonfinite_model_batch_gradients(&mut gradients);
+    assert_eq!(
+        tensor3_vec(gradients.remove(0)).unwrap(),
+        [1.0, 0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn model_batch_optimizer_normalizes_large_finite_gradients_without_overflow() {
+    let device = BurnDevice::default();
+    let inner_device: Device<InnerBackend> = device;
+    let mut gradients = vec![Tensor::<InnerBackend, 3>::from_data(
+        TensorData::new(vec![1.0e30, -1.0e30, 1.0e30, -1.0e30], [1, 2, 2]),
+        &inner_device,
+    )];
+    let (norms, _, _) =
+        prepare_model_batch_grad_group(&mut gradients, 0.0, true, true).unwrap();
+    assert!(norms[0].is_finite());
+    assert!((norms[0] / 2.0e30 - 1.0).abs() <= 1.0e-5);
+    let normalized = tensor3_vec(gradients.remove(0)).unwrap();
+    assert!(normalized.iter().all(|value| value.is_finite()));
+    let normalized_norm = normalized.iter().map(|value| value * value).sum::<f32>().sqrt();
+    assert!((normalized_norm - 1.0).abs() <= 1.0e-5);
+}
+
+#[test]
+fn model_batch_scale_only_optimizer_preserves_native_rule_parameters() {
+    let device = BurnDevice::default();
+    let mut config = NpaConfig::growing_2d();
+    config.auxiliary_input_dims = 1;
+    let model = NpaModel::seeded(config, 17);
+    let initial = model.weights.clone();
+    let mut params = BurnBaseBatch::from_models(std::slice::from_ref(&model), &device).unwrap();
+    let mut optimizer = BurnBaseBatchAdamWState::zeros_like(&params);
+    let mut grads = (params.w1.clone().sum()
+        + params.b1.clone().sum()
+        + params.w2.clone().sum()
+        + params.b2.clone().sum())
+    .backward();
+    params
+        .apply_adamw_last_input_column(
+            &mut grads,
+            &mut optimizer,
+            AdamWConfig {
+                learning_rate: 1.0e-3,
+                weight_decay: 0.0,
+                ..AdamWConfig::default()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    let mut updated = model.clone();
+    params
+        .write_to_models(std::slice::from_mut(&mut updated))
+        .unwrap();
+
+    let input_dims = model.config.perception_dims();
+    for hidden in 0..model.config.hidden_dims {
+        let row = hidden * input_dims;
+        assert_eq!(
+            &updated.weights.w1[row..row + input_dims - 1],
+            &initial.w1[row..row + input_dims - 1],
+        );
+        assert_ne!(
+            updated.weights.w1[row + input_dims - 1],
+            initial.w1[row + input_dims - 1],
+        );
+    }
+    assert_eq!(updated.weights.b1, initial.b1);
+    assert_eq!(updated.weights.w2, initial.w2);
+    assert_eq!(updated.weights.b2, initial.b2);
+}
+
+#[test]
 fn tbptt_gradient_chunks_apply_one_optimizer_update() {
     let device = BurnDevice::default();
     let model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 17);
@@ -387,6 +546,29 @@ fn tbptt_gradient_chunks_apply_one_optimizer_update() {
         .unwrap();
 
     assert_eq!(optimizer.step, 1);
+}
+
+#[test]
+fn final_only_tbptt_reserves_a_full_gradient_suffix() {
+    let chunks = |rollout_steps, chunk_steps| {
+        let mut remaining = rollout_steps;
+        let mut chunks = Vec::new();
+        while remaining > 0 {
+            let steps = tbptt_next_chunk_steps(remaining, chunk_steps, true);
+            chunks.push((steps, remaining <= chunk_steps));
+            remaining -= steps;
+        }
+        chunks
+    };
+
+    assert_eq!(chunks(32, 64), vec![(32, true)]);
+    assert_eq!(chunks(64, 64), vec![(64, true)]);
+    assert_eq!(chunks(65, 64), vec![(1, false), (64, true)]);
+    assert_eq!(chunks(95, 64), vec![(31, false), (64, true)]);
+    assert_eq!(
+        chunks(150, 64),
+        vec![(64, false), (22, false), (64, true)]
+    );
 }
 
 #[test]
@@ -727,6 +909,25 @@ fn single_oracle_trajectory_batched_forward_matches_independent_base() {
             &tensor3_vec(expected.inner()).unwrap(),
         ) <= 1.0e-6
     );
+}
+
+#[test]
+fn oracle_batch_model_view_matches_each_independent_base() {
+    let device = BurnDevice::default();
+    let config = NpaConfig::growing_2d();
+    let models = [
+        NpaModel::upstream_seeded(config.clone(), 41),
+        NpaModel::upstream_seeded(config.clone(), 73),
+    ];
+    let batch = BurnBaseBatch::from_models(&models, &device).unwrap();
+
+    for (index, model) in models.iter().enumerate() {
+        let selected = batch.model(index);
+        assert!(max_abs_difference(&tensor_vec(selected.w1.inner()).unwrap(), &model.weights.w1) <= 1.0e-6);
+        assert!(max_abs_difference(&tensor_vec(selected.b1.inner()).unwrap(), &model.weights.b1) <= 1.0e-6);
+        assert!(max_abs_difference(&tensor_vec(selected.w2.inner()).unwrap(), &model.weights.w2) <= 1.0e-6);
+        assert!(max_abs_difference(&tensor_vec(selected.b2.inner()).unwrap(), &model.weights.b2) <= 1.0e-6);
+    }
 }
 
 #[test]
@@ -1667,10 +1868,26 @@ fn modulated_layer_norm_cube_matches_reference_value_and_gradients() {
     )
     .unwrap();
 
-    assert!(max_abs_difference(&custom_values, &reference_values) <= 2.0e-4);
-    assert!(max_abs_difference(&custom_input_grad, &reference_input_grad) <= 5.0e-4);
-    assert!(max_abs_difference(&custom_shift_grad, &reference_shift_grad) <= 5.0e-4);
-    assert!(max_abs_difference(&custom_scale_grad, &reference_scale_grad) <= 5.0e-4);
+    assert!(
+        max_abs_difference(&custom_values, &reference_values) <= 2.0e-4,
+        "modulated layer norm value mismatch: max_abs_diff={}",
+        max_abs_difference(&custom_values, &reference_values),
+    );
+    assert!(
+        max_abs_difference(&custom_input_grad, &reference_input_grad) <= 5.0e-4,
+        "modulated layer norm input VJP mismatch: max_abs_diff={}",
+        max_abs_difference(&custom_input_grad, &reference_input_grad),
+    );
+    assert!(
+        max_abs_difference(&custom_shift_grad, &reference_shift_grad) <= 5.0e-4,
+        "modulated layer norm shift VJP mismatch: max_abs_diff={}",
+        max_abs_difference(&custom_shift_grad, &reference_shift_grad),
+    );
+    assert!(
+        max_abs_difference(&custom_scale_grad, &reference_scale_grad) <= 5.0e-4,
+        "modulated layer norm scale VJP mismatch: max_abs_diff={}",
+        max_abs_difference(&custom_scale_grad, &reference_scale_grad),
+    );
 }
 
 #[test]
@@ -1920,6 +2137,867 @@ fn test_direct_config(particle_count: usize) -> DirectBasisTrainConfig {
 }
 
 #[test]
+fn adaptive_deployment_rgb_metric_ignores_training_centering() {
+    let device = BurnDevice::default();
+    let target = test_burn_target(&device, 1.0, 0.1);
+    let x = tensor3(
+        vec![0.4, 0.3, 0.45, 0.35, 0.5, 0.4, 0.55, 0.45],
+        [1, 4, 2],
+        &device,
+    );
+    let s = tensor3(vec![0.0; 4 * 16], [1, 4, 16], &device);
+    let particle_pixel_size = tensor(vec![2.0; 4], [1, 4], &device);
+    let particle_output_scale = tensor(vec![1.0; 4], [1, 4], &device);
+    let mut uncentered = test_direct_config(4);
+    uncentered.loss_config.image_size = 1;
+    uncentered.loss_config.center = false;
+    let mut centered_training = uncentered;
+    centered_training.loss_config.center = true;
+
+    let metric = |config| {
+        tensor1_vec(
+            adaptive_uncentered_render_rgb_mse_batch(
+                &x,
+                &s,
+                std::slice::from_ref(&target),
+                &[0],
+                config,
+                particle_pixel_size.clone(),
+                particle_output_scale.clone(),
+            )
+            .inner(),
+        )
+        .unwrap()[0]
+    };
+    assert_eq!(metric(uncentered), metric(centered_training));
+}
+
+#[test]
+fn adaptive_variable_footprint_render_matches_host_contract() {
+    let device = BurnDevice::default();
+    let particle_count = 3;
+    let state_dims = 4;
+    let mut config = test_direct_config(particle_count);
+    config.loss_config.image_size = 16;
+    config.max_splat_chunk_floats = 1_000_000;
+    let pixels = config.loss_config.image_size * config.loss_config.image_size;
+    let target_cpu = crate::TargetImage2d {
+        source_width: 1,
+        source_height: 1,
+        positions: vec![[0.0, 0.0]],
+        colors: vec![[1.0, 1.0, 1.0]],
+        pixel_size: 0.1,
+        threshold: 0.05,
+        aabb: [-1.0, 1.0, -1.0, 1.0],
+    };
+    let target = BurnTargetExample {
+        target_rgb: Tensor::<BurnBackend, 2>::zeros([pixels, 3], &device),
+        target_density: Tensor::<BurnBackend, 2>::zeros([pixels, 1], &device),
+        target_foreground: Tensor::<BurnBackend, 2>::zeros([pixels, 1], &device),
+        target_foreground_scale: 1.0,
+        target_mean: Tensor::<BurnBackend, 2>::zeros([1, 2], &device),
+        target_positions: Tensor::<BurnBackend, 2>::zeros([1, 2], &device),
+        pixel_xy: tensor(
+            pixel_xy_values(config.loss_config.image_size),
+            [pixels, 2],
+            &device,
+        ),
+        pixel_size: target_cpu.pixel_size,
+        target_points: 4,
+        particle_count,
+        update_prob: 1.0,
+        seed_scale: 0.1,
+        target_cpu,
+    };
+    let positions = vec![-0.35, -0.2, 0.1, 0.25, 0.45, -0.3];
+    let states = vec![
+        0.0, -0.25, 0.1, 0.35, 0.0, 0.4, -0.2, 0.15, 0.0, 0.2, 0.3, -0.1,
+    ];
+    let pixel_sizes = vec![0.08, 0.16, 0.12];
+    let output_scales = vec![1.25, 0.75, 1.5];
+    let x = tensor3(positions.clone(), [1, particle_count, 2], &device);
+    let s = tensor3(
+        states.clone(),
+        [1, particle_count, state_dims],
+        &device,
+    );
+    let colors = s
+        .narrow(2, state_dims - 3, 3)
+        .add_scalar(0.5);
+    let (burn_rgb, burn_density) = adaptive_splat_render_batch(
+        &x,
+        &colors,
+        std::slice::from_ref(&target),
+        &[0],
+        config,
+        tensor(pixel_sizes.clone(), [1, particle_count], &device),
+        tensor(output_scales.clone(), [1, particle_count], &device),
+    );
+    let host_positions = positions
+        .chunks_exact(2)
+        .map(|position| [position[0], position[1], 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let host = crate::target2d::render_variable_rollout_2d_splat(
+        &host_positions,
+        &states,
+        state_dims,
+        &pixel_sizes,
+        &output_scales,
+        config.loss_config,
+        None,
+    )
+    .unwrap();
+    let rgb_difference =
+        max_abs_difference(&tensor3_vec(burn_rgb.inner()).unwrap(), &host.rgb);
+    let density_difference =
+        max_abs_difference(&tensor3_vec(burn_density.inner()).unwrap(), &host.density);
+    assert!(
+        rgb_difference < 2.0e-5 && density_difference < 2.0e-5,
+        "adaptive Burn/host render mismatch: rgb={rgb_difference:e} density={density_difference:e}"
+    );
+}
+
+#[test]
+fn bounded_eval_rollout_matches_canonical_core_mask_stream() {
+    let device = BurnDevice::default();
+    let npa = NpaConfig::growing_2d();
+    let grid = burn_automata_kernels::HashGridConfig::growing_2d();
+    let model = NpaModel::upstream_seeded(npa.clone(), 71);
+    let params = BurnBaseParams::from_model(&model, &device).unwrap();
+    let adapter = BurnAdapterParams::from_adapter(
+        &NpaLowRankAdapter::zeros(&npa, 1, 1.0),
+        &model,
+        &device,
+    )
+    .unwrap();
+    let particle_count = 4;
+    let steps = 3;
+    let seed = 47;
+    let seed_scale = 0.1;
+    let mut config = test_direct_config(particle_count);
+    config.rollout_steps = steps;
+    config.tbptt_chunk_steps = steps;
+    config.update_prob = 0.5;
+    let target = test_burn_target(&device, config.update_prob, seed_scale);
+    let (x, s) = seed_tensors(particle_count, config, seed_scale, seed, &device);
+    let (x, s, _) = rollout_single_chunk(
+        &params,
+        &adapter,
+        &target,
+        x,
+        s,
+        config,
+        &mut canonical_eval_mask_rng(seed),
+        steps,
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    );
+
+    let reference = crate::run_rollout(
+        &model,
+        &grid,
+        &crate::RolloutConfig {
+            batch_size: 1,
+            particle_count,
+            steps,
+            update_prob: config.update_prob,
+            seed,
+            seed_scale,
+            ..crate::RolloutConfig::default()
+        },
+        config.seed_mode,
+    )
+    .unwrap();
+    let expected_x = reference
+        .positions
+        .iter()
+        .flat_map(|position| [position[0], position[1]])
+        .collect::<Vec<_>>();
+    let x_diff = max_abs_difference(&tensor_vec(x.inner()).unwrap(), &expected_x);
+    let s_diff = max_abs_difference(&tensor_vec(s.inner()).unwrap(), &reference.states);
+    assert!(
+        x_diff < 2.0e-4 && s_diff < 2.0e-3,
+        "bounded Burn eval diverged from canonical core rollout: x={x_diff:e} s={s_diff:e}"
+    );
+}
+
+#[test]
+fn adaptive_eval_rollout_reuses_the_seeded_mask_stream_for_one_model() {
+    let device = BurnDevice::default();
+    let model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 71);
+    let params =
+        BurnBaseBatch::from_models(std::slice::from_ref(&model), &device).unwrap().detached();
+    let particle_count = 4;
+    let steps = 3;
+    let seed = 47;
+    let seed_scale = 0.1;
+    let mut config = test_direct_config(particle_count);
+    config.rollout_steps = steps;
+    config.tbptt_chunk_steps = steps;
+    config.update_prob = 0.5;
+    let target = test_burn_target(&device, config.update_prob, seed_scale);
+    let (x, s) = seed_tensors(particle_count, config, seed_scale, seed, &device);
+    let x = x.reshape([1, particle_count, 2]);
+    let s = s.reshape([1, particle_count, model.config.state_dims]);
+    let material = Tensor::<BurnBackend, 2>::ones([1, particle_count], &device);
+    let bandwidth =
+        Tensor::<BurnBackend, 2>::ones([1, particle_count], &device).mul_scalar(config.grid_eps);
+    let perception = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: model.config.eps0,
+        scale_equivariance: model.config.scale_equivariant(),
+        particle_density_equivariance: model.config.particle_density_equivariant(),
+        log_norm_grad: model.config.log_norm_grad,
+        log_norm_density_grad: model.config.log_norm_density_grad,
+        position_features: model.config.position_features,
+    };
+    let run = || {
+        rollout_adaptive_oracle_model_batch_chunk(
+            &params,
+            None,
+            std::slice::from_ref(&target),
+            &[0],
+            x.clone(),
+            s.clone(),
+            material.clone(),
+            bandwidth.clone(),
+            Tensor::<BurnBackend, 2>::zeros([1, particle_count], &device),
+            Tensor::<BurnBackend, 2>::zeros([1, particle_count], &device),
+            perception,
+            options,
+            burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+            None,
+            false,
+            false,
+            config,
+            particle_count,
+            &mut [canonical_eval_mask_rng(seed)],
+            true,
+            None,
+            None,
+            0,
+            steps,
+            Tensor::<BurnBackend, 1>::zeros([1], &device),
+        )
+    };
+    let first = run();
+    let second = run();
+    assert_eq!(
+        tensor3_vec(first.0.inner()).unwrap(),
+        tensor3_vec(second.0.inner()).unwrap()
+    );
+    assert_eq!(
+        tensor3_vec(first.1.inner()).unwrap(),
+        tensor3_vec(second.1.inner()).unwrap()
+    );
+}
+
+#[test]
+fn adaptive_eval_mask_stream_uses_persistent_material_keys_and_weights() {
+    let device = BurnDevice::default();
+    let target = test_burn_target(&device, 0.5, 0.1);
+    let seed = 47_u64;
+    let mut first_keys = [0; 6];
+    let mut first_weights = [0.0; 6];
+    first_keys[0] = 1_234;
+    first_weights[0] = 1.0;
+    let mut second_keys = [0; 6];
+    let mut second_weights = [0.0; 6];
+    second_keys[..2].copy_from_slice(&[42, 43]);
+    second_weights[..2].copy_from_slice(&[0.25, 0.75]);
+    let mut expected_keys = [0; 6];
+    let mut expected_weights = [0.0; 6];
+    expected_keys[0] = 99;
+    expected_weights[0] = 1.0;
+    let masks = [
+        crate::adaptive::AdaptiveTarget2dUpdateMask {
+            keys: first_keys,
+            weights: first_weights,
+            expected: false,
+        },
+        crate::adaptive::AdaptiveTarget2dUpdateMask {
+            keys: second_keys,
+            weights: second_weights,
+            expected: false,
+        },
+        crate::adaptive::AdaptiveTarget2dUpdateMask {
+            keys: expected_keys,
+            weights: expected_weights,
+            expected: true,
+        },
+    ];
+    let steps = 4;
+    let actual = tensor3_vec(
+        host_batch_wgpu_mask_stack(
+            std::slice::from_ref(&target),
+            &[0],
+            3,
+            steps,
+            0,
+            &[seed],
+            Some(&masks),
+        )
+        .squeeze_dim::<3>(3)
+        .inner(),
+    )
+    .unwrap();
+    let random_seed = wgpu_random_seed(seed);
+    let mut expected = Vec::with_capacity(steps * 3);
+    for step in 0..steps {
+        expected.push(f32::from(
+            wgpu_random01(1_234, step as u32, random_seed) < 0.5,
+        ));
+        expected.push(
+            0.25 * f32::from(wgpu_random01(42, step as u32, random_seed) < 0.5)
+                + 0.75 * f32::from(wgpu_random01(43, step as u32, random_seed) < 0.5),
+        );
+        expected.push(0.5);
+    }
+    assert_eq!(actual, expected);
+}
+
+#[cfg(feature = "gpu_wgpu")]
+#[test]
+fn adaptive_burn_rollout_matches_wgpu_with_material_identity_masks() {
+    let device = BurnDevice::default();
+    let (rule_config, grid) =
+        crate::NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
+    let rule = NpaModel::seeded(rule_config, 131);
+    let mut adaptive_config = crate::AdaptiveNpaConfig::growing_2d();
+    let reference_count = 16;
+    let particle_count = 13;
+    let fine_measure = std::f32::consts::PI * 0.2_f32.powi(2) / reference_count as f32;
+    let fine_footprint = crate::material_footprint_radius(fine_measure, 2);
+    adaptive_config.reference_footprint = fine_footprint;
+    adaptive_config.base_rule_footprint = fine_footprint;
+    adaptive_config.min_footprint = 0.5 * fine_footprint;
+    adaptive_config.max_footprint = 4.0 * fine_footprint;
+    adaptive_config.initial_leaves = particle_count;
+    adaptive_config.min_leaves = particle_count;
+    adaptive_config.target_leaves = particle_count;
+    adaptive_config.max_leaves = reference_count;
+    adaptive_config.bootstrap_fine_leaves = reference_count;
+    adaptive_config.bootstrap_target_leaves = reference_count;
+    adaptive_config.hierarchical_bootstrap_seed = true;
+    adaptive_config.retain_bootstrap_templates = false;
+    adaptive_config.rule_graph_policy =
+        burn_automata_kernels::AdaptiveGraphPolicy::RawSupport;
+    adaptive_config.perception.graph_policy =
+        burn_automata_kernels::AdaptiveGraphPolicy::RawSupport;
+    adaptive_config.perception.reference_measure = fine_measure;
+    adaptive_config.perception.min_bandwidth = grid.eps;
+    adaptive_config.perception.max_bandwidth = 2.0 * grid.eps;
+    adaptive_config.perception.support_bin_ratio = 2.0;
+    adaptive_config.proxy.enabled = false;
+    adaptive_config.expected_coarse_update_mask = true;
+    let adaptive_model =
+        crate::AdaptiveNpaModel::seeded(rule, adaptive_config, 137).unwrap();
+    let seed = 149_u64;
+    let particles = crate::seed_adaptive_particles_scaled(
+        &adaptive_model,
+        particle_count,
+        seed,
+        crate::ParticleSeed::UniformCircle,
+        0.2,
+        fine_measure * reference_count as f32,
+        grid.eps,
+    )
+    .unwrap();
+    assert!(particles.bootstrap_templates.is_empty());
+    assert!(
+        particles
+            .represented_measure
+            .iter()
+            .any(|measure| *measure > 1.5 * fine_measure)
+    );
+    let positions = particles
+        .positions
+        .iter()
+        .flat_map(|position| [position[0], position[1]])
+        .collect::<Vec<_>>();
+    let represented_measure = particles.represented_measure.clone();
+    let bandwidth = particles.bandwidth.clone();
+    let states = particles.states.clone();
+    let masks = particles
+        .particle_id
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(row, particle_id)| {
+            let mut keys = [0; 6];
+            let mut weights = [0.0; 6];
+            keys[0] = (particle_id as u32) ^ ((particle_id >> 32) as u32);
+            weights[0] = 1.0;
+            crate::adaptive::AdaptiveTarget2dUpdateMask {
+                keys,
+                weights,
+                expected: represented_measure[row] > 1.5 * fine_measure,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let params =
+        BurnBaseBatch::from_models(std::slice::from_ref(&adaptive_model.rule), &device)
+            .unwrap()
+            .detached();
+    let mut config = test_direct_config(particle_count);
+    config.update_prob = 0.5;
+    config.grid_eps = grid.eps;
+    config.motion_scale = adaptive_model.rule.config.alpha
+        * adaptive_model.rule.config.motion_eps(grid.eps);
+    let target = test_burn_target(&device, config.update_prob, 0.2);
+    let steps = 3;
+    let mut rngs = [canonical_eval_mask_rng(seed)];
+    let (burn_positions, burn_states, _, _) =
+        rollout_adaptive_oracle_model_batch_chunk(
+            &params,
+            None,
+            std::slice::from_ref(&target),
+            &[0],
+            tensor3(positions, [1, particle_count, 2], &device),
+            tensor3(
+                states,
+                [1, particle_count, adaptive_model.rule.config.state_dims],
+                &device,
+            ),
+            tensor(
+                represented_measure,
+                [1, particle_count],
+                &device,
+            ),
+            tensor(bandwidth, [1, particle_count], &device),
+            Tensor::<BurnBackend, 2>::zeros([1, particle_count], &device),
+            Tensor::<BurnBackend, 2>::zeros([1, particle_count], &device),
+            adaptive_model.config.perception,
+            burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+                eps0: adaptive_model.rule.config.eps0,
+                scale_equivariance: adaptive_model.rule.config.scale_equivariant(),
+                particle_density_equivariance: adaptive_model
+                    .rule
+                    .config
+                    .particle_density_equivariant(),
+                log_norm_grad: adaptive_model.rule.config.log_norm_grad,
+                log_norm_density_grad: adaptive_model.rule.config.log_norm_density_grad,
+                position_features: adaptive_model.rule.config.position_features,
+            },
+            burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+            None,
+            false,
+            false,
+            config,
+            particle_count,
+            &mut rngs,
+            true,
+            Some(&[seed]),
+            Some(&masks),
+            0,
+            steps,
+            Tensor::<BurnBackend, 1>::zeros([1], &device),
+        );
+
+    let executor = crate::gpu::WgpuAutomataExecutor::new_blocking().unwrap();
+    let mut wgpu_state = executor
+        .create_adaptive_state(
+            &adaptive_model,
+            particles,
+            &grid,
+            1.0,
+            crate::gpu::WgpuNeighborMode::CooperativeSortedCells,
+            config.update_prob,
+            seed,
+        )
+        .unwrap();
+    executor.set_adaptive_stable_sorted_cells_enabled(&mut wgpu_state, true);
+    executor
+        .step_adaptive_state_many(&mut wgpu_state, steps, false)
+        .unwrap();
+    executor
+        .synchronize_adaptive_particles(&mut wgpu_state)
+        .unwrap();
+    let expected_positions = wgpu_state
+        .particles
+        .positions
+        .iter()
+        .flat_map(|position| [position[0], position[1]])
+        .collect::<Vec<_>>();
+    let position_difference = max_abs_difference(
+        &tensor3_vec(burn_positions.inner()).unwrap(),
+        &expected_positions,
+    );
+    let state_difference = max_abs_difference(
+        &tensor3_vec(burn_states.inner()).unwrap(),
+        &wgpu_state.particles.states,
+    );
+    eprintln!(
+        "adaptive Burn/WGPU material-mask parity: position={position_difference:e} state={state_difference:e}"
+    );
+    assert!(
+        position_difference < 2.0e-4 && state_difference < 2.0e-4,
+        "adaptive Burn/WGPU rollout mismatch with material identities: position={position_difference:e} state={state_difference:e}"
+    );
+}
+
+#[test]
+fn zero_normalized_adaptive_residual_preserves_the_compatible_base_rollout() {
+    let device = BurnDevice::default();
+    let base = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 79);
+    let mut residual_config = base.config.clone();
+    residual_config.auxiliary_input_dims = 2;
+    let residual = NpaModel {
+        config: residual_config.clone(),
+        weights: NpaWeights::zero_output_seeded(&residual_config, 83),
+    };
+    let base_params =
+        BurnBaseBatch::from_models(std::slice::from_ref(&base), &device).unwrap().detached();
+    let residual_params =
+        BurnBaseBatch::from_models(std::slice::from_ref(&residual), &device).unwrap();
+    let particle_count = 8;
+    let steps = 4;
+    let mut config = test_direct_config(particle_count);
+    config.update_prob = 1.0;
+    config.rollout_steps = steps;
+    config.tbptt_chunk_steps = steps;
+    let target = test_burn_target(&device, 1.0, 0.1);
+    let (x, s) = seed_tensors(particle_count, config, 0.1, 89, &device);
+    let x = x.reshape([1, particle_count, 2]);
+    let s = s.reshape([1, particle_count, base.config.state_dims]);
+    let represented_measure = tensor(
+        vec![4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        [1, particle_count],
+        &device,
+    );
+    let bandwidth = tensor(
+        vec![0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [1, particle_count],
+        &device,
+    );
+    let residual_gate = tensor(
+        vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [1, particle_count],
+        &device,
+    );
+    let material_scale_feature = tensor(
+        vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [1, particle_count],
+        &device,
+    );
+    let perception = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.2,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: base.config.eps0,
+        scale_equivariance: base.config.scale_equivariant(),
+        particle_density_equivariance: base.config.particle_density_equivariant(),
+        log_norm_grad: base.config.log_norm_grad,
+        log_norm_density_grad: base.config.log_norm_density_grad,
+        position_features: base.config.position_features,
+    };
+    let mut baseline_rngs = [StdRng::seed_from_u64(97)];
+    let baseline = rollout_adaptive_oracle_model_batch_chunk(
+        &base_params,
+        None,
+        std::slice::from_ref(&target),
+        &[0],
+        x.clone(),
+        s.clone(),
+        represented_measure.clone(),
+        bandwidth.clone(),
+        material_scale_feature.clone(),
+        residual_gate.clone(),
+        perception,
+        options,
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+        None,
+        false,
+        false,
+        config,
+        particle_count,
+        &mut baseline_rngs,
+        true,
+        None,
+        None,
+        0,
+        steps,
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    );
+    let mut residual_rngs = [StdRng::seed_from_u64(97)];
+    let with_zero_residual = rollout_adaptive_oracle_model_batch_chunk(
+        &residual_params,
+        Some(&base_params),
+        std::slice::from_ref(&target),
+        &[0],
+        x,
+        s,
+        represented_measure,
+        bandwidth,
+        material_scale_feature,
+        residual_gate,
+        perception,
+        options,
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+        Some(burn_automata_kernels::AdaptivePerceptionSemantics::NormalizedAdaptive),
+        false,
+        true,
+        config,
+        particle_count,
+        &mut residual_rngs,
+        true,
+        None,
+        None,
+        0,
+        steps,
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    );
+    assert_eq!(
+        tensor3_vec(baseline.0.inner()).unwrap(),
+        tensor3_vec(with_zero_residual.0.inner()).unwrap()
+    );
+    assert_eq!(
+        tensor3_vec(baseline.1.inner()).unwrap(),
+        tensor3_vec(with_zero_residual.1.inner()).unwrap()
+    );
+}
+
+#[test]
+fn compatible_residual_receives_gradient_at_fixed_support() {
+    let device = BurnDevice::default();
+    let base = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 101);
+    let mut residual_config = base.config.clone();
+    residual_config.auxiliary_input_dims = 2;
+    let residual = NpaModel {
+        config: residual_config.clone(),
+        weights: NpaWeights::zero_output_seeded(&residual_config, 103),
+    };
+    let base_params =
+        BurnBaseBatch::from_models(std::slice::from_ref(&base), &device).unwrap().detached();
+    let residual_params =
+        BurnBaseBatch::from_models(std::slice::from_ref(&residual), &device).unwrap();
+    let particle_count = 8;
+    let mut config = test_direct_config(particle_count);
+    config.motion_scale = 0.0;
+    config.update_prob = 1.0;
+    config.rollout_steps = 1;
+    config.tbptt_chunk_steps = 1;
+    let target = test_burn_target(&device, 1.0, 0.1);
+    let (x, s) = seed_tensors(particle_count, config, 0.1, 107, &device);
+    let perception = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        reference_measure: 1.0,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.1,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: base.config.eps0,
+        scale_equivariance: base.config.scale_equivariant(),
+        particle_density_equivariance: base.config.particle_density_equivariant(),
+        log_norm_grad: base.config.log_norm_grad,
+        log_norm_density_grad: base.config.log_norm_density_grad,
+        position_features: base.config.position_features,
+    };
+    let (_, states, _, _) = rollout_adaptive_oracle_model_batch_chunk(
+        &residual_params,
+        Some(&base_params),
+        std::slice::from_ref(&target),
+        &[0],
+        x.reshape([1, particle_count, 2]),
+        s.reshape([1, particle_count, base.config.state_dims]),
+        tensor(
+            vec![4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [1, particle_count],
+            &device,
+        ),
+        tensor(vec![0.1; particle_count], [1, particle_count], &device),
+        tensor(
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [1, particle_count],
+            &device,
+        ),
+        tensor(
+            vec![1.0; particle_count],
+            [1, particle_count],
+            &device,
+        ),
+        perception,
+        options,
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+        Some(burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible),
+        false,
+        true,
+        config,
+        particle_count,
+        &mut [StdRng::seed_from_u64(109)],
+        true,
+        None,
+        None,
+        0,
+        1,
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    );
+    let mut gradients = states.sum().backward();
+    let w2_gradient = test_tensor_values(
+        residual_params
+            .w2
+            .grad_remove(&mut gradients)
+            .expect("fixed-support coarse residual must receive a w2 gradient"),
+    );
+    let gradient_norm = w2_gradient
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    assert!(
+        gradient_norm > 1.0e-8,
+        "fixed-support represented-measure residual gradient was zero"
+    );
+}
+
+#[test]
+fn adaptive_shared_rule_receives_the_per_row_material_scale_feature() {
+    let device = BurnDevice::default();
+    let particle_count = 2;
+    let mut npa = NpaConfig::growing_2d();
+    npa.auxiliary_input_dims = 1;
+    let mut weights = NpaWeights::zeros(&npa);
+    let material_scale_input = npa.perception_dims() - 1;
+    weights.w1[material_scale_input] = 1.0;
+    let first_state_output = npa.spatial_dims;
+    weights.w2[first_state_output * npa.hidden_dims] = 1.0;
+    let model = NpaModel {
+        config: npa.clone(),
+        weights,
+    };
+    let params = BurnBaseBatch::from_models(std::slice::from_ref(&model), &device).unwrap();
+    let mut config = test_direct_config(particle_count);
+    config.motion_scale = 0.0;
+    config.update_prob = 1.0;
+    let target = test_burn_target(&device, 1.0, 0.1);
+    let perception = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.2,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: 0.1,
+        scale_equivariance: npa.scale_equivariant(),
+        particle_density_equivariance: npa.particle_density_equivariant(),
+        log_norm_grad: npa.log_norm_grad,
+        log_norm_density_grad: npa.log_norm_density_grad,
+        position_features: npa.position_features,
+    };
+    let (_, states, _, _) = rollout_adaptive_oracle_model_batch_chunk(
+        &params,
+        None,
+        std::slice::from_ref(&target),
+        &[0],
+        Tensor::<BurnBackend, 3>::zeros([1, particle_count, 2], &device),
+        Tensor::<BurnBackend, 3>::zeros([1, particle_count, npa.state_dims], &device),
+        tensor(vec![1.0, 4.0], [1, particle_count], &device),
+        tensor(vec![0.1, 0.1], [1, particle_count], &device),
+        tensor(vec![0.0, 1.0], [1, particle_count], &device),
+        Tensor::<BurnBackend, 2>::zeros([1, particle_count], &device),
+        perception,
+        options,
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+        None,
+        true,
+        false,
+        config,
+        particle_count,
+        &mut [StdRng::seed_from_u64(73)],
+        true,
+        None,
+        None,
+        0,
+        1,
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    );
+    let states = tensor3_vec(states.inner()).unwrap();
+    assert!(states[0].abs() <= 1.0e-6);
+    assert!((states[npa.state_dims] - 1.0).abs() <= 1.0e-6);
+}
+
+#[test]
+fn adaptive_motion_uses_each_rows_scale_equivariant_bandwidth() {
+    let device = BurnDevice::default();
+    let raw = tensor3(vec![3.0, 4.0, 0.0, 2.0], [1, 2, 2], &device);
+    let bandwidth = tensor(vec![0.1, 0.2], [1, 2], &device);
+    let (motion, squared, denominator, row_scale) = normalized_adaptive_motion_batch(
+        raw,
+        0.02,
+        bandwidth,
+        0.1,
+        true,
+        1,
+        2,
+    );
+    let motion = tensor3_vec(motion.inner()).unwrap();
+    let expected = [0.01, 0.013_333_334, 0.0, 0.026_666_667];
+    assert!(
+        max_abs_difference(&motion, &expected) <= 1.0e-6,
+        "adaptive per-row motion scale mismatch: {motion:?}"
+    );
+    let displacement =
+        adaptive_displacement_magnitude_batch(squared, denominator, row_scale);
+    let displacement = tensor3_vec(displacement.inner()).unwrap();
+    assert!((displacement[0] - (0.01_f32.powi(2) + 0.013_333_334_f32.powi(2)).sqrt()).abs() <= 1.0e-6);
+    assert!((displacement[1] - 0.026_666_667).abs() <= 1.0e-6);
+}
+
+#[test]
+fn adaptive_checkpoint_selection_prioritizes_render_psnr() {
+    assert!(adaptive_training::adaptive_checkpoint_is_better(18.0, None));
+    assert!(adaptive_training::adaptive_checkpoint_is_better(
+        18.0,
+        Some(17.9)
+    ));
+    assert!(!adaptive_training::adaptive_checkpoint_is_better(
+        17.8,
+        Some(17.9)
+    ));
+    assert!(!adaptive_training::adaptive_checkpoint_is_better(
+        f32::NAN,
+        Some(17.9)
+    ));
+}
+
+#[test]
+fn adaptive_target2d_primal_parity_is_rowwise_and_fail_closed() {
+    adaptive_training::validate_adaptive_target2d_primal_parity(
+        &[0.0041, 0.0021, 0.0019],
+        &[0.0040, 0.0020, 0.0020],
+        512,
+    )
+    .unwrap();
+
+    let tail = adaptive_training::validate_adaptive_target2d_primal_parity(
+        &[0.0041, 0.0021, 10.0],
+        &[0.0040, 0.0020, 0.0020],
+        512,
+    )
+    .unwrap_err();
+    assert!(tail.to_string().contains("row 2"));
+
+    let non_finite = adaptive_training::validate_adaptive_target2d_primal_parity(
+        &[0.0041, f32::NAN],
+        &[0.0040, 0.0020],
+        96,
+    )
+    .unwrap_err();
+    assert!(non_finite.to_string().contains("non-finite"));
+}
+
+#[test]
 fn functional_teacher_probe_loss_distinguishes_adapter_behavior() {
     let device = BurnDevice::default();
     let config = NpaConfig::growing_2d();
@@ -2086,6 +3164,35 @@ fn target2d_auto_uses_device_adjoint_for_training_scale_particles() {
         Target2dLossBackend::Dense
     };
     assert_eq!(target2d_loss_backend_effective(training_scale), expected);
+}
+
+#[test]
+fn target2d_splat_denominator_is_translation_invariant_before_image_clipping() {
+    let device = BurnDevice::default();
+    let particle_count = 2;
+    let mut config = test_direct_config(particle_count);
+    config.loss_config.image_size = 32;
+    let particle_pixels = tensor3(
+        vec![15.25, 10.75, 37.25, 10.75],
+        [1, particle_count, 2],
+        &device,
+    );
+    let sigma = tensor3(vec![1.6, 1.6], [1, 1, particle_count], &device);
+    let denominator =
+        splat_particle_denominator_batch(&particle_pixels, particle_count, sigma, config);
+    let values = tensor3_vec(denominator.inner()).unwrap();
+
+    assert!(
+        (values[0] - values[1]).abs() <= 1.0e-5,
+        "full-patch Gaussian normalization changed after an integer translation outside the image: {values:?}"
+    );
+}
+
+#[test]
+fn adaptive_backward_scaling_bounds_large_linear_adjoint_surrogates() {
+    assert_eq!(adaptive_backward_scale(1.0, true), 1.0);
+    assert_eq!(adaptive_backward_scale(1.0e-4, true), 1.0e-4);
+    assert_eq!(adaptive_backward_scale(1.0e-4, false), 1.0);
 }
 
 #[test]
@@ -2540,7 +3647,8 @@ fn canonical_dense_residual_matches_generic_lora_expansion() {
     compare_grouped_grad!(grouped_params.w1, explicit_params.w1, 3.0e-3);
     compare_grouped_grad!(grouped_params.b1, explicit_params.b1, 3.0e-3);
     compare_grouped_grad!(grouped_params.w2, explicit_params.w2, 3.0e-3);
-    compare_grouped_grad!(grouped_params.b2, explicit_params.b2, 3.0e-3);
+    assert!(grouped_params.b2.grad_remove(&mut grouped_grads).is_none());
+    assert!(explicit_params.b2.grad_remove(&mut explicit_grads).is_none());
 }
 
 #[test]
@@ -2740,8 +3848,7 @@ fn target2d_training_loss_routes_auto_to_device_adjoint() {
     let mut config = test_direct_config(128);
     config.loss_config.image_size = 1;
     config.target2d_loss_backend = Target2dLossBackend::Auto;
-    TARGET2D_CUBE_ADJOINT_DEVICE_HITS.store(0, Ordering::Relaxed);
-    TARGET2D_CUBE_ADJOINT_FALLBACK_HITS.store(0, Ordering::Relaxed);
+    let device_hits_before = TARGET2D_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed);
 
     let loss = target_splat_loss_batch(
         &Tensor::<BurnBackend, 3>::zeros([1, 128, 2], &device).require_grad(),
@@ -2756,10 +3863,9 @@ fn target2d_training_loss_routes_auto_to_device_adjoint() {
     let scalar = loss.total.inner().into_scalar();
 
     assert!(scalar.is_finite());
-    assert_eq!(TARGET2D_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        TARGET2D_CUBE_ADJOINT_FALLBACK_HITS.load(Ordering::Relaxed),
-        0
+    assert!(
+        TARGET2D_CUBE_ADJOINT_DEVICE_HITS.load(Ordering::Relaxed) > device_hits_before,
+        "automatic Target2D routing did not invoke the device adjoint"
     );
 }
 
@@ -2768,8 +3874,9 @@ fn direct_particle_pool_persists_state_on_backend() {
     let device = BurnDevice::default();
     let config = test_direct_config(4);
     let mut pool = BurnDeviceParticlePool::new(2, 4, 16, 0.1, config, &device);
-    pool.update_batch(
+    pool.update_batch_with_ages(
         &[1],
+        &[37],
         Tensor::<BurnBackend, 3>::full([1, 4, 2], 0.25, &device),
         Tensor::<BurnBackend, 3>::full([1, 4, 16], 0.5, &device),
     )
@@ -2788,6 +3895,138 @@ fn direct_particle_pool_persists_state_on_backend() {
             .unwrap()
             .iter()
             .all(|value| (*value - 0.5).abs() < 1.0e-6)
+    );
+    assert_eq!(pool.ages, vec![0, 37]);
+    let snapshot = pool.target2d_snapshot().unwrap();
+    let mut restored = BurnDeviceParticlePool::new(2, 4, 16, 0.1, config, &device);
+    restored
+        .restore_target2d_snapshot(&snapshot, &device)
+        .unwrap();
+    assert_eq!(restored.ages, vec![0, 37]);
+    restored.reset();
+    assert_eq!(restored.ages, vec![0, 0]);
+}
+
+#[test]
+fn direct_particle_pool_recycles_selected_rows_at_the_age_limit() {
+    let device = BurnDevice::default();
+    let config = test_direct_config(4);
+    let mut pool = BurnDeviceParticlePool::new(1, 4, 16, 0.1, config, &device);
+    pool.update_batch_with_ages(
+        &[0],
+        &[37],
+        Tensor::<BurnBackend, 3>::full([1, 4, 2], 0.25, &device),
+        Tensor::<BurnBackend, 3>::full([1, 4, 16], 0.5, &device),
+    )
+    .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(11);
+    let batch = pool
+        .sample_batch_with_fresh_rows(
+            &mut rng,
+            1,
+            BurnPoolSampling {
+                fresh_seed_rows: 0,
+                max_age_steps: Some(32),
+                age_strata: 0,
+            },
+            config,
+            &device,
+        )
+        .unwrap();
+    assert_eq!(batch.ages, vec![0]);
+    assert!(
+        tensor3_vec(batch.x.inner())
+            .unwrap()
+            .iter()
+            .any(|value| (*value - 0.25).abs() > 1.0e-6)
+    );
+    assert!(
+        tensor3_vec(batch.s.inner())
+            .unwrap()
+            .iter()
+            .any(|value| (*value - 0.5).abs() > 1.0e-6)
+    );
+}
+
+#[test]
+fn age_stratified_pool_sampling_covers_available_bands_without_duplicates() {
+    let ages = (0..16).map(|index| index * 64).collect::<Vec<_>>();
+    let mut rng = StdRng::seed_from_u64(17);
+    let indices = sample_pool_indices_by_age(&mut rng, &ages, 8, 0, Some(1024), 4);
+
+    assert_eq!(indices.len(), 8);
+    let unique = indices.iter().copied().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), indices.len());
+    let mut counts = [0usize; 4];
+    for index in indices {
+        counts[pool_age_stratum(ages[index], 1024, 4)] += 1;
+    }
+    assert_eq!(counts, [2, 2, 2, 2]);
+}
+
+#[test]
+fn age_stratified_pool_sampling_preserves_explicit_fresh_slots() {
+    let ages = (0..16).map(|index| index * 64).collect::<Vec<_>>();
+    let mut rng = StdRng::seed_from_u64(23);
+    let indices = sample_pool_indices_by_age(&mut rng, &ages, 8, 1, Some(1024), 4);
+
+    assert_eq!(indices.len(), 8);
+    let unique = indices.iter().copied().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), indices.len());
+    let persistent_counts = indices[1..]
+        .iter()
+        .map(|index| pool_age_stratum(ages[*index], 1024, 4))
+        .fold([0usize; 4], |mut counts, stratum| {
+            counts[stratum] += 1;
+            counts
+        });
+    assert!(persistent_counts.iter().all(|count| *count >= 1));
+}
+
+#[test]
+fn direct_particle_pool_restores_unhealthy_trajectory_rows() {
+    let device = BurnDevice::default();
+    let config = test_direct_config(4);
+    let pool = BurnDeviceParticlePool::new(2, 4, 16, 0.1, config, &device);
+    let mut positions = vec![0.25; 2 * 4 * 2];
+    positions[4 * 2] = f32::NAN;
+    let mut states = vec![0.5; 2 * 4 * 16];
+    states[4 * 16] = 100.0;
+    let (restored_x, restored_s, unhealthy) = pool
+        .restore_unhealthy_batch(
+            &[0, 1],
+            tensor3(positions, [2, 4, 2], &device),
+            tensor3(states, [2, 4, 16], &device),
+        )
+        .unwrap();
+
+    assert_eq!(
+        unhealthy.into_data().to_vec::<u32>().unwrap(),
+        vec![0, 1]
+    );
+    let restored_x = tensor3_vec(restored_x.inner()).unwrap();
+    let restored_s = tensor3_vec(restored_s.inner()).unwrap();
+    assert!(restored_x[..4 * 2]
+        .iter()
+        .all(|value| (*value - 0.25).abs() < 1.0e-6));
+    assert!(restored_s[..4 * 16]
+        .iter()
+        .all(|value| (*value - 0.5).abs() < 1.0e-6));
+
+    let inner_device = pool.positions.device();
+    let second = inner_index_tensor(&[1], &inner_device);
+    assert_eq!(
+        &restored_x[4 * 2..],
+        tensor3_vec(pool.initial_positions.clone().select(0, second.clone()))
+            .unwrap()
+            .as_slice()
+    );
+    assert_eq!(
+        &restored_s[4 * 16..],
+        tensor3_vec(pool.initial_states.clone().select(0, second))
+            .unwrap()
+            .as_slice()
     );
 }
 
@@ -3275,6 +4514,572 @@ fn perception_tiled_adjoint_matches_dense_vjp_fixture() {
     );
 }
 
+#[test]
+fn adaptive_perception_autodiff_matches_reference_state_vjp() {
+    adaptive_perception_autodiff_matches_reference_state_vjp_for(
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+    );
+}
+
+#[test]
+fn adaptive_perception_coarse_exposure_uses_measure_at_fixed_support() {
+    let device = BurnDevice::default();
+    let particle_count = 3;
+    let positions = vec![0.0, 0.0, 0.04, 0.0, 0.8, 0.8];
+    let reference_positions = positions
+        .chunks_exact(2)
+        .map(|position| [position[0], position[1], 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let states = vec![0.0; particle_count * 2];
+    let represented_measure = vec![1.0, 4.0, 1.0];
+    let bandwidth = vec![0.1; particle_count];
+    let config = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        reference_measure: 1.0,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.1,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: 0.1,
+        scale_equivariance: true,
+        particle_density_equivariance: true,
+        log_norm_grad: true,
+        log_norm_density_grad: true,
+        position_features: false,
+    };
+    let output = adaptive_perception::adaptive_npa_perception_batch(
+        tensor3(positions, [1, particle_count, 2], &device),
+        tensor3(states.clone(), [1, particle_count, 2], &device),
+        tensor(
+            represented_measure.clone(),
+            [1, particle_count],
+            &device,
+        ),
+        tensor(bandwidth.clone(), [1, particle_count], &device),
+        config,
+        options,
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+    );
+    let exposure = test_tensor_values(output.coarse_exposure.inner());
+    let reference = burn_automata_kernels::adaptive_npa_perceive_all_pairs(
+        &reference_positions,
+        &states,
+        &represented_measure,
+        &bandwidth,
+        1,
+        particle_count,
+        2,
+        config,
+        options,
+    )
+    .unwrap();
+    assert!(exposure[0] > 0.0 && exposure[0] < 1.0);
+    assert!(exposure[1] > exposure[0]);
+    assert_eq!(exposure[2], 0.0);
+    assert!(
+        max_abs_difference(&exposure, &reference.coarse_exposure) <= 2.0e-5,
+        "device coarse exposure diverged from the represented-measure oracle"
+    );
+}
+
+#[test]
+fn normalized_adaptive_perception_autodiff_matches_reference_state_vjp() {
+    adaptive_perception_autodiff_matches_reference_state_vjp_for(
+        burn_automata_kernels::AdaptivePerceptionSemantics::NormalizedAdaptive,
+    );
+}
+
+fn adaptive_perception_autodiff_matches_reference_state_vjp_for(
+    semantics: burn_automata_kernels::AdaptivePerceptionSemantics,
+) {
+    let batch_size = 2;
+    let particle_count = 12;
+    let state_dims = 4;
+    let positions = (0..batch_size * particle_count)
+        .flat_map(|index| {
+            let batch = index / particle_count;
+            let local = index % particle_count;
+            let angle = local as f32 * 2.399_963_1 + batch as f32 * 0.17;
+            let radius = 0.045 * (local as f32 + 1.0).sqrt();
+            [radius * angle.cos(), radius * angle.sin()]
+        })
+        .collect::<Vec<_>>();
+    let reference_positions = positions
+        .chunks_exact(2)
+        .map(|position| [position[0], position[1], 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let states = (0..batch_size * particle_count * state_dims)
+        .map(|index| (index as f32 * 0.173).sin())
+        .collect::<Vec<_>>();
+    let represented_measure = (0..batch_size * particle_count)
+        .map(|index| 0.35 + (index % 5) as f32 * 0.11)
+        .collect::<Vec<_>>();
+    let bandwidth = (0..batch_size * particle_count)
+        .map(|index| {
+            if index % 3 == 0 {
+                0.1
+            } else {
+                0.19 + (index % 2) as f32 * 0.025
+            }
+        })
+        .collect::<Vec<_>>();
+    let config = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.3,
+        spacing_target_neighbors: 4.0,
+        moment_condition_limit: 1.0e8,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: 0.1,
+        scale_equivariance: true,
+        particle_density_equivariance: true,
+        log_norm_grad: true,
+        log_norm_density_grad: true,
+        position_features: false,
+    };
+    let feature_dims = config.feature_dims(state_dims);
+    let feature_weights = (0..batch_size * particle_count * feature_dims)
+        .map(|index| (index as f32 * 0.097).cos() * 0.1)
+        .collect::<Vec<_>>();
+    let device = BurnDevice::default();
+    let state_tensor = tensor3(
+        states.clone(),
+        [batch_size, particle_count, state_dims],
+        &device,
+    )
+    .require_grad();
+    let perception_output = adaptive_perception::adaptive_npa_perception_batch(
+        tensor3(
+            positions,
+            [batch_size, particle_count, 2],
+            &device,
+        ),
+        state_tensor.clone(),
+        tensor(
+            represented_measure.clone(),
+            [batch_size, particle_count],
+            &device,
+        ),
+        tensor(
+            bandwidth.clone(),
+            [batch_size, particle_count],
+            &device,
+        ),
+        config,
+        options,
+        semantics,
+    );
+    let coarse_exposure = perception_output
+        .coarse_exposure
+        .clone()
+        .inner()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let features = perception_output.features;
+    let feature_values = tensor3_vec(features.clone().inner()).unwrap();
+    let objective = features
+        .mul(tensor3(
+            feature_weights.clone(),
+            [batch_size, particle_count, feature_dims],
+            &device,
+        ))
+        .sum();
+    let mut gradients = objective.backward();
+    let state_gradient =
+        tensor3_vec(state_tensor.grad_remove(&mut gradients).unwrap()).unwrap();
+
+    let (reference, reference_gradient) = match semantics {
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible => (
+            burn_automata_kernels::adaptive_npa_perceive_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+                options,
+            )
+            .unwrap(),
+            burn_automata_kernels::adaptive_npa_perceive_state_adjoint_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+                options,
+                &feature_weights,
+            )
+            .unwrap(),
+        ),
+        burn_automata_kernels::AdaptivePerceptionSemantics::NormalizedAdaptive => (
+            burn_automata_kernels::adaptive_perceive_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+            )
+            .unwrap(),
+            burn_automata_kernels::adaptive_perceive_state_adjoint_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+                &feature_weights,
+            )
+            .unwrap(),
+        ),
+    };
+    assert!(
+        max_abs_difference(&feature_values, &reference.features) <= 2.0e-5,
+        "adaptive Burn forward diverged from the reference"
+    );
+    if semantics == burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible {
+        assert!(
+            max_abs_difference(&coarse_exposure, &reference.coarse_exposure) <= 2.0e-5,
+            "adaptive Burn coarse exposure diverged from the reference"
+        );
+    }
+    assert!(
+        max_abs_difference(&state_gradient, &reference_gradient) <= 3.0e-5,
+        "adaptive Burn state VJP diverged from the reference"
+    );
+}
+
+#[test]
+fn adaptive_sparse_perception_autodiff_matches_reference_state_vjp() {
+    adaptive_sparse_perception_autodiff_matches_reference_state_vjp_for(
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+    );
+}
+
+#[test]
+fn normalized_adaptive_sparse_perception_autodiff_matches_reference_state_vjp() {
+    adaptive_sparse_perception_autodiff_matches_reference_state_vjp_for(
+        burn_automata_kernels::AdaptivePerceptionSemantics::NormalizedAdaptive,
+    );
+}
+
+fn adaptive_sparse_perception_autodiff_matches_reference_state_vjp_for(
+    semantics: burn_automata_kernels::AdaptivePerceptionSemantics,
+) {
+    let batch_size = 1;
+    let particle_count = 128;
+    let state_dims = 4;
+    let positions = (0..particle_count)
+        .flat_map(|index| {
+            let column = index % 16;
+            let row = index / 16;
+            let jitter = (index as f32 * 1.618_034).sin() * 0.003;
+            [
+                -0.675 + column as f32 * 0.09 + jitter,
+                -0.63 + row as f32 * 0.18 - jitter,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let reference_positions = positions
+        .chunks_exact(2)
+        .map(|position| [position[0], position[1], 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let states = (0..particle_count * state_dims)
+        .map(|index| (index as f32 * 0.173).sin())
+        .collect::<Vec<_>>();
+    let represented_measure = (0..particle_count)
+        .map(|index| {
+            if index % 7 == 0 {
+                4.0 / 4096.0
+            } else {
+                1.0 / 4096.0
+            }
+        })
+        .collect::<Vec<_>>();
+    let bandwidth = (0..particle_count)
+        .map(|index| if index % 7 == 0 { 0.2 } else { 0.1 })
+        .collect::<Vec<_>>();
+    let config = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.2,
+        spacing_target_neighbors: 4.0,
+        moment_condition_limit: 1.0e8,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: 0.1,
+        scale_equivariance: true,
+        particle_density_equivariance: true,
+        log_norm_grad: true,
+        log_norm_density_grad: true,
+        position_features: false,
+    };
+    let feature_dims = config.feature_dims(state_dims);
+    let feature_weights = (0..particle_count * feature_dims)
+        .map(|index| (index as f32 * 0.097).cos() * 0.1)
+        .collect::<Vec<_>>();
+    let device = BurnDevice::default();
+    let state_tensor =
+        tensor3(states.clone(), [batch_size, particle_count, state_dims], &device).require_grad();
+    let perception_output = adaptive_perception::adaptive_npa_perception_batch(
+        tensor3(
+            positions,
+            [batch_size, particle_count, 2],
+            &device,
+        ),
+        state_tensor.clone(),
+        tensor(
+            represented_measure.clone(),
+            [batch_size, particle_count],
+            &device,
+        ),
+        tensor(
+            bandwidth.clone(),
+            [batch_size, particle_count],
+            &device,
+        ),
+        config,
+        options,
+        semantics,
+    );
+    let coarse_exposure = perception_output
+        .coarse_exposure
+        .inner()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let features = perception_output.features;
+    let feature_values = tensor3_vec(features.clone().inner()).unwrap();
+    let objective = features
+        .mul(tensor3(
+            feature_weights.clone(),
+            [batch_size, particle_count, feature_dims],
+            &device,
+        ))
+        .sum();
+    let mut gradients = objective.backward();
+    let state_gradient =
+        tensor3_vec(state_tensor.grad_remove(&mut gradients).unwrap()).unwrap();
+
+    let (reference, reference_gradient) = match semantics {
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible => (
+            burn_automata_kernels::adaptive_npa_perceive_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+                options,
+            )
+            .unwrap(),
+            burn_automata_kernels::adaptive_npa_perceive_state_adjoint_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+                options,
+                &feature_weights,
+            )
+            .unwrap(),
+        ),
+        burn_automata_kernels::AdaptivePerceptionSemantics::NormalizedAdaptive => (
+            burn_automata_kernels::adaptive_perceive_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+            )
+            .unwrap(),
+            burn_automata_kernels::adaptive_perceive_state_adjoint_all_pairs(
+                &reference_positions,
+                &states,
+                &represented_measure,
+                &bandwidth,
+                batch_size,
+                particle_count,
+                state_dims,
+                config,
+                &feature_weights,
+            )
+            .unwrap(),
+        ),
+    };
+    assert!(
+        max_abs_difference(&feature_values, &reference.features) <= 2.0e-4,
+        "adaptive sparse Burn forward diverged from the all-pairs reference"
+    );
+    if semantics == burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible {
+        assert!(
+            max_abs_difference(&coarse_exposure, &reference.coarse_exposure) <= 2.0e-4,
+            "adaptive sparse Burn coarse exposure diverged from the all-pairs reference"
+        );
+    }
+    assert!(
+        max_abs_difference(&state_gradient, &reference_gradient) <= 3.0e-4,
+        "adaptive sparse Burn state VJP diverged from the all-pairs reference"
+    );
+}
+
+#[test]
+fn adaptive_recurrent_state_gradient_matches_multistep_finite_difference() {
+    let device = BurnDevice::default();
+    let particle_count = 6;
+    let steps = 4;
+    let npa_config = NpaConfig::growing_2d();
+    let model = NpaModel::upstream_seeded(npa_config.clone(), 0xa4da_710e);
+    let positions = (0..particle_count)
+        .flat_map(|particle| {
+            let angle = particle as f32 * 2.399_963_1;
+            let radius = 0.04 * (particle as f32 + 1.0).sqrt();
+            [radius * angle.cos(), radius * angle.sin()]
+        })
+        .collect::<Vec<_>>();
+    let states = (0..particle_count * npa_config.state_dims)
+        .map(|index| (index as f32 * 0.071).sin() * 0.05)
+        .collect::<Vec<_>>();
+    let state_weights = (0..particle_count * npa_config.state_dims)
+        .map(|index| (index as f32 * 0.113).cos())
+        .collect::<Vec<_>>();
+    let represented_measure = vec![1.0; particle_count];
+    let bandwidth = vec![0.15, 0.18, 0.21, 0.16, 0.19, 0.22];
+    let perception = burn_automata_kernels::AdaptivePerceptionConfig {
+        graph_policy: burn_automata_kernels::AdaptiveGraphPolicy::RawSupport,
+        max_neighbors: particle_count,
+        min_bandwidth: 0.1,
+        max_bandwidth: 0.3,
+        spacing_target_neighbors: 4.0,
+        moment_condition_limit: 1.0e8,
+        ..burn_automata_kernels::AdaptivePerceptionConfig::growing_2d()
+    };
+    let perception_options = burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+        eps0: 0.1,
+        scale_equivariance: true,
+        particle_density_equivariance: true,
+        log_norm_grad: true,
+        log_norm_density_grad: true,
+        position_features: false,
+    };
+    let mut config = test_direct_config(particle_count);
+    config.motion_scale = 0.0;
+    let targets = vec![test_burn_target(&device, 1.0, 0.1)];
+    let objective_weights = tensor3(
+        state_weights.clone(),
+        [1, particle_count, npa_config.state_dims],
+        &device,
+    );
+
+    let rollout_objective = |params: &BurnBaseBatch| {
+        let mut rngs = [StdRng::seed_from_u64(17)];
+        let (_, state, _, _) = rollout_adaptive_oracle_model_batch_chunk(
+            params,
+            None,
+            &targets,
+            &[0],
+            tensor3(positions.clone(), [1, particle_count, 2], &device),
+            tensor3(
+                states.clone(),
+                [1, particle_count, npa_config.state_dims],
+                &device,
+            ),
+            tensor(
+                represented_measure.clone(),
+                [1, particle_count],
+                &device,
+            ),
+            tensor(bandwidth.clone(), [1, particle_count], &device),
+            Tensor::<BurnBackend, 2>::zeros([1, particle_count], &device),
+            Tensor::<BurnBackend, 2>::ones([1, particle_count], &device),
+            perception,
+            perception_options,
+            burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+            None,
+            false,
+            false,
+            config,
+            particle_count,
+            &mut rngs,
+            true,
+            None,
+            None,
+            0,
+            steps,
+            Tensor::<BurnBackend, 1>::zeros([1], &device),
+        );
+        state.mul(objective_weights.clone()).sum()
+    };
+
+    let params = BurnBaseBatch::from_models(std::slice::from_ref(&model), &device).unwrap();
+    let objective = rollout_objective(&params);
+    let mut gradients = objective.backward();
+    let analytic = tensor3_vec(
+        params
+            .w2
+            .grad_remove(&mut gradients)
+            .expect("adaptive recurrent parameter gradient"),
+    )
+    .unwrap();
+    let (coordinate, analytic_value) = analytic
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, value)| value.is_finite())
+        .max_by(|(_, left), (_, right)| {
+            left.abs()
+                .partial_cmp(&right.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("finite adaptive recurrent gradient");
+    assert!(
+        analytic_value.abs() > 1.0e-6,
+        "adaptive recurrent gradient fixture is degenerate"
+    );
+
+    let evaluate = |candidate: NpaModel| {
+        let params =
+            BurnBaseBatch::from_models(std::slice::from_ref(&candidate), &device).unwrap();
+        rollout_objective(&params).inner().into_scalar()
+    };
+    let epsilon = 1.0e-3;
+    let mut plus = model.clone();
+    plus.weights.w2[coordinate] += epsilon;
+    let mut minus = model;
+    minus.weights.w2[coordinate] -= epsilon;
+    let finite_difference = (evaluate(plus) - evaluate(minus)) / (2.0 * epsilon);
+    let tolerance = 2.0e-3_f32.max(finite_difference.abs() * 5.0e-2);
+    assert!(
+        (analytic_value - finite_difference).abs() <= tolerance,
+        "adaptive recurrent parameter gradient mismatch: coordinate={coordinate} analytic={analytic_value:e} finite={finite_difference:e} tolerance={tolerance:e}"
+    );
+}
+
 #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
 #[test]
 fn perception_cube_state_vjp_components_match_reference() {
@@ -3388,7 +5193,7 @@ fn perception_sparse_cell_planes_match_reference_state_vjp() {
     let npa_config = NpaConfig::growing_2d();
     let grid = crate::upstream_growing_2d_hashgrid();
     let particle_count = 1024;
-    let (positions, states) = seed_particles_scaled(
+    let (positions, mut states) = seed_particles_scaled(
         1,
         particle_count,
         npa_config.state_dims,
@@ -3397,6 +5202,9 @@ fn perception_sparse_cell_planes_match_reference_state_vjp() {
         crate::ParticleSeed::UniformCircle,
         0.5,
     );
+    for (index, state) in states.iter_mut().enumerate() {
+        *state = (index as f32 * 0.013_731).sin() * 0.1;
+    }
     let options = perception_reference_options(grid.eps);
     let reference = burn_automata_kernels::perceive_with_options(
         &positions,
@@ -3574,9 +5382,121 @@ fn perception_sparse_cell_planes_match_reference_state_vjp() {
 
 #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
 #[test]
+fn perception_sparse_blocks_support_24_state_channels() {
+    let mut npa_config = NpaConfig::growing_2d();
+    npa_config.state_dims = 24;
+    let grid = crate::upstream_growing_2d_hashgrid();
+    let particle_count = 1024;
+    let (positions, mut states) = seed_particles_scaled(
+        1,
+        particle_count,
+        npa_config.state_dims,
+        npa_config.spatial_dims,
+        97,
+        crate::ParticleSeed::UniformCircle,
+        0.5,
+    );
+    for (index, state) in states.iter_mut().enumerate() {
+        *state = (index as f32 * 0.013_731).sin() * 0.1;
+    }
+    let options = perception_reference_options(grid.eps);
+    let reference = burn_automata_kernels::perceive_with_options(
+        &positions,
+        &states,
+        1,
+        particle_count,
+        npa_config.state_dims,
+        &grid,
+        options,
+    )
+    .unwrap();
+    let feature_dims = reference.feature_dims;
+    let feature_weights = (0..particle_count * feature_dims)
+        .map(|index| (((index * 23) % 29) as f32 - 14.0) * 1.0e-4)
+        .collect::<Vec<_>>();
+    let reference_adjoint = burn_automata_kernels::perceive_adjoint_with_options(
+        &positions,
+        &states,
+        1,
+        particle_count,
+        npa_config.state_dims,
+        &grid,
+        options,
+        &feature_weights,
+    )
+    .unwrap();
+
+    let device = BurnDevice::default();
+    let x = tensor3(
+        positions
+            .iter()
+            .flat_map(|position| [position[0], position[1]])
+            .collect(),
+        [1, particle_count, 2],
+        &device,
+    )
+    .inner();
+    let s = tensor3(
+        states,
+        [1, particle_count, npa_config.state_dims],
+        &device,
+    )
+    .inner();
+    let cube_config = perception_cube_adjoint_config(grid.eps, false, true);
+    let prepared = InnerBackend::perception_cube_forward_prepared(
+        x.clone(),
+        s.clone(),
+        cube_config,
+    )
+    .expect("24-channel prepared perception backend")
+    .expect("24-channel prepared perception forward");
+    let feature_values = tensor3_vec(prepared.features.clone()).unwrap();
+    let feature_grad = Tensor::<InnerBackend, 3>::from_data(
+        TensorData::new(feature_weights, [1, particle_count, feature_dims]),
+        &x.device(),
+    );
+    let adjoint = InnerBackend::perception_cube_adjoint_prepared(
+        x,
+        s,
+        feature_grad,
+        prepared.density,
+        prepared.offsets,
+        prepared.permutation,
+        prepared.block_info,
+        prepared.raw_state_gradient,
+        prepared.state_gradient_inverse,
+        cube_config,
+    )
+    .expect("24-channel prepared perception adjoint backend")
+    .expect("24-channel prepared perception adjoint");
+    let state_gradient = tensor3_vec(adjoint.state_grad).unwrap();
+    let feature_diff = max_abs_difference(&reference.features, &feature_values);
+    let (_, state_diff, reference_state, device_state) =
+        max_abs_difference_with_index(&reference_adjoint.state, &state_gradient);
+    let state_relative = state_diff
+        / reference_state
+            .abs()
+            .max(device_state.abs())
+            .max(1.0e-4);
+    assert!(
+        feature_diff < 1.0e-2,
+        "24-channel sparse block forward diverged: max_abs_diff={feature_diff}"
+    );
+    assert!(
+        state_diff < 6.0e-3 && state_relative < 5.0e-2,
+        "24-channel sparse block VJP diverged: reference={reference_state} device={device_state} max_abs_diff={state_diff} relative={state_relative}"
+    );
+}
+
+#[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+#[test]
 #[ignore = "opt-in quality-scale perception parity gate"]
 fn perception_sparse_blocks_match_planes_at_training_shape() {
-    let npa_config = NpaConfig::growing_2d();
+    let mut npa_config = NpaConfig::growing_2d();
+    npa_config.state_dims = std::env::var("BURN_AUTOMATA_PERCEPTION_PARITY_STATE_DIMS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(npa_config.state_dims);
     let grid = crate::upstream_growing_2d_hashgrid();
     let batch_size = std::env::var("BURN_AUTOMATA_PERCEPTION_PARITY_BATCH")
         .ok()
@@ -3586,7 +5506,7 @@ fn perception_sparse_blocks_match_planes_at_training_shape() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(4096);
-    let (positions, states) = seed_particles_scaled(
+    let (positions, mut states) = seed_particles_scaled(
         batch_size,
         particle_count,
         npa_config.state_dims,
@@ -3595,6 +5515,9 @@ fn perception_sparse_blocks_match_planes_at_training_shape() {
         crate::ParticleSeed::UniformCircle,
         0.2,
     );
+    for (index, state) in states.iter_mut().enumerate() {
+        *state = (index as f32 * 0.013_731).sin() * 0.1;
+    }
     let device = BurnDevice::default();
     let x = tensor3(
         positions
@@ -3764,7 +5687,11 @@ fn perception_sparse_blocks_match_planes_at_training_shape() {
 #[test]
 #[ignore = "opt-in GPU perception throughput benchmark"]
 fn benchmark_perception_sparse_grid_forward_and_state_vjp() {
-    let npa_config = NpaConfig::growing_2d();
+    let mut npa_config = NpaConfig::growing_2d();
+    npa_config.state_dims = std::env::var("BURN_AUTOMATA_PERCEPTION_BENCH_STATE_DIMS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(npa_config.state_dims);
     let grid = crate::upstream_growing_2d_hashgrid();
     let device = BurnDevice::default();
     let inner_device = device.clone();
@@ -3912,12 +5839,13 @@ fn burn_target_splat_loss_matches_reference_cpu_fixture() {
         center: true,
         foreground_density_loss_weight: 0.5,
         composited_rgb_loss_weight: 0.75,
+        render_rgb_loss_weight: 1.25,
         displacement_regularizer_weight: 0.0,
         overflow_regularizer_weight: 0.0,
         bound_regularizer_weight: 0.0,
         ..crate::Target2dLossConfig::default()
     };
-    let (positions, mut states) = seed_particles_scaled(
+    let (mut positions, mut states) = seed_particles_scaled(
         1,
         4,
         npa_config.state_dims,
@@ -3926,6 +5854,9 @@ fn burn_target_splat_loss_matches_reference_cpu_fixture() {
         crate::ParticleSeed::UniformCircle,
         0.3,
     );
+    // Keep one partially visible off-image Gaussian in the parity fixture. This
+    // exercises upstream's normalize-full-patch-before-clipping semantics.
+    positions[0][0] = 2.0;
     for particle in 0..4 {
         let base = particle * npa_config.state_dims + npa_config.state_dims - 3;
         states[base] = -0.3 + particle as f32 * 0.1;
@@ -4209,7 +6140,8 @@ fn burn_target_splat_loss_matches_reference_cpu_fixture() {
         &device,
     )
     .require_grad();
-    let base_s3 = tensor3(states, [1, 4, npa_config.state_dims], &device).require_grad();
+    let base_s3 =
+        tensor3(states.clone(), [1, 4, npa_config.state_dims], &device).require_grad();
     let base_only_loss = target_splat_loss_batch_vector_base_only_selected(
         &base_x3,
         &base_s3,
@@ -4241,6 +6173,885 @@ fn burn_target_splat_loss_matches_reference_cpu_fixture() {
     .unwrap();
     assert!(max_abs_difference(&base_x_grad, &tiled_x_grad) < 1.0e-6);
     assert!(max_abs_difference(&base_s_grad, &tiled_s_grad) < 1.0e-6);
+
+    let fixed_dense_x3 = tensor3(
+        positions
+            .iter()
+            .flat_map(|position| [position[0], position[1]])
+            .collect(),
+        [1, 4, 2],
+        &device,
+    )
+    .require_grad();
+    let fixed_dense_s3 =
+        tensor3(states.clone(), [1, 4, npa_config.state_dims], &device).require_grad();
+    let fixed_dense_loss = target_splat_loss_batch_vector_base_only_selected(
+        &fixed_dense_x3,
+        &fixed_dense_s3,
+        std::slice::from_ref(&target),
+        &[0],
+        config,
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    )
+    .unwrap();
+    let fixed_dense_scalar = loss_vector_scalars(fixed_dense_loss.clone()).unwrap()[0];
+    let mut fixed_dense_grads = fixed_dense_loss.total.sum().backward();
+    let fixed_dense_x_grad = tensor3_vec(
+        fixed_dense_x3
+            .grad_remove(&mut fixed_dense_grads)
+            .unwrap_or_else(|| fixed_dense_x3.clone().inner().zeros_like()),
+    )
+    .unwrap();
+    let fixed_dense_s_grad = tensor3_vec(
+        fixed_dense_s3
+            .grad_remove(&mut fixed_dense_grads)
+            .unwrap_or_else(|| fixed_dense_s3.clone().inner().zeros_like()),
+    )
+    .unwrap();
+
+    let adaptive_x3 = tensor3(
+        positions
+            .iter()
+            .flat_map(|position| [position[0], position[1]])
+            .collect(),
+        [1, 4, 2],
+        &device,
+    )
+    .require_grad();
+    let adaptive_s3 =
+        tensor3(states.clone(), [1, 4, npa_config.state_dims], &device).require_grad();
+    let adaptive_loss = adaptive_target_splat_loss_batch_vector_base_only_selected(
+        &adaptive_x3,
+        &adaptive_s3,
+        std::slice::from_ref(&target),
+        &[0],
+        config,
+        tensor(vec![1.0; 4], [1, 4], &device),
+        tensor(vec![target.pixel_size; 4], [1, 4], &device),
+        tensor(
+            vec![target.target_points as f32 / 4.0; 4],
+            [1, 4],
+            &device,
+        ),
+        Tensor::<BurnBackend, 1>::zeros([1], &device),
+    )
+    .unwrap();
+    let adaptive_scalar = loss_vector_scalars(adaptive_loss.clone()).unwrap()[0];
+    assert!(
+        (adaptive_scalar.total - fixed_dense_scalar.total).abs() < 1.0e-6,
+        "equal-scale adaptive Target2D loss diverged from fixed loss: adaptive={} fixed={}",
+        adaptive_scalar.total,
+        fixed_dense_scalar.total,
+    );
+    let mut adaptive_grads = adaptive_loss.total.sum().backward();
+    let adaptive_x_grad = tensor3_vec(
+        adaptive_x3
+            .grad_remove(&mut adaptive_grads)
+            .unwrap_or_else(|| adaptive_x3.clone().inner().zeros_like()),
+    )
+    .unwrap();
+    let adaptive_s_grad = tensor3_vec(
+        adaptive_s3
+            .grad_remove(&mut adaptive_grads)
+            .unwrap_or_else(|| adaptive_s3.clone().inner().zeros_like()),
+    )
+    .unwrap();
+    assert!(
+        max_abs_difference(&adaptive_x_grad, &fixed_dense_x_grad) < 1.0e-6,
+        "equal-scale adaptive Target2D position VJP diverged from fixed loss"
+    );
+    assert!(
+        max_abs_difference(&adaptive_s_grad, &fixed_dense_s_grad) < 1.0e-6,
+        "equal-scale adaptive Target2D state VJP diverged from fixed loss"
+    );
+
+    #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+    {
+        let fine_units = [1.0_f32, 4.0, 2.0, 1.0];
+        let reference_particles = fine_units.iter().sum::<f32>();
+        let represented_measure = fine_units.to_vec();
+        let pixel_size = fine_units
+            .iter()
+            .map(|units| target.pixel_size * units.sqrt())
+            .collect::<Vec<_>>();
+        let output_scale =
+            vec![target.target_points as f32 / reference_particles; fine_units.len()];
+        let evaluate = |loss_backend, require_grad: bool| {
+            let mut local_config = config;
+            local_config.target2d_loss_backend = loss_backend;
+            let x = tensor3(
+                positions
+                    .iter()
+                    .flat_map(|position| [position[0], position[1]])
+                    .collect(),
+                [1, 4, 2],
+                &device,
+            );
+            let s = tensor3(states.clone(), [1, 4, npa_config.state_dims], &device);
+            let x = if require_grad { x.require_grad() } else { x };
+            let s = if require_grad { s.require_grad() } else { s };
+            let loss = adaptive_target_splat_loss_batch_vector_base_only_selected(
+                &x,
+                &s,
+                std::slice::from_ref(&target),
+                &[0],
+                local_config,
+                tensor(represented_measure.clone(), [1, 4], &device),
+                tensor(pixel_size.clone(), [1, 4], &device),
+                tensor(output_scale.clone(), [1, 4], &device),
+                Tensor::<BurnBackend, 1>::zeros([1], &device),
+            )
+            .unwrap();
+            let scalar = loss_vector_scalars(loss.clone()).unwrap()[0];
+            let mut grads = loss.total.sum().backward();
+            let x_grad = tensor3_vec(
+                x.grad_remove(&mut grads)
+                    .unwrap_or_else(|| x.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            let s_grad = tensor3_vec(
+                s.grad_remove(&mut grads)
+                    .unwrap_or_else(|| s.clone().inner().zeros_like()),
+            )
+            .unwrap();
+            (scalar, x_grad, s_grad)
+        };
+        let dense = evaluate(Target2dLossBackend::Dense, true);
+        let tiled = evaluate(Target2dLossBackend::TiledAdjoint, true);
+        assert!(
+            (dense.0.total - tiled.0.total).abs() < 2.0e-4,
+            "variable-footprint Target2D mismatch: dense total/splat/color/density={}/{}/{}/{} tiled={}/{}/{}/{}",
+            dense.0.total,
+            dense.0.splat,
+            dense.0.color,
+            dense.0.density,
+            tiled.0.total,
+            tiled.0.splat,
+            tiled.0.color,
+            tiled.0.density,
+        );
+        assert!(
+            max_abs_difference(&dense.1, &tiled.1) < 2.0e-3,
+            "variable-footprint Target2D position VJP mismatch: max_abs_diff={}",
+            max_abs_difference(&dense.1, &tiled.1),
+        );
+        assert!(
+            max_abs_difference(&dense.2, &tiled.2) < 2.0e-3,
+            "variable-footprint Target2D state VJP mismatch: max_abs_diff={}",
+            max_abs_difference(&dense.2, &tiled.2),
+        );
+    }
+}
+
+#[test]
+fn zero_primal_explicit_adjoint_preserves_primal_and_nonlinear_vjp() {
+    let device = BurnDevice::default();
+    let input = tensor3(vec![100_000_000.0], [1, 1, 1], &device).require_grad();
+    let gradient = tensor3(vec![1.0], [1, 1, 1], &device);
+    let accurate = tensor1(vec![0.25], [1], &device);
+    let loss = accurate.detach() + zero_primal_linear_adjoint_3d(&input, gradient);
+
+    let primal = tensor1_vec(loss.clone().inner()).unwrap()[0];
+    assert!(
+        (primal - 0.25).abs() < 1.0e-7,
+        "accurate explicit-adjoint primal was not preserved: {primal}"
+    );
+
+    let mut gradients = loss.log1p().sum().backward();
+    let gradient = tensor3_vec(
+        input
+            .grad_remove(&mut gradients)
+            .unwrap_or_else(|| input.clone().inner().zeros_like()),
+    )
+    .unwrap()[0];
+    assert!(
+        (gradient - 0.8).abs() < 1.0e-6,
+        "nonlinear VJP used the cancellation-prone surrogate primal: {gradient}"
+    );
+}
+
+#[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+#[test]
+fn target2d_cube_batched_tail_matches_dense_primal_and_vjp() {
+    const BATCHES: usize = 8;
+    const PARTICLES: usize = 64;
+
+    let device = BurnDevice::default();
+    let target = test_burn_target(&device, 1.0, 0.2);
+    let indices = vec![0; BATCHES];
+    let state_dims = NpaConfig::growing_2d().state_dims;
+    let mut positions = Vec::with_capacity(BATCHES * PARTICLES * 2);
+    let mut states = vec![0.0; BATCHES * PARTICLES * state_dims];
+    for batch in 0..BATCHES {
+        for particle in 0..PARTICLES {
+            let angle = particle as f32 * std::f32::consts::TAU / PARTICLES as f32;
+            let radius = 0.05 + 0.01 * (particle % 5) as f32;
+            positions.extend([
+                radius * angle.cos() + batch as f32 * 0.002,
+                radius * angle.sin() - batch as f32 * 0.001,
+            ]);
+            let color = (batch * PARTICLES + particle) * state_dims + state_dims - 3;
+            states[color] = -0.2 + batch as f32 * 0.01;
+            states[color + 1] = 0.1 + particle as f32 * 0.001;
+            states[color + 2] = -0.05;
+        }
+    }
+
+    let represented_measure = vec![1.0; BATCHES * PARTICLES];
+    let particle_pixel_size = vec![0.2; BATCHES * PARTICLES];
+    let particle_output_scale = vec![1.0 / PARTICLES as f32; BATCHES * PARTICLES];
+    let mut base_config = test_direct_config(PARTICLES);
+    base_config.example_batch_size = BATCHES;
+    base_config.loss_config.image_size = 1;
+    base_config.loss_config.center = false;
+    base_config.loss_config.splat_loss_weight = 2.0;
+    base_config.loss_config.color_loss_weight = 5.0;
+    base_config.loss_config.density_loss_weight = 1.0;
+    base_config.loss_config.background_density_loss_weight = 0.0;
+    base_config.loss_config.foreground_density_loss_weight = 0.5;
+    base_config.loss_config.composited_rgb_loss_weight = 0.75;
+    base_config.loss_config.render_rgb_loss_weight = 1.25;
+    base_config.loss_config.shape_chamfer_loss_weight = 0.0;
+    base_config.loss_config.displacement_regularizer_weight = 0.0;
+    base_config.loss_config.overflow_regularizer_weight = 0.0;
+    base_config.loss_config.bound_regularizer_weight = 0.0;
+
+    let evaluate = |backend| {
+        let x = tensor3(
+            positions.clone(),
+            [BATCHES, PARTICLES, 2],
+            &device,
+        )
+        .require_grad();
+        let s = tensor3(
+            states.clone(),
+            [BATCHES, PARTICLES, state_dims],
+            &device,
+        )
+        .require_grad();
+        let loss = adaptive_target_splat_loss_batch_vector_base_only_selected(
+            &x,
+            &s,
+            std::slice::from_ref(&target),
+            &indices,
+            DirectBasisTrainConfig {
+                target2d_loss_backend: backend,
+                ..base_config
+            },
+            tensor(
+                represented_measure.clone(),
+                [BATCHES, PARTICLES],
+                &device,
+            ),
+            tensor(
+                particle_pixel_size.clone(),
+                [BATCHES, PARTICLES],
+                &device,
+            ),
+            tensor(
+                particle_output_scale.clone(),
+                [BATCHES, PARTICLES],
+                &device,
+            ),
+            Tensor::<BurnBackend, 1>::zeros([BATCHES], &device),
+        )
+        .unwrap();
+        let splat = tensor1_vec(loss.splat.clone().inner()).unwrap();
+        let total = tensor1_vec(loss.total.clone().inner()).unwrap();
+        let mut gradients = loss.total.sum().backward();
+        let x_grad = tensor3_vec(
+            x.grad_remove(&mut gradients)
+                .unwrap_or_else(|| x.clone().inner().zeros_like()),
+        )
+        .unwrap();
+        let s_grad = tensor3_vec(
+            s.grad_remove(&mut gradients)
+                .unwrap_or_else(|| s.clone().inner().zeros_like()),
+        )
+        .unwrap();
+        (splat, total, x_grad, s_grad)
+    };
+
+    let dense = evaluate(Target2dLossBackend::Dense);
+    let tiled = evaluate(Target2dLossBackend::TiledAdjoint);
+    for row in 0..BATCHES {
+        assert!(tiled.0[row].is_finite(), "non-finite tiled splat row {row}");
+        assert!(
+            (dense.0[row] - tiled.0[row]).abs() < 2.0e-4,
+            "batched Target2D splat row {row} diverged: dense={} tiled={}",
+            dense.0[row],
+            tiled.0[row],
+        );
+        assert!(
+            (dense.1[row] - tiled.1[row]).abs() < 2.0e-4,
+            "batched Target2D primal row {row} diverged: dense={} tiled={}",
+            dense.1[row],
+            tiled.1[row],
+        );
+    }
+    assert!(
+        max_abs_difference(&dense.2, &tiled.2) < 2.0e-3,
+        "batched Target2D position VJP diverged"
+    );
+    assert!(
+        max_abs_difference(&dense.3, &tiled.3) < 2.0e-3,
+        "batched Target2D state VJP diverged"
+    );
+}
+
+fn train_adaptive_recurrent_smoke(
+    model: &mut NpaModel,
+    frozen_base: Option<NpaModel>,
+) -> BurnDenseOracleBatchOutput {
+    let residual_perception_semantics = frozen_base.as_ref().map(|_| {
+        burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible
+    });
+    let npa = model.config.clone();
+    let target = TargetImage2d {
+        source_width: 8,
+        source_height: 8,
+        positions: vec![[-0.2, 0.1], [0.2, -0.1]],
+        colors: vec![[0.2, 0.8, 0.1], [0.8, 0.2, 0.4]],
+        pixel_size: 0.25,
+        threshold: 0.05,
+        aabb: [-1.0, 1.0, -1.0, 1.0],
+    };
+    let example = DirectBasisExample {
+        target,
+        adapter: NpaLowRankAdapter::zeros(&npa, 1, 1.0),
+        last_train_loss: None,
+        particle_count: Some(8),
+        update_prob: Some(1.0),
+        seed_scale: Some(0.2),
+    };
+    let mut train = test_direct_config(8);
+    train.steps = 1;
+    train.example_batch_size = 1;
+    train.pool_size = 1;
+    train.use_particle_pool = true;
+    train.loss_on_final_chunk_only = true;
+    train.eval_interval = 1;
+    train.loss_config.image_size = 8;
+    train.target2d_loss_backend = Target2dLossBackend::Dense;
+    let material = crate::adaptive::AdaptiveTarget2dMaterialConfig {
+        reference_particle_count: 11,
+        total_measure: 11.0,
+        fine_bandwidth: 0.1,
+        bandwidth_exponent: 0.5,
+        max_initial_fine_units: 4,
+        seed_layout: crate::adaptive::AdaptiveMaterialSeedLayout::CanonicalGrouped,
+        seed_measure_ratio: 1.0,
+    }
+    .layout(8, 0.01, 0.4)
+    .unwrap();
+    let mut perception = burn_automata_kernels::AdaptivePerceptionConfig::growing_2d();
+    perception.max_neighbors = 8;
+    perception.graph_policy = burn_automata_kernels::AdaptiveGraphPolicy::RawSupport;
+    let seed_bank = test_adaptive_target2d_seed_bank(1, 8, npa.state_dims, train);
+    let output = adaptive_training::train_adaptive_target2d_burn_dense(
+        model,
+        &example,
+        Target2dOracleTrainPlan {
+            train,
+            steps_per_repetition: 1,
+            repetitions: 1,
+            optimizer: AdamWConfig {
+                learning_rate: 1.0e-3,
+                ..AdamWConfig::default()
+            },
+            scheduler_milestones: Vec::new(),
+            scheduler_gamma: 1.0,
+        },
+        AdaptiveTarget2dBurnConfig {
+            material,
+            topology: crate::adaptive::AdaptiveTarget2dTopologyConfig {
+                enabled: true,
+                start_step: 1,
+                interval_steps: 1,
+                ..crate::adaptive::AdaptiveTarget2dTopologyConfig::default()
+            },
+            perception,
+            perception_options: burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+                eps0: npa.eps0,
+                scale_equivariance: npa.scale_equivariant(),
+                particle_density_equivariance: npa.particle_density_equivariant(),
+                log_norm_grad: npa.log_norm_grad,
+                log_norm_density_grad: npa.log_norm_density_grad,
+                position_features: npa.position_features,
+            },
+            perception_semantics:
+                burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+            residual_perception_semantics,
+            seed_bank,
+            frozen_base,
+            material_scale_conditioning: false,
+            optimize_material_scale_only: false,
+            log1p_trajectory_loss: false,
+            trajectory_tail_fraction: 0.0,
+            trajectory_tail_weight: 0.0,
+            compatible_residual_material_features: false,
+            compact_recurrent_memory_dims: 0,
+            fresh_seed_trajectories: 1,
+            checkpoint_horizons: vec![train.rollout_steps],
+            max_pool_age_steps: 0,
+            pool_age_strata: 0,
+            backward_loss_scale: 1.0,
+        },
+        None,
+    )
+    .unwrap();
+    model.validate().unwrap();
+    output
+}
+
+#[test]
+fn adaptive_recurrent_target2d_smoke_updates_the_shared_rule() {
+    let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 91);
+    let initial = model.weights.clone();
+    let output = train_adaptive_recurrent_smoke(&mut model, None);
+    assert_eq!(output.history.len(), 1);
+    assert!(output.history[0].loss.is_finite());
+    assert!(output.history[0].base_grad_norm > 0.0);
+    assert_eq!(output.metrics["topology_events"].as_u64(), Some(1));
+    let best_step = output.metrics["best_fresh_seed_eval_step"]
+        .as_u64()
+        .unwrap() as usize;
+    if best_step == 0 {
+        assert_eq!(model.weights.w1, initial.w1);
+    } else {
+        assert!(max_abs_difference(&model.weights.w1, &initial.w1) > 0.0);
+    }
+}
+
+#[test]
+fn adaptive_recurrent_target2d_smoke_updates_only_the_compatible_residual() {
+    let base = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 91);
+    let frozen_weights = base.weights.clone();
+    let mut residual = NpaModel {
+        config: base.config.clone(),
+        weights: NpaWeights::zero_output_seeded(&base.config, 0x6c6f_6361_6c5f_6e70),
+    };
+    let initial_residual = residual.weights.clone();
+    let output = train_adaptive_recurrent_smoke(&mut residual, Some(base.clone()));
+
+    assert_eq!(
+        output.metrics["training_path"].as_str(),
+        Some("adaptive_recurrent_target2d_frozen_base_compatible_residual")
+    );
+    assert_eq!(base.weights.w1, frozen_weights.w1);
+    assert_eq!(base.weights.b1, frozen_weights.b1);
+    assert_eq!(base.weights.w2, frozen_weights.w2);
+    assert_eq!(base.weights.b2, frozen_weights.b2);
+    assert!(output.history[0].base_grad_norm > 0.0);
+    let best_step = output.metrics["best_fresh_seed_eval_step"]
+        .as_u64()
+        .unwrap() as usize;
+    if best_step == 0 {
+        assert_eq!(residual.weights.w2, initial_residual.w2);
+    } else {
+        assert!(max_abs_difference(&residual.weights.w2, &initial_residual.w2) > 0.0);
+    }
+}
+
+#[test]
+fn adaptive_paired_topology_conserves_material_and_is_batch_independent() {
+    let device = BurnDevice::default();
+    let npa = NpaConfig::growing_2d();
+    let material = crate::adaptive::AdaptiveTarget2dMaterialConfig {
+        reference_particle_count: 11,
+        total_measure: 11.0,
+        fine_bandwidth: 0.1,
+        bandwidth_exponent: 0.5,
+        max_initial_fine_units: 4,
+        seed_layout: crate::adaptive::AdaptiveMaterialSeedLayout::CanonicalGrouped,
+        seed_measure_ratio: 1.0,
+    }
+    .layout(8, 0.01, 0.4)
+    .unwrap();
+    assert_eq!(
+        material.fine_units,
+        Some(vec![4, 1, 1, 1, 1, 1, 1, 1])
+    );
+    let topology = BurnAdaptiveTopology::new(
+        &AdaptiveTarget2dBurnConfig {
+            material: material.clone(),
+            topology: crate::adaptive::AdaptiveTarget2dTopologyConfig {
+                enabled: true,
+                start_step: 0,
+                end_step: 0,
+                split_radius_scale: 1.0,
+                merge_detail_scale: 0.0,
+                min_relative_gain: 0.0,
+                interval_steps: 1,
+                events_per_interval: 1,
+            },
+            perception: burn_automata_kernels::AdaptivePerceptionConfig::growing_2d(),
+            perception_options: burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+                eps0: npa.eps0,
+                scale_equivariance: npa.scale_equivariant(),
+                particle_density_equivariance: npa.particle_density_equivariant(),
+                log_norm_grad: npa.log_norm_grad,
+                log_norm_density_grad: npa.log_norm_density_grad,
+                position_features: npa.position_features,
+            },
+            perception_semantics:
+                burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+            residual_perception_semantics: None,
+            seed_bank: test_adaptive_target2d_seed_bank(
+                1,
+                material.active_particle_count(),
+                npa.state_dims,
+                test_direct_config(material.active_particle_count()),
+            ),
+            frozen_base: None,
+            material_scale_conditioning: false,
+            optimize_material_scale_only: false,
+            log1p_trajectory_loss: false,
+            trajectory_tail_fraction: 0.0,
+            trajectory_tail_weight: 0.0,
+            compatible_residual_material_features: false,
+            compact_recurrent_memory_dims: 0,
+            fresh_seed_trajectories: 1,
+            checkpoint_horizons: vec![1],
+            max_pool_age_steps: 0,
+            pool_age_strata: 0,
+            backward_loss_scale: 1.0,
+        },
+        &device,
+    )
+    .unwrap();
+
+    let positions = (0..2)
+        .flat_map(|batch| {
+            (0..8).flat_map(move |row| {
+                let order = if batch == 0 { row } else { 7 - row };
+                [
+                    batch as f32 * 2.0 + order as f32 * 0.1,
+                    batch as f32 * -1.5 + order as f32 * 0.04,
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    let states = (0..2)
+        .flat_map(|batch| {
+            (0..8).flat_map(move |row| {
+                [
+                    batch as f32 + row as f32 * 0.03,
+                    row as f32 * -0.07,
+                    batch as f32 * 0.2 + row as f32 * 0.11,
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    let detail = vec![
+        10.0, 0.0, 0.2, 0.3, 0.4, 2.0, 3.0, 4.0, 9.0, 4.0, 3.0, 2.0, 0.4, 0.3, 0.2, 0.0,
+    ];
+    let batch_positions = tensor3(positions.clone(), [2, 8, 2], &device);
+    let batch_states = tensor3(states.clone(), [2, 8, 3], &device);
+    let (next_positions, next_states, events) =
+        topology.apply(batch_positions, batch_states, tensor(detail.clone(), [2, 8], &device));
+    assert_eq!(events, 2);
+    let next_positions = tensor3_vec(next_positions.inner()).unwrap();
+    let next_states = tensor3_vec(next_states.inner()).unwrap();
+
+    let weighted_sum = |values: &[f32], batch: usize, channels: usize| {
+        let mut sum = vec![0.0_f32; channels];
+        for (row, units) in material.fine_units.as_ref().unwrap().iter().enumerate() {
+            for channel in 0..channels {
+                sum[channel] +=
+                    values[(batch * 8 + row) * channels + channel] * *units as f32;
+            }
+        }
+        sum
+    };
+    for batch in 0..2 {
+        assert!(
+            max_abs_difference(
+                &weighted_sum(&positions, batch, 2),
+                &weighted_sum(&next_positions, batch, 2),
+            ) < 2.0e-5
+        );
+        assert!(
+            max_abs_difference(
+                &weighted_sum(&states, batch, 3),
+                &weighted_sum(&next_states, batch, 3),
+            ) < 2.0e-5
+        );
+    }
+
+    for batch in 0..2 {
+        let position_start = batch * 8 * 2;
+        let state_start = batch * 8 * 3;
+        let (single_positions, single_states, single_events) = topology.apply(
+            tensor3(
+                positions[position_start..position_start + 16].to_vec(),
+                [1, 8, 2],
+                &device,
+            ),
+            tensor3(
+                states[state_start..state_start + 24].to_vec(),
+                [1, 8, 3],
+                &device,
+            ),
+            tensor(detail[batch * 8..batch * 8 + 8].to_vec(), [1, 8], &device),
+        );
+        assert_eq!(single_events, 1);
+        assert!(
+            max_abs_difference(
+                &next_positions[position_start..position_start + 16],
+                &tensor3_vec(single_positions.inner()).unwrap(),
+            ) < 1.0e-6
+        );
+        assert!(
+            max_abs_difference(
+                &next_states[state_start..state_start + 24],
+                &tensor3_vec(single_states.inner()).unwrap(),
+            ) < 1.0e-6
+        );
+    }
+}
+
+#[test]
+fn adaptive_continuous_topology_conserves_material_and_is_batch_independent() {
+    let device = BurnDevice::default();
+    let npa = NpaConfig::growing_2d();
+    let material = crate::adaptive::AdaptiveTarget2dMaterialConfig {
+        reference_particle_count: 8,
+        total_measure: 8.0,
+        fine_bandwidth: 0.1,
+        bandwidth_exponent: 0.0,
+        max_initial_fine_units: 4,
+        seed_layout: crate::adaptive::AdaptiveMaterialSeedLayout::GradedContinuous,
+        seed_measure_ratio: 1.44,
+    }
+    .layout(8, 0.01, 0.4)
+    .unwrap();
+    let mean_measure =
+        material.represented_measure.iter().sum::<f32>() / material.active_particle_count() as f32;
+    let coarse_rows = material
+        .represented_measure
+        .iter()
+        .enumerate()
+        .filter_map(|(row, measure)| (*measure > mean_measure).then_some(row))
+        .collect::<Vec<_>>();
+    let fine_rows = material
+        .represented_measure
+        .iter()
+        .enumerate()
+        .filter_map(|(row, measure)| (*measure < mean_measure).then_some(row))
+        .collect::<Vec<_>>();
+    assert!(!coarse_rows.is_empty() && !fine_rows.is_empty());
+
+    let topology = BurnAdaptiveTopology::new(
+        &AdaptiveTarget2dBurnConfig {
+            material: material.clone(),
+            topology: crate::adaptive::AdaptiveTarget2dTopologyConfig {
+                enabled: true,
+                start_step: 0,
+                end_step: 2,
+                split_radius_scale: 1.0,
+                merge_detail_scale: 0.0,
+                min_relative_gain: 0.0,
+                interval_steps: 1,
+                events_per_interval: 2,
+            },
+            perception: burn_automata_kernels::AdaptivePerceptionConfig::growing_2d(),
+            perception_options: burn_automata_kernels::AdaptiveNpaPerceptionOptions {
+                eps0: npa.eps0,
+                scale_equivariance: npa.scale_equivariant(),
+                particle_density_equivariance: npa.particle_density_equivariant(),
+                log_norm_grad: npa.log_norm_grad,
+                log_norm_density_grad: npa.log_norm_density_grad,
+                position_features: npa.position_features,
+            },
+            perception_semantics:
+                burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible,
+            residual_perception_semantics: None,
+            seed_bank: test_adaptive_target2d_seed_bank(
+                1,
+                material.active_particle_count(),
+                npa.state_dims,
+                test_direct_config(material.active_particle_count()),
+            ),
+            frozen_base: None,
+            material_scale_conditioning: false,
+            optimize_material_scale_only: false,
+            log1p_trajectory_loss: false,
+            trajectory_tail_fraction: 0.0,
+            trajectory_tail_weight: 0.0,
+            compatible_residual_material_features: false,
+            compact_recurrent_memory_dims: 0,
+            fresh_seed_trajectories: 1,
+            checkpoint_horizons: vec![1],
+            max_pool_age_steps: 0,
+            pool_age_strata: 0,
+            backward_loss_scale: 1.0,
+        },
+        &device,
+    )
+    .unwrap();
+    assert!(topology.should_apply(0));
+    assert!(topology.should_apply(2));
+    assert!(!topology.should_apply(3));
+
+    let positions = (0..2)
+        .flat_map(|batch| {
+            (0..8).flat_map(move |row| {
+                [
+                    batch as f32 * 1.3 + row as f32 * 0.07,
+                    batch as f32 * -0.8
+                        + row as f32 * -0.03
+                        + (row % 3) as f32 * 0.04,
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    let states = (0..2)
+        .flat_map(|batch| {
+            (0..8).flat_map(move |row| {
+                [
+                    batch as f32 + row as f32 * 0.05,
+                    row as f32 * -0.09,
+                    batch as f32 * 0.3 + row as f32 * 0.13,
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut detail = vec![1.0; 16];
+    for batch in 0..2 {
+        let offset = batch * 8;
+        detail[offset + coarse_rows[0]] = 10.0 - batch as f32;
+        detail[offset + coarse_rows[1]] = 8.0 - batch as f32;
+        detail[offset + fine_rows[0]] = 0.0;
+        detail[offset + fine_rows[1]] = 0.25;
+    }
+    let (scheduled_positions, scheduled_states, scheduled_events) = topology.apply_scheduled(
+        tensor3(positions.clone(), [2, 8, 2], &device),
+        tensor3(states.clone(), [2, 8, 3], &device),
+        tensor(detail.clone(), [2, 8], &device),
+        &[0, 2],
+        &[1, 3],
+    );
+    assert_eq!(scheduled_events, 2);
+    let scheduled_positions = tensor3_vec(scheduled_positions.inner()).unwrap();
+    let scheduled_states = tensor3_vec(scheduled_states.inner()).unwrap();
+    assert!(max_abs_difference(&scheduled_positions[..16], &positions[..16]) > 1.0e-4);
+    assert!(max_abs_difference(&scheduled_states[..24], &states[..24]) > 1.0e-4);
+    assert!(max_abs_difference(&scheduled_positions[16..], &positions[16..]) < 1.0e-6);
+    assert!(max_abs_difference(&scheduled_states[24..], &states[24..]) < 1.0e-6);
+
+    let (next_positions, next_states, events) = topology.apply(
+        tensor3(positions.clone(), [2, 8, 2], &device),
+        tensor3(states.clone(), [2, 8, 3], &device),
+        tensor(detail.clone(), [2, 8], &device),
+    );
+    assert_eq!(events, 4);
+    let next_positions = tensor3_vec(next_positions.inner()).unwrap();
+    let next_states = tensor3_vec(next_states.inner()).unwrap();
+
+    let weighted_sum = |values: &[f32], batch: usize, channels: usize| {
+        let mut sum = vec![0.0_f32; channels];
+        for (row, measure) in material.represented_measure.iter().enumerate() {
+            for channel in 0..channels {
+                sum[channel] += values[(batch * 8 + row) * channels + channel] * measure;
+            }
+        }
+        sum
+    };
+    let weighted_second_moment = |values: &[f32], batch: usize| {
+        let mut moment = [0.0_f32; 3];
+        for (row, measure) in material.represented_measure.iter().enumerate() {
+            let x = values[(batch * 8 + row) * 2];
+            let y = values[(batch * 8 + row) * 2 + 1];
+            moment[0] += measure * x * x;
+            moment[1] += measure * x * y;
+            moment[2] += measure * y * y;
+        }
+        moment
+    };
+    for batch in 0..2 {
+        assert!(
+            max_abs_difference(
+                &weighted_sum(&positions, batch, 2),
+                &weighted_sum(&next_positions, batch, 2),
+            ) < 2.0e-5
+        );
+        assert!(
+            max_abs_difference(
+                &weighted_sum(&states, batch, 3),
+                &weighted_sum(&next_states, batch, 3),
+            ) < 2.0e-5
+        );
+        assert!(
+            max_abs_difference(
+                &weighted_second_moment(&positions, batch),
+                &weighted_second_moment(&next_positions, batch),
+            ) < 2.0e-5
+        );
+        let position_start = batch * 16;
+        let state_start = batch * 24;
+        let (single_positions, single_states, single_events) = topology.apply(
+            tensor3(
+                positions[position_start..position_start + 16].to_vec(),
+                [1, 8, 2],
+                &device,
+            ),
+            tensor3(
+                states[state_start..state_start + 24].to_vec(),
+                [1, 8, 3],
+                &device,
+            ),
+            tensor(detail[batch * 8..batch * 8 + 8].to_vec(), [1, 8], &device),
+        );
+        assert_eq!(single_events, 2);
+        assert!(
+            max_abs_difference(
+                &next_positions[position_start..position_start + 16],
+                &tensor3_vec(single_positions.inner()).unwrap(),
+            ) < 1.0e-6
+        );
+        assert!(
+            max_abs_difference(
+                &next_states[state_start..state_start + 24],
+                &tensor3_vec(single_states.inner()).unwrap(),
+            ) < 1.0e-6
+        );
+    }
+}
+
+#[test]
+fn adaptive_continuous_topology_ranking_matches_wgpu_quantization_and_ties() {
+    let device = BurnDevice::default();
+    let rows = Tensor::<BurnBackend, 1, Int>::from_data(
+        TensorData::new(vec![7_i64, 2, 5], [3]),
+        &device,
+    );
+    let detail = tensor(
+        vec![
+            1.0002, 1.0018, 1.0010, // all quantize to 1.0
+            2.0060, 2.0061, 2.0062, // all quantize to 2.0078125
+        ],
+        [2, 3],
+        &device,
+    );
+    let ranked = stable_local_detail_rank(detail);
+    let high = stable_local_detail_score(ranked.clone(), rows.clone(), 8, true)
+        .topk_with_indices(3, 1)
+        .1
+        .inner()
+        .into_data()
+        .to_vec::<i32>()
+        .unwrap();
+    let low = stable_local_detail_score(ranked, rows, 8, false)
+        .topk_with_indices(3, 1)
+        .1
+        .inner()
+        .into_data()
+        .to_vec::<i32>()
+        .unwrap();
+    // Local row 1 maps to global row 2, then local row 2 maps to row 5.
+    assert_eq!(high, vec![1, 2, 0, 1, 2, 0]);
+    assert_eq!(low, high);
 }
 
 #[test]

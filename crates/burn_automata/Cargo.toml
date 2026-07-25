@@ -31,7 +31,7 @@ backend_wgpu = [
 cli = ["dep:base64", "dep:clap", "dep:image", "dep:toml", "dep:ureq"]
 dino = ["dep:burn_dino", "dep:image", "backend_ndarray"]
 gpu_wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
-import = []
+import = ["dep:image"]
 train = []
 
 [dependencies]
@@ -57,6 +57,7 @@ zip.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+naga.workspace = true
 
 [lib]
 path = "src/lib.rs"

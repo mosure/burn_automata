@@ -22,7 +22,9 @@ const PERCEPTION_FORWARD_OP: &str = "burn_automata.perception.forward.v2";
 const LOG_NORMALIZE_EPSILON: f32 = 1.0e-6;
 const MAX_SPARSE_PLANES_PER_CUBE: u32 = 4;
 const PERCEPTION_QUERY_BLOCK_PARTICLES: usize = 16;
-const PERCEPTION_TILED_MAX_STATE_DIMS: usize = 16;
+const PERCEPTION_TILED_NATIVE_STATE_DIMS: usize = 16;
+const PERCEPTION_TILED_MAX_STATE_DIMS: usize = 24;
+const PERCEPTION_TILED_NEIGHBOR_PARTICLES: usize = 64;
 const PERCEPTION_TILED_CUBE_UNITS: u32 = 256;
 const PERCEPTION_TILED_VJP_C4_CUBE_UNITS: u32 = 128;
 
@@ -1052,9 +1054,27 @@ fn perception_sparse_block_tiled_supported<R: CubeRuntime>(
     client: &ComputeClient<R>,
     state_dims: usize,
 ) -> bool {
+    let state_capacity = perception_sparse_block_tiled_state_capacity(state_dims);
+    let cube_units = perception_sparse_block_tiled_cube_units(state_dims);
+    let shared_memory_bytes = 448
+        + 4 * PERCEPTION_TILED_NEIGHBOR_PARTICLES * size_of::<f32>()
+        + 4 * PERCEPTION_TILED_NEIGHBOR_PARTICLES * state_capacity * size_of::<f32>();
     state_dims <= PERCEPTION_TILED_MAX_STATE_DIMS
-        && client.properties().hardware.max_units_per_cube >= PERCEPTION_TILED_CUBE_UNITS
+        && client.properties().hardware.max_units_per_cube >= cube_units
+        && client.properties().hardware.max_shared_memory_size >= shared_memory_bytes
         && std::env::var_os("BURN_AUTOMATA_DISABLE_BLOCK_TILED_PERCEPTION").is_none()
+}
+
+fn perception_sparse_block_tiled_state_capacity(state_dims: usize) -> usize {
+    if state_dims <= PERCEPTION_TILED_NATIVE_STATE_DIMS {
+        PERCEPTION_TILED_NATIVE_STATE_DIMS
+    } else {
+        PERCEPTION_TILED_MAX_STATE_DIMS
+    }
+}
+
+fn perception_sparse_block_tiled_cube_units(state_dims: usize) -> u32 {
+    (PERCEPTION_QUERY_BLOCK_PARTICLES * state_dims).max(PERCEPTION_TILED_CUBE_UNITS as usize) as u32
 }
 
 fn perception_max_blocks_per_batch(
@@ -1353,10 +1373,12 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
                 .as_ref()
                 .filter(|_| perception_sparse_block_tiled_supported(&client, state_dims))
             {
+                let shared_state_values = PERCEPTION_TILED_NEIGHBOR_PARTICLES
+                    * perception_sparse_block_tiled_state_capacity(state_dims);
                 perception_forward_sparse_block_global_q16_rsqrt_v2_kernel::launch(
                     &client,
                     CubeCount::Static((blocks.max_blocks_per_batch * batches) as u32, 1, 1),
-                    CubeDim::new_1d(PERCEPTION_TILED_CUBE_UNITS),
+                    CubeDim::new_1d(perception_sparse_block_tiled_cube_units(state_dims)),
                     AddressType::U32,
                     x.clone().into_tensor_arg(),
                     s.clone().into_tensor_arg(),
@@ -1370,6 +1392,7 @@ fn launch_perception_forward_raw<R: CubeRuntime>(
                     args_forward,
                     retain_adjoint_state,
                     cfg.density_grad,
+                    shared_state_values,
                     dtype.into(),
                 );
             } else {
@@ -1790,10 +1813,12 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
                             dtype.into(),
                         );
                     } else {
+                        let shared_state_values = PERCEPTION_TILED_NEIGHBOR_PARTICLES
+                            * perception_sparse_block_tiled_state_capacity(state_dims);
                         perception_state_output_sparse_block_global_q16_rsqrt_v2_kernel::launch(
                             &client,
                             cube_count,
-                            CubeDim::new_1d(PERCEPTION_TILED_CUBE_UNITS),
+                            CubeDim::new_1d(perception_sparse_block_tiled_cube_units(state_dims)),
                             AddressType::U32,
                             x.clone().into_tensor_arg(),
                             s.clone().into_tensor_arg(),
@@ -1806,6 +1831,7 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
                             state_grad.clone().into_tensor_arg(),
                             args_state,
                             cfg.state_grad,
+                            shared_state_values,
                             dtype.into(),
                         );
                     }
@@ -3405,6 +3431,7 @@ fn perception_forward_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
     args: &PerceptionArgs,
     #[comptime] retain_adjoint_state: bool,
     #[comptime] density_grad: bool,
+    #[comptime] shared_state_values: usize,
     #[define(F)] _dtype: StorageType,
 ) {
     let unit = UNIT_POS as usize;
@@ -3447,10 +3474,10 @@ fn perception_forward_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
     let mut neighbor_x = SharedMemory::<F>::new(64usize);
     let mut neighbor_y = SharedMemory::<F>::new(64usize);
     let mut neighbor_volume = SharedMemory::<F>::new(64usize);
-    let mut neighbor_state = SharedMemory::<F>::new(1024usize);
-    let mut neighbor_poly6 = SharedMemory::<F>::new(1024usize);
-    let mut neighbor_spiky_x = SharedMemory::<F>::new(1024usize);
-    let mut neighbor_spiky_y = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_state = SharedMemory::<F>::new(shared_state_values);
+    let mut neighbor_poly6 = SharedMemory::<F>::new(shared_state_values);
+    let mut neighbor_spiky_x = SharedMemory::<F>::new(shared_state_values);
+    let mut neighbor_spiky_y = SharedMemory::<F>::new(shared_state_values);
 
     if active_query {
         let particle = perception_grid_particle(permutation, batch, query_start + unit);
@@ -3510,7 +3537,7 @@ fn perception_forward_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
                     let neighbor_channel = value - local * state_dims;
                     let neighbor = perception_grid_particle(permutation, batch, tile_start + local);
                     neighbor_state[value] = state_value::<F>(s, batch, neighbor, neighbor_channel);
-                    value += 256usize;
+                    value += CUBE_DIM_X as usize;
                 }
                 sync_cube();
 
@@ -4377,6 +4404,7 @@ fn perception_state_output_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
     state_grad: &mut Tensor<F>,
     args: &PerceptionArgs,
     #[comptime] state_grad_enabled: bool,
+    #[comptime] shared_state_values: usize,
     #[define(F)] _dtype: StorageType,
 ) {
     let unit = UNIT_POS as usize;
@@ -4416,9 +4444,9 @@ fn perception_state_output_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
     let mut neighbor_x = SharedMemory::<F>::new(64usize);
     let mut neighbor_y = SharedMemory::<F>::new(64usize);
     let mut neighbor_volume = SharedMemory::<F>::new(64usize);
-    let mut neighbor_feature = SharedMemory::<F>::new(1024usize);
-    let mut neighbor_raw_x = SharedMemory::<F>::new(1024usize);
-    let mut neighbor_raw_y = SharedMemory::<F>::new(1024usize);
+    let mut neighbor_feature = SharedMemory::<F>::new(shared_state_values);
+    let mut neighbor_raw_x = SharedMemory::<F>::new(shared_state_values);
+    let mut neighbor_raw_y = SharedMemory::<F>::new(shared_state_values);
 
     if unit < query_count {
         let particle = perception_grid_particle(permutation, batch, query_start + unit);
@@ -4502,7 +4530,7 @@ fn perception_state_output_sparse_block_global_q16_rsqrt_v2_kernel<F: Float>(
                             1,
                         );
                     }
-                    value += 256usize;
+                    value += CUBE_DIM_X as usize;
                 }
                 sync_cube();
 

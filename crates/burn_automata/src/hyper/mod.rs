@@ -11,12 +11,6 @@ pub mod dino;
 pub mod e2e;
 #[cfg(feature = "cli")]
 pub mod e2e_rollout;
-#[cfg(any(
-    feature = "cli",
-    feature = "backend_wgpu",
-    feature = "backend_cuda",
-    test
-))]
 #[cfg_attr(not(feature = "cli"), allow(dead_code, unused_imports))]
 pub(crate) mod e2e_training;
 pub mod hypernet;

@@ -67,6 +67,11 @@ pub(crate) struct Target2dBurnCheckpointConfig {
     pub(crate) current_model_output: PathBuf,
     pub(crate) best_model_output: PathBuf,
     pub(crate) metadata_output: PathBuf,
+    pub(crate) training_state_output: Option<PathBuf>,
+    pub(crate) resume_training_state: Option<PathBuf>,
+    pub(crate) resume_model_sha256: Option<String>,
+    pub(crate) curriculum_resume: bool,
+    pub(crate) include_particle_pool: bool,
     pub(crate) model_config: NpaConfig,
     pub(crate) hashgrid: burn_automata_kernels::HashGridConfig,
     pub(crate) source: String,
@@ -75,6 +80,10 @@ pub(crate) struct Target2dBurnCheckpointConfig {
 }
 
 #[derive(Clone)]
+#[cfg_attr(
+    not(any(feature = "backend_cuda", feature = "backend_wgpu")),
+    allow(dead_code)
+)]
 pub(crate) struct Target2dOracleTrainPlan {
     pub(crate) train: DirectBasisTrainConfig,
     pub(crate) steps_per_repetition: usize,
@@ -84,6 +93,10 @@ pub(crate) struct Target2dOracleTrainPlan {
     pub(crate) scheduler_gamma: f32,
 }
 
+#[cfg_attr(
+    not(any(feature = "backend_cuda", feature = "backend_wgpu")),
+    allow(dead_code)
+)]
 impl Target2dOracleTrainPlan {
     pub(crate) fn total_steps(&self) -> usize {
         self.steps_per_repetition.saturating_mul(self.repetitions)
@@ -145,4 +158,38 @@ pub(crate) struct BurnDenseOracleBatchOutput {
     pub(crate) per_model_history: Vec<Vec<Hyper2dDirectBasisHistoryEntry>>,
     pub(crate) best_train_loss: Vec<Option<f32>>,
     pub(crate) best_train_step: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct AdaptiveTarget2dBurnConfig {
+    pub(crate) material: crate::adaptive::AdaptiveTarget2dMaterialLayout,
+    pub(crate) topology: crate::adaptive::AdaptiveTarget2dTopologyConfig,
+    pub(crate) perception: burn_automata_kernels::AdaptivePerceptionConfig,
+    pub(crate) perception_options: burn_automata_kernels::AdaptiveNpaPerceptionOptions,
+    pub(crate) perception_semantics: burn_automata_kernels::AdaptivePerceptionSemantics,
+    /// Optional perception contract for the trainable residual. When this
+    /// differs from `perception_semantics`, both streams are evaluated over
+    /// the same active rows.
+    pub(crate) residual_perception_semantics:
+        Option<burn_automata_kernels::AdaptivePerceptionSemantics>,
+    pub(crate) seed_bank: crate::adaptive::AdaptiveTarget2dSeedBank,
+    /// Frozen native-scale rule used while the trainable model represents only
+    /// a mixed-resolution closure.
+    pub(crate) frozen_base: Option<crate::NpaModel>,
+    /// Whether the primary shared rule consumes the continuous relative
+    /// material-bandwidth feature after canonical NPA perception.
+    pub(crate) material_scale_conditioning: bool,
+    /// Restrict optimization to the added material-scale input column.
+    pub(crate) optimize_material_scale_only: bool,
+    pub(crate) log1p_trajectory_loss: bool,
+    pub(crate) trajectory_tail_fraction: f32,
+    pub(crate) trajectory_tail_weight: f32,
+    pub(crate) compatible_residual_material_features: bool,
+    pub(crate) compact_recurrent_memory_dims: usize,
+    pub(crate) fresh_seed_trajectories: usize,
+    pub(crate) checkpoint_horizons: Vec<usize>,
+    pub(crate) max_pool_age_steps: usize,
+    pub(crate) pool_age_strata: usize,
+    pub(crate) backward_loss_scale: f32,
 }

@@ -134,6 +134,13 @@ use super::*;
         }
     }
 
+    pub(super) fn sanitize_nonfinite_model_batch_gradients(tensors: &mut [Tensor3Inner]) {
+        for tensor in tensors {
+            let nonfinite = tensor.clone().is_finite().bool_not();
+            *tensor = tensor.clone().mask_fill(nonfinite, 0.0);
+        }
+    }
+
     pub(super) fn accumulate_gradient_group(
         accumulated: &mut Option<Vec<Tensor2Inner>>,
         gradients: Vec<Tensor2Inner>,
@@ -166,6 +173,7 @@ use super::*;
         normalize: bool,
         collect_metrics: bool,
     ) -> AutomataResult<(Vec<f32>, Vec<f32>, Tensor1Inner)> {
+        sanitize_nonfinite_model_batch_gradients(tensors);
         let model_count = tensors
             .first()
             .map(|tensor| tensor.shape().dims::<3>()[0])
@@ -184,11 +192,7 @@ use super::*;
         };
         if normalize {
             for tensor in tensors.iter_mut() {
-                let dims = tensor.shape().dims::<3>();
-                let norm = model_batch_tensor_l2_norm_tensor(tensor)
-                    .add_scalar(1.0e-8)
-                    .reshape([dims[0], 1, 1]);
-                *tensor = tensor.clone().div(norm.expand(dims));
+                *tensor = normalize_model_batch_tensor(tensor);
             }
         }
         let clip_norm_source = if normalize {
@@ -220,19 +224,62 @@ use super::*;
     }
 
     pub(super) fn model_batch_group_norm_tensor(tensors: &[Tensor3Inner]) -> Tensor1Inner {
+        let mut maximum = None::<Tensor1Inner>;
+        for tensor in tensors {
+            let value = model_batch_tensor_max_abs_tensor(tensor);
+            maximum = Some(match maximum {
+                Some(maximum) => maximum.max_pair(value),
+                None => value,
+            });
+        }
+        let maximum = maximum
+            .expect("model batch gradient group has tensors")
+            .clamp_min(1.0e-30);
         let mut total = None::<Tensor1Inner>;
         for tensor in tensors {
-            let value = model_batch_tensor_squared_norm_tensor(tensor);
+            let value = model_batch_tensor_scaled_squared_norm_tensor(tensor, maximum.clone());
             total = Some(match total {
                 Some(total) => total + value,
                 None => value,
             });
         }
-        total.expect("model batch gradient group has tensors").sqrt()
+        total
+            .expect("model batch gradient group has tensors")
+            .sqrt()
+            .mul(maximum)
+            .clamp_max(f32::MAX)
     }
 
     pub(super) fn model_batch_tensor_l2_norm_tensor(tensor: &Tensor3Inner) -> Tensor1Inner {
-        model_batch_tensor_squared_norm_tensor(tensor).sqrt()
+        let maximum = model_batch_tensor_max_abs_tensor(tensor).clamp_min(1.0e-30);
+        model_batch_tensor_scaled_squared_norm_tensor(tensor, maximum.clone())
+            .sqrt()
+            .mul(maximum)
+            .clamp_max(f32::MAX)
+    }
+
+    fn normalize_model_batch_tensor(tensor: &Tensor3Inner) -> Tensor3Inner {
+        let dims = tensor.shape().dims::<3>();
+        let maximum = model_batch_tensor_max_abs_tensor(tensor)
+            .clamp_min(1.0e-30)
+            .reshape([dims[0], 1, 1]);
+        let scaled = tensor.clone().div(maximum.expand(dims));
+        let norm = model_batch_tensor_squared_norm_tensor(&scaled)
+            .sqrt()
+            .add_scalar(1.0e-8)
+            .reshape([dims[0], 1, 1]);
+        scaled.div(norm.expand(dims))
+    }
+
+    fn model_batch_tensor_scaled_squared_norm_tensor(
+        tensor: &Tensor3Inner,
+        scale: Tensor1Inner,
+    ) -> Tensor1Inner {
+        let dims = tensor.shape().dims::<3>();
+        let scaled = tensor
+            .clone()
+            .div(scale.reshape([dims[0], 1, 1]).expand(dims));
+        model_batch_tensor_squared_norm_tensor(&scaled)
     }
 
     fn model_batch_tensor_squared_norm_tensor(tensor: &Tensor3Inner) -> Tensor1Inner {
@@ -242,6 +289,16 @@ use super::*;
             .mul(tensor.clone())
             .reshape([dims[0], dims[1] * dims[2]])
             .sum_dim(1)
+            .squeeze_dim::<1>(1)
+    }
+
+    fn model_batch_tensor_max_abs_tensor(tensor: &Tensor3Inner) -> Tensor1Inner {
+        let dims = tensor.shape().dims::<3>();
+        tensor
+            .clone()
+            .abs()
+            .reshape([dims[0], dims[1] * dims[2]])
+            .max_dim(1)
             .squeeze_dim::<1>(1)
     }
 

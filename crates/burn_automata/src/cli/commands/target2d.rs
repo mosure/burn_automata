@@ -1,5 +1,8 @@
 use crate::cli::prelude::*;
-use crate::target2d::{Target2dRenderedSplat, render_rollout_2d_splat, render_target_2d_splat};
+use crate::target2d::{
+    Target2dGpuBackend, Target2dGpuCheckpointConfig, Target2dRenderedSplat,
+    render_rollout_2d_splat, render_target_2d_splat, train_target_2d_gpu,
+};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -566,15 +569,24 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
         }
         TrainingDeviceArg::Gpu => {
             let mut model = initialize_target2d_model(initial_model.as_deref(), student_seed)?;
-            let burn_output = super::hyper_e2e::train_target_2d_burn_oracle(
-                gpu_backend,
+            let backend = match gpu_backend {
+                DirectBasisOracleBackendArg::Wgpu => Target2dGpuBackend::Wgpu,
+                DirectBasisOracleBackendArg::Cuda => Target2dGpuBackend::Cuda,
+                DirectBasisOracleBackendArg::Cpu => {
+                    return Err(std::io::Error::other(
+                        "GPU Target2D training requires burn-wgpu or burn-cuda",
+                    )
+                    .into());
+                }
+            };
+            let burn_output = train_target_2d_gpu(
+                backend,
                 &mut model,
                 &hashgrid,
-                &target_image,
                 target.clone(),
                 training_config.clone(),
                 loss_config,
-                checkpoint_config.clone(),
+                checkpoint_config.as_ref(),
             )?;
             if let Some(path) = &model_output {
                 let manifest = BpkModelManifest::from_model(
@@ -608,6 +620,14 @@ pub(crate) fn run_train_target_2d(command: Command) -> Result<(), Box<dyn std::e
                         let mut metrics = burn_output.metrics;
                         metrics["best_train_loss"] = serde_json::json!(burn_output.best_train_loss);
                         metrics["best_train_step"] = serde_json::json!(burn_output.best_train_step);
+                        metrics["best_fresh_seed_eval_loss"] =
+                            serde_json::json!(burn_output.best_fresh_seed_eval_loss);
+                        metrics["best_fresh_seed_eval_step"] =
+                            serde_json::json!(burn_output.best_fresh_seed_eval_step);
+                        metrics["best_fresh_seed_render_rgb_psnr_db"] =
+                            serde_json::json!(burn_output.best_fresh_seed_render_rgb_psnr_db);
+                        metrics["best_fresh_seed_render_rgb_psnr_step"] =
+                            serde_json::json!(burn_output.best_fresh_seed_render_rgb_psnr_step);
                         metrics["history"] = serde_json::json!(burn_output.history);
                         metrics
                     },
@@ -720,7 +740,7 @@ fn target2d_burn_checkpoint_config(
     model_config: NpaConfig,
     hashgrid: burn_automata_kernels::HashGridConfig,
     source: String,
-) -> Result<Option<super::hyper_e2e::Target2dBurnCheckpointConfig>, Box<dyn std::error::Error>> {
+) -> Result<Option<Target2dGpuCheckpointConfig>, Box<dyn std::error::Error>> {
     if checkpoint_interval_seconds == 0 && checkpoint_interval_steps == 0 {
         return Ok(None);
     }
@@ -738,12 +758,16 @@ fn target2d_burn_checkpoint_config(
         .unwrap_or_else(|| sibling_path_with_suffix(&anchor, "best", "bpk"));
     let metadata_output = checkpoint_report_output
         .unwrap_or_else(|| sibling_path_with_suffix(&anchor, "checkpoint", "json"));
-    Ok(Some(super::hyper_e2e::Target2dBurnCheckpointConfig {
+    let _ = (model_config, hashgrid);
+    Ok(Some(Target2dGpuCheckpointConfig {
         current_model_output,
         best_model_output,
         metadata_output,
-        model_config,
-        hashgrid,
+        training_state_output: None,
+        resume_training_state: None,
+        resume_model_sha256: None,
+        curriculum_resume: false,
+        include_particle_pool: false,
         source,
         interval_steps: checkpoint_interval_steps,
         interval_duration: (checkpoint_interval_seconds > 0)

@@ -44,6 +44,10 @@ pub struct NpaConfig {
     pub equivariance: EquivarianceMode,
     #[serde(default)]
     pub position_features: bool,
+    /// Model-specific features supplied by a caller after the canonical NPA
+    /// perception row. Core NPA presets keep this at zero.
+    #[serde(default)]
+    pub auxiliary_input_dims: usize,
     pub decoder_dims: Option<usize>,
     pub output_dims: Option<usize>,
 }
@@ -64,6 +68,7 @@ impl NpaConfig {
             stopgrad_state: false,
             equivariance: EquivarianceMode::ParticleDensityAndScale,
             position_features: false,
+            auxiliary_input_dims: 0,
             decoder_dims: None,
             output_dims: None,
         }
@@ -91,6 +96,7 @@ impl NpaConfig {
             stopgrad_state: false,
             equivariance: EquivarianceMode::ParticleDensityAndScale,
             position_features: false,
+            auxiliary_input_dims: 0,
             decoder_dims: Some(256),
             output_dims: Some(20),
         }
@@ -111,6 +117,7 @@ impl NpaConfig {
             stopgrad_state: false,
             equivariance: EquivarianceMode::ParticleDensityAndScale,
             position_features: false,
+            auxiliary_input_dims: 0,
             decoder_dims: Some(256),
             output_dims: Some(10),
         }
@@ -128,6 +135,7 @@ impl NpaConfig {
             + usize::from(self.state_grad) * self.state_dims * self.spatial_dims
             + usize::from(self.density_grad) * self.spatial_dims
             + usize::from(self.position_features) * self.spatial_dims
+            + self.auxiliary_input_dims
     }
 
     pub fn update_dims(&self) -> usize {

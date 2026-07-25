@@ -1,0 +1,159 @@
+# Bounded correctness and throughput smoke for genuine resident adaptive NPA.
+# The rollout starts with 1,024 recurrent coarse rows, reserves 3,070 rows once,
+# and activates a canonical 3,070-row mixed cut over three device-only topology
+# tranches. No fine child templates or hidden fine dynamics are retained.
+report_output = "artifacts/adaptive_npa/resident_lizard_3070/smoke-report.json"
+model_output = "artifacts/adaptive_npa/resident_lizard_3070/smoke-model.adaptive.bpk"
+base_model = "models/catalog/growing/lizard.bpk"
+seed = 42
+backend = "wgpu"
+
+[adaptive]
+spatial_dims = 2
+controller_hidden_dims = 64
+reference_footprint = 0.003125
+base_rule_footprint = 0.003125
+local_residual_scale = 0.0
+min_footprint = 0.003125
+max_footprint = 0.0125
+min_render_footprint = 0.0028
+max_render_footprint = 0.014
+render_footprint_exponent = 1.0
+material_seed_layout = "canonical-grouped"
+material_seed_bandwidth_exponent = 0.5
+min_leaves = 1024
+max_leaves = 4096
+target_leaves = 3070
+bootstrap_target_leaves = 3070
+initial_leaves = 1024
+bootstrap_fine_leaves = 4096
+hierarchical_bootstrap_seed = true
+retain_bootstrap_templates = false
+hierarchical_restriction_step = 0
+topology_interval = 1
+steady_topology_interval = 95
+topology_start_step = 1
+topology_end_step = 256
+steady_topology_start_step = 96
+runtime_topology_control = "paired-local-detail"
+max_events_per_interval = 1
+min_reallocation_relative_gain = 0.0
+bootstrap_end_step = 3
+bootstrap_events_per_interval = 256
+bootstrap_seed_spread = 0.0
+max_unequal_split_measure_ratio = 1.0
+render_transition_steps = 12
+render_footprint_relaxation = 0.2
+bandwidth_relaxation = 0.2
+domain_min = [-1.25, -1.25, 0.0]
+domain_max = [1.25, 1.25, 0.0]
+rule_perception = "npa-compatible"
+rule_graph_policy = "raw-support"
+coarse_dynamics = "represented-measure"
+material_scale_conditioning = false
+transport_coarse_moments = false
+expected_coarse_update_mask = true
+
+[adaptive.proxy]
+enabled = false
+branch_factor = 4
+context_scale = 0.0
+
+[adaptive.perception]
+dim = 2
+graph_policy = "raw-support"
+max_neighbors = 128
+pair_scale_power = 8.0
+support_bin_ratio = 2.0
+min_bandwidth = 0.1
+max_bandwidth = 0.2
+spacing_target_neighbors = 64.0
+spacing_root_iterations = 12
+shepard_epsilon = 1.0e-8
+moment_regularization = 1.0e-4
+moment_condition_limit = 1.0e5
+log_normalize_gradients = true
+include_position_features = false
+
+[multiscale_training]
+enabled = false
+fine_particle_count = 4096
+cut_leaf_counts = [1024, 3070, 4096]
+seed_scale = 0.2
+total_measure = 0.12566371
+bandwidth = 0.1
+
+[training_data]
+rows = 1024
+spatial_dims = 2
+seed = 42
+reference_footprint = 0.003125
+min_footprint = 0.003125
+max_footprint = 0.0125
+total_measure = 0.12566371
+target_leaf_count = 3070
+boundary_epsilon = 0.003125
+boundary_slope = 0.35
+
+[training]
+enabled = false
+
+[task_quality]
+enabled = true
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+reference_model = "models/catalog/growing/lizard.bpk"
+image_size = 128
+rollout_steps = 256
+update_prob = 0.5
+seed = 114
+validation_seeds = [114, 115]
+structural_audit_seeds = 1
+bandwidth_adaptation_enabled = false
+topology_control = "paired-local-detail"
+restriction_policy = "dynamics-detail"
+render_decoder = "isotropic-material-gaussian"
+render_compactness = 1.0
+
+[task_quality.gap_decomposition]
+enabled = false
+
+[rollout]
+enabled = false
+particles = 3070
+seed_scale = 0.2
+total_measure = 0.12566371
+
+[gates]
+max_operator_constant_error = 1.0e-3
+max_operator_affine_error = 1.0e-3
+max_operator_fallback_fraction = 0.0
+max_topology_relative_error = 1.0e-12
+max_topology_spd_failures = 0
+min_topology_events_per_second = 100000.0
+max_validation_mse = 10.0
+min_desired_scale_correlation = -1.0
+min_controller_rows_per_second = 0.0
+max_rule_normalized_mean_squared_error = 10.0
+min_rule_update_correlation = -1.0
+max_multiscale_normalized_mean_squared_error = 10.0
+min_multiscale_update_correlation = -1.0
+max_task_quality_leaf_relative_error = 0.0
+min_task_quality_occupied_material_scale_bins = 2
+min_task_quality_fractional_material_scale_fraction = 0.0
+min_task_quality_validation_seeds = 2
+min_adaptive_target_psnr_db = 0.0
+min_validation_mean_adaptive_over_teacher_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_teacher_psnr_gain_db = -100.0
+min_validation_mean_adaptive_over_regular_base_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_regular_base_psnr_gain_db = -100.0
+min_validation_mean_adaptive_over_regular_matched_budget_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_regular_matched_budget_psnr_gain_db = -100.0
+min_validation_mean_adaptive_over_regular_material_matched_budget_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_regular_material_matched_budget_psnr_gain_db = -100.0
+min_validation_mean_adaptive_over_budget_fixed_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_budget_fixed_psnr_gain_db = -100.0
+max_validation_measure_relative_drift = 1.0e-7
+max_validation_leaf_relative_error = 0.0
+max_validation_mean_adaptive_rollout_elapsed_ms = 5000.0
+max_validation_mean_adaptive_topology_elapsed_ms = 500.0
+max_validation_topology_update_elapsed_ms = 250.0

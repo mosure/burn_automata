@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-20",
+  "revision_before_worktree_changes": "a267e19fadda905d0b1a69bcf86ede52de3835b2",
+  "device": {
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "driver": "610.43.02",
+    "power_limit_w": 600.0
+  },
+  "toolchain": "rustc 1.97.0-nightly (913e4bea8 2026-04-22)",
+  "backend": "WGPU subgroup cooperative sorted cells",
+  "particles": 4096,
+  "bandwidth_range": [0.025, 0.2],
+  "bandwidth_range_ratio": 8.0,
+  "protocol": {
+    "warmup_steps": 32,
+    "samples": 7,
+    "steps_per_sample": 128,
+    "mode_order": "rotated each sample",
+    "sample_boundary": "device readback synchronization",
+    "output_parity_tolerance": 1e-6
+  },
+  "rows": [
+    {"distribution":"uniform-log","radius":0.8,"mode":"global","bins":1,"storage_u32":12305,"p50_step_ms":0.7922,"p95_step_ms":0.8676,"particle_steps_per_second":5170160,"p50_speedup":1.000,"p95_speedup":1.000},
+    {"distribution":"uniform-log","radius":0.8,"mode":"auto","bins":1,"storage_u32":28721,"p50_step_ms":0.6979,"p95_step_ms":0.7977,"particle_steps_per_second":5868965,"p50_speedup":1.135,"p95_speedup":1.088},
+    {"distribution":"uniform-log","radius":0.8,"mode":"ratio2","bins":3,"storage_u32":28721,"p50_step_ms":1.1811,"p95_step_ms":1.3523,"particle_steps_per_second":3467832,"p50_speedup":0.671,"p95_speedup":0.642},
+    {"distribution":"uniform-log","radius":0.8,"mode":"sqrt8","bins":2,"storage_u32":20513,"p50_step_ms":1.0026,"p95_step_ms":1.1225,"particle_steps_per_second":4085417,"p50_speedup":0.790,"p95_speedup":0.773},
+    {"distribution":"uniform-log","radius":0.8,"mode":"sqrt2","bins":6,"storage_u32":53345,"p50_step_ms":1.6259,"p95_step_ms":1.7585,"particle_steps_per_second":2519183,"p50_speedup":0.487,"p95_speedup":0.493},
+
+    {"distribution":"fine90","radius":0.8,"mode":"global","bins":1,"storage_u32":12305,"p50_step_ms":0.7270,"p95_step_ms":1.0057,"particle_steps_per_second":5633798,"p50_speedup":1.000,"p95_speedup":1.000},
+    {"distribution":"fine90","radius":0.8,"mode":"auto","bins":1,"storage_u32":28721,"p50_step_ms":0.6704,"p95_step_ms":1.0002,"particle_steps_per_second":6109425,"p50_speedup":1.084,"p95_speedup":1.005},
+    {"distribution":"fine90","radius":0.8,"mode":"ratio2","bins":3,"storage_u32":28721,"p50_step_ms":0.7352,"p95_step_ms":0.9157,"particle_steps_per_second":5571545,"p50_speedup":0.989,"p95_speedup":1.098},
+    {"distribution":"fine90","radius":0.8,"mode":"sqrt8","bins":2,"storage_u32":20513,"p50_step_ms":0.7978,"p95_step_ms":0.8999,"particle_steps_per_second":5133875,"p50_speedup":0.911,"p95_speedup":1.118},
+    {"distribution":"fine90","radius":0.8,"mode":"sqrt2","bins":6,"storage_u32":53345,"p50_step_ms":0.7941,"p95_step_ms":0.9046,"particle_steps_per_second":5157862,"p50_speedup":0.916,"p95_speedup":1.112},
+
+    {"distribution":"clustered-uniform-log","radius":0.2,"mode":"global","bins":1,"storage_u32":12305,"p50_step_ms":2.9910,"p95_step_ms":3.2223,"particle_steps_per_second":1369433,"p50_speedup":1.000,"p95_speedup":1.000},
+    {"distribution":"clustered-uniform-log","radius":0.2,"mode":"auto","bins":1,"storage_u32":28721,"p50_step_ms":2.9710,"p95_step_ms":3.1651,"particle_steps_per_second":1378652,"p50_speedup":1.007,"p95_speedup":1.018},
+    {"distribution":"clustered-uniform-log","radius":0.2,"mode":"ratio2","bins":3,"storage_u32":28721,"p50_step_ms":2.9634,"p95_step_ms":3.1554,"particle_steps_per_second":1382174,"p50_speedup":1.009,"p95_speedup":1.021},
+    {"distribution":"clustered-uniform-log","radius":0.2,"mode":"sqrt8","bins":2,"storage_u32":20513,"p50_step_ms":2.9417,"p95_step_ms":3.1931,"particle_steps_per_second":1392374,"p50_speedup":1.017,"p95_speedup":1.009},
+    {"distribution":"clustered-uniform-log","radius":0.2,"mode":"sqrt2","bins":6,"storage_u32":53345,"p50_step_ms":3.1553,"p95_step_ms":3.5223,"particle_steps_per_second":1298143,"p50_speedup":0.948,"p95_speedup":0.915},
+
+    {"distribution":"clustered-fine90","radius":0.2,"mode":"global","bins":1,"storage_u32":12305,"p50_step_ms":2.4763,"p95_step_ms":2.6466,"particle_steps_per_second":1654104,"p50_speedup":1.000,"p95_speedup":1.000},
+    {"distribution":"clustered-fine90","radius":0.2,"mode":"auto","bins":3,"storage_u32":28721,"p50_step_ms":1.9623,"p95_step_ms":2.2799,"particle_steps_per_second":2087333,"p50_speedup":1.262,"p95_speedup":1.161},
+    {"distribution":"clustered-fine90","radius":0.2,"mode":"ratio2","bins":3,"storage_u32":28721,"p50_step_ms":2.0405,"p95_step_ms":2.1657,"particle_steps_per_second":2007355,"p50_speedup":1.214,"p95_speedup":1.222},
+    {"distribution":"clustered-fine90","radius":0.2,"mode":"sqrt8","bins":2,"storage_u32":20513,"p50_step_ms":2.0105,"p95_step_ms":2.1236,"particle_steps_per_second":2037348,"p50_speedup":1.232,"p95_speedup":1.246},
+    {"distribution":"clustered-fine90","radius":0.2,"mode":"sqrt2","bins":6,"storage_u32":53345,"p50_step_ms":2.0728,"p95_step_ms":2.1110,"particle_steps_per_second":1976079,"p50_speedup":1.195,"p95_speedup":1.254}
+  ],
+  "automatic_policy": {
+    "minimum_particles": 1024,
+    "minimum_estimated_particles_per_spatial_cell": 64.0,
+    "maximum_estimated_binned_candidate_ratio": 0.60,
+    "selected_binning_for": ["clustered-fine90"],
+    "selected_global_for": ["uniform-log", "fine90", "clustered-uniform-log"]
+  },
+  "interpretation": "Support bins are scene-dependent. The automatic policy preserves the one-bin execution path unless both local density and the bandwidth histogram predict at least 40 percent less broad-phase cell work. Auto and the matching forced mode execute the same shader path; timing differences between those duplicate rows are run-order noise. All final positions and states matched the global-support output within 1e-6."
+}

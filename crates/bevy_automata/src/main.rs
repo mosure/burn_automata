@@ -58,6 +58,12 @@ enum AutomataCommand {
 struct ViewArgs {
     #[arg(long)]
     model: Option<PathBuf>,
+    #[arg(long)]
+    adaptive_model: Option<PathBuf>,
+    #[arg(long)]
+    no_adaptive_bandwidth: bool,
+    #[arg(long)]
+    no_adaptive_topology: bool,
     #[arg(long, default_value_t = 4096)]
     particles: usize,
     #[arg(long, value_enum, default_value_t = PresetArg::Growing2d)]
@@ -90,6 +96,12 @@ impl ViewArgs {
         if !self.dt.is_finite() || self.dt <= 0.0 {
             return Err(std::io::Error::other("--dt must be finite and positive").into());
         }
+        if self.model.is_some() && self.adaptive_model.is_some() {
+            return Err(std::io::Error::other(
+                "--model and --adaptive-model are mutually exclusive",
+            )
+            .into());
+        }
         let preset: AutomataPreset = self.preset.into();
         let model_path = self
             .model
@@ -97,6 +109,18 @@ impl ViewArgs {
                 if !path.is_file() {
                     return Err(std::io::Error::other(format!(
                         "--model does not exist or is not a file: {}",
+                        path.display()
+                    )));
+                }
+                Ok(path.display().to_string())
+            })
+            .transpose()?;
+        let adaptive_model_path = self
+            .adaptive_model
+            .map(|path| {
+                if !path.is_file() {
+                    return Err(std::io::Error::other(format!(
+                        "--adaptive-model does not exist or is not a file: {}",
                         path.display()
                     )));
                 }
@@ -116,6 +140,9 @@ impl ViewArgs {
             render_scale: self.render_scale,
             render_opacity: self.render_opacity,
             model_path,
+            adaptive_model_path,
+            adaptive_bandwidth_enabled: !self.no_adaptive_bandwidth,
+            adaptive_topology_enabled: !self.no_adaptive_topology,
             ..bevy_automata::AutomataSettings::default()
         };
         settings.reference_seed_scale = settings.seed_scale;
@@ -152,6 +179,12 @@ struct ExportArgs {
     seed_mode: SeedModeArg,
     #[arg(long)]
     model: Option<PathBuf>,
+    #[arg(long)]
+    adaptive_model: Option<PathBuf>,
+    #[arg(long)]
+    no_adaptive_bandwidth: bool,
+    #[arg(long)]
+    no_adaptive_topology: bool,
     #[arg(long)]
     hyper_image: Option<PathBuf>,
     #[arg(long)]
@@ -195,6 +228,9 @@ impl ExportArgs {
             preset: self.preset.into(),
             seed_mode: self.seed_mode.into(),
             model_path: self.model,
+            adaptive_model_path: self.adaptive_model,
+            adaptive_bandwidth_enabled: !self.no_adaptive_bandwidth,
+            adaptive_topology_enabled: !self.no_adaptive_topology,
             hyper_image_path: self.hyper_image,
             hyper_base_model_path: self.hyper_base,
             hyper_model_path: self.hyper_model,

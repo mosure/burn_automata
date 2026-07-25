@@ -180,6 +180,55 @@ pub(crate) enum Command {
         #[arg(long, default_value = "artifacts/npa2d_parity/report.json")]
         output: PathBuf,
     },
+    /// Train and evaluate the budgeted adaptive NPA pipeline from a TOML bundle.
+    #[command(name = "adaptive-npa", alias = "train-adaptive-npa")]
+    AdaptiveNpa {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Train one genuine active-material adaptive 2D NPA from a TOML bundle.
+    #[command(name = "train-adaptive-target2d")]
+    TrainAdaptiveTarget2d {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Evaluate one active-material adaptive 2D NPA without mutating training
+    /// checkpoints or optimizer state.
+    #[command(name = "eval-adaptive-target2d")]
+    EvalAdaptiveTarget2d {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Run only the conservative adaptive topology audit from a TOML bundle.
+    #[command(name = "audit-adaptive-topology")]
+    AuditAdaptiveTopology {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Audit whether fixed-topology coarse dynamics are identifiable from the
+    /// currently exposed material state.
+    #[command(name = "audit-adaptive-closure")]
+    AuditAdaptiveClosure {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Evaluate a trained adaptive artifact without retraining it.
+    #[command(name = "eval-adaptive-npa")]
+    EvalAdaptiveNpa {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        model: PathBuf,
+        /// Comma-delimited matched-mask seeds for aggregate parity evaluation.
+        #[arg(long, value_delimiter = ',')]
+        seeds: Vec<u64>,
+        #[arg(long, default_value = "/tmp/burn_automata_adaptive_eval.json")]
+        output: PathBuf,
+        /// Write a binary artifact with this validated runtime schedule after
+        /// all aggregate parity gates pass.
+        #[arg(long)]
+        promote_model_output: Option<PathBuf>,
+    },
     #[command(name = "train-target2d", alias = "train-target-2d", hide = true)]
     TrainTarget2d {
         #[arg(long)]

@@ -12,7 +12,7 @@ readme = "../../README.md"
 
 [features]
 default = ["viewer", "splatting", "gpu_wgpu", "hyper_dino_wgpu", "headless"]
-viewer = []
+viewer = ["burn_automata/import"]
 splatting = ["dep:bevy_gaussian_splatting"]
 gpu_wgpu = ["burn_automata/gpu_wgpu"]
 hyper_dino = ["burn_automata/dino", "dep:crossbeam-channel", "dep:image", "dep:rfd"]

@@ -42,6 +42,9 @@ pub struct HeadlessExportConfig {
     pub preset: AutomataPreset,
     pub seed_mode: ParticleSeed,
     pub model_path: Option<PathBuf>,
+    pub adaptive_model_path: Option<PathBuf>,
+    pub adaptive_bandwidth_enabled: bool,
+    pub adaptive_topology_enabled: bool,
     pub hyper_image_path: Option<PathBuf>,
     pub hyper_base_model_path: Option<PathBuf>,
     pub hyper_model_path: Option<PathBuf>,
@@ -72,6 +75,9 @@ impl Default for HeadlessExportConfig {
             preset: AutomataPreset::Growing2d,
             seed_mode: ParticleSeed::UniformCircle,
             model_path: None,
+            adaptive_model_path: None,
+            adaptive_bandwidth_enabled: true,
+            adaptive_topology_enabled: true,
             hyper_image_path: None,
             hyper_base_model_path: None,
             hyper_model_path: None,
@@ -94,9 +100,33 @@ pub struct HeadlessExportReport {
     pub report_path: PathBuf,
     pub config: HeadlessExportConfig,
     pub model_source: String,
+    pub adaptive_rule_perception: Option<burn_automata::AdaptiveRulePerception>,
+    pub adaptive_bandwidth_active: Option<bool>,
     pub requested_steps: Vec<usize>,
     pub captures: Vec<HeadlessExportRecord>,
+    pub adaptive_render_audit: Option<AdaptiveRenderAudit>,
     pub elapsed_ms: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdaptiveRenderAudit {
+    pub particles: usize,
+    pub display_scale_per_footprint: f32,
+    pub min_material_footprint: f32,
+    pub max_material_footprint: f32,
+    pub min_gaussian_scale: f32,
+    pub max_gaussian_scale: f32,
+    pub min_opacity: f32,
+    pub max_opacity: f32,
+    pub anisotropic_particle_fraction: f32,
+    pub max_axis_ratio: f32,
+    pub fine_leaves: usize,
+    pub reference_leaves: usize,
+    pub coarse_leaves: usize,
+    pub non_reference_leaf_fraction: f32,
+    pub fine_represented_measure_fraction: f32,
+    pub coarse_represented_measure_fraction: f32,
+    pub represented_measure_relative_error: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,6 +135,8 @@ pub struct HeadlessExportRecord {
     pub actual_step: usize,
     pub path: PathBuf,
     pub particles: usize,
+    #[serde(default)]
+    pub dynamics_particles: usize,
     pub width: u32,
     pub height: u32,
     pub metrics: CaptureMetrics,
@@ -155,9 +187,12 @@ pub fn run_headless_export(
     mut config: HeadlessExportConfig,
 ) -> Result<HeadlessExportReport, Box<dyn std::error::Error>> {
     validate_config(&config)?;
-    if config.model_path.is_some() && config.hyper_image_path.is_some() {
+    let selected_model_sources = usize::from(config.model_path.is_some())
+        + usize::from(config.adaptive_model_path.is_some())
+        + usize::from(config.hyper_image_path.is_some());
+    if selected_model_sources > 1 {
         return Err(std::io::Error::other(
-            "--model and --hyper-image are mutually exclusive; --hyper-image uses --hyper-base",
+            "--model, --adaptive-model, and --hyper-image are mutually exclusive",
         )
         .into());
     }
@@ -181,6 +216,16 @@ pub fn run_headless_export(
         .into());
     }
     let model_source = model_source_label(&config, &settings);
+    let adaptive_rule_perception = settings
+        .adaptive_model_path
+        .as_deref()
+        .map(burn_automata::load_adaptive_model)
+        .transpose()?
+        .map(|artifact| artifact.model.config.rule_perception);
+    let adaptive_bandwidth_active = adaptive_rule_perception.map(|perception| {
+        config.adaptive_bandwidth_enabled
+            && perception == burn_automata::AdaptiveRulePerception::NormalizedAdaptive
+    });
 
     let mut apps = headless_automata_viewer(settings);
     #[cfg(feature = "hyper_dino")]
@@ -201,18 +246,26 @@ pub fn run_headless_export(
         while current_frame(&apps) < *requested_step {
             pump_headless_frame(&mut apps);
         }
-        assign_render_target_to_gaussian_cameras(&mut apps, target.clone());
         set_paused(&mut apps, true);
+        // A topology event can change the adaptive leaf count on the final
+        // rollout frame. Let cloud reallocation and its visibility cooldown
+        // settle while paused before scheduling the screenshot.
+        for _ in 0..3 {
+            pump_headless_frame(&mut apps);
+        }
+        assign_render_target_to_gaussian_cameras(&mut apps, target.clone());
         let actual_step = current_frame(&apps);
         let path = config
             .output_dir
             .join(format!("{}_step{actual_step:06}.png", config.output_prefix));
         let metrics = capture_target_png(&mut apps, &target, &path)?;
+        let (particles, dynamics_particles) = current_particle_counts(&apps);
         captures.push(HeadlessExportRecord {
             requested_step: *requested_step,
             actual_step,
             path,
-            particles: config.particles,
+            particles,
+            dynamics_particles,
             width: config.width,
             height: config.height,
             metrics,
@@ -222,13 +275,27 @@ pub fn run_headless_export(
     let report_path = config
         .output_dir
         .join(format!("{}_report.json", config.output_prefix));
+    if let Some(particles) = synchronize_adaptive_render_particles(&mut apps)?
+        && let Some(adaptive) = apps
+            .main
+            .world_mut()
+            .resource_mut::<AutomataRuntime>()
+            .adaptive
+            .as_mut()
+    {
+        adaptive.particles = particles;
+    }
+    let adaptive_render_audit = adaptive_render_audit(&apps);
     let report = HeadlessExportReport {
         output_dir: config.output_dir.clone(),
         report_path: report_path.clone(),
         config,
         model_source,
+        adaptive_rule_perception,
+        adaptive_bandwidth_active,
         requested_steps,
         captures,
+        adaptive_render_audit,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     };
     std::fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
@@ -319,6 +386,8 @@ fn settings_from_config(
         seed_mode: config.seed_mode,
         render_scale: config.render_scale,
         render_opacity: config.render_opacity,
+        adaptive_bandwidth_enabled: config.adaptive_bandwidth_enabled,
+        adaptive_topology_enabled: config.adaptive_topology_enabled,
         paused: true,
         train_live: false,
         visualize_backward: false,
@@ -331,7 +400,17 @@ fn settings_from_config(
                 .display()
                 .to_string(),
         );
+        settings.adaptive_model_path = None;
     } else if config.hyper_image_path.is_some() {
+        settings.model_path = None;
+        settings.adaptive_model_path = None;
+    }
+    if let Some(model_path) = &config.adaptive_model_path {
+        settings.adaptive_model_path = Some(
+            resolve_existing_path(model_path, "adaptive model")?
+                .display()
+                .to_string(),
+        );
         settings.model_path = None;
     }
     if let Some(path) = &config.hyper_base_model_path {
@@ -381,6 +460,7 @@ fn install_generated_model(apps: &mut SubApps, label: String, generated: Generat
     {
         let mut settings = world.resource_mut::<AutomataSettings>();
         settings.model_path = None;
+        settings.adaptive_model_path = None;
         settings.generated_model_label = Some(label);
         settings.preset = AutomataPreset::Growing2d;
         settings.seed_mode = ParticleSeed::UniformCircle;
@@ -391,6 +471,8 @@ fn install_generated_model(apps: &mut SubApps, label: String, generated: Generat
         runtime.model = generated.model;
         runtime.hashgrid = generated.hashgrid;
         runtime.loaded_model_path = None;
+        runtime.loaded_adaptive_model_path = None;
+        runtime.adaptive = None;
         runtime.loaded_preset = None;
         runtime.trace = None;
         runtime.frame = 0;
@@ -617,6 +699,123 @@ fn current_frame(apps: &SubApps) -> usize {
     apps.main.world().resource::<AutomataRuntime>().frame
 }
 
+fn current_particle_counts(apps: &SubApps) -> (usize, usize) {
+    if let Some(counts) = adaptive_render_particle_counts(apps) {
+        return counts;
+    }
+    let runtime = apps.main.world().resource::<AutomataRuntime>();
+    let particles = runtime.adaptive.as_ref().map_or_else(
+        || {
+            apps.main
+                .world()
+                .resource::<AutomataSettings>()
+                .particle_count
+        },
+        |state| state.particles.len(),
+    );
+    (particles, particles)
+}
+
+#[cfg(feature = "splatting")]
+fn adaptive_render_audit(apps: &SubApps) -> Option<AdaptiveRenderAudit> {
+    let runtime = apps.main.world().resource::<AutomataRuntime>();
+    let adaptive = runtime.adaptive.as_ref()?;
+    let particles = &adaptive.particles;
+    let display_scale = adaptive_display_scale_per_footprint(&adaptive.model);
+    let mut min_material_footprint = f32::INFINITY;
+    let mut max_material_footprint = f32::NEG_INFINITY;
+    let mut min_gaussian_scale = f32::INFINITY;
+    let mut max_gaussian_scale = f32::NEG_INFINITY;
+    let mut min_opacity = f32::INFINITY;
+    let mut max_opacity = f32::NEG_INFINITY;
+    let mut anisotropic_particles = 0usize;
+    let mut max_axis_ratio = 1.0_f32;
+    let mut reconstructed_measure = 0.0_f64;
+    let reference_footprint = adaptive.model.config.reference_footprint;
+    let scale_tolerance = reference_footprint * 1.0e-4;
+    let mut fine_leaves = 0usize;
+    let mut reference_leaves = 0usize;
+    let mut coarse_leaves = 0usize;
+    let mut fine_measure = 0.0_f64;
+    let mut coarse_measure = 0.0_f64;
+    for index in 0..particles.len() {
+        let footprint = burn_automata::material_footprint_radius(
+            particles.represented_measure[index],
+            particles.spatial_dims,
+        );
+        min_material_footprint = min_material_footprint.min(footprint);
+        max_material_footprint = max_material_footprint.max(footprint);
+        if footprint < reference_footprint - scale_tolerance {
+            fine_leaves += 1;
+            fine_measure += f64::from(particles.represented_measure[index]);
+        } else if footprint > reference_footprint + scale_tolerance {
+            coarse_leaves += 1;
+            coarse_measure += f64::from(particles.represented_measure[index]);
+        } else {
+            reference_leaves += 1;
+        }
+        let state_base = index * particles.state_dims;
+        let gaussian = adaptive_particle_gaussian(
+            particles.positions[index],
+            &particles.states[state_base..state_base + particles.state_dims],
+            particles.spatial_dims,
+            AdaptiveGaussianMaterial {
+                represented_measure: particles.represented_measure[index],
+                render_footprint: particles.render_footprint[index],
+                display_scale_per_footprint: display_scale,
+            },
+            1.0,
+        );
+        let active_scale = &gaussian.scale_opacity.scale[..particles.spatial_dims];
+        let major = active_scale.iter().copied().fold(0.0_f32, f32::max);
+        let minor = active_scale
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+            .max(f32::MIN_POSITIVE);
+        let axis_ratio = major / minor;
+        anisotropic_particles += usize::from(axis_ratio > 1.05);
+        max_axis_ratio = max_axis_ratio.max(axis_ratio);
+        min_gaussian_scale = min_gaussian_scale.min(minor);
+        max_gaussian_scale = max_gaussian_scale.max(major);
+        min_opacity = min_opacity.min(gaussian.scale_opacity.opacity);
+        max_opacity = max_opacity.max(gaussian.scale_opacity.opacity);
+        reconstructed_measure += f64::from(
+            burn_automata::unit_ball_measure(particles.spatial_dims)
+                * active_scale.iter().product::<f32>()
+                * gaussian.scale_opacity.opacity
+                / display_scale.powi(particles.spatial_dims as i32),
+        );
+    }
+    let represented_measure = particles.total_measure();
+    Some(AdaptiveRenderAudit {
+        particles: particles.len(),
+        display_scale_per_footprint: display_scale,
+        min_material_footprint,
+        max_material_footprint,
+        min_gaussian_scale,
+        max_gaussian_scale,
+        min_opacity,
+        max_opacity,
+        anisotropic_particle_fraction: anisotropic_particles as f32 / particles.len().max(1) as f32,
+        max_axis_ratio,
+        fine_leaves,
+        reference_leaves,
+        coarse_leaves,
+        non_reference_leaf_fraction: (fine_leaves + coarse_leaves) as f32
+            / particles.len().max(1) as f32,
+        fine_represented_measure_fraction: (fine_measure / represented_measure) as f32,
+        coarse_represented_measure_fraction: (coarse_measure / represented_measure) as f32,
+        represented_measure_relative_error: (reconstructed_measure - represented_measure).abs()
+            / represented_measure.abs().max(f64::MIN_POSITIVE),
+    })
+}
+
+#[cfg(not(feature = "splatting"))]
+fn adaptive_render_audit(_apps: &SubApps) -> Option<AdaptiveRenderAudit> {
+    None
+}
+
 fn resolve_output_dir(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -641,6 +840,8 @@ fn resolve_optional_path(path: &Path) -> PathBuf {
 fn model_source_label(config: &HeadlessExportConfig, settings: &AutomataSettings) -> String {
     if let Some(path) = &config.hyper_image_path {
         format!("hyper-image:{}", path.display())
+    } else if let Some(path) = &config.adaptive_model_path {
+        format!("adaptive-model:{}", path.display())
     } else if let Some(path) = &config.model_path {
         format!("model:{}", path.display())
     } else if let Some(path) = &settings.model_path {

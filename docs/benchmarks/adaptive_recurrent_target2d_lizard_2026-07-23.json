@@ -1,0 +1,125 @@
+{
+  "date": "2026-07-23",
+  "status": "superseded_fixed_graded_centered_metric_ablation",
+  "objective": "historical direct-active fixed-graded NPA comparison with regular 4096-particle lizard",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "training": {
+    "backend": "burn_cuda_autodiff_dense_direct_basis",
+    "active_particles": 3070,
+    "reference_particles": 4096,
+    "batch_size": 16,
+    "rollout_steps": [32, 95],
+    "tbptt_chunk_steps": 95,
+    "persistent_pool_size": 256,
+    "persistent_pool_max_age_steps": 4096,
+    "optimizer_steps": 1024,
+    "mean_particle_steps_per_second": 4630458.02,
+    "selected_checkpoint_step": 1024,
+    "selected_checkpoint_geometry_score_db": 18.130867,
+    "training_topology_events_per_interval": 4,
+    "loss": {
+      "center": true,
+      "splat_weight": 2.0,
+      "color_weight": 5.0,
+      "density_weight": 1.0,
+      "displacement_weight": 0.01,
+      "overflow_weight": 100.0,
+      "bound_weight": 100.0,
+      "background_weight": 0.0,
+      "render_rgb_weight": 0.0,
+      "chamfer_weight": 0.0
+    }
+  },
+  "deployment": {
+    "visible_rows": 3070,
+    "recurrent_rows": 3070,
+    "interaction_rows": 3070,
+    "hidden_fine_rows": 0,
+    "reference_rows": 4096,
+    "topology_interval_steps": 95,
+    "topology_events_per_interval": 1,
+    "topology_event_window": [95, 475],
+    "accepted_exchanges_per_seed": 5,
+    "material_scale_ratio": 1.1998575,
+    "occupied_material_scale_bins": 10,
+    "fractional_material_scale_fraction": 1.0,
+    "model_payload_sha256": "adf15c060a7c40fc673d62da926a5f4662beb663de8b415ea94bbfad94039d11"
+  },
+  "validation": {
+    "seeds": [42, 43, 44, 45, 46, 47, 48, 49],
+    "stable_sorted_cells": true,
+    "passed": true,
+    "failures": [],
+    "mean_interaction_work_ratio": 0.7495117,
+    "mean_wall_time_ratio": 0.8538716,
+    "max_wall_time_ratio": 1.0167661,
+    "adaptive_particle_steps_per_second": 4279994.41,
+    "same_rule_fine_particle_steps_per_second": 4645292.84,
+    "max_material_relative_error": 7.11478e-7,
+    "max_out_of_bounds_fraction": 0.0016286644,
+    "max_grid_overflow": 0,
+    "worst_psnr_drift_db": 0.14739227,
+    "horizons": [
+      {
+        "steps": 96,
+        "adaptive_mean_psnr_db": 23.61622,
+        "adaptive_worst_psnr_db": 22.76345,
+        "same_rule_fine_mean_psnr_db": 23.79969,
+        "same_rule_fine_worst_psnr_db": 23.207893,
+        "oracle_mean_psnr_db": 23.826033,
+        "oracle_worst_psnr_db": 23.174915
+      },
+      {
+        "steps": 256,
+        "adaptive_mean_psnr_db": 25.005205,
+        "adaptive_worst_psnr_db": 23.664314,
+        "same_rule_fine_mean_psnr_db": 25.473042,
+        "same_rule_fine_worst_psnr_db": 24.276064,
+        "oracle_mean_psnr_db": 25.498991,
+        "oracle_worst_psnr_db": 24.552746
+      },
+      {
+        "steps": 512,
+        "adaptive_mean_psnr_db": 26.450115,
+        "adaptive_worst_psnr_db": 24.410591,
+        "same_rule_fine_mean_psnr_db": 26.473461,
+        "same_rule_fine_worst_psnr_db": 24.333595,
+        "oracle_mean_psnr_db": 26.364769,
+        "oracle_worst_psnr_db": 24.183542
+      },
+      {
+        "steps": 1024,
+        "adaptive_mean_psnr_db": 27.99151,
+        "adaptive_worst_psnr_db": 25.628895,
+        "same_rule_fine_mean_psnr_db": 27.006582,
+        "same_rule_fine_worst_psnr_db": 24.775028,
+        "oracle_mean_psnr_db": 26.773296,
+        "oracle_worst_psnr_db": 23.321085
+      },
+      {
+        "steps": 2048,
+        "adaptive_mean_psnr_db": 29.391132,
+        "adaptive_worst_psnr_db": 25.786707,
+        "same_rule_fine_mean_psnr_db": 28.69373,
+        "same_rule_fine_worst_psnr_db": 24.271053,
+        "oracle_mean_psnr_db": 28.373116,
+        "oracle_worst_psnr_db": 24.89464
+      },
+      {
+        "steps": 4096,
+        "adaptive_mean_psnr_db": 31.89794,
+        "adaptive_worst_psnr_db": 30.694456,
+        "same_rule_fine_mean_psnr_db": 31.151289,
+        "same_rule_fine_worst_psnr_db": 23.382526,
+        "oracle_mean_psnr_db": 31.029888,
+        "oracle_worst_psnr_db": 27.507294
+      }
+    ]
+  },
+  "notes": [
+    "This run used a centered evaluation metric and a 1.20x fixed-graded radius span. It predates the uncentered deployment metric and 2x adaptive-resolution gate and is not promotion evidence.",
+    "The selected rule was initialized from the released lizard rule and then optimized with the adaptive Target2D objective; it is not random-initialization oracle-training parity.",
+    "Deterministic validation forces stable sorted cells for the entire adaptive rollout. Normal inference retains the faster default sorted-cell path.",
+    "Four exchanges per topology pass regressed long-horizon worst-seed quality. One exchange per pass was the best deterministic ablation."
+  ]
+}

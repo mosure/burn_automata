@@ -12,21 +12,33 @@ impl WgpuAutomataExecutor {
         );
     }
 
-    pub(super) fn ensure_step_index_copy_buffers(
+    pub(super) fn prepare_step_indices(
         &self,
         state: &mut WgpuAutomataState,
         count: usize,
     ) -> AutomataResult<()> {
-        while state.step_index_copy_buffers.len() < count {
-            state
-                .step_index_copy_buffers
-                .push(self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("burn_automata_step_index_copy"),
-                    size: byte_len::<u32>(1)?,
-                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
+        if state.step_indices_capacity < count {
+            let capacity = count.next_power_of_two();
+            state.step_indices_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("burn_automata_step_indices"),
+                size: byte_len::<u32>(capacity)?,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            state.step_indices_capacity = capacity;
         }
+        let indices = (0..count)
+            .map(|offset| {
+                Ok(state
+                    .step_index
+                    .wrapping_add(u32_checked(offset, "batched step index")?))
+            })
+            .collect::<AutomataResult<Vec<_>>>()?;
+        let buffer = state.step_indices_buffer.as_ref().ok_or_else(|| {
+            AutomataError::InvalidArgument("step-index buffer was not allocated".to_owned())
+        })?;
+        self.queue
+            .write_buffer(buffer, 0, bytemuck::cast_slice(&indices));
         Ok(())
     }
 
@@ -63,6 +75,8 @@ impl WgpuAutomataExecutor {
                 "GPU BVH state has zero leaf count".to_owned(),
             ));
         }
+        let bvh_init_pipeline = required_pipeline(&self.bvh_init_pipeline, "BVH init")?;
+        let bvh_reduce_pipeline = required_pipeline(&self.bvh_reduce_pipeline, "BVH reduce")?;
         let grid_bind_group = &state.grid_bind_groups[state.current];
         if matches!(state.neighbor_mode, WgpuNeighborMode::GpuLbvh { .. }) {
             let mut encoder = self
@@ -140,7 +154,7 @@ impl WgpuAutomataExecutor {
                 label: Some("burn_automata_gpu_bvh_init_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.bvh_init_pipeline);
+            pass.set_pipeline(bvh_init_pipeline);
             pass.set_bind_group(0, grid_bind_group, &[]);
             pass.dispatch_workgroups(
                 dispatch_groups(state.total.max(state.bvh_leaf_count))?,
@@ -171,7 +185,7 @@ impl WgpuAutomataExecutor {
                 label: Some("burn_automata_gpu_bvh_reduce_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.bvh_reduce_pipeline);
+            pass.set_pipeline(bvh_reduce_pipeline);
             pass.set_bind_group(0, grid_bind_group, &[]);
             pass.dispatch_workgroups(dispatch_groups(nodes_this_level)?, 1, 1);
             drop(pass);
@@ -190,6 +204,10 @@ impl WgpuAutomataExecutor {
                 "GPU Morton LBVH state has zero sort count".to_owned(),
             ));
         }
+        let morton_sort_init_pipeline =
+            required_pipeline(&self.morton_sort_init_pipeline, "Morton sort init")?;
+        let morton_sort_step_pipeline =
+            required_pipeline(&self.morton_sort_step_pipeline, "Morton sort step")?;
         {
             let mut encoder = self
                 .device
@@ -200,7 +218,7 @@ impl WgpuAutomataExecutor {
                 label: Some("burn_automata_morton_sort_init_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.morton_sort_init_pipeline);
+            pass.set_pipeline(morton_sort_init_pipeline);
             pass.set_bind_group(0, grid_bind_group, &[]);
             pass.dispatch_workgroups(dispatch_groups(state.bvh_sort_count)?, 1, 1);
             drop(pass);
@@ -230,7 +248,7 @@ impl WgpuAutomataExecutor {
                     label: Some("burn_automata_morton_sort_step_pass"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.morton_sort_step_pipeline);
+                pass.set_pipeline(morton_sort_step_pipeline);
                 pass.set_bind_group(0, grid_bind_group, &[]);
                 pass.dispatch_workgroups(dispatch_groups(state.bvh_sort_count)?, 1, 1);
                 drop(pass);

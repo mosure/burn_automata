@@ -129,6 +129,40 @@ pub fn run_rollout(
     cfg: &RolloutConfig,
     seed_mode: ParticleSeed,
 ) -> AutomataResult<RolloutTrace> {
+    let mut rng = StdRng::seed_from_u64(cfg.seed ^ 0x5eed);
+    run_rollout_with_mask_schedule(model, grid, cfg, seed_mode, |_, count| {
+        stochastic_mask(count, cfg.update_prob, &mut rng)
+    })
+}
+
+/// Matched stochastic trajectory used when comparing fixed and adaptive NPA
+/// rollouts. The canonical CPU rollout above intentionally retains upstream's
+/// sequential RNG; this variant uses the adaptive CPU/WGPU material-ID
+/// schedule so the comparison changes only material resolution.
+pub(crate) fn run_rollout_with_stable_material_masks(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    cfg: &RolloutConfig,
+    seed_mode: ParticleSeed,
+) -> AutomataResult<RolloutTrace> {
+    let material_ids = (0..cfg.batch_size * cfg.particle_count)
+        .map(|index| index as u64)
+        .collect::<Vec<_>>();
+    run_rollout_with_mask_schedule(model, grid, cfg, seed_mode, |step, _| {
+        material_ids
+            .iter()
+            .map(|id| f32::from(stable_material_uniform(cfg.seed, step, *id) < cfg.update_prob))
+            .collect()
+    })
+}
+
+fn run_rollout_with_mask_schedule(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    cfg: &RolloutConfig,
+    seed_mode: ParticleSeed,
+    mut update_mask: impl FnMut(usize, usize) -> Vec<f32>,
+) -> AutomataResult<RolloutTrace> {
     let (mut positions, mut states) = seed_particles_scaled(
         cfg.batch_size,
         cfg.particle_count,
@@ -138,15 +172,10 @@ pub fn run_rollout(
         seed_mode,
         cfg.seed_scale,
     );
-    let mut rng = StdRng::seed_from_u64(cfg.seed ^ 0x5eed);
     let mut mean_dx = Vec::with_capacity(cfg.steps);
 
-    for _ in 0..cfg.steps {
-        let mask = stochastic_mask(
-            cfg.batch_size * cfg.particle_count,
-            cfg.update_prob,
-            &mut rng,
-        );
+    for step in 1..=cfg.steps {
+        let mask = update_mask(step, cfg.batch_size * cfg.particle_count);
         let step = model.step_cpu(
             &positions,
             &states,
@@ -176,6 +205,40 @@ pub fn run_rollout(
         steps: cfg.steps,
         mean_dx,
     })
+}
+
+#[inline]
+pub(crate) fn stable_particle_uniform(seed: u64, step: usize, particle_id: u64) -> f32 {
+    let mut value = seed
+        ^ (step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ particle_id.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    ((value >> 40) as f32) * (1.0 / (1_u32 << 24) as f32)
+}
+
+/// Stable material-ID schedule shared with the WGPU adaptive integration path.
+/// Adaptive CPU rollouts number their first step as one while resident WGPU
+/// states number it as zero, so the absolute CPU step is shifted here.
+#[inline]
+pub(crate) fn stable_material_uniform(seed: u64, absolute_step: usize, particle_id: u64) -> f32 {
+    const GOLDEN_U32: u32 = 0x9e37_79b9;
+    let key = particle_id as u32 ^ (particle_id >> 32) as u32;
+    let seed = seed as u32 ^ (seed >> 32) as u32;
+    let step = absolute_step.saturating_sub(1) as u32;
+    let mixed = hash_u32(key ^ hash_u32(step.wrapping_add(GOLDEN_U32)) ^ seed);
+    (mixed >> 8) as f32 * (1.0 / 16_777_216.0)
+}
+
+#[inline]
+const fn hash_u32(mut value: u32) -> u32 {
+    value = (value ^ 61) ^ (value >> 16);
+    value = value.wrapping_add(value << 3);
+    value ^= value >> 4;
+    value = value.wrapping_mul(0x27d4_eb2d);
+    value ^= value >> 15;
+    value
 }
 
 pub fn seed_particles(

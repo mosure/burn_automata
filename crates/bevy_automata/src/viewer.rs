@@ -12,6 +12,7 @@ use bevy::{
     input::mouse::{MouseScrollUnit, MouseWheel},
     picking::hover::Hovered,
     prelude::*,
+    time::Real,
 };
 use bevy_ui_widgets::{
     Slider, SliderDragState, SliderOrientation, SliderPlugin, SliderRange, SliderStep, SliderThumb,
@@ -36,7 +37,7 @@ use bevy::render::{
 use bevy::window::PrimaryWindow;
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use bevy_gaussian_splatting::PlanarStorageBindGroup;
-#[cfg(all(feature = "splatting", not(feature = "gpu_wgpu")))]
+#[cfg(feature = "splatting")]
 use bevy_gaussian_splatting::SphericalHarmonicCoefficients;
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use bevy_gaussian_splatting::gaussian::formats::planar_3d::PlanarStorageGaussian3d;
@@ -55,6 +56,7 @@ use bevy_gaussian_splatting::{
 #[cfg(feature = "splatting")]
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 
+mod adaptive;
 mod camera;
 mod catalog;
 mod catalog_images;
@@ -68,6 +70,7 @@ mod hyper_inference;
 mod runtime;
 mod ui;
 
+use adaptive::*;
 use camera::*;
 use cloud::*;
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
@@ -83,7 +86,7 @@ use ui::*;
 
 #[cfg(feature = "splatting")]
 use catalog::AUTOMATA_MIN_VIEWPORT_WIDTH;
-#[cfg(all(feature = "splatting", not(feature = "gpu_wgpu")))]
+#[cfg(feature = "splatting")]
 use catalog::GAUSSIAN_SH_C0;
 #[cfg(feature = "splatting")]
 use catalog::SORTED_ENTRY_MIN_CAPACITY;
@@ -122,6 +125,9 @@ pub struct AutomataSettings {
     pub train_live: bool,
     pub training_learning_rate: f32,
     pub model_path: Option<String>,
+    pub adaptive_model_path: Option<String>,
+    pub adaptive_bandwidth_enabled: bool,
+    pub adaptive_topology_enabled: bool,
     pub generated_model_label: Option<String>,
     pub hyper_base_model_path: Option<String>,
     pub hyper_model_path: Option<String>,
@@ -160,6 +166,9 @@ impl Default for AutomataSettings {
             train_live: false,
             training_learning_rate: 1.0e-3,
             model_path,
+            adaptive_model_path: std::env::var("BURN_AUTOMATA_ADAPTIVE_MODEL").ok(),
+            adaptive_bandwidth_enabled: true,
+            adaptive_topology_enabled: true,
             generated_model_label: None,
             hyper_base_model_path: env_or_workspace_path(
                 "BURN_AUTOMATA_HYPER_E2E_BASE",
@@ -219,6 +228,8 @@ pub struct AutomataRuntime {
     pub frame: usize,
     pub status: String,
     pub loaded_model_path: Option<String>,
+    pub loaded_adaptive_model_path: Option<String>,
+    pub adaptive: Option<AdaptiveViewerState>,
     pub loaded_preset: Option<AutomataPreset>,
     pub backward_loss: Option<f32>,
     pub backward_grad_norm: Option<f32>,
@@ -240,6 +251,8 @@ impl Default for AutomataRuntime {
             frame: 0,
             status: "ready".to_string(),
             loaded_model_path: None,
+            loaded_adaptive_model_path: None,
+            adaptive: None,
             loaded_preset: Some(AutomataPreset::Growing2d),
             backward_loss: None,
             backward_grad_norm: None,
@@ -283,6 +296,8 @@ impl Plugin for AutomataViewerPlugin {
         app.init_resource::<AutomataSettings>()
             .init_resource::<AutomataRuntime>()
             .init_resource::<AutomataUiState>()
+            .init_resource::<AutomataPerformanceTelemetry>()
+            .init_resource::<PerformanceUiState>()
             .init_resource::<CatalogPreviewState>()
             .init_resource::<CatalogPreviewImageState>();
         #[cfg(feature = "hyper_dino")]
@@ -298,31 +313,47 @@ impl Plugin for AutomataViewerPlugin {
 
         app.add_systems(
             Startup,
-            (scene.spawn(), load_selected_model, setup_gaussian_cloud).chain(),
+            (
+                scene.spawn(),
+                load_selected_adaptive_model,
+                load_selected_model,
+                setup_gaussian_cloud,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
             (
-                load_selected_model,
-                toggle_ui_visibility,
-                sync_view_cameras,
-                sync_automata_camera_viewports,
-                sync_gaussian_cloud_asset,
-                restore_resized_gaussian_cloud_visibility,
-                sync_gaussian_cloud_settings,
-                advance_rollout,
-                sync_cpu_trace_to_gaussian_asset,
-                scroll_ui_panel,
-                assign_catalog_thumbnails,
-                assign_catalog_text_fonts,
-                update_catalog_preview_modal,
-                update_catalog_card_styles,
-                sync_slider_values,
-                update_slider_visuals,
-                update_slider_value_labels,
-                update_run_control_button_styles,
-                update_status_label,
-                update_settings_label,
+                (
+                    load_selected_adaptive_model,
+                    load_selected_model,
+                    toggle_ui_visibility,
+                    sync_view_cameras,
+                    sync_automata_camera_viewports,
+                    sync_gaussian_cloud_asset,
+                    restore_resized_gaussian_cloud_visibility,
+                    sync_gaussian_cloud_settings,
+                    advance_rollout,
+                    advance_adaptive_viewer,
+                    sync_cpu_trace_to_gaussian_asset,
+                    sync_adaptive_particles_to_gaussian_asset,
+                )
+                    .chain(),
+                (
+                    scroll_ui_panel,
+                    assign_catalog_thumbnails,
+                    assign_catalog_text_fonts,
+                    update_catalog_preview_modal,
+                    update_catalog_card_styles,
+                    sync_slider_values,
+                    update_slider_visuals,
+                    update_slider_value_labels,
+                    update_run_control_button_styles,
+                    update_status_label,
+                    update_performance_labels,
+                    update_settings_label,
+                )
+                    .chain(),
             )
                 .chain(),
         );

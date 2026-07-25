@@ -2,6 +2,24 @@
 
 use super::*;
 
+    /// Build an explicit batched VJP term with an exactly zero forward value.
+    ///
+    /// Reducing `input * gradient` and correcting it with one large affine
+    /// constant loses the loss primal to f32 cancellation at quality-scale
+    /// particle counts. Subtracting the detached input elementwise first keeps
+    /// the same VJP while every reduced forward element is exactly zero.
+    pub(super) fn zero_primal_linear_adjoint_3d(
+        input: &Tensor3,
+        gradient: Tensor3,
+    ) -> Tensor1 {
+        let [batches, rows, dimensions] = input.shape().dims::<3>();
+        (input.clone() - input.clone().detach())
+            .mul(gradient)
+            .reshape([batches, rows * dimensions])
+            .sum_dim(1)
+            .squeeze_dim::<1>(1)
+    }
+
     pub(super) fn background_density_term(density: Tensor2, foreground: Tensor2) -> Tensor2 {
         let background = foreground.mul_scalar(-1.0).add_scalar(1.0);
         let leak = density.mul(background);
@@ -91,7 +109,12 @@ use super::*;
             config.loss_config.image_size * config.loss_config.image_size,
             3,
         ]);
-        let color_loss = l1l2_tensor(rgb - target.target_rgb.clone())
+        let render_rgb_diff = rgb - target.target_rgb.clone();
+        let render_rgb_loss = render_rgb_diff
+            .clone()
+            .mul(render_rgb_diff.clone())
+            .mean();
+        let color_loss = l1l2_tensor(render_rgb_diff)
             .mul(color_gate)
             .mean();
         let shape_chamfer_loss = target_shape_chamfer_loss(&centered, target, config);
@@ -107,7 +130,8 @@ use super::*;
             + foreground_density_loss
                 .clone()
                 .mul_scalar(config.loss_config.foreground_density_loss_weight)
-            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight);
+            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight)
+            + render_rgb_loss.mul_scalar(config.loss_config.render_rgb_loss_weight);
         let bound = relu(x.clone().abs().add_scalar(-1.0));
         let bound_loss = bound.mean();
         let overflow = relu(s.clone().abs().add_scalar(-1.0));
@@ -231,7 +255,14 @@ use super::*;
             .mean_dim(1)
             .squeeze_dim::<1>(1);
         let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
-        let color_loss = l1l2_tensor3(rgb - target_rgb)
+        let render_rgb_diff = rgb - target_rgb;
+        let render_rgb_loss = render_rgb_diff
+            .clone()
+            .mul(render_rgb_diff.clone())
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let color_loss = l1l2_tensor3(render_rgb_diff)
             .mul(color_gate)
             .reshape([batches, pixels * 3])
             .mean_dim(1)
@@ -250,7 +281,8 @@ use super::*;
             + foreground_density_loss
                 .clone()
                 .mul_scalar(config.loss_config.foreground_density_loss_weight)
-            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight);
+            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight)
+            + render_rgb_loss.mul_scalar(config.loss_config.render_rgb_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -345,6 +377,7 @@ use super::*;
             background_density_loss_weight: value.background_density_loss_weight,
             foreground_density_loss_weight: value.foreground_density_loss_weight,
             composited_rgb_loss_weight: value.composited_rgb_loss_weight,
+            render_rgb_loss_weight: value.render_rgb_loss_weight,
             center: value.center,
         }
     }
@@ -410,58 +443,14 @@ use super::*;
             ) {
                 TARGET2D_CUBE_ADJOINT_DEVICE_HITS.fetch_add(1, Ordering::Relaxed);
                 let device_loss = device_loss?;
-                let position_grad = Tensor::<BurnBackend, 3>::from_inner(device_loss.position_grad);
-                let state_grad = Tensor::<BurnBackend, 3>::from_inner(device_loss.state_grad);
-                let position_term = x
-                    .clone()
-                    .mul(position_grad)
-                    .reshape([batches, particle_count * 2])
-                    .sum_dim(1)
-                    .squeeze_dim::<1>(1);
-                let state_term = s
-                    .clone()
-                    .mul(state_grad)
-                    .reshape([batches, particle_count * state_dims])
-                    .sum_dim(1)
-                    .squeeze_dim::<1>(1);
-                let mut total = position_term
-                    + state_term
-                    + Tensor::<BurnBackend, 1>::from_inner(device_loss.constant);
-                if config.loss_config.bound_regularizer_weight > 0.0 {
-                    let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
-                        .reshape([batches, particle_count * 2])
-                        .mean_dim(1)
-                        .squeeze_dim::<1>(1);
-                    total = total
-                        + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight);
-                }
-                if config.loss_config.overflow_regularizer_weight > 0.0 {
-                    let overflow_loss = relu(s.clone().abs().add_scalar(-1.0))
-                        .reshape([batches, particle_count * state_dims])
-                        .mean_dim(1)
-                        .squeeze_dim::<1>(1);
-                    total = total
-                        + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
-                }
-                if config.loss_config.displacement_regularizer_weight > 0.0 {
-                    total = total
-                        + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight);
-                }
-                if config.adapter_l2_weight > 0.0 {
-                    let adapter = adapter.expect(
-                        "adapter L2 regularization requires adapter parameters",
-                    );
-                    total = total
-                        + adapter
-                            .l2_loss_vector()
-                            .mul_scalar(config.adapter_l2_weight);
-                }
-                return Ok(BurnLossBatchTensors {
-                    total,
-                    splat: Tensor::<BurnBackend, 1>::from_inner(device_loss.splat),
-                    color: Tensor::<BurnBackend, 1>::from_inner(device_loss.color),
-                    density: Tensor::<BurnBackend, 1>::from_inner(device_loss.density),
-                });
+                return Ok(base_only_loss_batch_vector_from_device_adjoint(
+                    x,
+                    s,
+                    device_loss,
+                    config,
+                    adapter,
+                    displacement,
+                ));
             }
           }
         }
@@ -482,7 +471,6 @@ use super::*;
         let mut splat_values = Vec::with_capacity(batches);
         let mut color_values = Vec::with_capacity(batches);
         let mut density_values = Vec::with_capacity(batches);
-        let mut constant_values = Vec::with_capacity(batches);
 
         for (batch, target_idx) in indices.iter().copied().enumerate() {
             let target = targets.get(target_idx).ok_or_else(|| {
@@ -517,24 +505,18 @@ use super::*;
             color_values.push(reference.report.color_loss);
             density_values.push(reference.report.density_loss);
 
-            let mut dot = 0.0_f32;
             for particle in 0..particle_count {
                 let pos_base = x_offset + particle * 2;
                 let reference_position = reference.position_gradients[particle];
                 position_grad_values[pos_base] = reference_position[0];
                 position_grad_values[pos_base + 1] = reference_position[1];
-                dot += x_values[pos_base] * reference_position[0]
-                    + x_values[pos_base + 1] * reference_position[1];
 
                 let state_base = s_offset + particle * state_dims;
                 let reference_state = &reference.state_gradients
                     [particle * state_dims..(particle + 1) * state_dims];
-                for dim in 0..state_dims {
-                    state_grad_values[state_base + dim] = reference_state[dim];
-                    dot += s_values[state_base + dim] * reference_state[dim];
-                }
+                state_grad_values[state_base..state_base + state_dims]
+                    .copy_from_slice(reference_state);
             }
-            constant_values.push(total - dot);
         }
 
         let position_grad = tensor3(position_grad_values, [batches, particle_count, 2], device);
@@ -543,19 +525,10 @@ use super::*;
             [batches, particle_count, state_dims],
             device,
         );
-        let position_term = x
-            .clone()
-            .mul(position_grad)
-            .reshape([batches, particle_count * 2])
-            .sum_dim(1)
-            .squeeze_dim::<1>(1);
-        let state_term = s
-            .clone()
-            .mul(state_grad)
-            .reshape([batches, particle_count * state_dims])
-            .sum_dim(1)
-            .squeeze_dim::<1>(1);
-        let mut total = position_term + state_term + tensor1(constant_values, [batches], device);
+        let position_term = zero_primal_linear_adjoint_3d(x, position_grad);
+        let state_term = zero_primal_linear_adjoint_3d(s, state_grad);
+        let mut total =
+            tensor1(total_values, [batches], device).detach() + position_term + state_term;
         if config.loss_config.displacement_regularizer_weight > 0.0 {
             total = total
                 + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight);
@@ -574,6 +547,63 @@ use super::*;
             color: tensor1(color_values, [batches], device),
             density: tensor1(density_values, [batches], device),
         })
+    }
+
+    #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn base_only_loss_batch_vector_from_device_adjoint(
+        x: &Tensor3,
+        s: &Tensor3,
+        device_loss: burn_automata_kernels::Target2dCubeLossOutput<InnerBackend>,
+        config: DirectBasisTrainConfig,
+        adapter: Option<&BurnAdapterBatch>,
+        displacement: Tensor1,
+    ) -> BurnLossBatchTensors {
+        let [batches, particle_count, _] = x.shape().dims::<3>();
+        let state_dims = s.shape().dims::<3>()[2];
+        let position_grad = Tensor::<BurnBackend, 3>::from_inner(device_loss.position_grad);
+        let state_grad = Tensor::<BurnBackend, 3>::from_inner(device_loss.state_grad);
+        let position_term = zero_primal_linear_adjoint_3d(x, position_grad);
+        let state_term = zero_primal_linear_adjoint_3d(s, state_grad);
+        let splat = Tensor::<BurnBackend, 1>::from_inner(device_loss.splat);
+        let mut total = splat
+            .clone()
+            .mul_scalar(config.loss_config.splat_loss_weight)
+            .detach()
+            + position_term
+            + state_term;
+        if config.loss_config.bound_regularizer_weight > 0.0 {
+            let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
+                .reshape([batches, particle_count * 2])
+                .mean_dim(1)
+                .squeeze_dim::<1>(1);
+            total = total + bound_loss.mul_scalar(config.loss_config.bound_regularizer_weight);
+        }
+        if config.loss_config.overflow_regularizer_weight > 0.0 {
+            let overflow_loss = relu(s.clone().abs().add_scalar(-1.0))
+                .reshape([batches, particle_count * state_dims])
+                .mean_dim(1)
+                .squeeze_dim::<1>(1);
+            total = total + overflow_loss.mul_scalar(config.loss_config.overflow_regularizer_weight);
+        }
+        if config.loss_config.displacement_regularizer_weight > 0.0 {
+            total =
+                total + displacement.mul_scalar(config.loss_config.displacement_regularizer_weight);
+        }
+        if config.adapter_l2_weight > 0.0 {
+            let adapter =
+                adapter.expect("adapter L2 regularization requires adapter parameters");
+            total = total
+                + adapter
+                    .l2_loss_vector()
+                    .mul_scalar(config.adapter_l2_weight);
+        }
+        BurnLossBatchTensors {
+            total,
+            splat,
+            color: Tensor::<BurnBackend, 1>::from_inner(device_loss.color),
+            density: Tensor::<BurnBackend, 1>::from_inner(device_loss.density),
+        }
     }
 
     pub(super) fn target_splat_quality_batch_vector(
@@ -758,7 +788,13 @@ use super::*;
                 .mul_scalar(config.loss_config.background_density_loss_weight)
             + foreground_density_loss
                 .clone()
-                .mul_scalar(config.loss_config.foreground_density_loss_weight);
+                .mul_scalar(config.loss_config.foreground_density_loss_weight)
+            + composited_rgb_mse
+                .clone()
+                .mul_scalar(config.loss_config.composited_rgb_loss_weight)
+            + render_rgb_mse
+                .clone()
+                .mul_scalar(config.loss_config.render_rgb_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -841,12 +877,7 @@ use super::*;
         let batches = dims[0];
         let particle_count = dims[1];
         let state_dims = s.shape().dims::<3>()[2];
-        let pixels = config.loss_config.image_size * config.loss_config.image_size;
         let target_mean = stack_target_mean(targets, indices);
-        let target_rgb = stack_target_rgb(targets, indices);
-        let target_density = stack_target_density(targets, indices);
-        let target_foreground = stack_target_foreground(targets, indices);
-        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
         let centered = if config.loss_config.center {
             x.clone() - x.clone().mean_dim(1).expand([batches, particle_count, 2])
                 + target_mean.expand([batches, particle_count, 2])
@@ -856,6 +887,63 @@ use super::*;
         let colors = s.clone().narrow(2, state_dims - 3, 3).add_scalar(0.5);
         let (rgb, density) =
             splat_render_batch(&centered, &colors, targets, indices, config, particle_count);
+        base_only_loss_batch_vector_from_render(
+            x,
+            s,
+            &centered,
+            rgb,
+            density,
+            targets,
+            indices,
+            config,
+            displacement,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn base_only_loss_batch_vector_from_render(
+        x: &Tensor3,
+        s: &Tensor3,
+        centered: &Tensor3,
+        rgb: Tensor3,
+        density: Tensor3,
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        config: DirectBasisTrainConfig,
+        displacement: Tensor1,
+    ) -> BurnLossBatchTensors {
+        let dims = x.shape().dims::<3>();
+        let batches = dims[0];
+        let particle_count = dims[1];
+        let state_dims = s.shape().dims::<3>()[2];
+        let pixels = config.loss_config.image_size * config.loss_config.image_size;
+        let target_rgb = stack_target_rgb(targets, indices);
+        let target_density = stack_target_density(targets, indices);
+        let target_foreground = stack_target_foreground(targets, indices);
+        let target_foreground_scales = stack_target_foreground_scales(targets, indices);
+        let predicted_alpha = density.clone().clamp_min(0.0).clamp_max(1.0);
+        let target_alpha = target_density.clone().clamp_min(0.0).clamp_max(1.0);
+        let predicted_composited_rgb = (rgb.clone()
+            + predicted_alpha
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([batches, pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let target_composited_rgb = (target_rgb.clone()
+            + target_alpha
+                .mul_scalar(-1.0)
+                .add_scalar(1.0)
+                .expand([batches, pixels, 3]))
+        .clamp_min(0.0)
+        .clamp_max(1.0);
+        let composited_diff = predicted_composited_rgb - target_composited_rgb;
+        let composited_rgb_loss = composited_diff
+            .clone()
+            .mul(composited_diff)
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
         let background_density_loss = background_density_term_batch(
             density.clone(),
             target_foreground.clone(),
@@ -880,13 +968,20 @@ use super::*;
             .mean_dim(1)
             .squeeze_dim::<1>(1);
         let color_gate = target_2d_detached_color_gate3(density_term).expand([batches, pixels, 3]);
-        let color_loss = l1l2_tensor3(rgb - target_rgb)
+        let render_rgb_diff = rgb - target_rgb;
+        let render_rgb_loss = render_rgb_diff
+            .clone()
+            .mul(render_rgb_diff.clone())
+            .reshape([batches, pixels * 3])
+            .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let color_loss = l1l2_tensor3(render_rgb_diff)
             .mul(color_gate)
             .reshape([batches, pixels * 3])
             .mean_dim(1)
             .squeeze_dim::<1>(1);
         let shape_chamfer_loss =
-            target_shape_chamfer_loss_batch_vector(&centered, targets, indices, config);
+            target_shape_chamfer_loss_batch_vector(centered, targets, indices, config);
         let splat = color_loss
             .clone()
             .mul_scalar(config.loss_config.color_loss_weight)
@@ -898,7 +993,9 @@ use super::*;
                 .mul_scalar(config.loss_config.background_density_loss_weight)
             + foreground_density_loss
                 .clone()
-                .mul_scalar(config.loss_config.foreground_density_loss_weight);
+                .mul_scalar(config.loss_config.foreground_density_loss_weight)
+            + composited_rgb_loss.mul_scalar(config.loss_config.composited_rgb_loss_weight)
+            + render_rgb_loss.mul_scalar(config.loss_config.render_rgb_loss_weight);
         let bound_loss = relu(x.clone().abs().add_scalar(-1.0))
             .reshape([batches, particle_count * 2])
             .mean_dim(1)
@@ -989,8 +1086,7 @@ use super::*;
             (config.loss_config.sigma * config.loss_config.image_size as f32 * target.pixel_size
                 / (config.loss_config.hi - config.loss_config.lo))
                 .max(EPSILON);
-        let denom =
-            splat_particle_denominator(&particle_pixels, target, particle_count, sigma, config);
+        let denom = splat_particle_denominator(&particle_pixels, particle_count, sigma, config);
         let norm_scale = (config.loss_config.image_size as f32 * target.pixel_size
             / (config.loss_config.hi - config.loss_config.lo))
             .powi(2);
@@ -1030,8 +1126,6 @@ use super::*;
             .clamp_min(EPSILON);
         let denom = splat_particle_denominator_batch(
             &particle_pixels,
-            targets,
-            indices,
             particle_count,
             sigma.clone(),
             config,
@@ -1245,72 +1339,67 @@ use super::*;
 
     pub(super) fn splat_particle_denominator(
         particle_pixels: &Tensor2,
-        target: &BurnTargetExample,
         particle_count: usize,
         sigma: f32,
         config: DirectBasisTrainConfig,
     ) -> Tensor2 {
-        let pixels = config.loss_config.image_size * config.loss_config.image_size;
-        let chunk_size =
-            splat_pixel_chunk_size(1, particle_count, pixels, config.max_splat_chunk_floats);
-        let mut denom = None::<Tensor2>;
-        for (start, len) in chunks_for(pixels, chunk_size) {
-            let g =
-                splat_gaussian_chunk(particle_pixels, target, particle_count, sigma, start, len);
-            let contribution = g.sum_dim(0);
-            denom = Some(match denom {
-                Some(value) => value + contribution,
-                None => contribution,
-            });
-        }
-        denom
-            .unwrap_or_else(|| {
-                Tensor::<BurnBackend, 2>::zeros([1, particle_count], &target.target_rgb.device())
-            })
-            .add_scalar(EPSILON)
+        let device = particle_pixels.device();
+        splat_particle_denominator_batch(
+            &particle_pixels.clone().unsqueeze_dim::<3>(0),
+            particle_count,
+            Tensor::<BurnBackend, 3>::ones([1, 1, particle_count], &device).mul_scalar(sigma),
+            config,
+        )
+        .squeeze_dim::<2>(0)
     }
 
     pub(super) fn splat_particle_denominator_batch(
         particle_pixels: &Tensor3,
-        targets: &[BurnTargetExample],
-        indices: &[usize],
         particle_count: usize,
         sigma: Tensor3,
         config: DirectBasisTrainConfig,
     ) -> Tensor3 {
-        let batches = indices.len();
-        let pixels = config.loss_config.image_size * config.loss_config.image_size;
-        let chunk_size = splat_pixel_chunk_size(
-            batches,
-            particle_count,
-            pixels,
-            config.max_splat_chunk_floats,
-        );
-        let mut denom = None::<Tensor3>;
-        for (start, len) in chunks_for(pixels, chunk_size) {
-            let g = splat_gaussian_batch_chunk(
-                particle_pixels,
-                targets,
-                indices,
-                particle_count,
-                sigma.clone(),
-                start,
-                len,
-            );
-            let contribution = g.sum_dim(1);
-            denom = Some(match denom {
-                Some(value) => value + contribution,
-                None => contribution,
-            });
-        }
-        denom
-            .unwrap_or_else(|| {
-                Tensor::<BurnBackend, 3>::zeros(
-                    [batches, 1, particle_count],
-                    &targets[indices[0]].target_rgb.device(),
-                )
-            })
-            .add_scalar(EPSILON)
+        let batches = particle_pixels.shape().dims::<3>()[0];
+        let support_extent = config.loss_config.image_size.max(8) as i32;
+        let samples = (2 * support_extent + 1) as usize;
+        let offsets = tensor1(
+            (-support_extent..=support_extent)
+                .map(|offset| offset as f32)
+                .collect(),
+            [samples],
+            &particle_pixels.device(),
+        )
+        .reshape([1, samples, 1])
+        .expand([batches, samples, particle_count]);
+        let radius = sigma
+            .clone()
+            .mul_scalar(5.0)
+            .ceil()
+            .clamp_min(1.0)
+            .expand([batches, samples, particle_count]);
+        let support = offsets
+            .clone()
+            .abs()
+            .lower_equal(radius)
+            .float();
+        let sigma2 = sigma
+            .clone()
+            .mul(sigma)
+            .expand([batches, samples, particle_count]);
+        let axis_sum = |axis| {
+            let fraction = particle_pixels
+                .clone()
+                .narrow(2, axis, 1)
+                .squeeze_dim::<2>(2);
+            let fraction = (fraction.clone() - fraction.floor())
+                .reshape([batches, 1, particle_count])
+                .expand([batches, samples, particle_count]);
+            let delta = offsets.clone() - fraction;
+            (delta.clone().mul(delta).div(sigma2.clone()).mul_scalar(-0.5).exp()
+                * support.clone())
+            .sum_dim(1)
+        };
+        axis_sum(0).mul(axis_sum(1)).add_scalar(1.0e-8)
     }
 
     pub(super) fn splat_gaussian_chunk(
@@ -1332,9 +1421,23 @@ use super::*;
                 .clone()
                 .unsqueeze_dim::<3>(0)
                 .expand([len, particle_count, 2]);
+        let pixel_offset = pixel_i.clone() - particle_j.clone().floor();
+        let support_x = pixel_offset
+            .clone()
+            .narrow(2, 0, 1)
+            .squeeze_dim::<2>(2)
+            .abs()
+            .lower_equal_elem((5.0 * sigma).ceil().max(1.0))
+            .float();
+        let support_y = pixel_offset
+            .narrow(2, 1, 1)
+            .squeeze_dim::<2>(2)
+            .abs()
+            .lower_equal_elem((5.0 * sigma).ceil().max(1.0))
+            .float();
         let diff = pixel_i - particle_j;
         let dist2 = diff.clone().mul(diff).sum_dim(2).squeeze_dim::<2>(2);
-        dist2.mul_scalar(-0.5 / (sigma * sigma)).exp()
+        dist2.mul_scalar(-0.5 / (sigma * sigma)).exp() * support_x * support_y
     }
 
     pub(super) fn splat_gaussian_batch_chunk(
@@ -1359,13 +1462,33 @@ use super::*;
                 .clone()
                 .unsqueeze_dim::<4>(1)
                 .expand([batches, len, particle_count, 2]);
+        let support_radius = sigma
+            .clone()
+            .mul_scalar(5.0)
+            .ceil()
+            .clamp_min(1.0)
+            .expand([batches, len, particle_count]);
+        let pixel_offset = pixel_i.clone() - particle_j.clone().floor();
+        let support_x = pixel_offset
+            .clone()
+            .narrow(3, 0, 1)
+            .squeeze_dim::<3>(3)
+            .abs()
+            .lower_equal(support_radius.clone())
+            .float();
+        let support_y = pixel_offset
+            .narrow(3, 1, 1)
+            .squeeze_dim::<3>(3)
+            .abs()
+            .lower_equal(support_radius)
+            .float();
         let diff = pixel_i - particle_j;
         let dist2 = diff.clone().mul(diff).sum_dim(3).squeeze_dim::<3>(3);
         let sigma2 = sigma
             .clone()
             .mul(sigma)
             .expand([batches, len, particle_count]);
-        dist2.mul_scalar(-0.5).div(sigma2).exp()
+        dist2.mul_scalar(-0.5).div(sigma2).exp() * support_x * support_y
     }
 
     pub(super) fn chunks_for(total: usize, chunk_size: usize) -> impl Iterator<Item = (usize, usize)> {

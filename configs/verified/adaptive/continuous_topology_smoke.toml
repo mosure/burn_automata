@@ -1,0 +1,9 @@
+# Fast deterministic audit of equal and bounded-unequal conservative events.
+# This command loads no model and does not initialize a GPU:
+# cargo run -p burn_automata -- audit-adaptive-topology --config <this-file>
+report_output = "artifacts/adaptive_npa/continuous_topology_smoke/report.json"
+seed = 17
+
+[topology]
+samples = 10000
+max_unequal_measure_ratio = 8.0

@@ -1,0 +1,203 @@
+{
+  "schema_version": 2,
+  "date": "2026-07-18",
+  "task": "lizard",
+  "hardware": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "artifact": {
+    "base": "fresh Burn Target2D lizard checkpoint",
+    "path": "artifacts/adaptive_npa/task_multiscale_lizard_parity/model.adaptive.bpk",
+    "payload_sha256": "6d607c1b834f3455338d044e0c37f473003951282d8ed536c9de26e5d39bb507",
+    "file_sha256": "1deec7fe3044c35d6a227269c2cc0080bd1fae1bb2129588e6f1e99aa3337b66",
+    "file_bytes": 297408
+  },
+  "model": {
+    "particle_count": 4096,
+    "initial_particle_count": 1024,
+    "rollout_steps": 256,
+    "update_probability": 0.5,
+    "local_residual_scale": 0.0,
+    "topology_control": "learned event gates and bandwidth modulation with deterministic refinement-defect allocation",
+    "steady_topology_events_per_seed": {
+      "split": 1,
+      "merge": 1
+    }
+  },
+  "parity_definition": {
+    "matched_seed_geometry": true,
+    "matched_particle_id_masks": true,
+    "mean_adaptive_over_regular_psnr_gain_db_min": -0.01,
+    "worst_adaptive_over_regular_psnr_gain_db_min": -0.15,
+    "mean_topology_gain_db_min": 0.0,
+    "worst_topology_gain_db_min": -0.08,
+    "minimum_controller_oracle_correlation": 0.80,
+    "maximum_measure_relative_drift": 1e-7,
+    "maximum_leaf_relative_error": 0.0
+  },
+  "aggregate": {
+    "seeds": 8,
+    "mean_adaptive_psnr_db": 21.884272,
+    "mean_regular_psnr_db": 21.886889,
+    "mean_adaptive_over_regular_psnr_gain_db": -0.0026156902,
+    "worst_adaptive_over_regular_psnr_gain_db": -0.09929848,
+    "mean_topology_gain_db": 0.0017316341,
+    "worst_topology_gain_db": -0.07160187,
+    "mean_controller_oracle_correlation": 0.842320545,
+    "minimum_controller_oracle_correlation": 0.83147585,
+    "maximum_measure_relative_drift": 0.0,
+    "maximum_leaf_relative_error": 0.0
+  },
+  "training": {
+    "total_integrated_elapsed_ms": 273029.144405,
+    "maximum_process_rss_kib": 2744576,
+    "static_dataset": {
+      "rows": 184320,
+      "rollouts": 8,
+      "snapshots": 72
+    },
+    "static_controller_fit": {
+      "backend": "burn-cuda",
+      "steps": 20000,
+      "initial_loss": 3.266046,
+      "final_loss": 0.26116428,
+      "elapsed_ms": 28734.171735,
+      "rows_per_second": 128293240.32715154
+    },
+    "on_policy_dataset": {
+      "rounds": 1,
+      "rows": 69632,
+      "rollouts": 4,
+      "snapshots": 68,
+      "minimum_material_leaves": 1024,
+      "maximum_material_leaves": 4096,
+      "mean_counterfactual_error": 0.0023909833,
+      "generation_elapsed_ms": 28060.973209
+    },
+    "on_policy_controller_fit": {
+      "backend": "burn-cuda",
+      "steps": 20000,
+      "initial_loss": 2.4442763,
+      "final_loss": 0.2455476,
+      "elapsed_ms": 13419.690303,
+      "rows_per_second": 103775867.29320218
+    },
+    "observed_device_range": {
+      "static_fit_gpu_utilization_percent": [98, 99],
+      "static_fit_gpu_power_watts": [378, 405],
+      "on_policy_fit_gpu_utilization_percent": [96, 98],
+      "on_policy_fit_gpu_power_watts": [305, 326],
+      "note": "nvidia-smi samples during optimizer phases; CPU refinement-defect labeling is reported separately"
+    }
+  },
+  "inference": {
+    "backend": "WGPU",
+    "neighbor_mode": "cooperative-sorted-cells",
+    "timed_steps": 2048,
+    "end_to_end_with_two_topology_passes": {
+      "milliseconds_per_step": 2.461,
+      "particle_steps_per_second": 1660000.0,
+      "initial_particles": 1024,
+      "final_particles": 4096
+    },
+    "steady_adaptive": {
+      "milliseconds_per_step": 0.817,
+      "particle_steps_per_second": 5020000.0
+    },
+    "matched_material_control": {
+      "milliseconds_per_step": 0.845,
+      "particle_steps_per_second": 4850000.0
+    },
+    "matched_regular_control": {
+      "milliseconds_per_step": 0.865,
+      "particle_steps_per_second": 4740000.0
+    },
+    "separately_seeded_regular_4096": {
+      "milliseconds_per_step": 0.735,
+      "particle_steps_per_second": 5580000.0
+    },
+    "steady_wall_ratio_vs_material_control": 0.966,
+    "steady_wall_ratio_vs_matched_regular": 0.945,
+    "note": "matched controls clone the exact post-topology positions and states; the separately seeded regular comparison has a different neighbor distribution"
+  },
+  "rows": [
+    {
+      "seed": 42,
+      "adaptive_psnr_db": 21.638067,
+      "regular_psnr_db": 21.619616,
+      "adaptive_over_regular_psnr_gain_db": 0.01845169,
+      "budget_fixed_psnr_db": 21.596806,
+      "topology_gain_db": 0.041261,
+      "controller_oracle_correlation": 0.840942,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 43,
+      "adaptive_psnr_db": 21.519608,
+      "regular_psnr_db": 21.447205,
+      "adaptive_over_regular_psnr_gain_db": 0.072402954,
+      "budget_fixed_psnr_db": 21.499004,
+      "topology_gain_db": 0.020604,
+      "controller_oracle_correlation": 0.8383025,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 44,
+      "adaptive_psnr_db": 21.948135,
+      "regular_psnr_db": 22.024584,
+      "adaptive_over_regular_psnr_gain_db": -0.07644844,
+      "budget_fixed_psnr_db": 22.00111,
+      "topology_gain_db": -0.052975,
+      "controller_oracle_correlation": 0.8534232,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 45,
+      "adaptive_psnr_db": 21.477432,
+      "regular_psnr_db": 21.492662,
+      "adaptive_over_regular_psnr_gain_db": -0.015230179,
+      "budget_fixed_psnr_db": 21.398232,
+      "topology_gain_db": 0.0792,
+      "controller_oracle_correlation": 0.85010535,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 46,
+      "adaptive_psnr_db": 21.242,
+      "regular_psnr_db": 21.153,
+      "adaptive_over_regular_psnr_gain_db": 0.0890007,
+      "budget_fixed_psnr_db": 21.16055,
+      "topology_gain_db": 0.08145,
+      "controller_oracle_correlation": 0.83199036,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 47,
+      "adaptive_psnr_db": 23.26118,
+      "regular_psnr_db": 23.303797,
+      "adaptive_over_regular_psnr_gain_db": -0.04261589,
+      "budget_fixed_psnr_db": 23.316433,
+      "topology_gain_db": -0.055253,
+      "controller_oracle_correlation": 0.8515746,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 48,
+      "adaptive_psnr_db": 22.16982,
+      "regular_psnr_db": 22.26912,
+      "adaptive_over_regular_psnr_gain_db": -0.09929848,
+      "budget_fixed_psnr_db": 22.241423,
+      "topology_gain_db": -0.071603,
+      "controller_oracle_correlation": 0.8407505,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    },
+    {
+      "seed": 49,
+      "adaptive_psnr_db": 21.817934,
+      "regular_psnr_db": 21.785122,
+      "adaptive_over_regular_psnr_gain_db": 0.03281212,
+      "budget_fixed_psnr_db": 21.84677,
+      "topology_gain_db": -0.028836,
+      "controller_oracle_correlation": 0.83147585,
+      "fine_reference_coarse_leaves": [4, 4091, 1]
+    }
+  ]
+}

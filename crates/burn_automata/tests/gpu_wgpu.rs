@@ -1,5 +1,7 @@
 #![cfg(feature = "gpu_wgpu")]
 
+#[path = "gpu_wgpu/adaptive.rs"]
+mod adaptive;
 #[path = "gpu_wgpu/common.rs"]
 mod common;
 #[path = "gpu_wgpu/gaussian.rs"]

@@ -39,6 +39,13 @@ pub(in crate::viewer) fn controls_panel() -> impl Scene {
                 TextColor(Color::srgb(0.84, 0.88, 0.76))
                 StatusLabel
             ),
+            performance_summary(),
+            (
+                Text("")
+                template_value(ModelCatalogTextSize(11.0))
+                TextColor(Color::srgb(0.58, 0.72, 0.70))
+                AdaptiveDiagnosticsLabel
+            ),
             controls_section("run", run_controls_row()),
             controls_section("training", training_controls_row()),
             controls_section("simulation", simulation_controls_row()),
@@ -57,6 +64,91 @@ pub(in crate::viewer) fn controls_panel() -> impl Scene {
                     margin: UiRect::vertical(px(4)),
                 }
                 BackgroundColor(Color::srgb(0.20, 0.23, 0.26))
+            ),
+        ]
+    }
+}
+
+pub(in crate::viewer) fn performance_summary() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(8),
+            align_items: AlignItems::Center,
+        }
+        Children [
+            (
+                Node {
+                    width: px(72),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Stretch,
+                }
+                Children [
+                    (
+                        Text("frame")
+                        template_value(ModelCatalogTextSize(10.0))
+                        TextColor(Color::srgb(0.48, 0.54, 0.58))
+                    ),
+                    (
+                        Text("       0")
+                        Node {
+                            width: percent(100),
+                        }
+                        TextLayout::justify(Justify::Right)
+                        template_value(ModelCatalogTextSize(13.0))
+                        TextColor(Color::srgb(0.82, 0.88, 0.90))
+                        PerformanceFrameLabel
+                    ),
+                ]
+            ),
+            (
+                Node {
+                    width: px(72),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Stretch,
+                }
+                Children [
+                    (
+                        Text("render fps")
+                        template_value(ModelCatalogTextSize(10.0))
+                        TextColor(Color::srgb(0.48, 0.54, 0.58))
+                    ),
+                    (
+                        Text("   --.-")
+                        Node {
+                            width: percent(100),
+                        }
+                        TextLayout::justify(Justify::Right)
+                        template_value(ModelCatalogTextSize(13.0))
+                        TextColor(Color::srgb(0.82, 0.88, 0.90))
+                        PerformanceFpsLabel
+                    ),
+                ]
+            ),
+            (
+                Node {
+                    width: px(72),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Stretch,
+                }
+                Children [
+                    (
+                        Text("steps/s")
+                        template_value(ModelCatalogTextSize(10.0))
+                        TextColor(Color::srgb(0.48, 0.54, 0.58))
+                    ),
+                    (
+                        Text("   --.-")
+                        Node {
+                            width: percent(100),
+                        }
+                        TextLayout::justify(Justify::Right)
+                        template_value(ModelCatalogTextSize(13.0))
+                        TextColor(Color::srgb(0.82, 0.88, 0.90))
+                        PerformanceStepRateLabel
+                    ),
+                ]
             ),
         ]
     }

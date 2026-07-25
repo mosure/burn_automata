@@ -1257,6 +1257,83 @@ use super::*;
         )
     }
 
+    pub(super) fn host_batch_wgpu_mask_stack(
+        targets: &[BurnTargetExample],
+        indices: &[usize],
+        particle_count: usize,
+        steps: usize,
+        step_offset: usize,
+        seeds: &[u64],
+        material_update_masks: Option<&[crate::adaptive::AdaptiveTarget2dUpdateMask]>,
+    ) -> Tensor4 {
+        debug_assert_eq!(indices.len(), seeds.len());
+        debug_assert!(
+            material_update_masks
+                .is_none_or(|masks| masks.len() == indices.len() * particle_count)
+        );
+        let mut values = Vec::with_capacity(steps * indices.len() * particle_count);
+        for step in 0..steps {
+            let absolute_step = step_offset.saturating_add(step) as u32;
+            for (local, &idx) in indices.iter().enumerate() {
+                let probability = targets[idx].update_prob;
+                let seed = wgpu_random_seed(seeds[local]);
+                values.extend((0..particle_count).map(|particle| {
+                    material_update_masks.map_or_else(
+                        || {
+                            f32::from(
+                                wgpu_random01(particle as u32, absolute_step, seed) < probability,
+                            )
+                        },
+                        |masks| {
+                            let mask = masks[local * particle_count + particle];
+                            if mask.expected {
+                                probability
+                            } else {
+                                mask.keys
+                                    .iter()
+                                    .copied()
+                                    .zip(mask.weights.iter().copied())
+                                    .take_while(|(_, weight)| *weight > 0.0)
+                                    .map(|(key, weight)| {
+                                        weight
+                                            * f32::from(
+                                                wgpu_random01(key, absolute_step, seed)
+                                                    < probability,
+                                            )
+                                    })
+                                    .sum()
+                            }
+                        },
+                    )
+                }));
+            }
+        }
+        STOCHASTIC_MASK_UPLOAD_HITS.fetch_add(1, Ordering::Relaxed);
+        tensor4(
+            values,
+            [steps, indices.len(), particle_count, 1],
+            &targets[indices[0]].target_rgb.device(),
+        )
+    }
+
+    pub(super) fn wgpu_random_seed(seed: u64) -> u32 {
+        (seed as u32) ^ ((seed >> 32) as u32)
+    }
+
+    fn wgpu_hash_u32(mut value: u32) -> u32 {
+        value = (value ^ 61) ^ (value >> 16);
+        value = value.wrapping_add(value << 3);
+        value ^= value >> 4;
+        value = value.wrapping_mul(0x27d4_eb2d);
+        value ^ (value >> 15)
+    }
+
+    pub(super) fn wgpu_random01(particle: u32, step: u32, seed: u32) -> f32 {
+        let mixed =
+            wgpu_hash_u32(particle ^ wgpu_hash_u32(step.wrapping_add(0x9e37_79b9)) ^ seed);
+        (mixed >> 8) as f32 * (1.0 / 16_777_216.0)
+    }
+
     pub(super) fn host_batch_mask_seeded(
         targets: &[BurnTargetExample],
         indices: &[usize],
@@ -1696,7 +1773,76 @@ use super::*;
         Ok(())
     }
 
+    pub(super) fn pool_age_stratum(
+        age: usize,
+        max_age_steps: usize,
+        strata: usize,
+    ) -> usize {
+        if strata < 2 || max_age_steps == 0 {
+            return 0;
+        }
+        age.min(max_age_steps.saturating_sub(1))
+            .saturating_mul(strata)
+            .checked_div(max_age_steps)
+            .unwrap_or(0)
+            .min(strata - 1)
+    }
+
+    pub(super) fn sample_pool_indices_by_age(
+        rng: &mut StdRng,
+        ages: &[usize],
+        batch_size: usize,
+        fresh_seed_rows: usize,
+        max_age_steps: Option<usize>,
+        age_strata: usize,
+    ) -> Vec<usize> {
+        let sample_count = batch_size.min(ages.len());
+        let Some(max_age_steps) =
+            max_age_steps.filter(|max_age| *max_age > 0 && age_strata >= 2)
+        else {
+            let mut indices = (0..ages.len()).collect::<Vec<_>>();
+            indices.shuffle(rng);
+            indices.truncate(sample_count);
+            return indices;
+        };
+        if sample_count == 0 {
+            return Vec::new();
+        }
+
+        let fresh_count = fresh_seed_rows.min(sample_count);
+        let mut available = (0..ages.len()).collect::<Vec<_>>();
+        available.shuffle(rng);
+        let mut selected = available.drain(..fresh_count).collect::<Vec<_>>();
+        let persistent_count = sample_count - fresh_count;
+        let mut buckets = vec![Vec::new(); age_strata];
+        for index in available {
+            buckets[pool_age_stratum(ages[index], max_age_steps, age_strata)].push(index);
+        }
+        for bucket in &mut buckets {
+            bucket.shuffle(rng);
+        }
+
+        let mut missing = 0usize;
+        for slot in 0..persistent_count {
+            let stratum = slot % age_strata;
+            if let Some(index) = buckets[stratum].pop() {
+                selected.push(index);
+            } else {
+                missing += 1;
+            }
+        }
+        if missing > 0 {
+            let mut remaining = buckets.into_iter().flatten().collect::<Vec<_>>();
+            remaining.shuffle(rng);
+            selected.extend(remaining.into_iter().take(missing));
+        }
+        selected
+    }
+
     impl BurnDeviceParticlePool {
+        const MAX_RECOVERABLE_POSITION: f32 = 4.0;
+        const MAX_RECOVERABLE_STATE: f32 = 32.0;
+
         pub(super) fn new(
             pool_size: usize,
             particle_count: usize,
@@ -1718,20 +1864,180 @@ use super::*;
                 .iter()
                 .flat_map(|position| [position[0], position[1]])
                 .collect::<Vec<_>>();
-            let inner_device = Device::<InnerBackend>::from(device.clone());
-            Self {
-                positions: Tensor::<InnerBackend, 3>::from_data(
-                    TensorData::new(position_values, [pool_size, particle_count, 2]),
-                    &inner_device,
-                ),
-                states: Tensor::<InnerBackend, 3>::from_data(
-                    TensorData::new(states, [pool_size, particle_count, state_dims]),
-                    &inner_device,
-                ),
+            Self::from_flat_values(
+                position_values,
+                states,
                 pool_size,
                 particle_count,
                 state_dims,
+                device,
+            )
+            .expect("generated particle pool has canonical tensor shapes")
+        }
+
+        pub(super) fn from_flat_values(
+            positions: Vec<f32>,
+            states: Vec<f32>,
+            pool_size: usize,
+            particle_count: usize,
+            state_dims: usize,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            if pool_size == 0
+                || particle_count == 0
+                || state_dims == 0
+                || positions.len() != pool_size * particle_count * 2
+                || states.len() != pool_size * particle_count * state_dims
+                || positions
+                    .iter()
+                    .chain(&states)
+                    .any(|value| !value.is_finite())
+            {
+                return Err(AutomataError::InvalidArgument(
+                    "device particle pool values have invalid shapes or non-finite values"
+                        .to_owned(),
+                ));
             }
+            let inner_device = Device::<InnerBackend>::from(device.clone());
+            let positions = Tensor::<InnerBackend, 3>::from_data(
+                TensorData::new(positions, [pool_size, particle_count, 2]),
+                &inner_device,
+            );
+            let states = Tensor::<InnerBackend, 3>::from_data(
+                TensorData::new(states, [pool_size, particle_count, state_dims]),
+                &inner_device,
+            );
+            Ok(Self {
+                initial_positions: positions.clone(),
+                initial_states: states.clone(),
+                positions,
+                states,
+                ages: vec![0; pool_size],
+                pool_size,
+                particle_count,
+                state_dims,
+            })
+        }
+
+        pub(super) fn reset(&mut self) {
+            self.positions = self.initial_positions.clone();
+            self.states = self.initial_states.clone();
+            self.ages.fill(0);
+        }
+
+        pub(super) fn target2d_snapshot(
+            &self,
+        ) -> AutomataResult<Target2dParticlePoolSnapshot> {
+            Ok(Target2dParticlePoolSnapshot {
+                positions: tensor3_snapshot(
+                    "target2d.pool.positions",
+                    self.positions.clone(),
+                )?,
+                states: tensor3_snapshot("target2d.pool.states", self.states.clone())?,
+                ages: self.ages.clone(),
+            })
+        }
+
+        pub(super) fn restore_target2d_snapshot(
+            &mut self,
+            snapshot: &Target2dParticlePoolSnapshot,
+            device: &BurnDevice,
+        ) -> AutomataResult<()> {
+            let expected_positions = [self.pool_size, self.particle_count, 2];
+            let expected_states = [self.pool_size, self.particle_count, self.state_dims];
+            if snapshot.positions.shape != expected_positions
+                || snapshot.states.shape != expected_states
+            {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "Target2D particle-pool checkpoint shapes {:?}/{:?} != expected {:?}/{:?}",
+                    snapshot.positions.shape,
+                    snapshot.states.shape,
+                    expected_positions,
+                    expected_states,
+                )));
+            }
+            self.positions = tensor3_from_snapshot(&snapshot.positions, device)?;
+            self.states = tensor3_from_snapshot(&snapshot.states, device)?;
+            if snapshot.ages.is_empty() {
+                self.ages.fill(0);
+            } else if snapshot.ages.len() == self.pool_size {
+                self.ages.clone_from(&snapshot.ages);
+            } else {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "Target2D particle-pool checkpoint age count {} != expected {}",
+                    snapshot.ages.len(),
+                    self.pool_size,
+                )));
+            }
+            Ok(())
+        }
+
+        pub(super) fn restore_unhealthy_batch(
+            &self,
+            pool_indices: &[usize],
+            x: Tensor3,
+            s: Tensor3,
+        ) -> AutomataResult<(Tensor3, Tensor3, Tensor1Bool)> {
+            let x_dims = x.shape().dims::<3>();
+            let s_dims = s.shape().dims::<3>();
+            if x_dims != [pool_indices.len(), self.particle_count, 2]
+                || s_dims != [pool_indices.len(), self.particle_count, self.state_dims]
+            {
+                return Err(AutomataError::InvalidArgument(
+                    "device particle-pool recovery received incompatible batch shapes".to_owned(),
+                ));
+            }
+            if pool_indices.is_empty() {
+                let device = x.device();
+                return Ok((
+                    x,
+                    s,
+                    Tensor::<BurnBackend, 1, Bool>::empty([0], &device),
+                ));
+            }
+
+            let x_healthy = x
+                .clone()
+                .is_finite()
+                .all_dim(2)
+                .all_dim(1)
+                .bool_and(
+                    x.clone()
+                        .abs()
+                        .lower_equal_elem(Self::MAX_RECOVERABLE_POSITION)
+                        .all_dim(2)
+                        .all_dim(1),
+                );
+            let s_healthy = s
+                .clone()
+                .is_finite()
+                .all_dim(2)
+                .all_dim(1)
+                .bool_and(
+                    s.clone()
+                        .abs()
+                        .lower_equal_elem(Self::MAX_RECOVERABLE_STATE)
+                        .all_dim(2)
+                        .all_dim(1),
+                );
+            let unhealthy = x_healthy.bool_and(s_healthy).bool_not();
+            let unhealthy_rows = unhealthy
+                .clone()
+                .squeeze_dim::<2>(2)
+                .squeeze_dim::<1>(1);
+            let inner_device = self.positions.device();
+            let indices = inner_index_tensor(pool_indices, &inner_device);
+            let initial_x = Tensor::<BurnBackend, 3>::from_inner(
+                self.initial_positions.clone().select(0, indices.clone()),
+            );
+            let initial_s = Tensor::<BurnBackend, 3>::from_inner(
+                self.initial_states.clone().select(0, indices),
+            );
+            Ok((
+                x.mask_where(unhealthy.clone().expand(x_dims), initial_x),
+                s.mask_where(unhealthy.expand(s_dims), initial_s),
+                unhealthy_rows,
+            ))
         }
 
         pub(super) fn sample_batch(
@@ -1739,13 +2045,39 @@ use super::*;
             rng: &mut StdRng,
             batch_size: usize,
             replace_seed: bool,
-            seed_scale: f32,
+            _seed_scale: f32,
             config: DirectBasisTrainConfig,
             device: &BurnDevice,
         ) -> AutomataResult<BurnPoolBatch> {
-            let mut pool_indices = (0..self.pool_size).collect::<Vec<_>>();
-            pool_indices.shuffle(rng);
-            pool_indices.truncate(batch_size.min(self.pool_size));
+            self.sample_batch_with_fresh_rows(
+                rng,
+                batch_size,
+                BurnPoolSampling {
+                    fresh_seed_rows: usize::from(replace_seed),
+                    max_age_steps: None,
+                    age_strata: 0,
+                },
+                config,
+                device,
+            )
+        }
+
+        pub(super) fn sample_batch_with_fresh_rows(
+            &self,
+            rng: &mut StdRng,
+            batch_size: usize,
+            sampling: BurnPoolSampling,
+            config: DirectBasisTrainConfig,
+            device: &BurnDevice,
+        ) -> AutomataResult<BurnPoolBatch> {
+            let pool_indices = sample_pool_indices_by_age(
+                rng,
+                &self.ages,
+                batch_size,
+                sampling.fresh_seed_rows,
+                sampling.max_age_steps,
+                sampling.age_strata,
+            );
             let inner_device = self.positions.device();
             let indices = inner_index_tensor(&pool_indices, &inner_device);
             let mut x = Tensor::<BurnBackend, 3>::from_inner(
@@ -1753,30 +2085,44 @@ use super::*;
             );
             let mut s =
                 Tensor::<BurnBackend, 3>::from_inner(self.states.clone().select(0, indices));
+            let mut ages = pool_indices
+                .iter()
+                .map(|index| self.ages[*index])
+                .collect::<Vec<_>>();
 
-            if replace_seed && !pool_indices.is_empty() {
-                let seed = config.seed ^ rng.random::<u64>();
-                let (seed_positions, seed_states) = seed_particles_scaled(
-                    1,
-                    self.particle_count,
-                    self.state_dims,
-                    2,
-                    seed,
-                    config.seed_mode,
-                    seed_scale,
-                );
-                let position_values = seed_positions
+            let fresh_seed_rows = sampling.fresh_seed_rows.min(pool_indices.len());
+            let fresh_batch_rows = ages
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(batch_row, age)| {
+                    (batch_row < fresh_seed_rows
+                        || sampling
+                            .max_age_steps
+                            .is_some_and(|max_age| age >= max_age))
+                    .then_some(batch_row)
+                })
+                .collect::<Vec<_>>();
+            if !fresh_batch_rows.is_empty() {
+                for batch_row in fresh_batch_rows.iter().copied() {
+                    ages[batch_row] = 0;
+                }
+                let initial_rows = (0..fresh_batch_rows.len())
+                    .map(|_| rng.random_range(0..self.pool_size))
+                    .collect::<Vec<_>>();
+                let inner_initial_index = inner_index_tensor(&initial_rows, &inner_device);
+                let replacement_rows = fresh_batch_rows
                     .iter()
-                    .flat_map(|position| [position[0], position[1]])
+                    .map(|row| *row as i64)
                     .collect::<Vec<_>>();
                 let replacement = Tensor::<BurnBackend, 1, Int>::from_data(
-                    TensorData::new(vec![0_i64], [1]),
+                    TensorData::new(replacement_rows, [fresh_batch_rows.len()]),
                     device,
                 );
-                let new_positions = tensor3(
-                    position_values,
-                    [1, self.particle_count, 2],
-                    device,
+                let new_positions = Tensor::<BurnBackend, 3>::from_inner(
+                    self.initial_positions
+                        .clone()
+                        .select(0, inner_initial_index.clone()),
                 );
                 let position_delta = new_positions - x.clone().select(0, replacement.clone());
                 x = x.select_assign(
@@ -1785,10 +2131,10 @@ use super::*;
                     position_delta,
                     IndexingUpdateOp::Add,
                 );
-                let new_states = tensor3(
-                    seed_states,
-                    [1, self.particle_count, self.state_dims],
-                    device,
+                let new_states = Tensor::<BurnBackend, 3>::from_inner(
+                    self.initial_states
+                        .clone()
+                        .select(0, inner_initial_index),
                 );
                 let state_delta = new_states - s.clone().select(0, replacement.clone());
                 s = s.select_assign(0, replacement, state_delta, IndexingUpdateOp::Add);
@@ -1823,6 +2169,7 @@ use super::*;
 
             Ok(BurnPoolBatch {
                 pool_indices,
+                ages,
                 x,
                 s,
             })
@@ -1853,6 +2200,27 @@ use super::*;
                 state_delta,
                 IndexingUpdateOp::Add,
             );
+            Ok(())
+        }
+
+        pub(super) fn update_batch_with_ages(
+            &mut self,
+            pool_indices: &[usize],
+            ages: &[usize],
+            x: Tensor3,
+            s: Tensor3,
+        ) -> AutomataResult<()> {
+            if pool_indices.len() != ages.len() {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "device particle-pool update has {} indices but {} ages",
+                    pool_indices.len(),
+                    ages.len(),
+                )));
+            }
+            self.update_batch(pool_indices, x, s)?;
+            for (index, age) in pool_indices.iter().copied().zip(ages.iter().copied()) {
+                self.ages[index] = age;
+            }
             Ok(())
         }
     }

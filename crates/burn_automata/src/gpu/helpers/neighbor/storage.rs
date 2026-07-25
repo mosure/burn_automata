@@ -81,6 +81,62 @@ pub(in crate::gpu) fn grid_storage_len_for_mode(
         .ok_or_else(|| AutomataError::InvalidArgument("grid storage length overflow".to_owned()))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::gpu) struct SupportBinGridLayout {
+    pub support_bin_count: usize,
+    pub cell_count: usize,
+    pub storage_len: usize,
+}
+
+pub(in crate::gpu) fn resolve_support_bin_grid_layout(
+    spatial_cell_count: usize,
+    batch_size: usize,
+    particle_count: usize,
+    bucket_capacity: usize,
+    mode: WgpuNeighborMode,
+    requested_support_bin_count: usize,
+) -> AutomataResult<SupportBinGridLayout> {
+    if spatial_cell_count == 0 || batch_size == 0 || requested_support_bin_count == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "support-bin grid dimensions must be non-zero".to_owned(),
+        ));
+    }
+    let base_cell_count = spatial_cell_count.checked_mul(batch_size).ok_or_else(|| {
+        AutomataError::InvalidArgument("batched spatial cell count overflow".to_owned())
+    })?;
+    let eligible = requested_support_bin_count > 1
+        && matches!(
+            mode,
+            WgpuNeighborMode::CooperativeSortedCells
+                | WgpuNeighborMode::SubgroupCooperativeSortedCells
+        );
+    if eligible {
+        let candidate = base_cell_count
+            .checked_mul(requested_support_bin_count)
+            .and_then(|cell_count| {
+                grid_storage_len_for_mode(cell_count, particle_count, bucket_capacity, mode)
+                    .ok()
+                    .map(|storage_len| (cell_count, storage_len))
+            })
+            .filter(|(_, storage_len)| grid_storage_binding_len_fits(*storage_len));
+        if let Some((cell_count, storage_len)) = candidate {
+            return Ok(SupportBinGridLayout {
+                support_bin_count: requested_support_bin_count,
+                cell_count,
+                storage_len,
+            });
+        }
+    }
+    let storage_len =
+        grid_storage_len_for_mode(base_cell_count, particle_count, bucket_capacity, mode)?;
+    ensure_grid_storage_binding_limit(storage_len, mode)?;
+    Ok(SupportBinGridLayout {
+        support_bin_count: 1,
+        cell_count: base_cell_count,
+        storage_len,
+    })
+}
+
 pub(in crate::gpu) fn ensure_grid_storage_binding_limit(
     storage_len: usize,
     mode: WgpuNeighborMode,

@@ -4,6 +4,7 @@
 //! used for parity fixtures. WGPU/CubeCL kernels are intended to replace the
 //! reference kernels behind the same interfaces.
 
+pub mod adaptive;
 pub mod burn_bridge;
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -24,6 +25,61 @@ pub mod training;
 #[cfg(feature = "backend_wgpu")]
 pub mod training_wgpu;
 
+pub use adaptive::{
+    AdaptiveBaseTrainingConfig, AdaptiveBaseTrainingPhase, AdaptiveBaseTrainingPhaseReport,
+    AdaptiveBaseTrainingReport, AdaptiveBootstrapChild, AdaptiveBootstrapTemplate,
+    AdaptiveClosureAuditBackend, AdaptiveClosureAuditConfig, AdaptiveClosureIdentifiabilityConfig,
+    AdaptiveClosureIdentifiabilityReport, AdaptiveClosureModeTrainingReport,
+    AdaptiveClosureModeValidationReport, AdaptiveController, AdaptiveControllerOutput,
+    AdaptiveControllerTrainConfig, AdaptiveControllerTrainingBatch,
+    AdaptiveControllerTrainingHistory, AdaptiveControllerTrainingReport, AdaptiveControllerWeights,
+    AdaptiveDeploymentRuleTrainingReport, AdaptiveDeploymentRuleValidationReport,
+    AdaptiveDeploymentStrategy, AdaptiveExperimentConfig, AdaptiveExperimentReport,
+    AdaptiveGapDecompositionConfig, AdaptiveGapDecompositionReport, AdaptiveGapDecompositionRow,
+    AdaptiveGaussianGeometry, AdaptiveHierarchyMember, AdaptiveLocalRuleSemantics,
+    AdaptiveMaterialView, AdaptiveModelArtifact, AdaptiveMultiscaleDatasetReport,
+    AdaptiveMultiscaleExperimentReport, AdaptiveMultiscaleRuleTrainingReport,
+    AdaptiveMultiscaleRuleValidationReport, AdaptiveMultiscaleTrainingBatch,
+    AdaptiveMultiscaleTrainingConfig, AdaptiveNpaConfig, AdaptiveNpaModel,
+    AdaptiveOracleDatasetConfig, AdaptiveParticleSet, AdaptiveProxyConfig, AdaptiveProxyHierarchy,
+    AdaptiveProxyNode, AdaptiveReplayBackend, AdaptiveReplayTeacher, AdaptiveRolloutConfig,
+    AdaptiveRolloutTrace, AdaptiveRuleDistillationConfig, AdaptiveRuleDistillationReport,
+    AdaptiveRulePerception, AdaptiveRuleTrainingBatch, AdaptiveRuleTrainingHistory,
+    AdaptiveRuleTrainingReport, AdaptiveRuleValidationReport, AdaptiveStepMetrics,
+    AdaptiveTaskQualityConfig, AdaptiveTaskQualityReport, AdaptiveTaskQualityValidationReport,
+    AdaptiveTopologyAuditConfig, AdaptiveTopologyAuditReport, AdaptiveTopologyControl,
+    AdaptiveTopologyExperimentConfig, AdaptiveTopologyExperimentReport, AdaptiveTopologyUpdate,
+    AdaptiveTrainingBackend, AdaptiveTrainingStage, BudgetAllocation, CanonicalMaterial,
+    TopologyAudit, adaptive_closure_mode_validation, adaptive_deployment_on_policy_batch_wgpu,
+    adaptive_deployment_rule_validation, adaptive_display_scale_per_footprint,
+    adaptive_isotropic_gaussian_geometry, adaptive_multiscale_on_policy_batch,
+    adaptive_multiscale_rule_validation, adaptive_multiscale_training_batch,
+    adaptive_oracle_training_batch, adaptive_rule_distillation_batch,
+    adaptive_rule_on_policy_batch, advance_adaptive_rollout, apply_adaptive_topology_at_step,
+    audit_adaptive_closure_identifiability, audit_adaptive_closure_identifiability_wgpu,
+    evaluate_adaptive_task_quality, evaluate_adaptive_task_quality_validation, load_adaptive_model,
+    material_footprint_radius, normalize_footprint_budget, run_adaptive_closure_audit,
+    run_adaptive_experiment_suite, run_adaptive_rollout, run_adaptive_topology_audit,
+    save_adaptive_model, seed_adaptive_particles_scaled, unit_ball_measure,
+    validate_adaptive_task_quality_validation_gates,
+};
+#[cfg(feature = "gpu_wgpu")]
+pub use adaptive::{
+    WgpuAdaptiveNpaState, WgpuAdaptiveStepReport,
+    adaptive_multiscale_on_policy_batch_wgpu_with_executor,
+    adaptive_multiscale_training_batch_wgpu_with_executor,
+};
+pub use adaptive::{
+    train_adaptive_closure_mode_rule_cuda, train_adaptive_closure_mode_rule_ndarray,
+    train_adaptive_closure_mode_rule_wgpu, train_adaptive_multiscale_rule_cuda,
+    train_adaptive_multiscale_rule_ndarray, train_adaptive_multiscale_rule_wgpu,
+};
+#[cfg(feature = "backend_cuda")]
+pub use adaptive::{train_adaptive_controller_cuda, train_adaptive_rule_cuda};
+#[cfg(feature = "backend_ndarray")]
+pub use adaptive::{train_adaptive_controller_ndarray, train_adaptive_rule_ndarray};
+#[cfg(feature = "backend_wgpu")]
+pub use adaptive::{train_adaptive_controller_wgpu, train_adaptive_rule_wgpu};
 pub use burn_automata_kernels as kernels;
 pub use burn_automata_kernels::GaussianDecodeMode;
 pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
@@ -80,14 +136,15 @@ pub use target_geometry::{
     OvoxelTarget, TargetProjection, TargetSurfaceSample, TriangleMeshTarget,
 };
 pub use target2d::{
-    TARGET_2D_COLOR_GATE_GRADIENT, Target2dColorGateGradient, Target2dLossConfig,
-    Target2dLossOutput, Target2dLossReport, Target2dTrainingConfig, Target2dTrainingHistoryEntry,
-    Target2dTrainingReport, Target2dUpstreamOneStepOutput, TargetImage2d,
-    TargetImage2dExtractConfig, foreground_alpha_count_upstream, load_rgba_thumbnail_upstream,
-    load_target_image_2d_upstream, target_2d_loss, target_2d_loss_with_adjoint,
-    target_2d_rollout_loss_with_gradients, target_2d_upstream_one_step_with_gradients,
-    train_target_2d, upstream_adaptive_target_image_size, upstream_growing_2d_hashgrid,
-    upstream_growing_2d_model,
+    TARGET_2D_COLOR_GATE_GRADIENT, Target2dColorGateGradient, Target2dGpuBackend,
+    Target2dGpuCheckpointConfig, Target2dGpuLossSummary, Target2dGpuTrainingHistoryEntry,
+    Target2dGpuTrainingReport, Target2dLossConfig, Target2dLossOutput, Target2dLossReport,
+    Target2dTrainingConfig, Target2dTrainingHistoryEntry, Target2dTrainingReport,
+    Target2dUpstreamOneStepOutput, TargetImage2d, TargetImage2dExtractConfig,
+    foreground_alpha_count_upstream, load_rgba_thumbnail_upstream, load_target_image_2d_upstream,
+    target_2d_loss, target_2d_loss_with_adjoint, target_2d_rollout_loss_with_gradients,
+    target_2d_upstream_one_step_with_gradients, train_target_2d, train_target_2d_gpu,
+    upstream_adaptive_target_image_size, upstream_growing_2d_hashgrid, upstream_growing_2d_model,
 };
 pub use training::{
     AdamWConfig, AdamWState, LowRankAdapterGradients, SgdConfig, SupervisedBatch,

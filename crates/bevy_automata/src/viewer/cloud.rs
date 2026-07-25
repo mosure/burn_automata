@@ -129,11 +129,13 @@ pub(super) fn sync_gaussian_cloud_settings(
 pub(super) fn sync_gaussian_cloud_settings() {}
 
 #[cfg(feature = "splatting")]
+#[allow(clippy::too_many_arguments)] // Bevy injects each ECS system parameter independently.
 pub(super) fn sync_gaussian_cloud_asset(
     mut commands: Commands,
     mut assets: ResMut<Assets<PlanarGaussian3d>>,
     mut sorted_entries: ResMut<Assets<SortedEntries>>,
     settings: Res<AutomataSettings>,
+    runtime: Res<AutomataRuntime>,
     mut cloud_state: ResMut<AutomataCloudState>,
     mut clouds: Query<
         (
@@ -146,16 +148,26 @@ pub(super) fn sync_gaussian_cloud_asset(
     >,
     gaussian_cameras: Query<&Camera, With<GaussianCamera>>,
 ) {
-    if cloud_state.handle.is_some() && cloud_state.particle_count == settings.particle_count {
+    let desired_count = runtime
+        .adaptive
+        .as_ref()
+        .map_or(settings.particle_count, |adaptive| {
+            adaptive
+                .model
+                .config
+                .max_leaves
+                .max(adaptive.particles.len())
+        });
+    if cloud_state.handle.is_some() && cloud_state.particle_count == desired_count {
         return;
     }
-    let cloud_asset = automata_gaussian_cloud(settings.particle_count);
+    let cloud_asset = automata_gaussian_cloud(desired_count);
     let sorted_len = sorted_entry_capacity(cloud_asset.len());
     let cloud = assets.add(cloud_asset);
     let camera_count = active_gaussian_camera_count(&gaussian_cameras);
     let sorted = sorted_entries.add(SortedEntries::new(camera_count, sorted_len));
     cloud_state.handle = Some(cloud.clone());
-    cloud_state.particle_count = settings.particle_count;
+    cloud_state.particle_count = desired_count;
     for (entity, mut handle, mut sorted_handle, mut visibility) in &mut clouds {
         *handle = PlanarGaussian3dHandle(cloud.clone());
         *sorted_handle = SortedEntriesHandle(sorted.clone());

@@ -88,9 +88,9 @@ fn pytorch_npa_checkpoint_imports_to_bpk() {
     assert_eq!(loaded.hashgrid.eps, 0.1);
     assert_eq!(
         loaded.hashgrid.mode,
-        burn_automata::kernels::HashGridMode::Grid
+        burn_automata::kernels::HashGridMode::Particle
     );
-    assert_eq!(loaded.hashgrid.grid_size, [16, 16, 1]);
+    assert_eq!(loaded.hashgrid.grid_size, [64, 64, 1]);
     assert_eq!(burn_automata::import::parameter_count(&loaded), 23);
 }
 #[test]

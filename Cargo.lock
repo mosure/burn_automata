@@ -2655,6 +2655,7 @@ dependencies = [
  "clap",
  "criterion",
  "image",
+ "naga",
  "pollster",
  "rand 0.9.4",
  "rayon",

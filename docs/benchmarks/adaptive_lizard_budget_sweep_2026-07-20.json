@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-20",
+  "scope": "Budgeted adaptive 2D lizard inference with two persistent dynamics modes per coarse material leaf",
+  "hardware": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "driver": "610.43.02",
+    "vram_mib": 97887,
+    "power_limit_w": 600
+  },
+  "quality_protocol": {
+    "seeds": [42, 43, 44, 45, 46, 47, 48, 49],
+    "rollout_steps": 256,
+    "initial_particles": 4096,
+    "hierarchical_cut_step": 128,
+    "render_decoder": "compact-moment-gaussian",
+    "stochastic_schedule": "matched stable particle-ID masks",
+    "regular_reference_particles": 4096
+  },
+  "quality": [
+    {
+      "visible_particles": 1024,
+      "dynamics_particles": 2048,
+      "adaptive_psnr_db": 19.995070,
+      "regular_4096_psnr_db": 21.934170,
+      "regular_same_count_psnr_db": 11.275395,
+      "regular_material_same_count_psnr_db": 18.279438,
+      "adaptive_over_regular_4096_mean_db": -1.939102,
+      "adaptive_over_regular_4096_worst_db": -2.540747,
+      "adaptive_over_regular_same_count_mean_db": 8.719674,
+      "adaptive_over_regular_same_count_worst_db": 7.940640,
+      "adaptive_over_regular_material_same_count_mean_db": 1.715632,
+      "adaptive_over_regular_material_same_count_worst_db": 0.373169,
+      "adaptive_over_single_state_topology_mean_db": 3.111559,
+      "adaptive_over_single_state_topology_worst_db": 2.282957,
+      "maximum_measure_relative_drift": 0.0,
+      "artifact_sha256": "041123caea3af4bfd0cc937c009b97c5560eb3b7af2bc23a600fa243a17d83d7"
+    },
+    {
+      "visible_particles": 2047,
+      "dynamics_particles": 2730,
+      "adaptive_psnr_db": 20.625372,
+      "regular_4096_psnr_db": 21.928226,
+      "regular_same_count_psnr_db": 14.342794,
+      "regular_material_same_count_psnr_db": 20.290892,
+      "adaptive_over_regular_4096_mean_db": -1.302853,
+      "adaptive_over_regular_4096_worst_db": -2.047968,
+      "adaptive_over_regular_same_count_mean_db": 6.282579,
+      "adaptive_over_regular_same_count_worst_db": 5.589473,
+      "adaptive_over_regular_material_same_count_mean_db": 0.334481,
+      "adaptive_over_regular_material_same_count_worst_db": -1.805010,
+      "adaptive_over_single_state_topology_mean_db": 2.241875,
+      "adaptive_over_single_state_topology_worst_db": 1.621111,
+      "maximum_measure_relative_drift": 0.0,
+      "artifact_sha256": "cc7a2ca05e0e90e897093d6d66cac9e17122c86011ae044e263b4b37a459350a"
+    },
+    {
+      "visible_particles": 3070,
+      "dynamics_particles": 3412,
+      "adaptive_psnr_db": 21.368773,
+      "regular_4096_psnr_db": 21.910948,
+      "regular_same_count_psnr_db": 18.731455,
+      "regular_material_same_count_psnr_db": 21.743900,
+      "adaptive_over_regular_4096_mean_db": -0.542174,
+      "adaptive_over_regular_4096_worst_db": -1.122114,
+      "adaptive_over_regular_same_count_mean_db": 2.637320,
+      "adaptive_over_regular_same_count_worst_db": 1.947195,
+      "adaptive_over_regular_material_same_count_mean_db": -0.375125,
+      "adaptive_over_regular_material_same_count_worst_db": -2.373474,
+      "adaptive_over_single_state_topology_mean_db": 1.812237,
+      "adaptive_over_single_state_topology_worst_db": 0.392666,
+      "maximum_measure_relative_drift": 0.0,
+      "artifact_sha256": "a2d2307d44bb7d378147a4a7c8f16da77f7febbb21862f5aecbc7d6f82d092c4"
+    }
+  ],
+  "persistent_mode_ablation_at_3070": [
+    {
+      "modes_per_coarse_leaf": 2,
+      "dynamics_particles": 3412,
+      "adaptive_psnr_db": 21.368773,
+      "adaptive_over_regular_4096_mean_db": -0.542174,
+      "adaptive_over_regular_4096_worst_db": -1.122114
+    },
+    {
+      "modes_per_coarse_leaf": 3,
+      "dynamics_particles": 3754,
+      "adaptive_psnr_db": 21.481495,
+      "adaptive_over_regular_4096_mean_db": -0.431861,
+      "adaptive_over_regular_4096_worst_db": -1.023006
+    },
+    {
+      "modes_per_coarse_leaf": 4,
+      "dynamics_particles": 4096,
+      "adaptive_psnr_db": 21.535511,
+      "adaptive_over_regular_4096_mean_db": -0.392216,
+      "adaptive_over_regular_4096_worst_db": -1.138100
+    }
+  ],
+  "selector_ablation_at_3070": {
+    "small": {
+      "hidden_dims": 128,
+      "training_snapshots": 24,
+      "heldout_snapshots": 24,
+      "heldout_merge_iou": 0.472419,
+      "adaptive_psnr_db": 21.368773
+    },
+    "scaled": {
+      "hidden_dims": 512,
+      "training_snapshots": 704,
+      "heldout_snapshots": 352,
+      "heldout_merge_iou": 0.570004,
+      "adaptive_psnr_db": 21.352837,
+      "training_rows": 720896,
+      "training_rows_per_second": 25345684.21,
+      "peak_process_rss_kib": 4992600
+    },
+    "interpretation": "Better heldout merge-set prediction did not improve rollout PSNR; selector capacity and sample count are not the primary remaining quality bottleneck."
+  },
+  "verified_repeatability_at_3070": {
+    "recorded_wgpu_runs": 3,
+    "adaptive_psnr_db_range": [21.337040, 21.368773],
+    "adaptive_over_regular_4096_mean_db_range": [-0.601517, -0.542174],
+    "adaptive_over_regular_4096_worst_db_range": [-1.337400, -1.122114],
+    "adaptive_over_regular_same_count_mean_db_range": [2.603428, 2.637320],
+    "adaptive_over_regular_same_count_worst_db_range": [1.799156, 2.008726],
+    "interpretation": "Sorted-grid atomic ordering produces small numerical variation, but the matched-visible-budget superiority and the remaining regular-4096 gap are unchanged."
+  },
+  "viewer_throughput": [
+    {
+      "visible_particles": 1024,
+      "dynamics_particles": 2048,
+      "adaptive_ms_per_step": 0.538,
+      "adaptive_particle_steps_per_second": 3810000.0,
+      "restriction_export_ms_per_step": 0.175,
+      "regular_4096_ms_per_step": 0.622,
+      "adaptive_over_regular_4096_wall_ratio": 0.865
+    },
+    {
+      "visible_particles": 2047,
+      "dynamics_particles": 2730,
+      "adaptive_ms_per_step": 0.526,
+      "adaptive_particle_steps_per_second": 5190000.0,
+      "restriction_export_ms_per_step": 0.051,
+      "regular_4096_ms_per_step": 0.644,
+      "adaptive_over_regular_4096_wall_ratio": 0.817
+    },
+    {
+      "visible_particles": 3070,
+      "dynamics_particles": 3412,
+      "adaptive_ms_per_step": 0.609,
+      "adaptive_particle_steps_per_second": 5610000.0,
+      "restriction_export_ms_per_step": 0.090,
+      "regular_4096_ms_per_step": 0.681,
+      "adaptive_over_regular_4096_wall_ratio": 0.893
+    }
+  ],
+  "headless_renderer_smoke": {
+    "artifact": "artifacts/adaptive_npa/persistent_quadrature_m2_learned_3070/model.adaptive.bpk",
+    "capture_steps": [0, 127, 128, 132],
+    "visible_particles": [4096, 4096, 3070, 3070],
+    "dynamics_particles": [4096, 4096, 3412, 3412],
+    "lit_pixels_512x512": [5037, 26861, 36730, 37575],
+    "final_represented_measure_relative_error": 3.15e-8,
+    "resident_inference_host_readbacks": 0,
+    "bounded_final_audit_host_readbacks": 1,
+    "result": "The seed, pre-cut lizard, exact hierarchical cut, and post-cut lizard all render nonblank through Bevy Gaussian splatting."
+  },
+  "conclusion": "Two persistent modes are the selected Pareto point. They robustly outperform conventional regular NPA at equal visible count across all tested budgets and outperform the represented-measure control robustly at 1024. They do not yet achieve broad parity with regular 4096."
+}

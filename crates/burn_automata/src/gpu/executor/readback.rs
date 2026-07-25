@@ -1,8 +1,87 @@
 #![allow(clippy::too_many_arguments)]
 
+use super::state::{
+    MATERIAL_CLOSURE_BASIS_CAPACITY, MATERIAL_CLOSURE_BASIS_OFFSET, MATERIAL_CLOSURE_MODE_OFFSET,
+    MATERIAL_CLOSURE_PHASE_CAPACITY, MATERIAL_CLOSURE_PHASE_OFFSET, MATERIAL_STRIDE,
+};
 use super::*;
 
 impl WgpuAutomataExecutor {
+    pub fn read_positions_states(
+        &self,
+        state: &WgpuAutomataState,
+    ) -> AutomataResult<(Vec<[f32; 4]>, Vec<f32>)> {
+        let out_positions_staging = staging_read_buffer(
+            &self.device,
+            "burn_automata_state_positions_staging",
+            state.position_f32_len,
+        )?;
+        let out_states_staging = staging_read_buffer(
+            &self.device,
+            "burn_automata_state_states_staging",
+            state.state_f32_len,
+        )?;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("burn_automata_state_read_positions_states_encoder"),
+            });
+        encoder.copy_buffer_to_buffer(
+            &state.positions_buffers[state.current],
+            0,
+            &out_positions_staging,
+            0,
+            byte_len::<f32>(state.position_f32_len)?,
+        );
+        encoder.copy_buffer_to_buffer(
+            &state.states_buffers[state.current],
+            0,
+            &out_states_staging,
+            0,
+            byte_len::<f32>(state.state_f32_len)?,
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let positions =
+            read_f32_buffer(&self.device, &out_positions_staging, state.position_f32_len)?;
+        let states = read_f32_buffer(&self.device, &out_states_staging, state.state_f32_len)?;
+        Ok((unflatten_positions(&positions)?, states))
+    }
+
+    pub(crate) fn read_material_closure_state(
+        &self,
+        state: &WgpuAutomataState,
+    ) -> AutomataResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+        if !state.material_enabled || state.total == 0 {
+            return Err(AutomataError::InvalidArgument(
+                "closure-mode readback requires a non-empty material state".to_owned(),
+            ));
+        }
+        let state_dims = state.state_f32_len / state.total;
+        let packed = self.read_storage_f32(
+            &state.material_buffer,
+            state.total * MATERIAL_STRIDE,
+            "burn_automata_material_closure_staging",
+        )?;
+        let mut closure_mode = Vec::with_capacity(state.total * state_dims);
+        let mut closure_basis = Vec::with_capacity(state.total * MATERIAL_CLOSURE_BASIS_CAPACITY);
+        let mut closure_phase = Vec::with_capacity(state.total * MATERIAL_CLOSURE_PHASE_CAPACITY);
+        for row in 0..state.total {
+            let start = row * MATERIAL_STRIDE + MATERIAL_CLOSURE_MODE_OFFSET;
+            closure_mode.extend_from_slice(&packed[start..start + state_dims]);
+            let basis_start = row * MATERIAL_STRIDE + MATERIAL_CLOSURE_BASIS_OFFSET;
+            closure_basis.extend_from_slice(
+                &packed[basis_start..basis_start + MATERIAL_CLOSURE_BASIS_CAPACITY],
+            );
+            let phase_start = row * MATERIAL_STRIDE + MATERIAL_CLOSURE_PHASE_OFFSET;
+            closure_phase.extend_from_slice(
+                &packed[phase_start..phase_start + MATERIAL_CLOSURE_PHASE_CAPACITY],
+            );
+        }
+        Ok((closure_mode, closure_basis, closure_phase))
+    }
+
     pub fn read_state(&self, state: &WgpuAutomataState) -> AutomataResult<WgpuStepOutput> {
         let out_positions_staging = staging_read_buffer(
             &self.device,
@@ -89,6 +168,40 @@ impl WgpuAutomataExecutor {
             .into_iter()
             .next()
             .unwrap_or(0))
+    }
+
+    pub(crate) fn read_local_detail_topology_accept_count(
+        &self,
+        state: &WgpuAutomataState,
+    ) -> AutomataResult<u32> {
+        let staging = staging_read_buffer(
+            &self.device,
+            "burn_automata_local_detail_topology_accept_count_staging",
+            1,
+        )?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("burn_automata_local_detail_topology_accept_count_read_encoder"),
+            });
+        encoder.copy_buffer_to_buffer(
+            &state.material_buffer,
+            byte_len::<f32>(state.allocation_total * MATERIAL_STRIDE)?,
+            &staging,
+            0,
+            byte_len::<f32>(1)?,
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let value = read_f32_buffer(&self.device, &staging, 1)?
+            .into_iter()
+            .next()
+            .unwrap_or(0.0);
+        if !value.is_finite() || value < 0.0 || value > u32::MAX as f32 {
+            return Err(AutomataError::InvalidModel(format!(
+                "paired topology accept counter is invalid: {value}"
+            )));
+        }
+        Ok(value.round() as u32)
     }
 
     pub fn read_gaussian_buffers(

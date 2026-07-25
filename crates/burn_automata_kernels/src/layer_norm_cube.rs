@@ -449,30 +449,49 @@ fn launch_backward<R: CubeRuntime>(
 
 #[cube]
 fn reduce_row_pair<F: Float>(lhs: F, rhs: F, shared: &mut SharedMemory<F>) {
-    let plane = UNIT_POS_X / PLANE_DIM;
-    let plane_count = CUBE_DIM_X.div_ceil(PLANE_DIM);
-    let lhs = plane_sum(lhs);
-    let rhs = plane_sum(rhs);
-    if UNIT_POS_PLANE == 0 {
-        shared[plane as usize] = lhs;
-        shared[16usize + plane as usize] = rhs;
-    }
-    sync_cube();
-    if plane == 0 {
-        let mut lhs = F::new(0.0_f32);
-        let mut rhs = F::new(0.0_f32);
-        if UNIT_POS_PLANE < plane_count {
-            lhs = shared[UNIT_POS_PLANE as usize];
-            rhs = shared[16usize + UNIT_POS_PLANE as usize];
-        }
-        lhs = plane_sum(lhs);
-        rhs = plane_sum(rhs);
+    let unit = UNIT_POS_X as usize;
+    if PLANE_DIM >= 16u32 {
+        let plane = UNIT_POS_X / PLANE_DIM;
+        let plane_count = CUBE_DIM_X.div_ceil(PLANE_DIM);
+        let lhs = plane_sum(lhs);
+        let rhs = plane_sum(rhs);
         if UNIT_POS_PLANE == 0 {
-            shared[0] = lhs;
-            shared[16] = rhs;
+            shared[plane as usize] = lhs;
+            shared[256usize + plane as usize] = rhs;
+        }
+        sync_cube();
+        if plane == 0 {
+            let mut lhs = F::new(0.0_f32);
+            let mut rhs = F::new(0.0_f32);
+            if UNIT_POS_PLANE < plane_count {
+                lhs = shared[UNIT_POS_PLANE as usize];
+                rhs = shared[256usize + UNIT_POS_PLANE as usize];
+            }
+            lhs = plane_sum(lhs);
+            rhs = plane_sum(rhs);
+            if UNIT_POS_PLANE == 0 {
+                shared[0] = lhs;
+                shared[256] = rhs;
+            }
+        }
+        sync_cube();
+    } else {
+        shared[unit] = lhs;
+        shared[256usize + unit] = rhs;
+        sync_cube();
+
+        let mut stride = 128usize;
+        while stride > 0usize {
+            if unit < stride {
+                let lhs_other = shared[unit + stride];
+                let rhs_other = shared[256usize + unit + stride];
+                shared[unit] += lhs_other;
+                shared[256usize + unit] += rhs_other;
+            }
+            sync_cube();
+            stride /= 2usize;
         }
     }
-    sync_cube();
 }
 
 #[cube(launch, address_type = "dynamic")]
@@ -499,11 +518,11 @@ fn modulated_layer_norm_forward_kernel<F: Float>(
         square_sum += value * value;
         dim += CUBE_DIM_X as usize;
     }
-    let mut shared = SharedMemory::<F>::new(32usize);
+    let mut shared = SharedMemory::<F>::new(512usize);
     reduce_row_pair(sum, square_sum, &mut shared);
     let dims_f = F::cast_from(dims as f32);
     let mean = shared[0] / dims_f;
-    let variance = (shared[16] / dims_f - mean * mean).max(F::new(0.0_f32));
+    let variance = (shared[256] / dims_f - mean * mean).max(F::new(0.0_f32));
     let inv_std = F::new(1.0_f32) / (variance + F::new(1.0e-6_f32)).sqrt();
     if UNIT_POS_X == 0 {
         let stats_base = batch * stats.stride(0) + row * stats.stride(1);
@@ -553,10 +572,10 @@ fn modulated_layer_norm_input_adjoint_kernel<F: Float>(
         grad_normalized_sum += grad * normalized;
         dim += CUBE_DIM_X as usize;
     }
-    let mut shared = SharedMemory::<F>::new(32usize);
+    let mut shared = SharedMemory::<F>::new(512usize);
     reduce_row_pair(grad_sum, grad_normalized_sum, &mut shared);
     let grad_mean = shared[0] / F::cast_from(dims as f32);
-    let grad_normalized_mean = shared[16] / F::cast_from(dims as f32);
+    let grad_normalized_mean = shared[256] / F::cast_from(dims as f32);
     dim = UNIT_POS_X as usize;
     while dim < dims {
         let affine = batch * scale.stride(0) + dim * scale.stride(1);

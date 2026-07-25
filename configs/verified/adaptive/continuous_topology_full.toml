@@ -1,0 +1,8 @@
+# Release audit for continuous represented-measure topology. Each sample tests
+# one canonical equal event and one bounded-unequal event in dimensions 2..4.
+report_output = "docs/benchmarks/adaptive_continuous_topology_100k_2026-07-20.json"
+seed = 17
+
+[topology]
+samples = 100000
+max_unequal_measure_ratio = 8.0

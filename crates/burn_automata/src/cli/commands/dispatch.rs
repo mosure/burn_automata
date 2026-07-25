@@ -1,6 +1,6 @@
 use super::{
-    basic, bench_handlers, dynamics2d, hyper, hyper_e2e, mesh, npa2d_parity, render, reporting,
-    target2d, training_bench,
+    adaptive, adaptive_target2d, basic, bench_handlers, dynamics2d, hyper, hyper_e2e, mesh,
+    npa2d_parity, render, reporting, target2d, training_bench,
 };
 use crate::cli::prelude::*;
 
@@ -12,6 +12,20 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::ValidateNpa2dParity { .. } => {
             npa2d_parity::run_validate_npa_2d_parity(command)
         }
+        command @ Command::AdaptiveNpa { .. } => adaptive::run_adaptive_npa(command),
+        command @ Command::TrainAdaptiveTarget2d { .. } => {
+            adaptive_target2d::run_train_adaptive_target2d(command)
+        }
+        command @ Command::EvalAdaptiveTarget2d { .. } => {
+            adaptive_target2d::run_eval_adaptive_target2d(command)
+        }
+        command @ Command::AuditAdaptiveTopology { .. } => {
+            adaptive::run_audit_adaptive_topology(command)
+        }
+        command @ Command::AuditAdaptiveClosure { .. } => {
+            adaptive::run_audit_adaptive_closure(command)
+        }
+        command @ Command::EvalAdaptiveNpa { .. } => adaptive::run_eval_adaptive_npa(command),
         command @ Command::TrainTarget2d { .. } => {
             warn_legacy_2d("train-target2d");
             target2d::run_train_target_2d(command)

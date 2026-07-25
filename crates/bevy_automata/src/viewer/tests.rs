@@ -6,6 +6,90 @@ use std::{
 };
 
 #[test]
+fn performance_values_keep_stable_display_widths() {
+    for (value, expected) in [
+        (Some(9.94), "    9.9"),
+        (Some(99.94), "   99.9"),
+        (Some(999.94), "  999.9"),
+        (Some(1_024.0), "  1.02k"),
+        (Some(1_024_000.0), "  1.02M"),
+        (None, "   --.-"),
+    ] {
+        let formatted = format_rate(value);
+        assert_eq!(formatted, expected);
+        assert_eq!(formatted.len(), 7);
+    }
+    assert_eq!(format_counter(9), "       9");
+    assert_eq!(format_counter(99), "      99");
+}
+
+#[test]
+fn performance_telemetry_publishes_one_coherent_snapshot() {
+    let telemetry = AutomataPerformanceTelemetry::default();
+    telemetry.publish(AutomataPerformanceSnapshot {
+        render_thread_active: true,
+        adaptive: true,
+        completed_steps: 512,
+        resident_particle_count: 3_070,
+        dynamics_particle_count: 3_070,
+        support_bin_count: 3,
+        requested_support_bin_count: 3,
+        min_material_radius: 0.01,
+        median_material_radius: 0.01,
+        max_material_radius: 0.02,
+        split_events: 7,
+        merge_events: 5,
+    });
+    let snapshot = telemetry.snapshot();
+    assert!(snapshot.render_thread_active);
+    assert!(snapshot.adaptive);
+    assert_eq!(snapshot.completed_steps, 512);
+    assert_eq!(snapshot.resident_particle_count, 3_070);
+    assert_eq!(snapshot.support_bin_count, 3);
+    assert_eq!(
+        snapshot.max_material_radius / snapshot.min_material_radius,
+        2.0
+    );
+    assert_eq!((snapshot.split_events, snapshot.merge_events), (7, 5));
+}
+
+#[test]
+fn performance_label_system_uses_disjoint_text_queries() {
+    let mut app = App::new();
+    app.insert_resource(Time::<Real>::default())
+        .insert_resource(AutomataRuntime::default())
+        .init_resource::<AutomataPerformanceTelemetry>()
+        .init_resource::<PerformanceUiState>()
+        .add_systems(Update, update_performance_labels);
+    let frame = app
+        .world_mut()
+        .spawn((Text::new(""), PerformanceFrameLabel))
+        .id();
+    let fps = app
+        .world_mut()
+        .spawn((Text::new(""), PerformanceFpsLabel))
+        .id();
+    let step_rate = app
+        .world_mut()
+        .spawn((Text::new(""), PerformanceStepRateLabel))
+        .id();
+    let adaptive = app
+        .world_mut()
+        .spawn((Text::new(""), AdaptiveDiagnosticsLabel))
+        .id();
+
+    app.update();
+
+    assert_eq!(app.world().entity(frame).get::<Text>().unwrap().0.len(), 8);
+    assert_eq!(app.world().entity(fps).get::<Text>().unwrap().0.len(), 7);
+    assert_eq!(
+        app.world().entity(step_rate).get::<Text>().unwrap().0.len(),
+        7
+    );
+    assert!(app.world().entity(adaptive).get::<Text>().is_some());
+}
+
+#[test]
 fn m_key_toggles_ui_visibility() {
     let mut app = App::new();
     app.init_resource::<AutomataUiState>()
@@ -311,6 +395,135 @@ fn cpu_trace_gaussian_fallback_writes_visible_gaussian() {
             .iter()
             .all(|value| value.is_finite())
     );
+}
+
+#[cfg(feature = "splatting")]
+#[test]
+fn adaptive_gaussian_uses_material_footprint_as_dynamic_scale() {
+    let radius = 0.0125_f32;
+    let gaussian = adaptive_particle_gaussian(
+        [0.1, -0.2, 0.0, 0.0],
+        &[0.0, 0.1, -0.1],
+        2,
+        AdaptiveGaussianMaterial {
+            represented_measure: std::f32::consts::PI * radius.powi(2),
+            render_footprint: radius,
+            display_scale_per_footprint: 1.0,
+        },
+        0.7,
+    );
+    assert_eq!(gaussian.position_visibility.visibility, 1.0);
+    assert_eq!(gaussian.scale_opacity.scale, [0.0125; 3]);
+    assert!((gaussian.scale_opacity.opacity - 0.7).abs() < 1.0e-6);
+}
+
+#[cfg(feature = "splatting")]
+#[test]
+fn adaptive_gaussian_is_isotropic_and_preserves_measure() {
+    let represented_measure = 0.001_f32;
+    let footprint = (represented_measure / std::f32::consts::PI).sqrt();
+    let gaussian = adaptive_particle_gaussian(
+        [0.0; 4],
+        &[0.0; 3],
+        2,
+        AdaptiveGaussianMaterial {
+            represented_measure,
+            render_footprint: footprint,
+            display_scale_per_footprint: 1.0,
+        },
+        1.0,
+    );
+    assert_eq!(gaussian.scale_opacity.scale, [footprint; 3]);
+    assert_eq!(gaussian.rotation.rotation, [1.0, 0.0, 0.0, 0.0]);
+    let reconstructed_measure = std::f32::consts::PI
+        * gaussian.scale_opacity.scale[0]
+        * gaussian.scale_opacity.scale[1]
+        * gaussian.scale_opacity.opacity;
+    assert!((reconstructed_measure - represented_measure).abs() < 1.0e-6);
+}
+
+#[cfg(feature = "splatting")]
+#[test]
+fn adaptive_latent_state_cannot_change_gaussian_geometry() {
+    let radius = 0.01875_f32;
+    let material = AdaptiveGaussianMaterial {
+        represented_measure: std::f32::consts::PI * radius.powi(2),
+        render_footprint: radius,
+        display_scale_per_footprint: 2.5,
+    };
+    let baseline = adaptive_particle_gaussian([0.0; 4], &[0.0; 16], 2, material, 1.0);
+    let arbitrary_state = adaptive_particle_gaussian(
+        [0.0; 4],
+        &[
+            -1.0e6, 1.0e6, -10.0, 10.0, -3.0, 3.0, -2.0, 2.0, -1.0, 1.0, 0.5, -0.5, 0.25, -0.25,
+            0.75, -0.75,
+        ],
+        2,
+        material,
+        1.0,
+    );
+
+    assert_eq!(
+        arbitrary_state.scale_opacity.scale,
+        baseline.scale_opacity.scale
+    );
+    assert_eq!(
+        arbitrary_state.rotation.rotation,
+        baseline.rotation.rotation
+    );
+    assert_eq!(
+        arbitrary_state.scale_opacity.opacity,
+        baseline.scale_opacity.opacity
+    );
+    assert_eq!(arbitrary_state.scale_opacity.scale, [radius * 2.5; 3]);
+    assert_eq!(arbitrary_state.rotation.rotation, [1.0, 0.0, 0.0, 0.0]);
+}
+
+#[cfg(feature = "splatting")]
+#[test]
+fn adaptive_gaussian_preserves_multiscale_material_radius_ratio() {
+    let gaussian_at = |radius: f32| {
+        adaptive_particle_gaussian(
+            [0.0; 4],
+            &[0.0; 3],
+            2,
+            AdaptiveGaussianMaterial {
+                represented_measure: std::f32::consts::PI * radius.powi(2),
+                render_footprint: radius,
+                display_scale_per_footprint: 3.0,
+            },
+            1.0,
+        )
+    };
+    let fine = gaussian_at(0.00625);
+    let coarse = gaussian_at(0.025);
+    assert!((coarse.scale_opacity.scale[0] / fine.scale_opacity.scale[0] - 4.0).abs() < 1.0e-6);
+    assert_eq!(fine.scale_opacity.opacity, 1.0);
+    assert_eq!(coarse.scale_opacity.opacity, 1.0);
+}
+
+#[cfg(feature = "splatting")]
+#[test]
+fn adaptive_equal_resolution_matches_fixed_npa_viewer_scale() {
+    let base = burn_automata::NpaModel::upstream_seeded(burn_automata::NpaConfig::growing_2d(), 7);
+    let mut config = burn_automata::AdaptiveNpaConfig::growing_2d();
+    config.base_rule_footprint = 0.003125;
+    config.reference_footprint = 0.003125;
+    let model = burn_automata::AdaptiveNpaModel::seeded(base, config, 9).unwrap();
+    let radius = model.config.base_rule_footprint();
+    let gaussian = adaptive_particle_gaussian(
+        [0.0; 4],
+        &[0.0; 3],
+        2,
+        AdaptiveGaussianMaterial {
+            represented_measure: std::f32::consts::PI * radius.powi(2),
+            render_footprint: radius,
+            display_scale_per_footprint: adaptive_display_scale_per_footprint(&model),
+        },
+        1.0,
+    );
+    let fixed_scale = model.rule.config.eps0 * 0.12;
+    assert!((gaussian.scale_opacity.scale[0] - fixed_scale).abs() < 1.0e-6);
 }
 
 #[test]

@@ -100,6 +100,93 @@ use super::*;
         ) -> AdamWBiasCorrection {
             next_adamw_bias_correction(&mut self.step, cfg)
         }
+
+        pub(super) fn target2d_snapshots(&self) -> AutomataResult<Vec<E2eTensorSnapshot>> {
+            Ok(vec![
+                tensor3_snapshot("target2d.w1.m", self.w1_m.clone())?,
+                tensor3_snapshot("target2d.w1.v", self.w1_v.clone())?,
+                tensor3_snapshot("target2d.b1.m", self.b1_m.clone())?,
+                tensor3_snapshot("target2d.b1.v", self.b1_v.clone())?,
+                tensor3_snapshot("target2d.w2.m", self.w2_m.clone())?,
+                tensor3_snapshot("target2d.w2.v", self.w2_v.clone())?,
+                tensor3_snapshot("target2d.b2.m", self.b2_m.clone())?,
+                tensor3_snapshot("target2d.b2.v", self.b2_v.clone())?,
+            ])
+        }
+
+        pub(super) fn restore_target2d(
+            checkpoint: &Target2dTrainingCheckpoint,
+            params: &BurnBaseBatch,
+            device: &BurnDevice,
+        ) -> AutomataResult<Self> {
+            fn restore_tensor(
+                checkpoint: &Target2dTrainingCheckpoint,
+                name: &str,
+                expected_shape: [usize; 3],
+                device: &BurnDevice,
+            ) -> AutomataResult<Tensor3Inner> {
+                let snapshot = checkpoint.tensor(name)?;
+                if snapshot.shape != expected_shape {
+                    return Err(AutomataError::InvalidArgument(format!(
+                        "Target2D checkpoint tensor {name} shape {:?} != expected {:?}",
+                        snapshot.shape, expected_shape
+                    )));
+                }
+                tensor3_from_snapshot(snapshot, device)
+            }
+
+            Ok(Self {
+                step: checkpoint.optimizer_step,
+                w1_m: restore_tensor(
+                    checkpoint,
+                    "target2d.w1.m",
+                    params.w1.shape().dims::<3>(),
+                    device,
+                )?,
+                w1_v: restore_tensor(
+                    checkpoint,
+                    "target2d.w1.v",
+                    params.w1.shape().dims::<3>(),
+                    device,
+                )?,
+                b1_m: restore_tensor(
+                    checkpoint,
+                    "target2d.b1.m",
+                    params.b1.shape().dims::<3>(),
+                    device,
+                )?,
+                b1_v: restore_tensor(
+                    checkpoint,
+                    "target2d.b1.v",
+                    params.b1.shape().dims::<3>(),
+                    device,
+                )?,
+                w2_m: restore_tensor(
+                    checkpoint,
+                    "target2d.w2.m",
+                    params.w2.shape().dims::<3>(),
+                    device,
+                )?,
+                w2_v: restore_tensor(
+                    checkpoint,
+                    "target2d.w2.v",
+                    params.w2.shape().dims::<3>(),
+                    device,
+                )?,
+                b2_m: restore_tensor(
+                    checkpoint,
+                    "target2d.b2.m",
+                    params.b2.shape().dims::<3>(),
+                    device,
+                )?,
+                b2_v: restore_tensor(
+                    checkpoint,
+                    "target2d.b2.v",
+                    params.b2.shape().dims::<3>(),
+                    device,
+                )?,
+            })
+        }
     }
 
     impl BurnAdapterAdamWState {
@@ -2436,6 +2523,10 @@ use super::*;
             let hidden_dims = b1.shape().dims::<2>()[1];
             relu(features.matmul(w1.transpose()) + b1.expand([rows, hidden_dims]))
                 .matmul(w2.transpose())
+                + adapter
+                    .b2_delta
+                    .clone()
+                    .expand([rows, self.w2.shape().dims::<2>()[0]])
         }
 
         pub(super) fn forward_adapter_batch(
@@ -2493,7 +2584,12 @@ use super::*;
                     .b1_delta
                     .clone()
                     .expand([adapter_batches, rows, hidden_dims]);
+            let output_dims = self.w2.shape().dims::<2>()[0];
             relu(features.matmul(w1.swap_dims(1, 2)) + b1).matmul(w2.swap_dims(1, 2))
+                + adapter
+                    .b2_delta
+                    .clone()
+                    .expand([adapter_batches, rows, output_dims])
         }
 
         pub(super) fn apply_adamw(
@@ -2651,6 +2747,34 @@ use super::*;
             self.w1.shape().dims::<3>()[0]
         }
 
+        pub(super) fn model(&self, index: usize) -> BurnBaseParams {
+            let [model_count, hidden_dims, input_dims] = self.w1.shape().dims::<3>();
+            assert!(index < model_count, "oracle model index out of bounds");
+            let output_dims = self.w2.shape().dims::<3>()[1];
+            BurnBaseParams {
+                w1: self
+                    .w1
+                    .clone()
+                    .narrow(0, index, 1)
+                    .reshape([hidden_dims, input_dims]),
+                b1: self
+                    .b1
+                    .clone()
+                    .narrow(0, index, 1)
+                    .reshape([1, hidden_dims]),
+                w2: self
+                    .w2
+                    .clone()
+                    .narrow(0, index, 1)
+                    .reshape([output_dims, hidden_dims]),
+                b2: self
+                    .b2
+                    .clone()
+                    .narrow(0, index, 1)
+                    .reshape([1, output_dims]),
+            }
+        }
+
         pub(super) fn repeated(&self, repeats_per_model: usize) -> Self {
             let repeats_per_model = repeats_per_model.max(1);
             Self {
@@ -2724,6 +2848,35 @@ use super::*;
             normalize: bool,
             collect_metrics: bool,
         ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            self.apply_adamw_masked(grads, state, cfg, normalize, collect_metrics, false)
+        }
+
+        pub(super) fn apply_adamw_last_input_column(
+            &mut self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            if cfg.weight_decay != 0.0 {
+                return Err(AutomataError::InvalidArgument(
+                    "last-input-column optimization requires zero weight decay".to_owned(),
+                ));
+            }
+            self.apply_adamw_masked(grads, state, cfg, normalize, collect_metrics, true)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn apply_adamw_masked(
+            &mut self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+            last_input_column_only: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
             let mut tensors = vec![
                 self.w1
                     .grad_remove(grads)
@@ -2738,6 +2891,20 @@ use super::*;
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.b2.clone().inner().zeros_like()),
             ];
+            if last_input_column_only {
+                tensors[0] = retain_last_model_batch_input_column(tensors[0].clone());
+                for tensor in &mut tensors[1..] {
+                    *tensor = tensor.clone().zeros_like();
+                }
+                state.w1_m = retain_last_model_batch_input_column(state.w1_m.clone());
+                state.w1_v = retain_last_model_batch_input_column(state.w1_v.clone());
+                state.b1_m = state.b1_m.clone().zeros_like();
+                state.b1_v = state.b1_v.clone().zeros_like();
+                state.w2_m = state.w2_m.clone().zeros_like();
+                state.w2_v = state.w2_v.clone().zeros_like();
+                state.b2_m = state.b2_m.clone().zeros_like();
+                state.b2_v = state.b2_v.clone().zeros_like();
+            }
             let (norms, scales, scale_tensor) = prepare_model_batch_grad_group(
                 &mut tensors,
                 cfg.grad_clip_norm,
@@ -2802,6 +2969,21 @@ use super::*;
             }
             Ok(())
         }
+    }
+
+    fn retain_last_model_batch_input_column(tensor: Tensor3Inner) -> Tensor3Inner {
+        let dims = tensor.shape().dims::<3>();
+        assert!(dims[2] > 0, "model input tensor must have at least one column");
+        if dims[2] == 1 {
+            return tensor;
+        }
+        Tensor::cat(
+            vec![
+                tensor.clone().narrow(2, 0, dims[2] - 1).zeros_like(),
+                tensor.narrow(2, dims[2] - 1, 1),
+            ],
+            2,
+        )
     }
 
     pub(super) fn repeat_model_batch_tensor(tensor: Tensor3, repeats_per_model: usize) -> Tensor3 {

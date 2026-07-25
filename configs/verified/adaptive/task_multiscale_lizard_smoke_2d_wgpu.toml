@@ -1,0 +1,291 @@
+report_output = "artifacts/adaptive_npa/task_multiscale_lizard_smoke/report.json"
+model_output = "artifacts/adaptive_npa/task_multiscale_lizard_smoke/model.adaptive.bpk"
+seed = 42
+backend = "wgpu"
+
+[base_training]
+enabled = true
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+reference_model = "models/catalog/growing/lizard.bpk"
+model_output = "artifacts/adaptive_npa/task_multiscale_lizard_smoke/base.bpk"
+target_points = 4096
+target_image_size = 120
+target_threshold = 0.05
+
+[[base_training.phases]]
+name = "fine-smoke"
+particle_count = 128
+epochs = 1
+repetitions = 1
+report_interval = 1
+batch_size = 2
+pool_size = 8
+step_min = 2
+step_max = 4
+tbptt_chunk_steps = 4
+inject_seed_interval = 2
+
+[base_training.loss]
+image_size = 64
+sigma = 1.0
+lo = -1.0
+hi = 1.0
+center = true
+splat_loss_weight = 2.0
+color_loss_weight = 5.0
+density_loss_weight = 1.0
+background_density_loss_weight = 0.0
+foreground_density_loss_weight = 0.0
+composited_rgb_loss_weight = 0.0
+shape_chamfer_loss_weight = 0.0
+displacement_regularizer_weight = 0.01
+overflow_regularizer_weight = 100.0
+bound_regularizer_weight = 100.0
+
+[gates]
+require_fresh_base_training = true
+max_operator_constant_error = 1.0e-4
+max_operator_affine_error = 1.0e-4
+max_operator_fallback_fraction = 0.0
+max_topology_relative_error = 1.0e-12
+max_topology_spd_failures = 0
+min_topology_events_per_second = 250000.0
+max_validation_mse = 25.0
+min_desired_scale_correlation = -1.0
+min_controller_rows_per_second = 10000.0
+max_rule_normalized_mean_squared_error = 1.0
+min_rule_update_correlation = -1.0
+max_multiscale_normalized_mean_squared_error = 1.05
+min_multiscale_update_correlation = 0.0
+min_proxy_relative_mse_gain = -0.10
+min_multiscale_dataset_footprint_coefficient_of_variation = 0.20
+min_adaptive_target_psnr_db = -100.0
+max_adaptive_teacher_psnr_gap_db = 100.0
+max_fine_fixed_teacher_psnr_gap_db = 100.0
+min_adaptive_over_budget_fixed_psnr_gain_db = -100.0
+min_adaptive_over_regular_base_psnr_gain_db = -100.0
+min_deployment_over_training_policy_psnr_gain_db = -100.0
+max_task_quality_leaf_relative_error = 0.0
+min_task_quality_footprint_coefficient_of_variation = 0.0
+min_task_quality_footprint_ratio = 1.0
+min_task_quality_topology_events = 0
+min_task_quality_detail_density_correlation = 0.0
+max_task_quality_high_to_low_detail_footprint_ratio = 1.0
+min_task_quality_refinement_defect_relative_gain = 0.0
+min_task_quality_controller_oracle_refinement_scale_correlation = -1.0
+min_task_quality_validation_seeds = 1
+min_validation_mean_adaptive_over_regular_base_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_regular_base_psnr_gain_db = -100.0
+min_validation_mean_adaptive_over_budget_fixed_psnr_gain_db = -100.0
+min_validation_worst_adaptive_over_budget_fixed_psnr_gain_db = -100.0
+min_validation_controller_oracle_refinement_scale_correlation = -1.0
+max_validation_measure_relative_drift = 1.0e-7
+max_validation_leaf_relative_error = 0.0
+max_rollout_target_relative_error = 0.50
+max_rollout_measure_relative_drift = 1.0e-7
+min_rollout_footprint_coefficient_of_variation = 0.0
+min_rollout_particle_steps_per_second = 10000.0
+require_graph_cap_and_search_parity = true
+max_sparse_conservation_error = 1.0e-12
+max_sparse_protected_band_nrmse = 1.0e-12
+min_sparse_largest_cap_count_reduction = 1.05
+max_sparse_boundary_hd95_voxels = 1.5
+
+[adaptive]
+spatial_dims = 2
+controller_hidden_dims = 128
+reference_footprint = 0.01767767
+base_rule_footprint = 0.01767767
+local_residual_scale = 0.0
+min_footprint = 0.00625
+max_footprint = 0.1
+min_leaves = 32
+max_leaves = 128
+target_leaves = 128
+initial_leaves = 32
+hierarchical_bootstrap_seed = true
+topology_interval = 1
+steady_topology_interval = 8
+topology_start_step = 1
+steady_topology_start_step = 32
+runtime_topology_control = "learned-refinement-defect"
+max_events_per_interval = 2
+bootstrap_end_step = 1
+bootstrap_events_per_interval = 32
+bootstrap_seed_spread = 0.0
+min_topology_footprint_ratio = 0.5
+max_topology_footprint_ratio = 2.0
+split_ratio = 0.78
+merge_ratio = 1.15
+split_probability = 0.90
+merge_probability = 0.90
+merge_state_rms_limit = 0.25
+split_state_prolongation_scale = 0.0
+cooldown_steps = 8
+bandwidth_relaxation = 0.20
+domain_min = [-1.25, -1.25, 0.0]
+domain_max = [1.25, 1.25, 0.0]
+rule_perception = "npa-compatible"
+rule_graph_policy = "raw-support"
+
+[adaptive.proxy]
+enabled = true
+branch_factor = 4
+level = 2
+context_scale = 0.0
+bandwidth_scale = 2.5
+
+[adaptive.perception]
+dim = 2
+graph_policy = "directed-top-k"
+max_neighbors = 32
+pair_scale_power = 8.0
+support_bin_ratio = 2.0
+min_bandwidth = 0.025
+max_bandwidth = 0.4
+spacing_target_neighbors = 16.0
+spacing_root_iterations = 12
+shepard_epsilon = 1.0e-8
+moment_regularization = 1.0e-4
+moment_condition_limit = 1.0e5
+log_normalize_gradients = true
+include_position_features = false
+
+[operator]
+side = 17
+side_3d = 9
+jitter = 5.0e-4
+sparse_side_stride = 2
+
+[topology]
+samples = 10000
+
+[graph]
+spatial_dims = [2, 3]
+particle_counts = [256, 512]
+neighbor_caps = [16, 32]
+all_pairs_baseline_max_particles = 512
+coarse_fraction = 0.25
+fine_bandwidth = 0.035
+coarse_bandwidth = 0.14
+target_fine_degree = 48.0
+warmup_runs = 1
+timed_runs = 3
+
+[scaling]
+resolutions = [16, 24, 32]
+interior_spacing_cap = 0.24
+protected_band_voxels = 2.25
+transition_divisor = 1.65
+retention_samples = 3
+quality_resolution = 24
+quality_spacing_cap_ratios = [2.0, 4.0]
+sphere_outer_radius = 0.85
+sphere_cavity_center = [0.22, -0.12, 0.10]
+sphere_cavity_radius = 0.22
+torus_major_radius = 0.60
+torus_minor_radius = 0.318
+
+[training_data]
+rows = 4096
+spatial_dims = 2
+seed = 42
+reference_footprint = 0.01767767
+min_footprint = 0.00625
+max_footprint = 0.1
+total_measure = 0.12566371
+target_leaf_count = 128
+boundary_epsilon = 0.00625
+boundary_slope = 0.35
+
+[training]
+steps = 120
+report_interval = 20
+
+[training.optimizer]
+learning_rate = 0.003
+weight_decay = 1.0e-5
+grad_clip_norm = 5.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[multiscale_training]
+enabled = true
+fine_particle_count = 128
+cut_leaf_counts = [32, 64, 128]
+rollout_steps = 16
+rollouts = 2
+temporal_samples = 5
+rows_per_cut = 128
+validation_rollouts = 1
+dt = 1.0
+update_prob = 0.5
+seed = 42
+seed_scale = 0.2
+total_measure = 0.12566371
+bandwidth = 0.1
+steps = 1
+report_interval = 25
+controller_steps = 200
+freeze_multiscale_rule = true
+freeze_controller = false
+deployment_enabled = false
+gradient_reduction_chunk_rows = 1024
+controller_split_label_ratio = 0.78
+controller_merge_label_ratio = 1.20
+residual_coordinate_weight = 0.0
+local_residual_training_scale = 1.0
+proxy_residual_training_scale = 0.0
+on_policy_rounds = 1
+controller_on_policy_only_replay = true
+on_policy_topology_control = "refinement-defect-oracle"
+on_policy_replay_backend = "wgpu-resident"
+on_policy_rollout_steps = 64
+on_policy_rollouts = 4
+on_policy_snapshot_interval = 4
+on_policy_rows_per_snapshot = 128
+on_policy_steps = 0
+
+[multiscale_training.optimizer]
+learning_rate = 0.0005
+weight_decay = 1.0e-6
+grad_clip_norm = 5.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[multiscale_training.controller_optimizer]
+learning_rate = 0.0015
+weight_decay = 1.0e-5
+grad_clip_norm = 5.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[rollout]
+enabled = true
+particles = 32
+seed_scale = 0.2
+total_measure = 0.12566371
+
+[rollout.rollout]
+steps = 256
+dt = 1.0
+update_prob = 0.5
+seed = 42
+bandwidth_adaptation_enabled = false
+topology_enabled = true
+snapshot_interval = 64
+
+[task_quality]
+enabled = true
+target_image = "assets/reference_targets/lizard_upstream_120.png"
+reference_model = "models/catalog/growing/lizard.bpk"
+image_size = 128
+rollout_steps = 256
+update_prob = 0.5
+seed = 42
+validation_seeds = [42]
+bandwidth_adaptation_enabled = false
+topology_control = "learned-refinement-defect"

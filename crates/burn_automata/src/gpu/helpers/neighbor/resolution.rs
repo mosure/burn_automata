@@ -1,4 +1,6 @@
-use burn_automata_kernels::{Boundary, HashGridConfig, HashGridMode, build_hashgrid};
+use burn_automata_kernels::{
+    AdaptiveSupportBins, Boundary, HashGridConfig, HashGridMode, build_hashgrid,
+};
 
 use crate::gpu::types::WgpuNeighborMode;
 use crate::{AutomataError, AutomataResult};
@@ -14,6 +16,9 @@ const MAX_AUTO_EXACT_CELL_OCCUPANCY: usize = 512;
 const MAX_AUTO_TILED_CELL_OCCUPANCY: usize = 2048;
 const MIN_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 512;
 const MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 8192;
+const MIN_AUTO_SUPPORT_BIN_ESTIMATED_OCCUPANCY: f32 = 64.0;
+const MAX_AUTO_SUPPORT_BIN_CANDIDATE_RATIO: f64 = 0.60;
+const MIN_AUTO_SUPPORT_BIN_POPULATION_FRACTION: f64 = 0.02;
 
 pub(in crate::gpu) fn resolve_bucket_capacity(
     grid: &HashGridConfig,
@@ -211,7 +216,13 @@ pub(in crate::gpu) fn initial_cell_occupancy_stats(
     particle_count: usize,
     positions: &[[f32; 4]],
 ) -> AutomataResult<(usize, usize)> {
-    let snapshot = build_hashgrid(positions, 1, particle_count, grid)?;
+    if particle_count == 0 || !positions.len().is_multiple_of(particle_count) {
+        return Err(AutomataError::InvalidArgument(
+            "WGPU occupancy analysis requires complete particle batches".to_owned(),
+        ));
+    }
+    let batch_size = positions.len() / particle_count;
+    let snapshot = build_hashgrid(positions, batch_size, particle_count, grid)?;
     let mut nonempty_cells = 0usize;
     let max_occupancy = snapshot
         .bin_offsets
@@ -225,6 +236,108 @@ pub(in crate::gpu) fn initial_cell_occupancy_stats(
         .max()
         .unwrap_or(0);
     Ok((nonempty_cells, max_occupancy))
+}
+
+pub(in crate::gpu) fn should_activate_support_bins(
+    grid: &HashGridConfig,
+    particle_count: usize,
+    positions: &[[f32; 4]],
+    bandwidth: &[f32],
+    support_bin_min: f32,
+    support_bin_max: f32,
+    support_bin_ratio: f32,
+) -> bool {
+    if particle_count < 1_024
+        || particle_count == 0
+        || !positions.len().is_multiple_of(particle_count)
+        || bandwidth.len() != positions.len()
+    {
+        return false;
+    }
+    let dense = positions.chunks_exact(particle_count).any(|lane| {
+        let mut minimum = [f32::INFINITY; 3];
+        let mut maximum = [f32::NEG_INFINITY; 3];
+        for position in lane {
+            for axis in 0..grid.dim {
+                minimum[axis] = minimum[axis].min(position[axis]);
+                maximum[axis] = maximum[axis].max(position[axis]);
+            }
+        }
+        let estimated_cells = (0..grid.dim).fold(1usize, |cells, axis| {
+            let span = ((maximum[axis] - minimum[axis]) / grid.eps).ceil().max(0.0) as usize + 1;
+            cells.saturating_mul(span.min(grid.grid_size[axis]).max(1))
+        });
+        particle_count as f32 / estimated_cells.max(1) as f32
+            >= MIN_AUTO_SUPPORT_BIN_ESTIMATED_OCCUPANCY
+    });
+    dense
+        && estimated_support_bin_candidate_ratio(
+            grid,
+            bandwidth,
+            support_bin_min,
+            support_bin_max,
+            support_bin_ratio,
+        )
+        .is_some_and(|(ratio, minimum_population_fraction)| {
+            ratio <= MAX_AUTO_SUPPORT_BIN_CANDIDATE_RATIO
+                && minimum_population_fraction >= MIN_AUTO_SUPPORT_BIN_POPULATION_FRACTION
+        })
+}
+
+fn estimated_support_bin_candidate_ratio(
+    grid: &HashGridConfig,
+    bandwidth: &[f32],
+    support_bin_min: f32,
+    support_bin_max: f32,
+    support_bin_ratio: f32,
+) -> Option<(f64, f64)> {
+    let bins =
+        AdaptiveSupportBins::new(support_bin_min, support_bin_max, support_bin_ratio).ok()?;
+    if bins.len() < 2 || bandwidth.is_empty() {
+        return None;
+    }
+    let mut counts = vec![0usize; bins.len()];
+    for value in bandwidth {
+        *counts.get_mut(bins.bin_index(*value).ok()?)? += 1;
+    }
+    if counts.iter().filter(|count| **count > 0).count() < 2 {
+        return None;
+    }
+
+    let mut global_work = 0.0_f64;
+    let mut binned_work = 0.0_f64;
+    for target in bandwidth {
+        let global_cells =
+            support_query_cell_count(grid, pair_bandwidth_power8(*target, support_bin_max)) as f64;
+        global_work += global_cells * bandwidth.len() as f64;
+        for (count, upper) in counts.iter().zip(bins.upper_bounds()) {
+            if *count == 0 {
+                continue;
+            }
+            let cells =
+                support_query_cell_count(grid, pair_bandwidth_power8(*target, *upper)) as f64;
+            binned_work += cells * *count as f64;
+        }
+    }
+    let minimum_population_fraction =
+        counts.iter().copied().filter(|count| *count > 0).min()? as f64 / bandwidth.len() as f64;
+    (global_work > 0.0).then_some((binned_work / global_work, minimum_population_fraction))
+}
+
+fn pair_bandwidth_power8(lhs: f32, rhs: f32) -> f32 {
+    let lhs2 = lhs * lhs;
+    let lhs4 = lhs2 * lhs2;
+    let rhs2 = rhs * rhs;
+    let rhs4 = rhs2 * rhs2;
+    ((lhs4 * lhs4 + rhs4 * rhs4) * 0.5).sqrt().sqrt().sqrt()
+}
+
+fn support_query_cell_count(grid: &HashGridConfig, bandwidth: f32) -> usize {
+    let radius = (bandwidth / grid.eps).ceil().max(1.0) as usize;
+    let side = radius.saturating_mul(2).saturating_add(1);
+    (0..grid.dim).fold(1usize, |cells, axis| {
+        cells.saturating_mul(side.min(grid.grid_size[axis]))
+    })
 }
 
 pub(in crate::gpu) fn should_use_tiled_particle_grid(

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "seed": 17,
+  "topology_config": {
+    "samples": 100000,
+    "max_unequal_measure_ratio": 8.0
+  },
+  "topology": {
+    "samples": 100000,
+    "canonical_events": 100000,
+    "unequal_events": 100000,
+    "maximum_sampled_child_measure_ratio": 7.9113097697959684,
+    "events_per_second": 483344.6701020131,
+    "max_measure_relative_error": 5.219672644904315e-16,
+    "max_centroid_l2_error": 6.843874359417885e-16,
+    "max_second_moment_relative_error": 8.719427631407185e-16,
+    "max_extensive_relative_error": 3.9529565567683e-16,
+    "max_determinant_scale_relative_error": 3.2634649308358457e-15,
+    "spd_failures": 0,
+    "elapsed_ms": 413.78339800000003
+  }
+}
