@@ -28,6 +28,8 @@ jobs:
           cargo test -p burn_automata --test core --no-default-features
           --features "backend_ndarray cli import" -- --skip catalog_growth::
       - run: cargo test -p burn_automata --test gpu_wgpu --no-default-features --features gpu_wgpu
-      - run: cargo test -p bevy_automata --no-default-features --features "splatting gpu_wgpu" --test gaussian_gpu_link
+      - name: Link Bevy GPU integration tests
+        # Hosted runners have no graphics adapter; execute these on GPU hosts.
+        run: cargo test -p bevy_automata --no-default-features --features "splatting gpu_wgpu" --test gaussian_gpu_link --no-run
       - run: cargo check -p bevy_automata --no-default-features --features viewer
       - run: cargo check -p bevy_automata
