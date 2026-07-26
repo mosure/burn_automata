@@ -46,7 +46,7 @@ pub(in crate::viewer) fn controls_panel() -> impl Scene {
                 TextColor(Color::srgb(0.58, 0.72, 0.70))
                 AdaptiveDiagnosticsLabel
             ),
-            controls_section("run", run_controls_row()),
+            controls_section("rollout", run_controls_row()),
             controls_section("training", training_controls_row()),
             controls_section("simulation", simulation_controls_row()),
             controls_section("view", view_controls_row()),
@@ -286,8 +286,7 @@ pub(in crate::viewer) fn run_controls_row() -> impl Scene {
         Children [
             pause_button(),
             reset_button(),
-            backward_button(),
-            train_button(),
+            run_train_button(),
         ]
     }
 }
@@ -300,12 +299,11 @@ pub(in crate::viewer) fn training_controls_row() -> impl Scene {
             row_gap: px(6),
         }
         Children [
-            (
-                Text("target rollout teacher | 256 rows | 60f")
-                template_value(ModelCatalogTextSize(12.0))
-                TextColor(Color::srgb(0.56, 0.64, 0.68))
-            ),
-            slider_row("train lr", "0.0010", AutomataSliderKind::TrainingLearningRateLog2, log2_slider_value(1.0e-3), -16.0, -4.0, 0.125),
+            image_training_actions_row(),
+            image_target_summary(),
+            adaptive_training_toggle(),
+            slider_row("train lr", "0.0005", AutomataSliderKind::TrainingLearningRateLog2, log2_slider_value(5.0e-4), -16.0, -10.0, 0.125),
+            slider_row("rollout reset", "100 steps", AutomataSliderKind::TrainingRolloutResetInterval, 100.0, 0.0, 1000.0, 25.0),
         ]
     }
 }
@@ -348,7 +346,6 @@ pub(in crate::viewer) fn model_controls_row() -> impl Scene {
             row_gap: px(8),
         }
         Children [
-            hyper_image_button(),
             (
                 Node {
                     width: percent(100),

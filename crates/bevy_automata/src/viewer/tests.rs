@@ -560,15 +560,12 @@ fn run_control_active_state_tracks_settings() {
     let mut settings = AutomataSettings::default();
 
     assert!(!run_control_is_active(RunControlKind::Pause, &settings));
-    assert!(!run_control_is_active(RunControlKind::Backward, &settings));
     assert!(!run_control_is_active(RunControlKind::Train, &settings));
 
     settings.paused = true;
-    settings.visualize_backward = true;
     settings.train_live = true;
 
     assert!(run_control_is_active(RunControlKind::Pause, &settings));
-    assert!(run_control_is_active(RunControlKind::Backward, &settings));
     assert!(run_control_is_active(RunControlKind::Train, &settings));
     assert!(!run_control_is_active(RunControlKind::Reset, &settings));
 }
@@ -758,4 +755,21 @@ fn automata_cloud_settings_use_display_rgb_color_space() {
         cloud_settings_3d.radix_sort_depth_bits,
         RadixSortDepthBits::Bits32
     );
+}
+
+#[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
+#[test]
+fn live_weight_snapshots_do_not_reseed_the_gpu_rollout() {
+    let settings = AutomataSettings::default();
+    let (config, hashgrid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    let model_before = NpaModel::upstream_seeded(config.clone(), 1);
+    let mut model_after = model_before.clone();
+    model_after.weights.w1[0] += 0.25;
+
+    let before =
+        automata_render_reinit_key(&model_before, &hashgrid, &settings, WgpuNeighborMode::Auto);
+    let after =
+        automata_render_reinit_key(&model_after, &hashgrid, &settings, WgpuNeighborMode::Auto);
+
+    assert_eq!(before, after);
 }

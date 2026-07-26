@@ -466,13 +466,34 @@ pub(super) fn format_rate(value: Option<f64>) -> String {
 
 pub(super) fn update_settings_label(
     settings: Res<AutomataSettings>,
+    #[cfg(feature = "hyper_dino")] target_training: Res<ImageTargetTrainingState>,
     mut labels: Query<&mut Text, With<SettingsLabel>>,
 ) {
-    if !settings.is_changed() {
+    #[cfg(feature = "hyper_dino")]
+    let target_changed = target_training.is_changed();
+    #[cfg(not(feature = "hyper_dino"))]
+    let target_changed = false;
+    if !settings.is_changed() && !target_changed {
         return;
     }
+    #[cfg(feature = "hyper_dino")]
+    let image_training_active = target_training.is_training();
+    #[cfg(not(feature = "hyper_dino"))]
+    let image_training_active = false;
     for mut text in &mut labels {
-        let train_state = if settings.train_live {
+        let train_state = if image_training_active {
+            #[cfg(feature = "hyper_dino")]
+            {
+                format!(
+                    "target2d {}/{}",
+                    target_training.step, target_training.total_steps
+                )
+            }
+            #[cfg(not(feature = "hyper_dino"))]
+            {
+                unreachable!()
+            }
+        } else if settings.train_live {
             format!(
                 "{} {}r/{}f",
                 LIVE_TRAINING_TARGET, TRAINING_PROBE_PARTICLES, TRAINING_INTERVAL_FRAMES
@@ -547,6 +568,7 @@ pub(super) fn update_backward_probe(
     }
 }
 
+#[cfg_attr(feature = "hyper_dino", allow(dead_code))]
 pub(super) fn probe_trace_for_controls(
     runtime: &AutomataRuntime,
     settings: &AutomataSettings,

@@ -4,8 +4,8 @@ pub(in crate::viewer) fn control_button(label: &'static str, kind: RunControlKin
     bsn! {
         Button
         Node {
-            width: px(104),
-            max_width: percent(48),
+            width: px(86),
+            max_width: percent(32),
             flex_grow: 1.0,
             flex_shrink: 1.0,
             height: px(30),
@@ -21,6 +21,7 @@ pub(in crate::viewer) fn control_button(label: &'static str, kind: RunControlKin
         Children [(
             Text(label)
             template_value(ModelCatalogTextSize(12.0))
+            template_value(RunControlButtonLabel(kind))
             TextColor(Color::srgb(0.86, 0.91, 0.94))
         )]
     }
@@ -38,47 +39,35 @@ pub(in crate::viewer) fn pause_button() -> impl Scene {
 pub(in crate::viewer) fn reset_button() -> impl Scene {
     bsn! {
         control_button("reset", RunControlKind::Reset)
-        on(|_event: On<Pointer<Press>>, mut settings: ResMut<AutomataSettings>, mut runtime: ResMut<AutomataRuntime>| {
+        on(|_event: On<Pointer<Press>>,
+            mut settings: ResMut<AutomataSettings>,
+            mut runtime: ResMut<AutomataRuntime>| {
             settings.mark_changed();
             runtime.trace = None;
             runtime.adaptive = None;
             runtime.loaded_adaptive_model_path = None;
             runtime.frame = 0;
-            runtime.status = "reset requested".to_string();
+            runtime.status = "displayed rollout reset; training continues independently".to_string();
         })
     }
 }
 
-pub(in crate::viewer) fn backward_button() -> impl Scene {
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn train_button() -> impl Scene {
     bsn! {
-        control_button("backward", RunControlKind::Backward)
-        on(|_event: On<Pointer<Press>>, mut settings: ResMut<AutomataSettings>, mut runtime: ResMut<AutomataRuntime>| {
-            settings.visualize_backward = !settings.visualize_backward;
-            if settings.visualize_backward {
-                match probe_trace_for_controls(&runtime, &settings, BACKWARD_PROBE_PARTICLES) {
-                    Ok(trace) => {
-                        let hashgrid = effective_hashgrid(&runtime, &settings);
-                        update_backward_probe(&mut runtime, &trace, &hashgrid);
-                        if let (Some(loss), Some(grad_norm)) = (runtime.backward_loss, runtime.backward_grad_norm) {
-                            runtime.status = format!("backward probe on | loss {loss:.5} | grad {grad_norm:.5}");
-                        }
-                    }
-                    Err(err) => {
-                        settings.visualize_backward = false;
-                        runtime.backward_loss = None;
-                        runtime.backward_grad_norm = None;
-                        runtime.status = format!("backward probe failed: {err}");
-                    }
-                }
-            } else {
-                runtime.backward_loss = None;
-                runtime.backward_grad_norm = None;
-                runtime.status = "backward probe off".to_string();
+        control_button("train", RunControlKind::Train)
+        on(|_event: On<Pointer<Press>>,
+            state: Res<ImageTargetTrainingState>,
+            inference: Res<HyperNpaInferenceState>,
+            mut training: MessageWriter<ToggleImageTargetTraining>| {
+            if state.train_action_available() && inference.pending == 0 {
+                training.write(ToggleImageTargetTraining);
             }
         })
     }
 }
 
+#[cfg(not(feature = "hyper_dino"))]
 pub(in crate::viewer) fn train_button() -> impl Scene {
     bsn! {
         control_button("train", RunControlKind::Train)
@@ -117,12 +106,28 @@ pub(in crate::viewer) fn train_button() -> impl Scene {
 }
 
 #[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn run_train_button() -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::None,
+        }
+    }
+}
+
+#[cfg(not(feature = "hyper_dino"))]
+pub(in crate::viewer) fn run_train_button() -> impl Scene {
+    train_button()
+}
+
+#[cfg(feature = "hyper_dino")]
 pub(in crate::viewer) fn hyper_image_button() -> impl Scene {
     bsn! {
         Button
         Node {
-            width: percent(100),
-            height: px(32),
+            width: px(82),
+            flex_grow: 1.0,
+            max_width: percent(31),
+            height: px(30),
             border: px(1),
             padding: UiRect::horizontal(px(10)),
             align_items: AlignItems::Center,
@@ -137,15 +142,182 @@ pub(in crate::viewer) fn hyper_image_button() -> impl Scene {
             requests.write(OpenHyperNpaImage);
         })
         Children [(
-            Text("open image -> HyperNPA")
+            Text("open image")
             template_value(ModelCatalogTextSize(12.0))
             TextColor(Color::srgb(0.86, 0.92, 0.90))
         )]
     }
 }
 
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn hyper_inference_button() -> impl Scene {
+    bsn! {
+        Button
+        Node {
+            width: px(82),
+            flex_grow: 1.0,
+            max_width: percent(31),
+            height: px(30),
+            border: px(1),
+            padding: UiRect::horizontal(px(8)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        template_value(HyperInferenceButton)
+        template_value(Hovered::default())
+        BorderColor::from(Color::srgb(0.25, 0.30, 0.34))
+        BackgroundColor(Color::srgb(0.10, 0.12, 0.14))
+        on(|mut event: On<Pointer<Press>>,
+            state: Res<ImageTargetTrainingState>,
+            inference: Res<HyperNpaInferenceState>,
+            mut requests: MessageWriter<RunHyperNpaInference>| {
+            event.trigger_mut().propagate = false;
+            if state.has_target() && !state.is_training() && inference.pending == 0 {
+                requests.write(RunHyperNpaInference);
+            }
+        })
+        Children [(
+            Text("infer")
+            template_value(ModelCatalogTextSize(12.0))
+            template_value(HyperInferenceButtonLabel)
+            TextColor(Color::srgb(0.42, 0.47, 0.50))
+        )]
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn image_training_actions_row() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(6),
+            align_items: AlignItems::Center,
+        }
+        Children [
+            hyper_image_button(),
+            hyper_inference_button(),
+            train_button(),
+        ]
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn adaptive_training_toggle() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            height: px(28),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(8),
+            align_items: AlignItems::Center,
+        }
+        Children [
+            (
+                Checkbox
+                Node {
+                    width: px(18),
+                    height: px(18),
+                    border: px(1),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                }
+                AdaptiveTrainingCheckbox
+                Hovered::default()
+                BorderColor::from(Color::srgb(0.32, 0.39, 0.42))
+                BackgroundColor(Color::srgb(0.075, 0.09, 0.10))
+                on(handle_adaptive_training_toggle)
+                Children [(
+                    Node {
+                        width: px(10),
+                        height: px(10),
+                    }
+                    AdaptiveTrainingCheckboxMark
+                    BackgroundColor(Color::NONE)
+                )]
+            ),
+            (
+                Text("adaptive training")
+                template_value(ModelCatalogTextSize(12.0))
+                TextColor(Color::srgb(0.72, 0.78, 0.81))
+            ),
+        ]
+    }
+}
+
 #[cfg(not(feature = "hyper_dino"))]
-pub(in crate::viewer) fn hyper_image_button() -> impl Scene {
+pub(in crate::viewer) fn adaptive_training_toggle() -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::None,
+        }
+    }
+}
+
+#[cfg(not(feature = "hyper_dino"))]
+pub(in crate::viewer) fn image_training_actions_row() -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::None,
+        }
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn image_target_summary() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            min_height: px(58),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(10),
+            align_items: AlignItems::Center,
+        }
+        Visibility::Hidden
+        ImageTargetSummary
+        Children [
+            (
+                Node {
+                    width: px(56),
+                    height: px(56),
+                    flex_shrink: 0.0,
+                    border: px(1),
+                    overflow: Overflow::clip(),
+                }
+                BorderColor::from(Color::srgb(0.20, 0.26, 0.27))
+                BackgroundColor(Color::srgb(0.025, 0.032, 0.034))
+                ImageNode::default()
+                ImageTargetPreview
+            ),
+            (
+                Node {
+                    min_width: px(0),
+                    flex_grow: 1.0,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(4),
+                    justify_content: JustifyContent::Center,
+                }
+                Children [
+                    (
+                        Text("")
+                        template_value(ModelCatalogTextSize(12.0))
+                        TextColor(Color::srgb(0.86, 0.92, 0.90))
+                        ImageTargetName
+                    ),
+                    (
+                        Text("")
+                        template_value(ModelCatalogTextSize(10.0))
+                        TextColor(Color::srgb(0.53, 0.66, 0.64))
+                        ImageTargetProgress
+                    ),
+                ]
+            ),
+        ]
+    }
+}
+
+#[cfg(not(feature = "hyper_dino"))]
+pub(in crate::viewer) fn image_target_summary() -> impl Scene {
     bsn! {
         Node {
             display: Display::None,

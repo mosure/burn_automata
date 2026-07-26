@@ -15,6 +15,61 @@ pub struct AdaptiveViewerState {
     pub last_metrics: Option<AdaptiveStepMetrics>,
 }
 
+pub(super) fn apply_adaptive_model_snapshot(
+    runtime: &mut AutomataRuntime,
+    settings: &AutomataSettings,
+    model: AdaptiveNpaModel,
+    reset_rollout: bool,
+) -> burn_automata::AutomataResult<()> {
+    let can_preserve_particles = !reset_rollout
+        && runtime.adaptive.as_ref().is_some_and(|state| {
+            state.particles.spatial_dims == model.config.spatial_dims
+                && state.particles.state_dims == model.rule.config.state_dims
+                && state.particles.len() >= model.config.min_leaves
+                && state.particles.len() <= model.config.max_leaves
+        });
+    let particles = if can_preserve_particles {
+        runtime
+            .adaptive
+            .take()
+            .expect("adaptive state checked")
+            .particles
+    } else {
+        let count = model.config.initial_leaf_count();
+        let total_measure = unit_ball_measure(model.config.spatial_dims)
+            * settings.seed_scale.powi(model.config.spatial_dims as i32);
+        let bandwidth = model.rule.config.eps0.clamp(
+            model.config.perception.min_bandwidth,
+            model.config.perception.max_bandwidth,
+        );
+        burn_automata::seed_adaptive_particles_scaled(
+            &model,
+            count,
+            settings.seed,
+            settings.seed_mode,
+            settings.seed_scale,
+            total_measure,
+            bandwidth,
+        )?
+    };
+    runtime.model = model.rule.clone();
+    runtime.adaptive = Some(AdaptiveViewerState {
+        model,
+        training_stage: AdaptiveTrainingStage::FreshTaskTrainedMultiscale,
+        particles,
+        last_metrics: None,
+    });
+    runtime.trace = None;
+    runtime.loaded_model_path = None;
+    runtime.loaded_adaptive_model_path = None;
+    runtime.loaded_preset = None;
+    if reset_rollout {
+        runtime.frame = 0;
+    }
+    runtime.model_revision = runtime.model_revision.wrapping_add(1);
+    Ok(())
+}
+
 pub(super) fn load_selected_adaptive_model(
     mut runtime: ResMut<AutomataRuntime>,
     mut settings: ResMut<AutomataSettings>,

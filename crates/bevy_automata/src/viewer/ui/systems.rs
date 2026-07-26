@@ -27,6 +27,7 @@ pub(in crate::viewer) fn handle_model_catalog_press(
     mut settings: ResMut<AutomataSettings>,
     mut runtime: ResMut<AutomataRuntime>,
     mut preview: ResMut<CatalogPreviewState>,
+    #[cfg(feature = "hyper_dino")] mut image_target: ImageTargetInteraction,
 ) {
     event.trigger_mut().propagate = false;
     let Ok(card) = cards.get(event.entity) else {
@@ -37,6 +38,8 @@ pub(in crate::viewer) fn handle_model_catalog_press(
         && now - preview.last_press_time <= CATALOG_DOUBLE_CLICK_SECONDS;
     preview.last_pressed_key = Some(card.0);
     preview.last_press_time = now;
+    #[cfg(feature = "hyper_dino")]
+    image_target.clear_current_target();
     select_catalog_entry(card.0, &mut settings, &mut runtime);
     if double_click {
         preview.open = true;
@@ -107,6 +110,12 @@ pub(in crate::viewer) fn handle_slider_value_change(
             let next = exp2_slider_value(value_change.value).clamp(1.0e-5, 0.1);
             if (settings.training_learning_rate - next).abs() > 1.0e-7 {
                 settings.training_learning_rate = next;
+            }
+        }
+        AutomataSliderKind::TrainingRolloutResetInterval => {
+            let next = value_change.value.round().clamp(0.0, 1_000.0) as usize;
+            if settings.training_rollout_reset_interval != next {
+                settings.training_rollout_reset_interval = next;
             }
         }
     }
@@ -184,6 +193,8 @@ pub(in crate::viewer) fn update_slider_value_labels(
 
 pub(in crate::viewer) fn update_run_control_button_styles(
     settings: Res<AutomataSettings>,
+    #[cfg(feature = "hyper_dino")] target_training: Res<ImageTargetTrainingState>,
+    #[cfg(feature = "hyper_dino")] inference: Res<HyperNpaInferenceState>,
     mut buttons: Query<(
         &RunControlButton,
         &Hovered,
@@ -192,7 +203,28 @@ pub(in crate::viewer) fn update_run_control_button_styles(
     )>,
 ) {
     for (button, hovered, mut background, mut border) in &mut buttons {
-        let active = run_control_is_active(button.0, &settings);
+        #[cfg(feature = "hyper_dino")]
+        let available = button.0 != RunControlKind::Train
+            || (target_training.train_action_available() && inference.pending == 0);
+        #[cfg(not(feature = "hyper_dino"))]
+        let available = true;
+        if !available {
+            background.0 = Color::srgb(0.065, 0.075, 0.085);
+            *border = BorderColor::from(Color::srgb(0.16, 0.19, 0.21));
+            continue;
+        }
+        let active = if button.0 == RunControlKind::Train {
+            #[cfg(feature = "hyper_dino")]
+            {
+                target_training.is_training()
+            }
+            #[cfg(not(feature = "hyper_dino"))]
+            {
+                settings.train_live
+            }
+        } else {
+            run_control_is_active(button.0, &settings)
+        };
         background.0 = match (active, hovered.0) {
             (true, true) => Color::srgb(0.19, 0.36, 0.37),
             (true, false) => Color::srgb(0.14, 0.28, 0.29),
@@ -210,23 +242,70 @@ pub(in crate::viewer) fn update_run_control_button_styles(
 
 #[cfg(feature = "hyper_dino")]
 pub(in crate::viewer) fn update_hyper_image_button_styles(
-    inference: Res<HyperNpaInferenceState>,
     mut buttons: Query<(&Hovered, &mut BackgroundColor, &mut BorderColor), With<HyperImageButton>>,
 ) {
     for (hovered, mut background, mut border) in &mut buttons {
-        let active = inference.pending > 0;
-        background.0 = match (active, hovered.0) {
-            (true, true) => Color::srgb(0.19, 0.34, 0.31),
-            (true, false) => Color::srgb(0.13, 0.25, 0.23),
-            (false, true) => Color::srgb(0.12, 0.15, 0.15),
-            (false, false) => Color::srgb(0.09, 0.12, 0.13),
+        background.0 = match hovered.0 {
+            true => Color::srgb(0.12, 0.15, 0.15),
+            false => Color::srgb(0.09, 0.12, 0.13),
         };
-        *border = BorderColor::from(match (active, hovered.0) {
-            (true, true) => Color::srgb(0.48, 0.82, 0.70),
-            (true, false) => Color::srgb(0.34, 0.64, 0.56),
-            (false, true) => Color::srgb(0.39, 0.47, 0.48),
-            (false, false) => Color::srgb(0.28, 0.35, 0.37),
+        *border = BorderColor::from(match hovered.0 {
+            true => Color::srgb(0.39, 0.47, 0.48),
+            false => Color::srgb(0.28, 0.35, 0.37),
         });
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn update_hyper_inference_button_styles(
+    inference: Res<HyperNpaInferenceState>,
+    target_training: Res<ImageTargetTrainingState>,
+    mut buttons: Query<
+        (&Hovered, &mut BackgroundColor, &mut BorderColor),
+        With<HyperInferenceButton>,
+    >,
+) {
+    let running = inference.pending > 0;
+    let available = target_training.has_target() && !target_training.is_training() && !running;
+    for (hovered, mut background, mut border) in &mut buttons {
+        if !available && !running {
+            background.0 = Color::srgb(0.065, 0.075, 0.085);
+            *border = BorderColor::from(Color::srgb(0.16, 0.19, 0.21));
+        } else {
+            background.0 = match (running, hovered.0) {
+                (true, true) => Color::srgb(0.19, 0.34, 0.31),
+                (true, false) => Color::srgb(0.13, 0.25, 0.23),
+                (false, true) => Color::srgb(0.13, 0.15, 0.17),
+                (false, false) => Color::srgb(0.10, 0.12, 0.14),
+            };
+            *border = BorderColor::from(match (running, hovered.0) {
+                (true, true) => Color::srgb(0.48, 0.82, 0.70),
+                (true, false) => Color::srgb(0.34, 0.64, 0.56),
+                (false, true) => Color::srgb(0.36, 0.42, 0.46),
+                (false, false) => Color::srgb(0.25, 0.30, 0.34),
+            });
+        }
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn sync_hyper_inference_button_label(
+    inference: Res<HyperNpaInferenceState>,
+    target_training: Res<ImageTargetTrainingState>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<HyperInferenceButtonLabel>>,
+) {
+    if !inference.is_changed() && !target_training.is_changed() {
+        return;
+    }
+    let running = inference.pending > 0;
+    let available = target_training.has_target() && !target_training.is_training() && !running;
+    for (mut text, mut color) in &mut labels {
+        text.0 = if running { "inferring" } else { "infer" }.to_string();
+        color.0 = if available || running {
+            Color::srgb(0.86, 0.91, 0.94)
+        } else {
+            Color::srgb(0.42, 0.47, 0.50)
+        };
     }
 }
 
@@ -237,8 +316,73 @@ pub(in crate::viewer) fn run_control_is_active(
     match kind {
         RunControlKind::Pause => settings.paused,
         RunControlKind::Reset => false,
-        RunControlKind::Backward => settings.visualize_backward,
         RunControlKind::Train => settings.train_live,
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn handle_adaptive_training_toggle(
+    value_change: On<ValueChange<bool>>,
+    state: Res<ImageTargetTrainingState>,
+    mut settings: ResMut<AutomataSettings>,
+) {
+    if !state.is_training() {
+        settings.adaptive_training_enabled = value_change.value;
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn sync_adaptive_training_checkbox(
+    settings: Res<AutomataSettings>,
+    mut commands: Commands,
+    checkboxes: Query<(Entity, Has<Checked>), With<AdaptiveTrainingCheckbox>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (entity, checked) in &checkboxes {
+        if settings.adaptive_training_enabled != checked {
+            let mut entity = commands.entity(entity);
+            if settings.adaptive_training_enabled {
+                entity.insert(Checked);
+            } else {
+                entity.remove::<Checked>();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "hyper_dino")]
+pub(in crate::viewer) fn update_adaptive_training_checkbox_style(
+    settings: Res<AutomataSettings>,
+    state: Res<ImageTargetTrainingState>,
+    mut checkboxes: Query<
+        (&Hovered, &mut BackgroundColor, &mut BorderColor),
+        With<AdaptiveTrainingCheckbox>,
+    >,
+    mut marks: Query<&mut BackgroundColor, With<AdaptiveTrainingCheckboxMark>>,
+) {
+    let available = !state.is_training();
+    for (hovered, mut background, mut border) in &mut checkboxes {
+        background.0 = match (available, settings.adaptive_training_enabled, hovered.0) {
+            (false, _, _) => Color::srgb(0.055, 0.065, 0.072),
+            (true, true, true) => Color::srgb(0.16, 0.31, 0.30),
+            (true, true, false) => Color::srgb(0.12, 0.24, 0.24),
+            (true, false, true) => Color::srgb(0.11, 0.13, 0.14),
+            (true, false, false) => Color::srgb(0.075, 0.09, 0.10),
+        };
+        *border = BorderColor::from(if available {
+            Color::srgb(0.32, 0.43, 0.43)
+        } else {
+            Color::srgb(0.16, 0.19, 0.21)
+        });
+    }
+    for mut mark in &mut marks {
+        mark.0 = if settings.adaptive_training_enabled {
+            Color::srgb(0.48, 0.86, 0.76)
+        } else {
+            Color::NONE
+        };
     }
 }
 

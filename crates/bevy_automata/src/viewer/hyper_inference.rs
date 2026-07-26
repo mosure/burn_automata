@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use bevy::{tasks::AsyncComputeTaskPool, window::FileDragAndDrop};
 use burn_automata::{
@@ -12,6 +15,9 @@ use super::*;
 
 #[derive(Message, Clone, Debug, Default)]
 pub(in crate::viewer) struct OpenHyperNpaImage;
+
+#[derive(Message, Clone, Debug, Default)]
+pub(in crate::viewer) struct RunHyperNpaInference;
 
 #[derive(Resource)]
 pub(in crate::viewer) struct HyperNpaImageDialogChannel {
@@ -42,17 +48,32 @@ impl Default for HyperNpaInferenceChannel {
 #[derive(Resource, Clone, Debug, Default)]
 pub(in crate::viewer) struct HyperNpaInferenceState {
     pub(in crate::viewer) pending: usize,
+    next_request_id: u64,
+    current_request_id: Option<u64>,
+}
+
+impl HyperNpaInferenceState {
+    pub(in crate::viewer) fn cancel_current(&mut self) {
+        self.current_request_id = None;
+    }
 }
 
 #[derive(Clone, Debug)]
-struct HyperNpaImageSource {
-    file_name: String,
-    path: Option<PathBuf>,
-    bytes: Vec<u8>,
+pub(in crate::viewer) struct HyperNpaImageSource {
+    pub(in crate::viewer) file_name: String,
+    pub(in crate::viewer) path: Option<PathBuf>,
+    pub(in crate::viewer) bytes: Arc<Vec<u8>>,
+    pub(in crate::viewer) width: u32,
+    pub(in crate::viewer) height: u32,
+    pub(in crate::viewer) preview_width: u32,
+    pub(in crate::viewer) preview_height: u32,
+    pub(in crate::viewer) preview_rgba: Arc<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
 struct HyperNpaInferenceRequest {
+    request_id: u64,
+    target_id: u64,
     source: HyperNpaImageSource,
     base_model_path: PathBuf,
     hyper_model_path: PathBuf,
@@ -63,6 +84,8 @@ struct HyperNpaInferenceRequest {
 
 #[derive(Clone, Debug)]
 struct HyperNpaInferenceResult {
+    request_id: u64,
+    target_id: u64,
     file_name: String,
     result: Result<GeneratedHyperNpaModel, String>,
 }
@@ -86,7 +109,7 @@ pub(in crate::viewer) fn handle_open_hyper_npa_image_dialog(
 ) {
     for _request in requests.read() {
         let sender = channel.sender.clone();
-        runtime.status = "opening image for HyperNPA inference".to_string();
+        runtime.status = "opening target image".to_string();
         AsyncComputeTaskPool::get()
             .spawn(async move {
                 let picked = rfd::AsyncFileDialog::new()
@@ -101,11 +124,7 @@ pub(in crate::viewer) fn handle_open_hyper_npa_image_dialog(
                         #[cfg(target_arch = "wasm32")]
                         let path = None;
                         let bytes = file.read().await;
-                        Ok(HyperNpaImageSource {
-                            file_name,
-                            path,
-                            bytes,
-                        })
+                        build_image_source(file_name, path, bytes)
                     }
                     None => Err("image selection cancelled".to_string()),
                 };
@@ -143,37 +162,24 @@ pub(in crate::viewer) fn handle_hyper_npa_image_drop(
 
 pub(in crate::viewer) fn poll_hyper_npa_image_sources(
     source_channel: Res<HyperNpaImageDialogChannel>,
-    inference_channel: Res<HyperNpaInferenceChannel>,
     mut inference_state: ResMut<HyperNpaInferenceState>,
-    settings: Res<AutomataSettings>,
+    mut target_training: ResMut<ImageTargetTrainingState>,
     mut runtime: ResMut<AutomataRuntime>,
 ) {
     for source in source_channel.receiver.try_iter() {
         match source {
             Ok(source) => {
+                inference_state.cancel_current();
+                target_training.set_source(&source);
                 let origin = source
                     .path
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| source.file_name.clone());
-                let request = match build_inference_request(source, &settings) {
-                    Ok(request) => request,
-                    Err(err) => {
-                        runtime.status = err;
-                        continue;
-                    }
-                };
-                let file_name = request.source.file_name.clone();
-                let sender = inference_channel.sender.clone();
-                inference_state.pending = inference_state.pending.saturating_add(1);
-                runtime.status =
-                    format!("running DINO -> HyperNPA inference for {file_name} ({origin})");
-                AsyncComputeTaskPool::get()
-                    .spawn(async move {
-                        let result = run_hyper_npa_inference(request);
-                        let _ = sender.send(result);
-                    })
-                    .detach();
+                runtime.status = format!(
+                    "target image ready: {} ({origin}); choose infer or train fresh",
+                    source.file_name
+                );
             }
             Err(err) => {
                 runtime.status = format!("HyperNPA image load skipped: {err}");
@@ -182,14 +188,59 @@ pub(in crate::viewer) fn poll_hyper_npa_image_sources(
     }
 }
 
+pub(in crate::viewer) fn handle_run_hyper_npa_inference(
+    mut requests: MessageReader<RunHyperNpaInference>,
+    inference_channel: Res<HyperNpaInferenceChannel>,
+    mut inference_state: ResMut<HyperNpaInferenceState>,
+    mut target_training: ResMut<ImageTargetTrainingState>,
+    settings: Res<AutomataSettings>,
+    mut runtime: ResMut<AutomataRuntime>,
+) {
+    for _request in requests.read() {
+        if inference_state.pending > 0 || target_training.is_training() {
+            continue;
+        }
+        let Some((target_id, source)) = target_training.inference_source() else {
+            runtime.status = "open an image before running HyperNPA inference".to_string();
+            continue;
+        };
+        inference_state.next_request_id = inference_state.next_request_id.wrapping_add(1).max(1);
+        let request_id = inference_state.next_request_id;
+        let request = match build_inference_request(request_id, target_id, source, &settings) {
+            Ok(request) => request,
+            Err(error) => {
+                target_training.mark_inference_failed(target_id, error.clone());
+                runtime.status = format!("HyperNPA inference unavailable: {error}");
+                continue;
+            }
+        };
+        let file_name = request.source.file_name.clone();
+        let sender = inference_channel.sender.clone();
+        inference_state.current_request_id = Some(request_id);
+        inference_state.pending = inference_state.pending.saturating_add(1);
+        runtime.status = format!("inferring NPA from {file_name} with DINO -> HyperNPA");
+        AsyncComputeTaskPool::get()
+            .spawn(async move {
+                let result = run_hyper_npa_inference(request);
+                let _ = sender.send(result);
+            })
+            .detach();
+    }
+}
+
 pub(in crate::viewer) fn poll_hyper_npa_inference_results(
     inference_channel: Res<HyperNpaInferenceChannel>,
     mut inference_state: ResMut<HyperNpaInferenceState>,
+    mut target_training: ResMut<ImageTargetTrainingState>,
     mut settings: ResMut<AutomataSettings>,
     mut runtime: ResMut<AutomataRuntime>,
 ) {
     for result in inference_channel.receiver.try_iter() {
         inference_state.pending = inference_state.pending.saturating_sub(1);
+        if inference_state.current_request_id != Some(result.request_id) {
+            continue;
+        }
+        inference_state.current_request_id = None;
         match result.result {
             Ok(generated) => {
                 let label = format!("hyper {}", result.file_name);
@@ -213,6 +264,7 @@ pub(in crate::viewer) fn poll_hyper_npa_inference_results(
                 runtime.backward_grad_norm = None;
                 reset_training_stats(&mut runtime);
                 runtime.model_revision = runtime.model_revision.wrapping_add(1);
+                target_training.mark_inference_applied(result.target_id);
                 runtime.status = format!(
                     "generated HyperNPA for {} | image {}x{} | LoRA r{} a{:.1} | {} tokens x {} dims",
                     result.file_name,
@@ -225,14 +277,19 @@ pub(in crate::viewer) fn poll_hyper_npa_inference_results(
                 );
             }
             Err(err) => {
-                runtime.status =
-                    format!("HyperNPA inference failed for {}: {err}", result.file_name);
+                target_training.mark_inference_failed(result.target_id, err.clone());
+                runtime.status = format!(
+                    "HyperNPA inference failed for {}; target remains ready for fresh training: {err}",
+                    result.file_name
+                );
             }
         }
     }
 }
 
 fn build_inference_request(
+    request_id: u64,
+    target_id: u64,
     source: HyperNpaImageSource,
     settings: &AutomataSettings,
 ) -> Result<HyperNpaInferenceRequest, String> {
@@ -252,6 +309,8 @@ fn build_inference_request(
         "DINO model",
     )?;
     Ok(HyperNpaInferenceRequest {
+        request_id,
+        target_id,
         source,
         base_model_path,
         hyper_model_path,
@@ -275,9 +334,16 @@ fn required_existing_path(
 }
 
 fn run_hyper_npa_inference(request: HyperNpaInferenceRequest) -> HyperNpaInferenceResult {
+    let request_id = request.request_id;
+    let target_id = request.target_id;
     let file_name = request.source.file_name.clone();
     let result = generate_model_for_source(request).map_err(|err| err.to_string());
-    HyperNpaInferenceResult { file_name, result }
+    HyperNpaInferenceResult {
+        request_id,
+        target_id,
+        file_name,
+        result,
+    }
 }
 
 pub(in crate::viewer) fn generate_hyper_npa_model_from_image_path(
@@ -285,14 +351,14 @@ pub(in crate::viewer) fn generate_hyper_npa_model_from_image_path(
     settings: &AutomataSettings,
 ) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
     let source = read_image_source_from_path(path).map_err(std::io::Error::other)?;
-    let request = build_inference_request(source, settings).map_err(std::io::Error::other)?;
+    let request = build_inference_request(0, 0, source, settings).map_err(std::io::Error::other)?;
     generate_model_for_source(request)
 }
 
 fn generate_model_for_source(
     request: HyperNpaInferenceRequest,
 ) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
-    let condition = decode_condition_image(&request.source.bytes)?;
+    let condition = decode_condition_image(request.source.bytes.as_slice())?;
     let image_width = condition.width as u32;
     let image_height = condition.height as u32;
     let hyper = load_e2e_hyper_npa_2d(&request.hyper_model_path)?;
@@ -399,9 +465,64 @@ fn read_image_source_from_path(path: &Path) -> Result<HyperNpaImageSource, Strin
         .and_then(|name| name.to_str())
         .unwrap_or("image")
         .to_string();
+    build_image_source(file_name, Some(path.to_path_buf()), bytes)
+}
+
+fn build_image_source(
+    file_name: String,
+    path: Option<PathBuf>,
+    bytes: Vec<u8>,
+) -> Result<HyperNpaImageSource, String> {
+    let image = image::load_from_memory(&bytes)
+        .map_err(|err| format!("failed to decode image {file_name}: {err}"))?;
+    let width = image.width();
+    let height = image.height();
+    let preview = image.thumbnail(160, 160).to_rgba8();
     Ok(HyperNpaImageSource {
         file_name,
-        path: Some(path.to_path_buf()),
-        bytes,
+        path,
+        bytes: Arc::new(bytes),
+        width,
+        height,
+        preview_width: preview.width(),
+        preview_height: preview.height(),
+        preview_rgba: Arc::new(preview.into_raw()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_image_only_loads_target_until_infer_is_explicit() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/reference_targets/lizard_upstream_120.png");
+        let source = read_image_source_from_path(&path).unwrap();
+        let channel = HyperNpaImageDialogChannel::default();
+        let sender = channel.sender.clone();
+        let mut app = App::new();
+        app.insert_resource(channel)
+            .init_resource::<HyperNpaInferenceState>()
+            .init_resource::<ImageTargetTrainingState>()
+            .init_resource::<AutomataRuntime>()
+            .add_systems(Update, poll_hyper_npa_image_sources);
+
+        sender.send(Ok(source)).unwrap();
+        app.update();
+
+        let inference = app.world().resource::<HyperNpaInferenceState>();
+        assert_eq!(inference.pending, 0);
+        assert_eq!(inference.current_request_id, None);
+        let target = app.world().resource::<ImageTargetTrainingState>();
+        assert!(target.has_target());
+        assert_eq!(target.phase, ImageTargetTrainingPhase::Ready);
+        assert_eq!(target.train_action_label(), "train fresh");
+        assert!(
+            app.world()
+                .resource::<AutomataRuntime>()
+                .status
+                .contains("choose infer or train fresh")
+        );
+    }
 }

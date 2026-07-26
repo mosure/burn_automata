@@ -6,6 +6,8 @@ use bevy::camera::primitives::Aabb;
 use bevy::camera::{CameraProjection, Viewport};
 #[cfg(test)]
 use bevy::render::render_resource::TextureFormat;
+#[cfg(feature = "hyper_dino")]
+use bevy::ui::Checked;
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     image::ImageSampler,
@@ -14,9 +16,11 @@ use bevy::{
     prelude::*,
     time::Real,
 };
+#[cfg(feature = "hyper_dino")]
+use bevy_ui_widgets::Checkbox;
 use bevy_ui_widgets::{
-    Slider, SliderDragState, SliderOrientation, SliderPlugin, SliderRange, SliderStep, SliderThumb,
-    SliderValue, TrackClick, ValueChange, slider_self_update,
+    CheckboxPlugin, Slider, SliderDragState, SliderOrientation, SliderPlugin, SliderRange,
+    SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange, slider_self_update,
 };
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use burn_automata::gpu::WgpuNeighborMode;
@@ -24,8 +28,9 @@ use burn_automata::gpu::WgpuNeighborMode;
 use burn_automata::rollout::growth_3d_material_opacity_channel;
 use burn_automata::{
     AutomataPreset, NpaConfig, NpaModel, ParticleSeed, RolloutBatchConfig, RolloutConfig,
-    RolloutTrace, SgdConfig, SupervisedTarget, kernels::HashGridConfig, rollout_supervised_batch,
-    run_rollout, supervised_backward, supervised_loss, supervised_train_step,
+    RolloutTrace, SgdConfig, SupervisedTarget, Target2dTrainingConfig, kernels::HashGridConfig,
+    rollout_supervised_batch, run_rollout, supervised_backward, supervised_loss,
+    supervised_train_step,
 };
 
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
@@ -67,6 +72,8 @@ mod gpu_bridge;
 pub mod headless;
 #[cfg(feature = "hyper_dino")]
 mod hyper_inference;
+#[cfg(feature = "hyper_dino")]
+mod image_training;
 mod runtime;
 mod ui;
 
@@ -81,6 +88,8 @@ pub use gpu_bridge::{
 };
 #[cfg(feature = "hyper_dino")]
 use hyper_inference::*;
+#[cfg(feature = "hyper_dino")]
+use image_training::*;
 use runtime::*;
 use ui::*;
 
@@ -124,6 +133,8 @@ pub struct AutomataSettings {
     pub visualize_backward: bool,
     pub train_live: bool,
     pub training_learning_rate: f32,
+    pub training_rollout_reset_interval: usize,
+    pub adaptive_training_enabled: bool,
     pub model_path: Option<String>,
     pub adaptive_model_path: Option<String>,
     pub adaptive_bandwidth_enabled: bool,
@@ -164,7 +175,9 @@ impl Default for AutomataSettings {
             paused: false,
             visualize_backward: false,
             train_live: false,
-            training_learning_rate: 1.0e-3,
+            training_learning_rate: Target2dTrainingConfig::default().optimizer.learning_rate,
+            training_rollout_reset_interval: 100,
+            adaptive_training_enabled: false,
             model_path,
             adaptive_model_path: std::env::var("BURN_AUTOMATA_ADAPTIVE_MODEL").ok(),
             adaptive_bandwidth_enabled: true,
@@ -304,12 +317,17 @@ impl Plugin for AutomataViewerPlugin {
         app.init_resource::<HyperNpaImageDialogChannel>()
             .init_resource::<HyperNpaInferenceChannel>()
             .init_resource::<HyperNpaInferenceState>()
-            .add_message::<OpenHyperNpaImage>();
+            .init_resource::<ImageTargetTrainingChannel>()
+            .init_resource::<ImageTargetTrainingState>()
+            .init_resource::<ImageTargetPreviewState>()
+            .add_message::<OpenHyperNpaImage>()
+            .add_message::<RunHyperNpaInference>()
+            .add_message::<ToggleImageTargetTraining>();
         #[cfg(feature = "splatting")]
         app.init_resource::<AutomataCloudState>();
         #[cfg(feature = "splatting")]
         app.init_resource::<AutomataUiInputCapture>();
-        app.add_plugins(SliderPlugin);
+        app.add_plugins((SliderPlugin, CheckboxPlugin));
 
         app.add_systems(
             Startup,
@@ -365,10 +383,21 @@ impl Plugin for AutomataViewerPlugin {
                 handle_open_hyper_npa_image_dialog,
                 handle_hyper_npa_image_drop,
                 poll_hyper_npa_image_sources,
+                handle_run_hyper_npa_inference,
                 poll_hyper_npa_inference_results,
+                handle_toggle_image_target_training,
+                poll_image_target_training,
+                sync_image_target_summary,
+                sync_image_training_button_label,
+                sync_adaptive_training_checkbox,
+                sync_image_target_preview,
+                update_adaptive_training_checkbox_style,
                 update_hyper_image_button_styles,
+                update_hyper_inference_button_styles,
+                sync_hyper_inference_button_label,
             )
-                .chain(),
+                .chain()
+                .before(sync_gaussian_cloud_asset),
         );
 
         #[cfg(feature = "splatting")]

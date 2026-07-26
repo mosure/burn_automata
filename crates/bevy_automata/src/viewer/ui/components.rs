@@ -28,6 +28,7 @@ pub(in crate::viewer) enum AutomataSliderKind {
     RenderScaleLog2,
     RenderOpacityLog2,
     TrainingLearningRateLog2,
+    TrainingRolloutResetInterval,
 }
 
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -47,16 +48,51 @@ pub(in crate::viewer) enum RunControlKind {
     #[default]
     Pause,
     Reset,
-    Backward,
     Train,
 }
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub(in crate::viewer) struct RunControlButton(pub(in crate::viewer) RunControlKind);
 
+#[derive(Component, Clone, Copy, Debug, Default)]
+#[cfg_attr(not(feature = "hyper_dino"), allow(dead_code))]
+pub(in crate::viewer) struct RunControlButtonLabel(pub(in crate::viewer) RunControlKind);
+
 #[cfg(feature = "hyper_dino")]
 #[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct HyperImageButton;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct HyperInferenceButton;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct HyperInferenceButtonLabel;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct ImageTargetSummary;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct ImageTargetPreview;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct ImageTargetName;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct ImageTargetProgress;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct AdaptiveTrainingCheckbox;
+
+#[cfg(feature = "hyper_dino")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct AdaptiveTrainingCheckboxMark;
 
 #[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct AutomataUiPanel;

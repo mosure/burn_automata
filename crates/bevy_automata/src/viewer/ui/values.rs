@@ -14,6 +14,9 @@ pub(in crate::viewer) fn slider_value_for_settings(
         AutomataSliderKind::TrainingLearningRateLog2 => {
             log2_slider_value(settings.training_learning_rate)
         }
+        AutomataSliderKind::TrainingRolloutResetInterval => {
+            settings.training_rollout_reset_interval as f32
+        }
     }
 }
 
@@ -30,6 +33,13 @@ pub(in crate::viewer) fn slider_label(
         AutomataSliderKind::RenderOpacityLog2 => format!("{:.2}x", settings.render_opacity),
         AutomataSliderKind::TrainingLearningRateLog2 => {
             format!("{:.4}", settings.training_learning_rate)
+        }
+        AutomataSliderKind::TrainingRolloutResetInterval => {
+            if settings.training_rollout_reset_interval == 0 {
+                "off".to_string()
+            } else {
+                format!("{} steps", settings.training_rollout_reset_interval)
+            }
         }
     }
 }
