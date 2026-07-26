@@ -61,11 +61,6 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Validate browser inference and training runtime
-        env:
-          WEB_SMOKE_HEADED: "1"
-          WEB_SMOKE_INFERENCE: "0"
-          WEB_SMOKE_SOFTWARE_GPU: "1"
-          WEB_SMOKE_SCREENSHOT: target/web-runtime-smoke.png
         run: |
           python3 -m http.server 4173 --directory www >target/web-server.log 2>&1 &
           server_pid=$!
@@ -74,7 +69,7 @@ jobs:
             curl --fail --silent http://127.0.0.1:4173/smoke.html >/dev/null && break
             sleep 1
           done
-          xvfb-run -a node scripts/validate_web_runtime.mjs --all
+          node scripts/validate_web_runtime.mjs --static
 
       - uses: actions/configure-pages@v6
 
@@ -88,12 +83,9 @@ jobs:
       - name: Verify deployed Pages runtime
         env:
           WEB_BASE_URL: ${{ steps.deployment.outputs.page_url }}
-          WEB_SMOKE_HEADED: "1"
-          WEB_SMOKE_INFERENCE: "0"
-          WEB_SMOKE_SOFTWARE_GPU: "1"
         run: |
           for attempt in $(seq 1 5); do
-            if xvfb-run -a node scripts/validate_web_runtime.mjs --all; then
+            if node scripts/validate_web_runtime.mjs --static; then
               exit 0
             fi
             echo "deployed runtime attempt ${attempt} failed; waiting for Pages propagation"

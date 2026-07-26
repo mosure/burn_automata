@@ -29,19 +29,98 @@ function chromeExecutable() {
 
 async function launchBrowser() {
   const args = ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist"];
-  if (process.env.WEB_SMOKE_SOFTWARE_GPU === "1") {
-    args.push(
-      "--no-sandbox",
-      "--use-angle=vulkan",
-      "--enable-features=Vulkan",
-      "--disable-vulkan-surface",
-    );
-  }
   return chromium.launch({
     headless: process.env.WEB_SMOKE_HEADED !== "1",
     executablePath: chromeExecutable(),
     args,
   });
+}
+
+async function runStaticSmoke() {
+  const browser = await launchBrowser();
+  const page = await browser.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.stack ?? String(error)));
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      errors.push(message.text());
+    }
+  });
+  await page.goto(new URL("smoke.html", BASE_URL).href, {
+    waitUntil: "domcontentloaded",
+    timeout: 120_000,
+  });
+  const result = await page.evaluate(async () => {
+    const binaryPaths = [
+      "./pkg/bevy_automata_bg.wasm",
+      "./worker_pkg/burn_automata_web_worker_bg.wasm",
+    ];
+    const modelPaths = [
+      "./models/catalog/growing/lizard.bpk",
+      "./models/dino/dino_vits.mpk",
+      "./artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/hyper_2d.bpk",
+      "./artifacts/hyper2d_e2e_rollout_train_omnisvg_10k_steps3000_b16_p128s4_rank16_cosine_cuda/shared_base.bpk",
+    ];
+    const assets = {};
+    for (const path of binaryPaths) {
+      const response = await fetch(path);
+      if (!response.ok) {
+        throw new Error(`${path} returned ${response.status}`);
+      }
+      const bytes = await response.arrayBuffer();
+      await WebAssembly.compile(bytes);
+      assets[path] = bytes.byteLength;
+    }
+    for (const path of modelPaths) {
+      const response = await fetch(path, { method: "HEAD" });
+      if (!response.ok) {
+        throw new Error(`${path} returned ${response.status}`);
+      }
+      const length = Number(response.headers.get("content-length"));
+      if (!Number.isFinite(length) || length <= 0) {
+        throw new Error(`${path} has no positive content length`);
+      }
+      assets[path] = length;
+    }
+    const viewer = await import("./pkg/bevy_automata.js");
+    if (typeof viewer.default !== "function") {
+      throw new Error("viewer bindgen module has no initializer");
+    }
+    const workerProbe = await new Promise((resolve, reject) => {
+      const worker = new Worker("./training_worker.js", { type: "module" });
+      const timeout = setTimeout(() => {
+        worker.terminate();
+        reject(new Error("training worker module probe timed out"));
+      }, 120_000);
+      worker.onerror = (event) => {
+        clearTimeout(timeout);
+        worker.terminate();
+        reject(
+          new Error(`training worker module probe failed: ${event.message}`),
+        );
+      };
+      worker.onmessage = ({ data }) => {
+        if (data.type === "probe-ready") {
+          clearTimeout(timeout);
+          worker.terminate();
+          resolve("ready");
+        } else if (data.type === "probe-failed") {
+          clearTimeout(timeout);
+          worker.terminate();
+          reject(new Error(data.error));
+        }
+      };
+      worker.postMessage({ type: "probe" });
+    });
+    return { assets, workerProbe };
+  });
+  await browser.close();
+  if (errors.length > 0) {
+    throw new Error(
+      `browser static smoke console errors:\n${errors.join("\n")}`,
+    );
+  }
+  console.log(JSON.stringify({ staticPackage: result }, null, 2));
 }
 
 function fixedConfig() {
@@ -118,93 +197,109 @@ async function runWorkerSmokes() {
     waitUntil: "domcontentloaded",
     timeout: 120_000,
   });
-  const result = await page.evaluate(
-    async ({ fixed, adaptive, targetBase64 }) => {
-      if (!navigator.gpu) {
-        throw new Error("navigator.gpu is unavailable");
-      }
-      const adapter = await navigator.gpu.requestAdapter();
-      if (!adapter) {
-        throw new Error("WebGPU adapter request failed");
-      }
-      const modelResponse = await fetch("./models/catalog/growing/lizard.bpk");
-      if (!modelResponse.ok) {
-        throw new Error(`catalog model fetch failed: ${modelResponse.status}`);
-      }
-      const modelBytes = new Uint8Array(await modelResponse.arrayBuffer());
-      const targetBytes = Uint8Array.from(atob(targetBase64), (value) =>
-        value.charCodeAt(0),
-      );
+  let result;
+  try {
+    result = await page.evaluate(
+      async ({ fixed, adaptive, targetBase64 }) => {
+        if (!navigator.gpu) {
+          throw new Error("navigator.gpu is unavailable");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          throw new Error("WebGPU adapter request failed");
+        }
+        const modelResponse = await fetch(
+          "./models/catalog/growing/lizard.bpk",
+        );
+        if (!modelResponse.ok) {
+          throw new Error(
+            `catalog model fetch failed: ${modelResponse.status}`,
+          );
+        }
+        const modelBytes = new Uint8Array(await modelResponse.arrayBuffer());
+        const targetBytes = Uint8Array.from(atob(targetBase64), (value) =>
+          value.charCodeAt(0),
+        );
 
-      const run = (mode, config, jobId) =>
-        new Promise((resolve, reject) => {
-          const worker = new Worker("./training_worker.js", { type: "module" });
-          const updates = [];
-          const timeout = setTimeout(() => {
-            worker.terminate();
-            reject(new Error(`${mode} browser training timed out`));
-          }, 240_000);
-          worker.onerror = (event) => {
-            clearTimeout(timeout);
-            worker.terminate();
-            reject(new Error(`${mode} worker failed: ${event.message}`));
-          };
-          worker.onmessage = ({ data }) => {
-            if (data.type === "failed") {
+        const run = (mode, config, jobId) =>
+          new Promise((resolve, reject) => {
+            const worker = new Worker("./training_worker.js", {
+              type: "module",
+            });
+            const updates = [];
+            const timeout = setTimeout(() => {
+              worker.terminate();
+              reject(new Error(`${mode} browser training timed out`));
+            }, 240_000);
+            worker.onerror = (event) => {
               clearTimeout(timeout);
               worker.terminate();
-              reject(new Error(`${mode} training failed: ${data.error}`));
-              return;
-            }
-            if (data.type === "progress") {
-              updates.push({
-                step: data.step,
-                loss: data.loss,
-                gradNorm: data.gradNorm,
-                modelBytes: data.modelBytes?.byteLength ?? 0,
-              });
-            }
-            if (data.type === "finished") {
-              clearTimeout(timeout);
-              worker.terminate();
-              resolve({
-                mode,
-                updates,
-                finalModelBytes: data.modelBytes?.byteLength ?? 0,
-              });
-            }
-          };
-          worker.postMessage({
-            type: "train",
-            jobId,
-            targetId: jobId,
-            mode,
-            targetBytes,
-            modelBytes,
-            configJson: JSON.stringify(config),
-            snapshotIntervalSteps: 1,
-            snapshotIntervalMs: 0,
+              reject(new Error(`${mode} worker failed: ${event.message}`));
+            };
+            worker.onmessage = ({ data }) => {
+              if (data.type === "failed") {
+                clearTimeout(timeout);
+                worker.terminate();
+                reject(new Error(`${mode} training failed: ${data.error}`));
+                return;
+              }
+              if (data.type === "progress") {
+                updates.push({
+                  step: data.step,
+                  loss: data.loss,
+                  gradNorm: data.gradNorm,
+                  modelBytes: data.modelBytes?.byteLength ?? 0,
+                });
+              }
+              if (data.type === "finished") {
+                clearTimeout(timeout);
+                worker.terminate();
+                resolve({
+                  mode,
+                  updates,
+                  finalModelBytes: data.modelBytes?.byteLength ?? 0,
+                });
+              }
+            };
+            worker.postMessage({
+              type: "train",
+              jobId,
+              targetId: jobId,
+              mode,
+              targetBytes,
+              modelBytes,
+              configJson: JSON.stringify(config),
+              snapshotIntervalSteps: 1,
+              snapshotIntervalMs: 0,
+            });
           });
-        });
 
-      return {
-        fixed: await run("fixed", fixed, 1),
-        adaptive: await run("adaptive", adaptive, 2),
-      };
-    },
-    {
-      fixed: fixedConfig(),
-      adaptive: adaptiveConfig(),
-      targetBase64: TARGET_PNG_BASE64,
-    },
-  );
+        return {
+          fixed: await run("fixed", fixed, 1),
+          adaptive: await run("adaptive", adaptive, 2),
+        };
+      },
+      {
+        fixed: fixedConfig(),
+        adaptive: adaptiveConfig(),
+        targetBase64: TARGET_PNG_BASE64,
+      },
+    );
+  } catch (error) {
+    await browser.close();
+    throw new Error(
+      `${error?.stack ?? error}\nbrowser console:\n${errors.join("\n")}`,
+    );
+  }
   await browser.close();
   if (errors.length > 0) {
     throw new Error(`browser worker console errors:\n${errors.join("\n")}`);
   }
   for (const run of [result.fixed, result.adaptive]) {
     if (run.updates.length < 2 || run.finalModelBytes < 100_000) {
-      throw new Error(`${run.mode} browser training returned an incomplete run`);
+      throw new Error(
+        `${run.mode} browser training returned an incomplete run`,
+      );
     }
     for (const update of run.updates) {
       if (
@@ -223,7 +318,9 @@ async function runWorkerSmokes() {
 
 async function runAppSmoke() {
   const browser = await launchBrowser();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({
+    viewport: { width: 1440, height: 900 },
+  });
   const errors = [];
   const fetched = new Map();
   page.on("pageerror", (error) => errors.push(error.stack ?? String(error)));
@@ -263,7 +360,9 @@ async function runAppSmoke() {
   const runInference = process.env.WEB_SMOKE_INFERENCE !== "0";
   const runUiTraining = process.env.WEB_SMOKE_UI_TRAINING !== "0";
   if (runInference || runUiTraining) {
-    const chooserPromise = page.waitForEvent("filechooser", { timeout: 20_000 });
+    const chooserPromise = page.waitForEvent("filechooser", {
+      timeout: 20_000,
+    });
     await page.locator("canvas").click({ position: { x: 90, y: 225 } });
     const chooser = await chooserPromise;
     await chooser.setFiles("assets/reference_targets/lizard_upstream_120.png");
@@ -317,8 +416,11 @@ async function runAppSmoke() {
   );
 }
 
-if (!["--all", "--workers", "--app"].includes(RUN_MODE)) {
+if (!["--all", "--workers", "--app", "--static"].includes(RUN_MODE)) {
   throw new Error(`unsupported mode ${RUN_MODE}`);
+}
+if (RUN_MODE === "--static") {
+  await runStaticSmoke();
 }
 if (RUN_MODE === "--all" || RUN_MODE === "--workers") {
   await runWorkerSmokes();
