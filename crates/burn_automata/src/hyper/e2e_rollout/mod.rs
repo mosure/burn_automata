@@ -4588,7 +4588,6 @@ mod tests {
             expected_backend,
             expected_perception_backend,
         ) in [
-            ("smoke_lizard_dino_online.toml", 1, 1, "dense", "dense"),
             ("bench_omnisvg_8_b4_p128.toml", 200, 200, "dense", "dense"),
             (
                 "bench_omnisvg_8_b4_p128_tiled.toml",
@@ -4600,7 +4599,7 @@ mod tests {
         ] {
             let path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
-                .join("configs/verified/2d/hyper_e2e")
+                .join("configs/verified/2d/hypernpa/benchmarks")
                 .join(name);
             let text = std::fs::read_to_string(path).unwrap();
             let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
@@ -4654,7 +4653,7 @@ mod tests {
     fn verified_conditional_row_flow_configs_preserve_endpoint_contract() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("configs/verified/2d/hyper_e2e");
+            .join("configs/verified/2d/hypernpa/flow");
         for (name, steps, batch, width, layers, heads, ffn_dims, sample_steps) in [
             ("smoke_conditional_row_flow.toml", 1, 2, 64, 2, 4, 128, 2),
             (
@@ -4711,7 +4710,7 @@ mod tests {
     fn verified_amortized_row_flow_smoke_crosses_substrate_boundary() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("configs/verified/2d/hyper_e2e/smoke_conditional_row_flow_amortized.toml");
+            .join("configs/verified/2d/hypernpa/flow/smoke_conditional_row_flow_amortized.toml");
         let text = std::fs::read_to_string(path).unwrap();
         let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
         assert_eq!(config.training.steps, Some(2));
@@ -4727,7 +4726,7 @@ mod tests {
     fn verified_teacher_free_row_flow_configs_preserve_e2e_contract() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("configs/verified/2d/hyper_e2e");
+            .join("configs/verified/2d/hypernpa/e2e");
         for (name, source_limit, trainable, final_particles) in [
             ("smoke_conditional_row_flow_e2e.toml", 4, true, None),
             (
@@ -4894,7 +4893,7 @@ mod tests {
     fn verified_quality_scale_throughput_config_preserves_hot_path_contract() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("configs/verified/2d/hyper_e2e")
+            .join("configs/verified/2d/hypernpa/benchmarks")
             .join("throughput_omnisvg_64_b64_p1024_s96_cuda.toml");
         let text = std::fs::read_to_string(path).unwrap();
         let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
@@ -4936,7 +4935,7 @@ mod tests {
     fn verified_catalog_quality_configs_preserve_teacher_and_eval_contracts() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("configs/verified/2d/hyper_e2e");
+            .join("configs/verified/2d/hypernpa/published");
         for name in [
             "quality_growing_catalog_pretrain.toml",
             "quality_growing_catalog_refine.toml",

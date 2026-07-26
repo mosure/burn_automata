@@ -644,19 +644,19 @@ fn burn_controller_training_reduces_oracle_objective() {
 fn verified_adaptive_configs_parse_and_validate() {
     for source in [
         include_str!(
-            "../../../../configs/verified/adaptive/foundation_compatibility_smoke_2d_wgpu.toml"
+            "../../../../configs/verified/2d/adaptive/audits/foundation_compatibility_smoke_2d_wgpu.toml"
         ),
         include_str!(
-            "../../../../configs/verified/adaptive/foundation_compatibility_full_2d_wgpu.toml"
+            "../../../../configs/verified/2d/adaptive/audits/foundation_compatibility_full_2d_wgpu.toml"
         ),
         include_str!(
-            "../../../../configs/verified/adaptive/task_multiscale_lizard_smoke_2d_wgpu.toml"
+            "../../../../configs/verified/2d/adaptive/training/task_multiscale_lizard_smoke_2d_wgpu.toml"
         ),
         include_str!(
-            "../../../../configs/verified/adaptive/task_multiscale_lizard_full_2d_cuda.toml"
+            "../../../../configs/verified/2d/adaptive/training/task_multiscale_lizard_full_2d_cuda.toml"
         ),
         include_str!(
-            "../../../../configs/verified/adaptive/task_resident_lizard_smoke_3070_2d_wgpu.toml"
+            "../../../../configs/verified/2d/adaptive/evaluation/task_resident_lizard_smoke_3070_2d_wgpu.toml"
         ),
     ] {
         let config: AdaptiveExperimentConfig = toml::from_str(source).unwrap();
@@ -671,8 +671,12 @@ fn verified_adaptive_configs_parse_and_validate() {
 #[test]
 fn verified_continuous_topology_audits_parse() {
     for source in [
-        include_str!("../../../../configs/verified/adaptive/continuous_topology_smoke.toml"),
-        include_str!("../../../../configs/verified/adaptive/continuous_topology_full.toml"),
+        include_str!(
+            "../../../../configs/verified/2d/adaptive/audits/continuous_topology_smoke.toml"
+        ),
+        include_str!(
+            "../../../../configs/verified/2d/adaptive/audits/continuous_topology_full.toml"
+        ),
     ] {
         let config: super::AdaptiveTopologyAuditConfig = toml::from_str(source).unwrap();
         assert!(config.topology.samples >= 10_000);

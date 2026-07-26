@@ -53,7 +53,7 @@ jobs:
           (cd www && sha256sum -c web_models.sha256)
 
       - name: Build browser viewer and training worker
-        run: scripts/build_wasm.sh
+        run: scripts/web/build_wasm.sh
 
       - name: Install browser smoke dependencies
         run: |
@@ -69,7 +69,7 @@ jobs:
             curl --fail --silent http://127.0.0.1:4173/smoke.html >/dev/null && break
             sleep 1
           done
-          node scripts/validate_web_runtime.mjs --static
+          node scripts/web/validate_web_runtime.mjs --static
 
       - uses: actions/configure-pages@v6
 
@@ -85,7 +85,7 @@ jobs:
           WEB_BASE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
           for attempt in $(seq 1 5); do
-            if node scripts/validate_web_runtime.mjs --static; then
+            if node scripts/web/validate_web_runtime.mjs --static; then
               exit 0
             fi
             echo "deployed runtime attempt ${attempt} failed; waiting for Pages propagation"

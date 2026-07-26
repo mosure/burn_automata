@@ -1,0 +1,178 @@
+{
+  "date": "2026-07-25",
+  "status": "continuous_scale_candidate_validated_broad_promotion_tail_failed",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "objective": "3070-row adaptive lizard representing 4096 fine material units with continuous material and Gaussian scale",
+  "reproduction": {
+    "checked_in_smoke_config": "configs/verified/2d/adaptive/evaluation/recurrent_target2d_lizard_continuous_ratio4_smoke_3070_2d_wgpu.toml",
+    "broad_sandbox_config": null,
+    "broad_sandbox_note": "The broad-run config was a local sandbox artifact and is not versioned.",
+    "rule_checkpoint": "artifacts/adaptive/checkpoints/recurrent_lizard_graded144_fullrule_primal_k4_age4096_tbpttfix_best.bpk",
+    "oracle_model": "models/catalog/growing/lizard.bpk",
+    "broad_output_model": "artifacts/adaptive/continuous_scale_ratio4/lizard_ratio4_broad32_diagnostic.adaptive.bpk",
+    "broad_output_model_sha256": "8da86ca6b19abc9f6fb5ca13853839407703b480ea073652756f308f2a5d23e0",
+    "broad_evaluation_report": "artifacts/adaptive/continuous_scale_ratio4/lizard_ratio4_broad32_diagnostic.json",
+    "smoke_output_model": "artifacts/adaptive/continuous_scale_ratio4/lizard_ratio4_candidate.adaptive.bpk",
+    "smoke_output_model_sha256": "51d8f4698cc325682a31ade7fb1147bd29fd989c084017f567211931cdceaf45"
+  },
+  "contracts": {
+    "visible_rows": 3070,
+    "recurrent_rows": 3070,
+    "interaction_rows": 3070,
+    "reference_fine_units": 4096,
+    "hidden_fine_rows": 0,
+    "represented_measure_ratio": 4.003737,
+    "material_radius_ratio": 2.0009341,
+    "occupied_material_scale_bins": 33,
+    "fractional_material_scale_fraction": 0.9980456,
+    "topology": "fixed resident row budget with paired local-detail relocation",
+    "topology_interval_steps": 64,
+    "events_per_interval": 8,
+    "interaction_support_bin_count": 1,
+    "render": "one isotropic measure-derived Gaussian per active material row"
+  },
+  "broad_quality": {
+    "seeds": {
+      "first": 42,
+      "last": 73,
+      "count": 32
+    },
+    "horizons": [96, 256, 512, 1024],
+    "rows": 128,
+    "mean_adaptive_psnr_db": 25.31467,
+    "worst_adaptive_psnr_db": 23.169094,
+    "mean_oracle_gap_db": -0.16173582,
+    "worst_oracle_gap_db": -3.569172,
+    "mean_same_rule_fine_gap_db": -0.7703322,
+    "worst_same_rule_fine_gap_db": -2.80155,
+    "worst_psnr_drift_db": 2.3113155,
+    "horizon_summaries": [
+      {
+        "steps": 96,
+        "mean_adaptive_psnr_db": 23.852676,
+        "worst_adaptive_psnr_db": 23.169094,
+        "mean_oracle_psnr_db": 23.868982,
+        "mean_same_rule_fine_psnr_db": 24.823002
+      },
+      {
+        "steps": 256,
+        "mean_adaptive_psnr_db": 26.118334,
+        "worst_adaptive_psnr_db": 25.136715,
+        "mean_oracle_psnr_db": 25.571814,
+        "mean_same_rule_fine_psnr_db": 27.147957
+      },
+      {
+        "steps": 512,
+        "mean_adaptive_psnr_db": 26.318363,
+        "worst_adaptive_psnr_db": 25.22314,
+        "mean_oracle_psnr_db": 26.60342,
+        "mean_same_rule_fine_psnr_db": 27.082848
+      },
+      {
+        "steps": 1024,
+        "mean_adaptive_psnr_db": 24.969292,
+        "worst_adaptive_psnr_db": 23.717941,
+        "mean_oracle_psnr_db": 25.86139,
+        "mean_same_rule_fine_psnr_db": 25.286184
+      }
+    ]
+  },
+  "adaptive_behavior": {
+    "accepted_local_detail_exchanges": 2048,
+    "mean_topology_acceptance_fraction": 1.0,
+    "mean_scale_detail_correlation_gain_vs_static": 0.053592537,
+    "worst_scale_detail_correlation_gain_vs_static": 0.0024677683,
+    "mean_dynamic_over_static_psnr_db": 0.0138955265,
+    "worst_dynamic_over_static_psnr_db": -0.6936798,
+    "maximum_material_relative_error": 8.300577e-7,
+    "maximum_out_of_bounds_fraction": 0.0022801303,
+    "grid_overflow": 0
+  },
+  "throughput": {
+    "mean_interaction_work_ratio_vs_4096": 0.7495117,
+    "theoretical_pair_work_ratio_vs_4096": 0.5617707,
+    "mean_wall_time_ratio_vs_same_rule_4096": 0.9626802,
+    "maximum_row_wall_time_ratio_vs_same_rule_4096": 1.1172618
+  },
+  "renderer_audit": {
+    "report": "artifacts/adaptive/continuous_scale_ratio4/viewer_audit_candidate/lizard_ratio4_report.json",
+    "resolution": [768, 768],
+    "capture_steps": [0, 96, 256, 512],
+    "capture_paths": [
+      "artifacts/adaptive/continuous_scale_ratio4/viewer_audit_candidate/lizard_ratio4_step000000.png",
+      "artifacts/adaptive/continuous_scale_ratio4/viewer_audit_candidate/lizard_ratio4_step000096.png",
+      "artifacts/adaptive/continuous_scale_ratio4/viewer_audit_candidate/lizard_ratio4_step000256.png",
+      "artifacts/adaptive/continuous_scale_ratio4/viewer_audit_candidate/lizard_ratio4_step000512.png"
+    ],
+    "min_gaussian_scale": 0.00942341,
+    "max_gaussian_scale": 0.018855624,
+    "gaussian_scale_ratio": 2.000934,
+    "anisotropic_particle_fraction": 0.0,
+    "max_axis_ratio": 1.0,
+    "represented_measure_relative_error": 1.2228518e-7,
+    "lit_pixels": [11459, 60523, 61230, 61074],
+    "all_captures_nonblank": true
+  },
+  "ablations": [
+    {
+      "name": "ratio4_events8_four_seed_smoke",
+      "events_per_interval": 8,
+      "mean_psnr_db": 25.497269,
+      "worst_psnr_db": 23.221052,
+      "mean_dynamic_over_static_psnr_db": 0.11731994,
+      "worst_psnr_drift_db": 1.6534424,
+      "decision": "checked_in_bounded_regression"
+    },
+    {
+      "name": "ratio4_events16_four_seed",
+      "events_per_interval": 16,
+      "mean_psnr_db": 25.48688,
+      "worst_psnr_db": 23.248255,
+      "mean_dynamic_over_static_psnr_db": 0.10692847,
+      "decision": "rejected_by_broad32_dynamic_mean"
+    },
+    {
+      "name": "ratio4_events64_four_seed",
+      "events_per_interval": 64,
+      "mean_psnr_db": 24.604616,
+      "worst_psnr_db": 23.20897,
+      "mean_dynamic_over_static_psnr_db": -0.7753285,
+      "decision": "rejected_topology_churn"
+    },
+    {
+      "name": "ratio9_events16_four_seed",
+      "represented_measure_ratio": 9.0,
+      "events_per_interval": 16,
+      "mean_psnr_db": 24.639065,
+      "worst_psnr_db": 23.10111,
+      "mean_dynamic_over_static_psnr_db": -0.08399856,
+      "decision": "rejected_outside_rule_scale_range"
+    },
+    {
+      "name": "compact_recurrent_memory_q24",
+      "training_steps": 256,
+      "best_training_psnr_db": 18.886175,
+      "terminal_training_psnr_db": 17.53258,
+      "deployment_mean_psnr_db": 19.369478,
+      "deployment_worst_psnr_db": 18.803461,
+      "decision": "rejected_training_and_deployment_parity"
+    }
+  ],
+  "promotion_failures": [
+    "The 1024-step mean PSNR is 24.969 dB, below the 25.000 dB gate.",
+    "Worst per-seed PSNR drift is 2.311 dB, above the 2.000 dB gate.",
+    "The broad mean dynamic-over-static gain is only 0.014 dB and the worst row is -0.694 dB.",
+    "The worst released-oracle gap is -3.569 dB, so broad tail parity is not established."
+  ],
+  "architectural_limitations": [
+    "The material and rendered Gaussian radius are continuous, but interaction bandwidth is fixed and occupies one execution support bin.",
+    "The topology controller relocates resolution among a fixed set of 3070 resident rows; this does not demonstrate runtime particle births, deaths, or a variable leaf count.",
+    "The scale range is 2x in radius. A 3x-radius ablation lost quality, so arbitrary scale-free dynamics are not established.",
+    "The adaptive rule is lizard-specific and initialized from an earlier scale-conditioned lizard checkpoint; this is not a generalized adaptive HyperNPA result."
+  ],
+  "conclusion": [
+    "The candidate resolves the same-radius renderer failure: represented measures span 33 audit bins and produce a measured 2.001x isotropic Gaussian-radius range.",
+    "At 256 and 512 rollout steps the candidate exceeds 26 dB mean PSNR while using 74.95% of the 4096-row interaction work and approximately matched wall time.",
+    "The 32-seed protocol proves continuous material scale and bounded budget-neutral spatial allocation, but rejects production promotion because long-horizon quality and dynamic-allocation tails remain weak."
+  ]
+}

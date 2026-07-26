@@ -14,6 +14,8 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci/check_repository_layout.sh
+      - run: scripts/ci/check_inference_features.sh
       - run: cargo fmt --all --check
       - run: cargo check -p burn_automata_kernels -p burn_automata --all-targets
       - run: cargo check -p burn_automata --examples --benches

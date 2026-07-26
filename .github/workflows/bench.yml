@@ -10,5 +10,5 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/bench_rollout.sh
+      - run: scripts/ci/bench_rollout.sh
       - run: cargo bench -p burn_automata --bench rollout -- --sample-size 10

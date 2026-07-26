@@ -6,7 +6,8 @@
 
 # Generated experiment outputs and local model stores
 /artifacts/
-/configs/sandbox/
+/configs/sandbox/*
+!/configs/sandbox/README.md
 /.cache/
 /models/
 /assets/models/
@@ -47,13 +48,13 @@
 *.bin
 *.wasm
 *.pdf
-!docs/adaptive_npa.pdf
-!docs/hyper_npa.pdf
+!docs/papers/adaptive/adaptive_npa.pdf
+!docs/papers/hypernpa/hyper_npa.pdf
 
-# Top-level LaTeX intermediates. Paper source, bibliography, and figures remain tracked.
-/docs/*.aux
-/docs/*.bbl
-/docs/*.blg
-/docs/*.fdb_latexmk
-/docs/*.fls
-/docs/*.out
+# LaTeX intermediates. Paper source, bibliography, figures, and PDFs remain tracked.
+/docs/**/*.aux
+/docs/**/*.bbl
+/docs/**/*.blg
+/docs/**/*.fdb_latexmk
+/docs/**/*.fls
+/docs/**/*.out

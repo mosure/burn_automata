@@ -7,8 +7,6 @@ use burn_automata::{
     AdaptiveReplayTeacher, AdaptiveRolloutConfig, AdaptiveTopologyControl, AutomataPreset,
     NpaModel, NpaWeights, ParticleSeed, adaptive_deployment_on_policy_batch_wgpu,
     adaptive_isotropic_gaussian_geometry, adaptive_multiscale_on_policy_batch,
-    adaptive_multiscale_on_policy_batch_wgpu_with_executor,
-    adaptive_multiscale_training_batch_wgpu_with_executor,
     evaluate_adaptive_task_quality_validation,
     gpu::{WgpuMaterialStateInit, WgpuSupportBinConfig},
     load_adaptive_model, material_footprint_radius,
@@ -1634,212 +1632,6 @@ fn resident_wgpu_recurrent_closure_replay_matches_cpu_without_stochastic_masking
 
 #[test]
 #[ignore = "device benchmark; run explicitly with --ignored --nocapture"]
-fn coupled_fine_replay_quality_shape_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let _guard = wgpu_test_guard();
-    let Some(executor) = new_executor_or_skip()? else {
-        return Ok(());
-    };
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = std::fs::read_to_string(
-        workspace_root.join("configs/sandbox/adaptive/lizard_moment_closure_train_cuda.toml"),
-    )?;
-    let experiment: AdaptiveExperimentConfig = toml::from_str(&source)?;
-    let base_model = experiment
-        .base_model
-        .as_ref()
-        .expect("quality benchmark config has a base model");
-    let base_model = if base_model.is_absolute() {
-        base_model.clone()
-    } else {
-        workspace_root.join(base_model)
-    };
-    let manifest = burn_automata::import::load_manifest(base_model)?;
-    let grid = manifest.hashgrid.clone();
-    let teacher = manifest.into_model();
-    let mut adaptive = experiment.adaptive;
-    if std::env::var_os("BURN_AUTOMATA_COUPLED_BENCH_RAW_SUPPORT").is_some() {
-        adaptive.perception.graph_policy = AdaptiveGraphPolicy::RawSupport;
-    }
-    let mut model = AdaptiveNpaModel::seeded(teacher.clone(), adaptive, experiment.seed ^ 0xa4a4)?;
-    let mut local_config = teacher.config.clone();
-    local_config.hidden_dims = experiment
-        .multiscale_training
-        .resolved_local_residual_hidden_dims(teacher.config.hidden_dims);
-    local_config.auxiliary_input_dims = 1
-        + teacher.config.spatial_dims * (teacher.config.spatial_dims + 1) / 2
-        + teacher.config.state_dims * teacher.config.spatial_dims;
-    model.local_residual_rule = Some(NpaModel {
-        weights: NpaWeights::zero_output_seeded(&local_config, experiment.seed ^ 0x10ca_1eaf),
-        config: local_config,
-    });
-    model.validate()?;
-
-    let backend =
-        std::env::var("BURN_AUTOMATA_COUPLED_BENCH_BACKEND").unwrap_or_else(|_| "wgpu".to_string());
-    let mut config = experiment.multiscale_training;
-    config.on_policy_teacher = AdaptiveReplayTeacher::CoupledFine;
-    config.on_policy_rollouts = std::env::var("BURN_AUTOMATA_COUPLED_BENCH_ROLLOUTS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(4);
-    config.on_policy_rollout_steps = std::env::var("BURN_AUTOMATA_COUPLED_BENCH_STEPS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(16);
-    config.on_policy_snapshot_interval = 8;
-    config.on_policy_rows_per_snapshot = 512;
-    config.on_policy_replay_backend = match backend.as_str() {
-        "cpu" => AdaptiveReplayBackend::CpuReference,
-        "wgpu" => AdaptiveReplayBackend::WgpuResident,
-        value => panic!("unknown BURN_AUTOMATA_COUPLED_BENCH_BACKEND={value}"),
-    };
-
-    let started = Instant::now();
-    let batch = if config.on_policy_replay_backend == AdaptiveReplayBackend::WgpuResident {
-        adaptive_multiscale_on_policy_batch_wgpu_with_executor(
-            &executor, &teacher, &grid, &model, &config, 31,
-        )?
-    } else {
-        adaptive_multiscale_on_policy_batch(&teacher, &grid, &model, &config, 31)?
-    };
-    let elapsed = started.elapsed().as_secs_f64();
-    let dynamic_particle_steps = config.on_policy_rollouts
-        * config.on_policy_rollout_steps
-        * config
-            .cut_leaf_counts
-            .iter()
-            .copied()
-            .filter(|count| *count < config.fine_particle_count)
-            .map(|count| config.fine_particle_count + count)
-            .sum::<usize>();
-    eprintln!(
-        "coupled-fine quality-shape backend={backend} fine={} cuts={:?} rollouts={} steps={} rows={} elapsed={elapsed:.3}s rows_per_second={:.0} dynamic_particle_steps_per_second={:.0}",
-        config.fine_particle_count,
-        config.cut_leaf_counts,
-        config.on_policy_rollouts,
-        config.on_policy_rollout_steps,
-        batch.rows,
-        batch.rows as f64 / elapsed,
-        dynamic_particle_steps as f64 / elapsed,
-    );
-    Ok(())
-}
-
-#[test]
-#[ignore = "device benchmark; run explicitly with --ignored --nocapture"]
-fn resident_teacher_collection_quality_shape_benchmark() -> Result<(), Box<dyn std::error::Error>> {
-    let _guard = wgpu_test_guard();
-    let Some(executor) = new_executor_or_skip()? else {
-        return Ok(());
-    };
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = std::fs::read_to_string(
-        workspace_root.join("configs/sandbox/adaptive/lizard_moment_closure_train_cuda.toml"),
-    )?;
-    let experiment: AdaptiveExperimentConfig = toml::from_str(&source)?;
-    let base_model = experiment
-        .base_model
-        .as_ref()
-        .expect("quality benchmark config has a base model");
-    let base_model = if base_model.is_absolute() {
-        base_model.clone()
-    } else {
-        workspace_root.join(base_model)
-    };
-    let manifest = burn_automata::import::load_manifest(base_model)?;
-    let grid = manifest.hashgrid.clone();
-    let teacher = manifest.into_model();
-    let config = experiment.multiscale_training;
-
-    let started = Instant::now();
-    let batch = adaptive_multiscale_training_batch_wgpu_with_executor(
-        &executor,
-        &teacher,
-        &grid,
-        &experiment.adaptive,
-        &config,
-    )?;
-    let elapsed = started.elapsed().as_secs_f64();
-    let particle_steps = config.rollouts * config.rollout_steps * config.fine_particle_count;
-    eprintln!(
-        "resident teacher quality-shape fine={} rollouts={} steps={} temporal_samples={} rows={} elapsed={elapsed:.3}s rows_per_second={:.0} particle_steps_per_second={:.0}",
-        config.fine_particle_count,
-        config.rollouts,
-        config.rollout_steps,
-        config.temporal_samples,
-        batch.rows,
-        batch.rows as f64 / elapsed,
-        particle_steps as f64 / elapsed,
-    );
-    Ok(())
-}
-
-#[test]
-#[ignore = "device benchmark; run explicitly with --ignored --nocapture"]
-fn resident_wgpu_deployment_replay_outpaces_cpu_reference() -> Result<(), Box<dyn std::error::Error>>
-{
-    let _guard = wgpu_test_guard();
-    if new_executor_or_skip()?.is_none() {
-        return Ok(());
-    }
-    let config_path = std::env::var("BURN_AUTOMATA_ADAPTIVE_BENCH_CONFIG").unwrap_or_else(|_| {
-        "configs/sandbox/adaptive/task_multiscale_lizard_fresh_local_full_2d_wgpu.toml".to_string()
-    });
-    let artifact_path = std::env::var("BURN_AUTOMATA_ADAPTIVE_BENCH_MODEL").unwrap_or_else(|_| {
-        "artifacts/adaptive_npa/task_multiscale_lizard_adaptive_deployment_full/model.adaptive.failed.bpk"
-            .to_string()
-    });
-    let experiment: AdaptiveExperimentConfig =
-        toml::from_str(&std::fs::read_to_string(config_path)?)?;
-    let mut model = burn_automata::load_adaptive_model(artifact_path)?.model;
-    model.config = experiment.adaptive;
-    model.validate()?;
-    let reference_model = experiment
-        .task_quality
-        .reference_model
-        .as_ref()
-        .expect("benchmark config has a reference model");
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let reference_model = if reference_model.is_absolute() {
-        reference_model.clone()
-    } else {
-        workspace_root.join(reference_model)
-    };
-    let teacher_manifest = burn_automata::import::load_manifest(reference_model)?;
-    let grid = teacher_manifest.hashgrid.clone();
-    let teacher = teacher_manifest.into_model();
-
-    let cpu_started = Instant::now();
-    let cpu = adaptive_multiscale_on_policy_batch(
-        &teacher,
-        &grid,
-        &model,
-        &experiment.multiscale_training,
-        1_001,
-    )?;
-    let cpu_seconds = cpu_started.elapsed().as_secs_f64();
-    let gpu_started = Instant::now();
-    let gpu = adaptive_deployment_on_policy_batch_wgpu(
-        &model,
-        &grid,
-        &experiment.multiscale_training,
-        1_001,
-    )?;
-    let gpu_seconds = gpu_started.elapsed().as_secs_f64();
-    eprintln!(
-        "adaptive replay generation: CPU reference={cpu_seconds:.3}s ({:.0} rows/s); resident WGPU={gpu_seconds:.3}s ({:.0} rows/s); speedup={:.2}x; rows={}",
-        cpu.rows as f64 / cpu_seconds,
-        gpu.rows as f64 / gpu_seconds,
-        cpu_seconds / gpu_seconds,
-        gpu.rows,
-    );
-    assert_eq!(gpu.rows, cpu.rows);
-    assert!(gpu_seconds < cpu_seconds);
-    Ok(())
-}
-
-#[test]
-#[ignore = "device benchmark; run explicitly with --ignored --nocapture"]
 fn adaptive_wgpu_fused_throughput_matches_viewer_path() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = wgpu_test_guard();
     let Some(executor) = new_executor_or_skip()? else {
@@ -2116,7 +1908,9 @@ fn adaptive_wgpu_lod_artifact_preserves_worst_seed_quality()
     let config_path = std::env::var_os("BURN_AUTOMATA_ADAPTIVE_QUALITY_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            workspace_root.join("configs/verified/adaptive/task_lod_lizard_smoke_3070_2d_wgpu.toml")
+            workspace_root.join(
+                "configs/verified/2d/adaptive/evaluation/task_lod_lizard_smoke_3070_2d_wgpu.toml",
+            )
         });
     let config_path = resolve(config_path);
     if !model_path.is_file() || !config_path.is_file() {

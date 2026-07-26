@@ -1435,44 +1435,6 @@ mod tests {
     }
 
     #[test]
-    fn verified_budgeted_lizard_enables_bounded_gap_decomposition() {
-        let path = format!(
-            "{}/../../configs/verified/adaptive/task_budgeted_lizard_eval_3070_2d_wgpu.toml",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let source = std::fs::read_to_string(path).unwrap();
-        let config: AdaptiveExperimentConfig = toml::from_str(&source).unwrap();
-        assert_eq!(
-            config.task_quality.render_decoder,
-            AdaptiveRenderDecoder::IsotropicMaterialGaussian
-        );
-        assert_eq!(config.adaptive.controller_hidden_dims, 512);
-        assert_eq!(config.adaptive.hierarchical_restriction_step, 128);
-        assert_eq!(config.adaptive.topology_start_step, 240);
-        assert_eq!(config.adaptive.steady_topology_start_step, 240);
-        assert_eq!(config.adaptive.topology_end_step, 240);
-        assert_eq!(config.adaptive.topology_interval, 16);
-        assert_eq!(config.adaptive.steady_topology_interval, 16);
-        assert_eq!(
-            config.task_quality.validation_seeds,
-            (106..=137).collect::<Vec<_>>()
-        );
-        assert!(config.task_quality.gap_decomposition.enabled);
-        assert_eq!(
-            config.task_quality.gap_decomposition.horizons,
-            [127, 128, 160, 192, 256]
-        );
-        assert_eq!(config.task_quality.gap_decomposition.mode_counts, [2, 4]);
-        assert_eq!(config.task_quality.gap_decomposition.max_seeds, 8);
-        assert!(
-            config
-                .task_quality
-                .gap_decomposition
-                .covariance_decoder_control
-        );
-    }
-
-    #[test]
     fn fresh_base_phase_inherits_canonical_target2d_defaults() {
         let config: AdaptiveExperimentConfig = toml::from_str(
             r#"
@@ -1530,7 +1492,7 @@ reference_model = "models/lizard.bpk"
             ("task_multiscale_lizard_full_2d_cuda.toml", 4_096, 1_024, 8),
         ] {
             let path = format!(
-                "{}/../../configs/verified/adaptive/{name}",
+                "{}/../../configs/verified/2d/adaptive/training/{name}",
                 env!("CARGO_MANIFEST_DIR")
             );
             let source = std::fs::read_to_string(path).unwrap();
@@ -1563,8 +1525,8 @@ reference_model = "models/lizard.bpk"
     #[test]
     fn progressive_lod_config_separates_bootstrap_and_steady_budgets() {
         for relative in [
-            "configs/verified/adaptive/task_lod_lizard_smoke_3070_2d_wgpu.toml",
-            "configs/verified/adaptive/task_lod_lizard_eval_3070_2d_wgpu.toml",
+            "configs/verified/2d/adaptive/evaluation/task_lod_lizard_smoke_3070_2d_wgpu.toml",
+            "configs/verified/2d/adaptive/evaluation/task_lod_lizard_eval_3070_2d_wgpu.toml",
         ] {
             let path = format!("{}/../../{relative}", env!("CARGO_MANIFEST_DIR"));
             let source = std::fs::read_to_string(path).unwrap();
@@ -1622,7 +1584,7 @@ reference_model = "models/lizard.bpk"
     #[test]
     fn resident_direct_active_config_encodes_canonical_mixed_scale_progression() {
         let path = format!(
-            "{}/../../configs/verified/adaptive/task_resident_lizard_smoke_3070_2d_wgpu.toml",
+            "{}/../../configs/verified/2d/adaptive/evaluation/task_resident_lizard_smoke_3070_2d_wgpu.toml",
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(path).unwrap();

@@ -122,7 +122,7 @@ pub(super) fn validate_training_step(
     let Some(fixture) = root.training_step else {
         let failures = if config.required {
             vec![format!(
-                "required upstream training_step is absent from {}; regenerate with scripts/export_selforg_npa_fixture.py --training-step",
+                "required upstream training_step is absent from {}; regenerate with scripts/reference/selforg/export_selforg_npa_fixture.py --training-step",
                 fixture_path.display()
             )]
         } else {

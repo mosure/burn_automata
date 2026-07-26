@@ -32,7 +32,7 @@ fn hyper2d_quality_facing_commands_use_safe_training_and_quality_eval_defaults()
         "burn_automata",
         "train-hyper2d-e2e-rollout",
         "--config",
-        "configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml",
+        "configs/verified/2d/hypernpa/e2e/smoke_conditional_row_flow_e2e.toml",
     ])
     .unwrap();
     let Command::TrainHyper2dE2eRollout { config } = args.command else {
@@ -40,7 +40,7 @@ fn hyper2d_quality_facing_commands_use_safe_training_and_quality_eval_defaults()
     };
     assert_eq!(
         config,
-        PathBuf::from("configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml")
+        PathBuf::from("configs/verified/2d/hypernpa/e2e/smoke_conditional_row_flow_e2e.toml")
     );
 
     let args = CliArgs::try_parse_from(["burn_automata", "train-hyper2d-direct-basis"]).unwrap();

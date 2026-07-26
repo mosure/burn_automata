@@ -9,7 +9,7 @@ Burn-native Neural Particle Automata inference and training with optimized 2D
 GPU kernels and a native/web Bevy Gaussian Splatting viewer. Try the
 [live WebGPU demo](https://mosure.github.io/burn_automata/).
 
-![Matched adaptive and fixed lizard rollouts](docs/adaptive_npa_figures/lizard_rollout_seed42.png)
+![Matched adaptive and fixed lizard rollouts](docs/papers/adaptive/figures/lizard_rollout_seed42.png)
 
 ## features
 
@@ -125,12 +125,12 @@ cargo run --release -p burn_automata \
   --no-default-features \
   --features cli,backend_ndarray,backend_wgpu,dino -- \
   train-hypernpa2d \
-  --config configs/verified/2d/hyper_e2e/smoke_conditional_row_flow.toml
+  --config configs/verified/2d/hypernpa/flow/smoke_conditional_row_flow.toml
 ```
 
 Reproducible configs belong under `configs/verified/`; local experiments belong
 under the gitignored `configs/sandbox/`. The CUDA quality configuration is
-`configs/verified/2d/hyper_e2e/production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`.
+`configs/verified/2d/hypernpa/e2e/production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`.
 
 ## web
 
@@ -141,7 +141,7 @@ in a dedicated Web Worker so training does not block the Bevy render loop.
 Build the viewer and worker:
 
 ```bash
-scripts/build_wasm.sh
+scripts/web/build_wasm.sh
 python3 -m http.server 4173 --directory www
 ```
 
@@ -149,7 +149,7 @@ Run the real browser WebGPU gate:
 
 ```bash
 WEB_BASE_URL=http://127.0.0.1:4173/ \
-  node scripts/validate_web_runtime.mjs --all
+  node scripts/web/validate_web_runtime.mjs --all
 ```
 
 See [the web deployment notes](www/README.md) for model packaging, checksums,
@@ -177,16 +177,14 @@ The default native core enables NdArray and WGPU backends. CUDA training uses
 ## docs
 
 - [documentation index](docs/README.md)
-- [NPA reference and parity contract](docs/npa_reference.md)
-- [HyperNPA paper](docs/hyper_npa.pdf)
-- [HyperNPA paper companion and sources](docs/hyper_npa.md)
-- [HyperNPA quality status](docs/hypernpa_dino_flow_quality_status.md)
-- [budgeted adaptive NPA paper](docs/adaptive_npa.pdf)
-- [adaptive NPA paper companion and sources](docs/adaptive_npa.md)
-- [continuous-scale adaptive NPA](docs/adaptive_continuous_scale.md)
-- [kernel strategy](docs/kernel_strategy.md)
-- [GPU interop](docs/gpu_interop.md)
-- [validation](docs/validation.md)
+- [NPA reference and parity contract](docs/architecture/npa_reference.md)
+- [HyperNPA paper and companion](docs/papers/hypernpa/)
+- [HyperNPA quality status](docs/research/hypernpa_status.md)
+- [budgeted adaptive NPA paper and companion](docs/papers/adaptive/)
+- [continuous-scale adaptive NPA status](docs/research/adaptive_continuous_scale.md)
+- [kernel strategy](docs/architecture/kernel_strategy.md)
+- [GPU interop](docs/architecture/gpu_interop.md)
+- [validation](docs/development/validation.md)
 
 ## validation
 
@@ -194,8 +192,9 @@ The default native core enables NdArray and WGPU backends. CUDA training uses
 cargo fmt --all -- --check
 cargo test --workspace --lib
 cargo clippy --workspace --all-targets -- -D warnings
-scripts/check_inference_features.sh
-scripts/build_wasm.sh
+scripts/ci/check_repository_layout.sh
+scripts/ci/check_inference_features.sh
+scripts/web/build_wasm.sh
 ```
 
 Hardware-specific WGPU/CUDA benchmarks and the browser runtime gate are kept

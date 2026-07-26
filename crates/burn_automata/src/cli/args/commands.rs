@@ -1961,7 +1961,7 @@ mod tests {
             "burn_automata",
             "train-hypernpa2d",
             "--config",
-            "configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml",
+            "configs/verified/2d/hypernpa/e2e/smoke_conditional_row_flow_e2e.toml",
         ])
         .unwrap();
 
@@ -1970,7 +1970,7 @@ mod tests {
         };
         assert_eq!(
             config,
-            PathBuf::from("configs/verified/2d/hyper_e2e/smoke_lizard_dino_online.toml")
+            PathBuf::from("configs/verified/2d/hypernpa/e2e/smoke_conditional_row_flow_e2e.toml")
         );
     }
 

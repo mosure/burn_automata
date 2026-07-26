@@ -1,45 +1,48 @@
 # Documentation
 
-This directory separates current publications, maintained contracts, and
-immutable experiment evidence. Generated checkpoints and local datasets remain
-under gitignored `artifacts/`, `models/`, and `data/`.
+Documentation is organized by ownership rather than chronology. Generated
+checkpoints, datasets, raw run directories, and local reports remain under
+ignored `artifacts/`, `models/`, `data/`, and `target/` paths.
 
-## Papers
+## Publications
 
-| Publication | PDF | Source and evidence |
+| Paper | PDF | Sources and evidence |
 | --- | --- | --- |
-| HyperNPA: Amortized Image-Conditioned Neural Particle Automata | [`hyper_npa.pdf`](hyper_npa.pdf) | [`hyper_npa.md`](hyper_npa.md), [`hyper_npa.tex`](hyper_npa.tex), [`hyper_npa_figures/latest/`](hyper_npa_figures/latest/) |
-| Budgeted Adaptive Neural Particle Automata | [`adaptive_npa.pdf`](adaptive_npa.pdf) | [`adaptive_npa.md`](adaptive_npa.md), [`adaptive_npa.tex`](adaptive_npa.tex), [`adaptive_npa_figures/`](adaptive_npa_figures/) |
+| HyperNPA: Amortized Image-Conditioned Neural Particle Automata | [`hyper_npa.pdf`](papers/hypernpa/hyper_npa.pdf) | [`papers/hypernpa/`](papers/hypernpa/) |
+| Budgeted Adaptive Neural Particle Automata | [`adaptive_npa.pdf`](papers/adaptive/adaptive_npa.pdf) | [`papers/adaptive/`](papers/adaptive/) |
 
-Paper PDFs are versioned deliverables. LaTeX intermediates remain ignored.
-Each companion document states the exact claim boundary and primary reports.
+The PDFs are versioned deliverables. Each paper directory contains its LaTeX,
+bibliography, renderer captures, and a companion README that states the exact
+claim boundary.
 
-## Maintained Contracts
+## Architecture
 
-- [`npa_reference.md`](npa_reference.md): official SelfOrg-NPA parity contract.
-- [`hypernpa_dino_flow_quality_status.md`](hypernpa_dino_flow_quality_status.md):
-  current deterministic-checkpoint and row-flow status.
-- [`adaptive_continuous_scale.md`](adaptive_continuous_scale.md): continuous
-  measure, topology, bandwidth, and rendering semantics.
-- [`kernel_strategy.md`](kernel_strategy.md): optimized inference/training
-  kernel ownership and parity gates.
-- [`gpu_interop.md`](gpu_interop.md): Burn, WGPU, Bevy, and Gaussian-splatting
-  buffer ownership.
-- [`validation.md`](validation.md): validation inventory and commands.
+- [`architecture/npa_reference.md`](architecture/npa_reference.md): official
+  SelfOrg-NPA semantics and import/parity contract.
+- [`architecture/kernel_strategy.md`](architecture/kernel_strategy.md):
+  optimized CPU/WGPU/CUDA kernel ownership and dispatch evidence.
+- [`architecture/gpu_interop.md`](architecture/gpu_interop.md): Burn, WGPU,
+  Bevy, and Gaussian-splatting buffer ownership.
+
+## Research Status
+
+- [`research/hypernpa_status.md`](research/hypernpa_status.md): published
+  deterministic checkpoint versus the maintained conditional row-flow path.
+- [`research/adaptive_continuous_scale.md`](research/adaptive_continuous_scale.md):
+  conservative scale, topology, bandwidth, and renderer contracts.
+- [`research/3d_status.md`](research/3d_status.md): current 3D boundary and
+  remaining promotion work.
+
+## Development
+
+- [`development/validation.md`](development/validation.md): canonical local,
+  GPU, web, publication, and configuration checks.
+- [`../configs/README.md`](../configs/README.md): verified versus sandbox
+  experiment policy.
+- [`../scripts/README.md`](../scripts/README.md): operational script ownership.
 
 ## Evidence
 
-Machine-readable experiment summaries live in [`benchmarks/`](benchmarks/).
-They are retained when a current paper or maintained contract cites them.
-Large raw run directories, model weights, and local report matrices are not
-documentation and remain outside git.
-
-The adaptive paper's central reports are:
-
-- [`adaptive_continuous_scale_ratio4_2026-07-25.json`](benchmarks/adaptive_continuous_scale_ratio4_2026-07-25.json)
-- [`adaptive_event_aware_long_horizon_2026-07-25.json`](benchmarks/adaptive_event_aware_long_horizon_2026-07-25.json)
-
-The HyperNPA paper's curated renderer evidence is
-[`hyper_npa_figures/latest/`](hyper_npa_figures/latest/). Earlier direct-basis
-and duplicate renderer generations were removed because they are superseded
-and are not cited by a maintained paper.
+Machine-readable reports cited by maintained papers or contracts live under
+[`evidence/`](evidence/). Reports without a current consumer are not repository
+documentation and should remain in ignored experiment output directories.

@@ -1,0 +1,109 @@
+{
+  "schema_version": 3,
+  "date": "2026-07-20",
+  "promoted_update": "2026-07-21",
+  "device": {
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "driver": "610.43.02",
+    "memory_mib": 97887
+  },
+  "config": "configs/verified/2d/adaptive/evaluation/task_lod_lizard_eval_3070_2d_wgpu.toml",
+  "artifact": {
+    "path": "artifacts/adaptive_npa/lod_progressive_mixed_3070/model.adaptive.bpk",
+    "container_sha256": "e8feefca30120e1f6f3849278ebedc3dde7818a7ed9a471738047cf8d4ff607b",
+    "payload_sha256": "3a22baa2b4f0d8306a8935caf58acc03bfcabc23c2ac6f37843d8929f59ed10c"
+  },
+  "protocol": {
+    "validation_seeds": 32,
+    "seed_range": [106, 137],
+    "rollout_steps": 256,
+    "initial_visible_leaves": 1024,
+    "bootstrap_visible_leaves": 4096,
+    "steady_visible_leaves": 3070,
+    "steady_dynamics_rows": 3925,
+    "bootstrap_steps": [1, 4],
+    "bootstrap_visible_leaf_schedule": [1024, 1792, 2560, 3328, 4096],
+    "restriction_steps": [230, 240],
+    "restriction_leaf_delta_per_step": 96,
+    "restriction_arity": "mixed-2-3-4",
+    "restriction_schedule": "rolling-recompute",
+    "coarse_quadrature_points": 3,
+    "bootstrap_quadrature_points": 4
+  },
+  "quality": {
+    "mean_adaptive_psnr_db": 22.211288,
+    "mean_regular_4096_psnr_db": 22.080809,
+    "mean_adaptive_over_regular_4096_db": 0.13047904,
+    "worst_adaptive_over_regular_4096_db": -0.6084995,
+    "mean_adaptive_over_regular_count_matched_db": 3.410868,
+    "worst_adaptive_over_regular_count_matched_db": 2.3112564,
+    "mean_adaptive_over_regular_material_matched_db": 0.3004685,
+    "worst_adaptive_over_regular_material_matched_db": -0.81396484,
+    "mean_adaptive_over_fixed_budget_topology_db": 2.5837796,
+    "worst_adaptive_over_fixed_budget_topology_db": 0.17255974
+  },
+  "material_scale": {
+    "minimum_occupied_sixty_fourth_octave_bins": 4,
+    "minimum_fractional_octave_fraction": 0.11140065,
+    "minimum_dyadic_quantization_rmse_octaves": 0.1277645,
+    "maximum_measure_relative_drift": 4.95046949543996e-9,
+    "minimum_material_footprint": 0.003125,
+    "maximum_material_footprint": 0.00625
+  },
+  "renderer_audit": {
+    "backend": "bevy-wgpu-planar-gaussian",
+    "resolution": [512, 512],
+    "captured_steps": [
+      0, 1, 2, 3, 4, 5, 64, 128, 229, 230, 231, 232, 233,
+      234, 235, 236, 237, 238, 239, 240, 241, 252, 256
+    ],
+    "elapsed_ms_including_23_captures": 10474.527856,
+    "minimum_gaussian_scale": 0.012,
+    "maximum_gaussian_scale": 0.024,
+    "minimum_opacity_at_settled_step": 1.0,
+    "maximum_opacity_at_settled_step": 1.0,
+    "anisotropic_particle_fraction": 0.0,
+    "maximum_axis_ratio": 1.0,
+    "coarse_represented_measure_fraction": 0.37573242,
+    "represented_measure_relative_error": 2.9702816825596868e-8,
+    "pre_restriction_lit_pixels": 26880,
+    "minimum_restriction_transition_lit_pixels": 26905,
+    "minimum_transition_support_fraction": 1.00093006,
+    "pre_fix_minimum_transition_support_fraction": 0.7863069
+  },
+  "execution": {
+    "quality_precompute_ms": 97294.0,
+    "topology_precompute_ms": 87051.0,
+    "steady_rollout_and_persistent_restriction": "device-resident",
+    "scheduled_partition_selection_and_state_rebuild": "host-mediated",
+    "validation_trajectories": "serialized",
+    "stable_material_cell_order": "enabled until the final topology decision",
+    "steady_viewer_cadence": {
+      "visible_rows": 3070,
+      "dynamics_rows": 3925,
+      "adaptive_ms_per_step": 0.639,
+      "adaptive_particle_steps_per_second": 6140000.0,
+      "restriction_and_export_ms_per_step": 0.103,
+      "regular_4096_ms_per_step": 0.659,
+      "regular_4096_particle_steps_per_second": 6210000.0,
+      "adaptive_to_regular_wall_ratio": 0.969,
+      "end_to_end_ms_per_step_including_15_host_topology_events": 10.671,
+      "topology_event_total_ms": 2430.9
+    },
+    "exact_eight_stage_control": {
+      "end_to_end_ms_per_step": 17.327,
+      "topology_event_total_ms": 4100.6
+    },
+    "four_stage_speedup": {
+      "end_to_end_percent": 38.4,
+      "topology_event_percent": 40.7
+    }
+  },
+  "promotion": {
+    "gates_passed": true,
+    "gate_failures": [],
+    "render_decoder": "isotropic-material-gaussian",
+    "covariance_decoder_control": "regressed quality",
+    "nested_identity_stable_schedule_control": "failed worst-seed parity gates"
+  }
+}

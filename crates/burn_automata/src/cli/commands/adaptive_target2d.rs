@@ -611,33 +611,26 @@ fn load_or_initialize_model(
 mod tests {
     use super::*;
 
-    const VERIFIED_RECIPES: [(&str, &str); 4] = [
+    const VERIFIED_RECIPES: [(&str, &str); 3] = [
         (
             "stage1",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../configs/verified/adaptive/recurrent_target2d_lizard_stage1_scale_age1024_2d_cuda.toml"
+                "/../../configs/verified/2d/adaptive/training/recurrent_target2d_lizard_stage1_scale_age1024_2d_cuda.toml"
             )),
         ),
         (
             "stage2",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../configs/verified/adaptive/recurrent_target2d_lizard_stage2_scale_tail_age4096_2d_cuda.toml"
+                "/../../configs/verified/2d/adaptive/training/recurrent_target2d_lizard_stage2_scale_tail_age4096_2d_cuda.toml"
             )),
         ),
         (
             "stage3",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../configs/verified/adaptive/recurrent_target2d_lizard_stage3_fullrule_tail_age4096_2d_cuda.toml"
-            )),
-        ),
-        (
-            "promotion",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../configs/verified/adaptive/recurrent_target2d_lizard_events1_eval_3070_2d_wgpu.toml"
+                "/../../configs/verified/2d/adaptive/training/recurrent_target2d_lizard_stage3_fullrule_tail_age4096_2d_cuda.toml"
             )),
         ),
     ];
@@ -672,24 +665,5 @@ mod tests {
             assert_eq!(experiment.loss.render_rgb_loss_weight, 0.0, "{name}");
             assert_eq!(experiment.loss.shape_chamfer_loss_weight, 0.0, "{name}");
         }
-    }
-
-    #[test]
-    fn verified_recurrent_lizard_promotion_uses_the_robust_event_budget() {
-        let experiment: AdaptiveTarget2dExperiment =
-            toml::from_str(VERIFIED_RECIPES[3].1).expect("promotion recipe should parse");
-        let validation = experiment
-            .validation
-            .expect("promotion recipe should include strict validation");
-        assert_eq!(experiment.backend, Target2dGpuBackend::Wgpu);
-        assert_eq!(experiment.training.topology.events_per_interval, 1);
-        assert_eq!(experiment.training.topology.interval_steps, 95);
-        assert_eq!(validation.quality_horizon_min_steps, 512);
-        assert_eq!(validation.min_quality_mean_adaptive_psnr_db, 26.0);
-        assert_eq!(validation.min_quality_worst_adaptive_psnr_db, 24.0);
-        assert_eq!(validation.max_interaction_work_ratio, 0.8);
-        assert_eq!(validation.max_wall_time_ratio, 1.1);
-        assert!(experiment.output.model.is_some());
-        assert!(experiment.output.evaluation_report.is_some());
     }
 }

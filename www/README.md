@@ -2,12 +2,12 @@
 
 The generated Bevy/WebGPU application is hosted directly from this directory.
 
-Run `scripts/build_wasm.sh` to package the viewer and isolated Burn training
+Run `scripts/web/build_wasm.sh` to package the viewer and isolated Burn training
 worker into ignored `pkg/` directories. The Pages workflow downloads the
 versioned model bundle, verifies every asset digest, builds both Wasm modules,
 and deploys this directory.
 
-`scripts/validate_web_runtime.mjs --all` is the hardware runtime gate. It opens
+`scripts/web/validate_web_runtime.mjs --all` is the hardware runtime gate. It opens
 the Bevy viewer in Chrome, exercises image selection, the Train/Stop UI,
 conditioned DINO/HyperNPA inference, and bounded fixed and adaptive Target2D
 WGPU jobs in the dedicated worker. Browser training uses the same trainer and

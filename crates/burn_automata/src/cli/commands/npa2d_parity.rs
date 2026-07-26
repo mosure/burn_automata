@@ -192,7 +192,7 @@ pub(crate) fn run_validate_npa_2d_parity(
     let fixture = fixture_report(&cfg.upstream.fixture, cfg.upstream.require_fixture)?;
     if cfg.upstream.require_fixture && !fixture.exists {
         failures.push(format!(
-            "required upstream fixture is missing: {}; run scripts/fetch_selforg_npa.sh then scripts/export_selforg_npa_fixture.py",
+            "required upstream fixture is missing: {}; run scripts/reference/selforg/fetch_selforg_npa.sh then scripts/reference/selforg/export_selforg_npa_fixture.py",
             cfg.upstream.fixture.display()
         ));
         let report = Npa2dParityReport {
