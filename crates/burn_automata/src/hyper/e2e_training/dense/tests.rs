@@ -4066,8 +4066,8 @@ fn direct_particle_pool_restores_unhealthy_trajectory_rows() {
         .unwrap();
 
     assert_eq!(
-        unhealthy.into_data().to_vec::<u32>().unwrap(),
-        vec![0, 1]
+        unhealthy.float().into_data().to_vec::<f32>().unwrap(),
+        vec![0.0, 1.0]
     );
     let restored_x = tensor3_vec(restored_x.inner()).unwrap();
     let restored_s = tensor3_vec(restored_s.inner()).unwrap();

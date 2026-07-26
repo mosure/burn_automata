@@ -19,7 +19,12 @@ jobs:
       - run: cargo check -p burn_automata --examples --benches
       - run: cargo check -p burn_automata --no-default-features --features backend_wgpu
       - run: cargo check -p burn_automata --no-default-features --features gpu_wgpu
-      - run: cargo test -p burn_automata_kernels -p burn_automata -p bevy_burn
+      - run: cargo test -p burn_automata_kernels -p bevy_burn
+      - name: Test portable Burn core
+        run: cargo test -p burn_automata --lib --no-default-features --features "backend_ndarray cli import"
+      - name: Test portable integration surface
+        # Catalog growth gates require local, gitignored 3D model artifacts.
+        run: cargo test -p burn_automata --test core --no-default-features --features "backend_ndarray cli import" -- --skip catalog_growth::
       - run: cargo test -p burn_automata --test gpu_wgpu --no-default-features --features gpu_wgpu
       - run: cargo test -p bevy_automata --no-default-features --features "splatting gpu_wgpu" --test gaussian_gpu_link
       - run: cargo check -p bevy_automata --no-default-features --features viewer
