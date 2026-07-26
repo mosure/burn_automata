@@ -1,8 +1,13 @@
 use super::*;
 
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
+use burn_automata::adaptive_isotropic_gaussian_geometry;
 use burn_automata::{
     AdaptiveNpaModel, AdaptiveParticleSet, AdaptiveStepMetrics, AdaptiveTrainingStage,
-    adaptive_isotropic_gaussian_geometry, load_adaptive_model, unit_ball_measure,
+    load_adaptive_model, unit_ball_measure,
 };
 #[cfg(not(all(feature = "splatting", feature = "gpu_wgpu")))]
 use burn_automata::{AdaptiveRolloutConfig, advance_adaptive_rollout};
@@ -15,6 +20,7 @@ pub struct AdaptiveViewerState {
     pub last_metrics: Option<AdaptiveStepMetrics>,
 }
 
+#[cfg(feature = "hyper_dino")]
 pub(super) fn apply_adaptive_model_snapshot(
     runtime: &mut AutomataRuntime,
     settings: &AutomataSettings,
@@ -268,7 +274,10 @@ pub(super) fn sync_adaptive_particles_to_gaussian_asset(
 #[cfg(any(not(feature = "splatting"), feature = "gpu_wgpu"))]
 pub(super) fn sync_adaptive_particles_to_gaussian_asset() {}
 
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn particle_gaussian(
     position: [f32; 4],
@@ -312,7 +321,10 @@ pub(super) fn particle_gaussian(
 /// allowed to interpolate across a topology event, with opacity preserving
 /// measure during that transition. Covariance is intentionally not decoded:
 /// one visible adaptive particle remains one isotropic render primitive.
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) struct AdaptiveGaussianMaterial {
@@ -321,7 +333,10 @@ pub(super) struct AdaptiveGaussianMaterial {
     pub display_scale_per_footprint: f32,
 }
 
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn adaptive_particle_gaussian(
     position: [f32; 4],
@@ -347,7 +362,10 @@ pub(super) fn adaptive_particle_gaussian(
     gaussian
 }
 
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn adaptive_display_scale_per_footprint(model: &AdaptiveNpaModel) -> f32 {
     burn_automata::adaptive_display_scale_per_footprint(model)

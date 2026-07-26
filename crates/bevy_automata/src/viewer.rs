@@ -42,7 +42,10 @@ use bevy::render::{
 use bevy::window::PrimaryWindow;
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use bevy_gaussian_splatting::PlanarStorageBindGroup;
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 use bevy_gaussian_splatting::SphericalHarmonicCoefficients;
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use bevy_gaussian_splatting::gaussian::formats::planar_3d::PlanarStorageGaussian3d;
@@ -97,7 +100,10 @@ use ui::*;
 
 #[cfg(feature = "splatting")]
 use catalog::AUTOMATA_MIN_VIEWPORT_WIDTH;
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 use catalog::GAUSSIAN_SH_C0;
 #[cfg(feature = "splatting")]
 use catalog::SORTED_ENTRY_MIN_CAPACITY;

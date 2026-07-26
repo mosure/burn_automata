@@ -184,6 +184,7 @@ impl AutomataPerformanceTelemetry {
             .unwrap_or_default()
     }
 
+    #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
     pub(in crate::viewer) fn publish(&self, snapshot: AutomataPerformanceSnapshot) {
         if let Ok(mut current) = self.0.write() {
             *current = snapshot;

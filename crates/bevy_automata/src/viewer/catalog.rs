@@ -18,7 +18,10 @@ pub(super) const CATALOG_3D_GROWTH_SEED: u64 = 0x0051_a73d;
 pub(super) const AUTOMATA_UI_PANEL_WIDTH: f32 = 540.0;
 #[cfg(feature = "splatting")]
 pub(super) const AUTOMATA_MIN_VIEWPORT_WIDTH: u32 = 256;
-#[cfg(feature = "splatting")]
+#[cfg(all(
+    feature = "splatting",
+    any(not(feature = "gpu_wgpu"), feature = "headless", test)
+))]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) const GAUSSIAN_SH_C0: f32 = 0.282_094_8;
 #[cfg(feature = "splatting")]
