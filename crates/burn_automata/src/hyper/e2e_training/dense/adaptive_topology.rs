@@ -152,13 +152,69 @@ impl BurnAdaptiveTopology {
             && completed_steps.is_multiple_of(self.interval_steps)
     }
 
-    fn should_apply_between(&self, before: usize, after: usize) -> bool {
-        if !self.enabled || after <= before {
-            return false;
+    fn next_event_after(&self, before: usize) -> Option<usize> {
+        if !self.enabled {
+            return None;
         }
         let lower = before.saturating_add(1).max(self.start_step).max(1);
-        let next = lower.div_ceil(self.interval_steps) * self.interval_steps;
-        next <= after && (self.end_step == 0 || next <= self.end_step)
+        let next = lower
+            .div_ceil(self.interval_steps)
+            .saturating_mul(self.interval_steps);
+        (self.end_step == 0 || next <= self.end_step).then_some(next)
+    }
+
+    fn should_apply_between(&self, before: usize, after: usize) -> bool {
+        after > before
+            && self
+                .next_event_after(before)
+                .is_some_and(|event| event <= after)
+    }
+
+    /// Caps a rollout chunk at the earliest scheduled event in any batch row.
+    ///
+    /// Persistent-pool rows have different ages. Without this split, applying
+    /// an event after a fixed TBPTT chunk delays it by up to `chunk_steps - 1`
+    /// and trains dynamics that differ from exact-boundary inference.
+    pub(super) fn steps_until_next_event(&self, ages: &[usize], max_steps: usize) -> usize {
+        ages.iter()
+            .filter_map(|age| {
+                self.next_event_after(*age)
+                    .map(|event| event.saturating_sub(*age))
+            })
+            .filter(|steps| *steps > 0)
+            .fold(max_steps, usize::min)
+    }
+
+    pub(super) fn scheduled_event_delay_steps(
+        &self,
+        before: &[usize],
+        after: &[usize],
+    ) -> Vec<Option<usize>> {
+        debug_assert_eq!(before.len(), after.len());
+        before
+            .iter()
+            .copied()
+            .zip(after.iter().copied())
+            .map(|(before, after)| {
+                self.next_event_after(before)
+                    .filter(|event| *event <= after)
+                    .map(|event| after - event)
+            })
+            .collect()
+    }
+
+    pub(super) fn scheduled_event_rows(
+        &self,
+        before: &[usize],
+        after: &[usize],
+    ) -> Vec<bool> {
+        debug_assert_eq!(before.len(), after.len());
+        before
+            .iter()
+            .copied()
+            .zip(after.iter().copied())
+            .map(|(before, after)| self.should_apply_between(before, after))
+            .collect()
     }
 
     pub(super) fn apply_scheduled(
@@ -172,11 +228,10 @@ impl BurnAdaptiveTopology {
         let batch_size = positions.shape().dims::<3>()[0];
         debug_assert_eq!(before.len(), batch_size);
         debug_assert_eq!(after.len(), batch_size);
-        let gates = before
-            .iter()
-            .copied()
-            .zip(after.iter().copied())
-            .map(|(before, after)| f32::from(self.should_apply_between(before, after)))
+        let gates = self
+            .scheduled_event_rows(before, after)
+            .into_iter()
+            .map(f32::from)
             .collect::<Vec<_>>();
         let active_batches = gates.iter().filter(|gate| **gate > 0.0).count();
         if active_batches == 0 {

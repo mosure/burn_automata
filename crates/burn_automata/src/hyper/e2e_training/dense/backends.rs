@@ -12,9 +12,10 @@ pub(crate) fn train_adaptive_target2d_burn_wgpu(
     plan: Target2dOracleTrainPlan,
     adaptive: AdaptiveTarget2dBurnConfig,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     super::wgpu_imp::adaptive_training::train_adaptive_target2d_burn_dense(
-        model, example, plan, adaptive, checkpoint,
+        model, example, plan, adaptive, checkpoint, observer,
     )
 }
 
@@ -25,6 +26,7 @@ pub(crate) fn train_adaptive_target2d_burn_wgpu(
     _plan: Target2dOracleTrainPlan,
     _adaptive: AdaptiveTarget2dBurnConfig,
     _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    _observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(
         std::io::Error::other("adaptive Target2D training requires the backend_wgpu feature")
@@ -39,9 +41,10 @@ pub(crate) fn train_adaptive_target2d_burn_cuda(
     plan: Target2dOracleTrainPlan,
     adaptive: AdaptiveTarget2dBurnConfig,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     super::cuda_imp::adaptive_training::train_adaptive_target2d_burn_dense(
-        model, example, plan, adaptive, checkpoint,
+        model, example, plan, adaptive, checkpoint, observer,
     )
 }
 
@@ -52,6 +55,7 @@ pub(crate) fn train_adaptive_target2d_burn_cuda(
     _plan: Target2dOracleTrainPlan,
     _adaptive: AdaptiveTarget2dBurnConfig,
     _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    _observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(
         std::io::Error::other("adaptive Target2D training requires the backend_cuda feature")
@@ -160,8 +164,11 @@ pub(crate) fn train_target2d_oracle_burn_wgpu(
     example: &DirectBasisTrainingExample,
     plan: Target2dOracleTrainPlan,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::wgpu_imp::entrypoints::train_target2d_oracle_burn_dense(model, example, plan, checkpoint)
+    super::wgpu_imp::entrypoints::train_target2d_oracle_burn_dense(
+        model, example, plan, checkpoint, observer,
+    )
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
@@ -170,6 +177,7 @@ pub(crate) fn train_target2d_oracle_burn_wgpu(
     _example: &DirectBasisTrainingExample,
     _plan: Target2dOracleTrainPlan,
     _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    _observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/WGPU target2d oracle training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
@@ -272,8 +280,11 @@ pub(crate) fn train_target2d_oracle_burn_cuda(
     example: &DirectBasisTrainingExample,
     plan: Target2dOracleTrainPlan,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::cuda_imp::entrypoints::train_target2d_oracle_burn_dense(model, example, plan, checkpoint)
+    super::cuda_imp::entrypoints::train_target2d_oracle_burn_dense(
+        model, example, plan, checkpoint, observer,
+    )
 }
 
 #[cfg(not(feature = "backend_cuda"))]
@@ -282,6 +293,7 @@ pub(crate) fn train_target2d_oracle_burn_cuda(
     _example: &DirectBasisTrainingExample,
     _plan: Target2dOracleTrainPlan,
     _checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    _observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
         "Burn/CUDA target2d oracle training requires the backend_cuda feature; rebuild with --features cli,backend_cuda",

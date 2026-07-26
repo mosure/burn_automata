@@ -2848,7 +2848,8 @@ use super::*;
             normalize: bool,
             collect_metrics: bool,
         ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
-            self.apply_adamw_masked(grads, state, cfg, normalize, collect_metrics, false)
+            let tensors = self.take_gradients(grads);
+            self.apply_adamw_gradients(tensors, state, cfg, normalize, collect_metrics)
         }
 
         pub(super) fn apply_adamw_last_input_column(
@@ -2864,20 +2865,21 @@ use super::*;
                     "last-input-column optimization requires zero weight decay".to_owned(),
                 ));
             }
-            self.apply_adamw_masked(grads, state, cfg, normalize, collect_metrics, true)
+            let tensors = self.take_gradients(grads);
+            self.apply_adamw_last_input_column_gradients(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+            )
         }
 
-        #[allow(clippy::too_many_arguments)]
-        fn apply_adamw_masked(
-            &mut self,
+        pub(super) fn take_gradients(
+            &self,
             grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
-            state: &mut BurnBaseBatchAdamWState,
-            cfg: AdamWConfig,
-            normalize: bool,
-            collect_metrics: bool,
-            last_input_column_only: bool,
-        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
-            let mut tensors = vec![
+        ) -> Vec<Tensor3Inner> {
+            vec![
                 self.w1
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.w1.clone().inner().zeros_like()),
@@ -2890,7 +2892,66 @@ use super::*;
                 self.b2
                     .grad_remove(grads)
                     .unwrap_or_else(|| self.b2.clone().inner().zeros_like()),
-            ];
+            ]
+        }
+
+        pub(super) fn apply_adamw_gradients(
+            &mut self,
+            tensors: Vec<Tensor3Inner>,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            self.apply_adamw_masked_gradients(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+                false,
+            )
+        }
+
+        pub(super) fn apply_adamw_last_input_column_gradients(
+            &mut self,
+            tensors: Vec<Tensor3Inner>,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            if cfg.weight_decay != 0.0 {
+                return Err(AutomataError::InvalidArgument(
+                    "last-input-column optimization requires zero weight decay".to_owned(),
+                ));
+            }
+            self.apply_adamw_masked_gradients(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+                true,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn apply_adamw_masked_gradients(
+            &mut self,
+            mut tensors: Vec<Tensor3Inner>,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+            last_input_column_only: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            if tensors.len() != 4 {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "NPA model batch expected 4 gradient tensors, got {}",
+                    tensors.len()
+                )));
+            }
             if last_input_column_only {
                 tensors[0] = retain_last_model_batch_input_column(tensors[0].clone());
                 for tensor in &mut tensors[1..] {

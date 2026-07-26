@@ -63,6 +63,52 @@ pub fn load_target_image_2d_upstream(
     )
 }
 
+/// Decode an in-memory image with the same extraction and adaptive-sizing
+/// contract as [`load_target_image_2d_upstream`].
+pub fn decode_target_image_2d_upstream(
+    bytes: &[u8],
+    threshold: f32,
+    target_points: usize,
+    image_size: Option<usize>,
+) -> AutomataResult<TargetImage2d> {
+    if !threshold.is_finite() || threshold < 0.0 {
+        return Err(AutomataError::InvalidArgument(
+            "target threshold must be finite and non-negative".to_string(),
+        ));
+    }
+    if target_points == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "target points must be greater than zero".to_string(),
+        ));
+    }
+    if image_size == Some(0) {
+        return Err(AutomataError::InvalidArgument(
+            "target image size must be greater than zero".to_string(),
+        ));
+    }
+    let image = image::load_from_memory(bytes).map_err(|error| {
+        AutomataError::InvalidFormat(format!("failed to decode target image bytes: {error}"))
+    })?;
+    let max_size = image_size.unwrap_or_else(|| {
+        upstream_adaptive_target_image_size_for_image(&image, threshold, target_points)
+    });
+    let rgba = rgba_thumbnail_upstream(&image, max_size)?;
+    let values = rgba
+        .as_raw()
+        .iter()
+        .map(|value| *value as f32 / 255.0)
+        .collect::<Vec<_>>();
+    TargetImage2d::from_rgba_pixels(
+        rgba.width() as usize,
+        rgba.height() as usize,
+        &values,
+        TargetImage2dExtractConfig {
+            threshold,
+            ..TargetImage2dExtractConfig::default()
+        },
+    )
+}
+
 pub fn upstream_adaptive_target_image_size(
     path: &Path,
     threshold: f32,
@@ -84,6 +130,23 @@ pub fn upstream_adaptive_target_image_size(
     Ok(size)
 }
 
+fn upstream_adaptive_target_image_size_for_image(
+    image: &image::DynamicImage,
+    threshold: f32,
+    target_points: usize,
+) -> usize {
+    let mut size = 128usize;
+    for _ in 0..5 {
+        let thumbnail = rgba_thumbnail_upstream(image, size)
+            .expect("adaptive target image size always requests a positive thumbnail");
+        let count = foreground_alpha_count_upstream(&thumbnail, threshold).max(1);
+        size = ((target_points as f32 / count as f32).sqrt() * size as f32)
+            .round()
+            .clamp(1.0, 2048.0) as usize;
+    }
+    size
+}
+
 pub fn load_rgba_thumbnail_upstream(
     path: &Path,
     max_size: usize,
@@ -99,6 +162,18 @@ pub fn load_rgba_thumbnail_upstream(
             path.display()
         ))
     })?;
+    rgba_thumbnail_upstream(&image, max_size)
+}
+
+fn rgba_thumbnail_upstream(
+    image: &image::DynamicImage,
+    max_size: usize,
+) -> AutomataResult<image::RgbaImage> {
+    if max_size == 0 {
+        return Err(AutomataError::InvalidArgument(
+            "target thumbnail size must be greater than zero".to_string(),
+        ));
+    }
     if image.width() <= max_size as u32 && image.height() <= max_size as u32 {
         return Ok(image.to_rgba8());
     }
@@ -497,6 +572,46 @@ pub struct Target2dGpuTrainingReport {
     pub best_fresh_seed_render_rgb_psnr_step: usize,
 }
 
+/// Bounded training update suitable for live monitoring.
+///
+/// The model is copied from the backend only when the observer's publication
+/// cadence is due. Optimizer state, targets, and persistent particle pools
+/// remain device-resident between updates.
+#[derive(Clone, Debug)]
+pub struct Target2dGpuTrainingProgress {
+    pub step: usize,
+    pub total_steps: usize,
+    pub loss: f32,
+    pub eval_loss: Option<Target2dGpuLossSummary>,
+    pub render_rgb_psnr_db: Option<f32>,
+    pub base_grad_norm: f32,
+    pub base_grad_scale: f32,
+    pub particle_steps_per_sec: f64,
+    pub elapsed_ms: f64,
+    pub model: NpaModel,
+}
+
+/// Receives throttled model snapshots from canonical Burn Target2D training.
+///
+/// `should_stop` is checked between optimizer steps and must remain cheap.
+/// Snapshot cadence uses both limits, preventing frequent readbacks when either
+/// steps are fast or a single optimizer step is expensive.
+pub trait Target2dGpuTrainingObserver: Send {
+    fn should_stop(&self) -> bool {
+        false
+    }
+
+    fn snapshot_interval_steps(&self) -> usize {
+        1
+    }
+
+    fn snapshot_interval_duration(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn on_progress(&mut self, progress: Target2dGpuTrainingProgress);
+}
+
 const TARGET2D_GPU_MAX_TRAIN_PARTICLES: usize = 4096;
 const TARGET2D_GPU_QUALITY_PARTICLE_THRESHOLD: usize = 512;
 const TARGET2D_GPU_QUALITY_TBPTT_CHUNK_STEPS: usize = 32;
@@ -514,6 +629,53 @@ pub fn train_target_2d_gpu(
     training_config: Target2dTrainingConfig,
     loss_config: Target2dLossConfig,
     checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
+) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    train_target_2d_gpu_impl(
+        backend,
+        model,
+        hashgrid,
+        target,
+        training_config,
+        loss_config,
+        checkpoint_config,
+        None,
+    )
+}
+
+/// Canonical Burn Target2D training with cancellable, throttled model updates.
+#[allow(clippy::too_many_arguments)]
+pub fn train_target_2d_gpu_with_observer(
+    backend: Target2dGpuBackend,
+    model: &mut NpaModel,
+    hashgrid: &HashGridConfig,
+    target: TargetImage2d,
+    training_config: Target2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+    checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
+    observer: &mut dyn Target2dGpuTrainingObserver,
+) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    train_target_2d_gpu_impl(
+        backend,
+        model,
+        hashgrid,
+        target,
+        training_config,
+        loss_config,
+        checkpoint_config,
+        Some(observer),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_target_2d_gpu_impl(
+    backend: Target2dGpuBackend,
+    model: &mut NpaModel,
+    hashgrid: &HashGridConfig,
+    target: TargetImage2d,
+    training_config: Target2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+    checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
+    observer: Option<&mut dyn Target2dGpuTrainingObserver>,
 ) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
     use crate::hyper::e2e::{PerceptionRolloutBackend, Target2dLossBackend};
     use crate::hyper::e2e_training::{
@@ -646,12 +808,14 @@ pub fn train_target_2d_gpu(
             &training_example,
             plan,
             checkpoint.as_ref(),
+            observer,
         )?,
         Target2dGpuBackend::Cuda => dense::train_target2d_oracle_burn_cuda(
             model,
             &training_example,
             plan,
             checkpoint.as_ref(),
+            observer,
         )?,
     };
     let promoted_best_checkpoint = if let Some(config) = checkpoint_config
@@ -3822,6 +3986,81 @@ mod tests {
         assert_eq!(adaptive_size, 128);
         assert_eq!([target.source_width, target.source_height], [120, 120]);
         assert_eq!(target.point_count(), 4103);
+    }
+
+    #[test]
+    fn in_memory_upstream_loader_matches_the_path_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/reference_targets/lizard_upstream_120.png");
+        let bytes = std::fs::read(&path).unwrap();
+        let from_path = load_target_image_2d_upstream(&path, 0.05, 4096, None).unwrap();
+        let from_bytes = decode_target_image_2d_upstream(&bytes, 0.05, 4096, None).unwrap();
+
+        assert_eq!(from_bytes.source_width, from_path.source_width);
+        assert_eq!(from_bytes.source_height, from_path.source_height);
+        assert_eq!(from_bytes.positions, from_path.positions);
+        assert_eq!(from_bytes.colors, from_path.colors);
+        assert_eq!(from_bytes.pixel_size, from_path.pixel_size);
+    }
+
+    #[cfg(feature = "backend_wgpu")]
+    #[test]
+    fn gpu_training_observer_publishes_and_stops_between_optimizer_steps() {
+        struct StopAfterFirst {
+            updates: Vec<Target2dGpuTrainingProgress>,
+            stop: bool,
+        }
+
+        impl Target2dGpuTrainingObserver for StopAfterFirst {
+            fn should_stop(&self) -> bool {
+                self.stop
+            }
+
+            fn snapshot_interval_duration(&self) -> Duration {
+                Duration::from_secs(3_600)
+            }
+
+            fn on_progress(&mut self, progress: Target2dGpuTrainingProgress) {
+                self.updates.push(progress);
+                self.stop = true;
+            }
+        }
+
+        let mut model = upstream_growing_2d_model(17);
+        let mut observer = StopAfterFirst {
+            updates: Vec::new(),
+            stop: false,
+        };
+        let report = train_target_2d_gpu_with_observer(
+            Target2dGpuBackend::Wgpu,
+            &mut model,
+            &upstream_growing_2d_hashgrid(),
+            single_point_target(),
+            Target2dTrainingConfig {
+                epochs: 1,
+                repetitions: 1,
+                report_interval: 1,
+                batch_size: 1,
+                pool_size: 1,
+                particle_count: 8,
+                step_min: 1,
+                step_max: 1,
+                tbptt_chunk_steps: 1,
+                inject_seed_interval: 1,
+                scheduler_milestones: Vec::new(),
+                ..Target2dTrainingConfig::default()
+            },
+            finite_difference_loss_config(),
+            None,
+            &mut observer,
+        )
+        .unwrap();
+
+        assert_eq!(observer.updates.len(), 1);
+        assert_eq!(observer.updates[0].step, 1);
+        assert_eq!(observer.updates[0].total_steps, 2);
+        assert_eq!(report.metrics["steps_completed"], 1);
+        assert_eq!(report.metrics["stopped_early"], true);
     }
 
     #[test]

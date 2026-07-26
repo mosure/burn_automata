@@ -137,6 +137,7 @@ impl BurnAdaptiveMaterial {
 }
 
 struct AdaptiveTrainStepStats {
+    metrics_collected: bool,
     loss: f32,
     optimization_loss: f32,
     max_trajectory_loss: f32,
@@ -144,10 +145,18 @@ struct AdaptiveTrainStepStats {
     grad_scale: f32,
     backward_scale: f32,
     topology_events: usize,
+    event_exposed_rows: usize,
+    unique_event_exposed_rows: usize,
+    event_quota_shortfall_rows: usize,
+    max_event_delay_steps: usize,
+    post_event_row_chunks: usize,
+    post_event_mean_loss: Option<f32>,
+    recovery_extension_steps: usize,
     sampled_age_min: usize,
     sampled_age_max: usize,
     sampled_age_mean: f64,
     particle_steps_per_sec: f64,
+    particle_steps: f64,
     elapsed_ms: f64,
 }
 
@@ -160,7 +169,11 @@ struct BurnAdaptiveEvalSeed {
 
 struct AdaptiveFreshSeedEval {
     mean_loss: f32,
+    mean_render_rgb_mse: f32,
     selection_psnr_db: f32,
+    worst_psnr_drift_db: f32,
+    selection_score: f32,
+    horizon_mean_render_rgb_mse: Vec<f32>,
     horizon_mean_psnr_db: Vec<f32>,
     topology_events: usize,
 }
@@ -309,6 +322,7 @@ fn train_adaptive_step_tbptt(
     step_seed: u64,
     pool: &mut BurnDeviceParticlePool,
     replace_pool_seed: bool,
+    collect_metrics: bool,
     optimizer_config: AdamWConfig,
 ) -> Result<AdaptiveTrainStepStats, Box<dyn std::error::Error>> {
     let started = Instant::now();
@@ -316,6 +330,19 @@ fn train_adaptive_step_tbptt(
     let trajectories = config.example_batch_size.max(1);
     let indices = vec![0usize; trajectories];
     let mut rng = StdRng::seed_from_u64(step_seed ^ 0xada2_7a2d);
+    let chunk_steps = tbptt_chunk_steps(config);
+    let rollout_steps = sampled_training_rollout_steps(config, step_seed);
+    let event_preference = adaptive.event_training.enabled.then_some(
+        BurnPoolEventPreference {
+            start_step: adaptive.topology.start_step,
+            end_step: adaptive.topology.end_step,
+            interval_steps: adaptive.topology.interval_steps,
+            lookahead_steps: rollout_steps,
+            min_rows: adaptive
+                .event_training
+                .min_event_trajectories_per_batch,
+        },
+    );
     let pool_batch = pool.sample_batch_with_fresh_rows(
         &mut rng,
         trajectories,
@@ -325,6 +352,7 @@ fn train_adaptive_step_tbptt(
             max_age_steps: (adaptive.max_pool_age_steps > 0)
                 .then_some(adaptive.max_pool_age_steps),
             age_strata: adaptive.pool_age_strata,
+            event_preference,
         },
         config,
         device,
@@ -356,27 +384,45 @@ fn train_adaptive_step_tbptt(
     let sampled_age_mean = trajectory_ages.iter().copied().sum::<usize>() as f64
         / trajectory_ages.len().max(1) as f64;
     let mut displacement = Tensor::<BurnBackend, 1>::zeros([actual_trajectories], device);
-    let chunk_steps = tbptt_chunk_steps(config);
-    let rollout_steps = sampled_training_rollout_steps(config, step_seed);
     let mut remaining_steps = rollout_steps;
     let mut loss_sum = 0.0_f32;
     let mut optimization_loss_sum = 0.0_f32;
     let mut max_trajectory_loss = 0.0_f32;
     let mut loss_chunks = 0usize;
-    let mut grad_norm_sum = 0.0_f32;
-    let mut grad_scale_sum = 0.0_f32;
     let mut backward_scale_sum = 0.0_f32;
+    let mut accumulated_gradients = None::<Vec<Tensor3Inner>>;
+    let mut accumulated_gradient_chunks = 0usize;
     let mut particle_steps = 0.0_f64;
     let mut topology_events = 0usize;
+    let mut post_event_remaining = vec![0usize; actual_trajectories];
+    let mut pre_event_reference_loss =
+        Tensor::<BurnBackend, 1>::zeros([actual_trajectories], device);
+    let mut event_exposed = vec![false; actual_trajectories];
+    let mut event_exposed_rows = 0usize;
+    let mut max_event_delay_steps = 0usize;
+    let mut post_event_row_chunks = 0usize;
+    let mut post_event_loss_sum = 0.0_f64;
+    let mut post_event_loss_count = 0usize;
+    let mut recovery_extension_budget = adaptive
+        .event_training
+        .recovery_extension_budget();
+    let mut recovery_extension_steps = 0usize;
 
     while remaining_steps > 0 {
-        let final_chunk = remaining_steps <= chunk_steps;
-        let steps = tbptt_next_chunk_steps(
+        let post_event_rows = post_event_remaining
+            .iter()
+            .map(|remaining| *remaining > 0)
+            .collect::<Vec<_>>();
+        let active_post_event_rows = post_event_rows.iter().filter(|active| **active).count();
+        let nominal_steps = tbptt_next_chunk_steps(
             remaining_steps,
             chunk_steps,
             config.loss_on_final_chunk_only,
         );
-        let optimize_chunk = !config.loss_on_final_chunk_only || final_chunk;
+        let steps = topology.steps_until_next_event(&trajectory_ages, nominal_steps);
+        let final_chunk = steps == remaining_steps;
+        let optimize_chunk =
+            active_post_event_rows > 0 || !config.loss_on_final_chunk_only || final_chunk;
         let (mut next_x, mut next_s, mut next_displacement, mut detail) = if optimize_chunk {
             rollout_adaptive_oracle_model_batch_chunk(
                 params,
@@ -463,6 +509,45 @@ fn train_adaptive_step_tbptt(
             .iter()
             .map(|age| age.saturating_add(steps))
             .collect::<Vec<_>>();
+        let scheduled_event_rows =
+            topology.scheduled_event_rows(&trajectory_ages, &next_trajectory_ages);
+        let event_reference_loss = (adaptive
+            .event_training
+            .post_event_degradation_weight
+            > 0.0
+            && scheduled_event_rows
+                .iter()
+                .any(|scheduled| *scheduled))
+        .then(|| {
+                adaptive_target_splat_loss_batch_vector_base_only_selected(
+                    &detach3(next_x.clone()),
+                    &detach3(next_s.clone()),
+                    std::slice::from_ref(target),
+                    indices,
+                    config,
+                    represented_measure.clone(),
+                    pixel_size.clone(),
+                    output_scale.clone(),
+                    detach1(next_displacement.clone()),
+                )
+                .map(|loss| detach1(loss.total))
+            })
+            .transpose()?;
+        let event_delays =
+            topology.scheduled_event_delay_steps(&trajectory_ages, &next_trajectory_ages);
+        let chunk_max_event_delay = event_delays.iter().flatten().copied().max().unwrap_or(0);
+        debug_assert_eq!(
+            chunk_max_event_delay, 0,
+            "adaptive topology events must land on exact rollout boundaries"
+        );
+        max_event_delay_steps = max_event_delay_steps.max(chunk_max_event_delay);
+        // A recovery chunk that lands on the next topology boundary must be
+        // scored before that next detached exchange. The persistent state
+        // still receives the exchange below, but its loss should measure the
+        // differentiable dynamics between events rather than two stacked
+        // discontinuities.
+        let pre_topology_recovery_state =
+            (active_post_event_rows > 0).then(|| (next_x.clone(), next_s.clone()));
         let applied = topology.apply_scheduled(
             next_x,
             next_s,
@@ -473,11 +558,20 @@ fn train_adaptive_step_tbptt(
         next_x = applied.0;
         next_s = applied.1;
         topology_events += applied.2;
+        for (row, scheduled) in scheduled_event_rows.iter().copied().enumerate() {
+            if scheduled {
+                event_exposed_rows += 1;
+                event_exposed[row] = true;
+            }
+        }
         trajectory_ages = next_trajectory_ages;
         if optimize_chunk {
+            let (loss_x, loss_s) = pre_topology_recovery_state
+                .as_ref()
+                .map_or((&next_x, &next_s), |(x, s)| (x, s));
             let loss = adaptive_target_splat_loss_batch_vector_base_only_selected(
-                &next_x,
-                &next_s,
+                loss_x,
+                loss_s,
                 std::slice::from_ref(target),
                 indices,
                 config,
@@ -486,59 +580,94 @@ fn train_adaptive_step_tbptt(
                 output_scale.clone(),
                 next_displacement.clone(),
             )?;
-            let loss_values = tensor1_vec(loss.total.clone().inner())?;
-            let finite_losses = loss_values
-                .iter()
-                .copied()
-                .filter(|value| value.is_finite())
-                .collect::<Vec<_>>();
-            let scalar = if finite_losses.is_empty() {
-                1.0e6
+            let event_loss_weight = if adaptive.event_training.enabled {
+                adaptive.event_training.post_event_loss_weight
             } else {
-                finite_losses.iter().sum::<f32>() / finite_losses.len() as f32
+                0.0
             };
-            let optimization_scalar = if adaptive.log1p_trajectory_loss {
-                if finite_losses.is_empty() {
-                    1.0e6_f32.ln_1p()
-                } else {
-                    finite_losses
-                        .iter()
-                        .map(|value| value.max(0.0).ln_1p())
-                        .sum::<f32>()
-                        / finite_losses.len() as f32
-                }
-            } else {
-                scalar
-            };
-            let tail_count = adaptive_trajectory_tail_count(
-                finite_losses.len(),
-                adaptive.trajectory_tail_fraction,
-            );
-            let optimization_scalar = if tail_count > 0 && adaptive.trajectory_tail_weight > 0.0 {
-                let mut ordered = finite_losses
-                    .iter()
-                    .map(|value| {
-                        if adaptive.log1p_trajectory_loss {
-                            value.max(0.0).ln_1p()
-                        } else {
-                            *value
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                ordered.sort_by(|lhs, rhs| rhs.total_cmp(lhs));
-                let tail_mean =
-                    ordered[..tail_count].iter().sum::<f32>() / tail_count as f32;
-                (optimization_scalar + adaptive.trajectory_tail_weight * tail_mean)
-                    / (1.0 + adaptive.trajectory_tail_weight)
-            } else {
-                optimization_scalar
-            };
-            max_trajectory_loss = max_trajectory_loss.max(
-                finite_losses
+            let mut scalar = 0.0_f32;
+            let mut optimization_scalar = 0.0_f32;
+            if collect_metrics {
+                let loss_values = tensor1_vec(loss.total.clone().inner())?;
+                let finite_losses = loss_values
                     .iter()
                     .copied()
-                    .fold(0.0_f32, f32::max),
-            );
+                    .filter(|value| value.is_finite())
+                    .collect::<Vec<_>>();
+                scalar = if finite_losses.is_empty() {
+                    1.0e6
+                } else {
+                    finite_losses.iter().sum::<f32>() / finite_losses.len() as f32
+                };
+                let finite_optimization_losses = loss_values
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(_, value)| value.is_finite())
+                    .map(|(row, value)| {
+                        let transformed = if adaptive.log1p_trajectory_loss {
+                            value.max(0.0).ln_1p()
+                        } else {
+                            value
+                        };
+                        (row, transformed)
+                    })
+                    .collect::<Vec<_>>();
+                let optimization_weight_sum = finite_optimization_losses
+                    .iter()
+                    .map(|(row, _)| {
+                        1.0 + event_loss_weight * f32::from(post_event_rows[*row])
+                    })
+                    .sum::<f32>();
+                optimization_scalar = if finite_optimization_losses.is_empty() {
+                    if adaptive.log1p_trajectory_loss {
+                        1.0e6_f32.ln_1p()
+                    } else {
+                        1.0e6
+                    }
+                } else {
+                    finite_optimization_losses
+                        .iter()
+                        .map(|(row, value)| {
+                            value * (1.0 + event_loss_weight * f32::from(post_event_rows[*row]))
+                        })
+                        .sum::<f32>()
+                        / optimization_weight_sum.max(f32::MIN_POSITIVE)
+                };
+                let tail_count = adaptive_trajectory_tail_count(
+                    finite_optimization_losses.len(),
+                    adaptive.trajectory_tail_fraction,
+                );
+                if tail_count > 0 && adaptive.trajectory_tail_weight > 0.0 {
+                    let mut ordered = finite_optimization_losses
+                        .iter()
+                        .map(|(_, value)| *value)
+                        .collect::<Vec<_>>();
+                    ordered.sort_by(|lhs, rhs| rhs.total_cmp(lhs));
+                    let tail_mean =
+                        ordered[..tail_count].iter().sum::<f32>() / tail_count as f32;
+                    optimization_scalar =
+                        (optimization_scalar + adaptive.trajectory_tail_weight * tail_mean)
+                            / (1.0 + adaptive.trajectory_tail_weight);
+                }
+                max_trajectory_loss = max_trajectory_loss.max(
+                    finite_losses
+                        .iter()
+                        .copied()
+                        .fold(0.0_f32, f32::max),
+                );
+                if active_post_event_rows > 0 {
+                    for (row, value) in loss_values.iter().copied().enumerate() {
+                        if post_event_rows[row] && value.is_finite() {
+                            post_event_loss_sum += f64::from(value);
+                            post_event_loss_count += 1;
+                        }
+                    }
+                }
+            }
+            if active_post_event_rows > 0 {
+                post_event_row_chunks += active_post_event_rows;
+            }
             // Per-parameter normalization makes the optimizer invariant to a
             // common positive gradient scale. Normalize the linear-adjoint
             // objective before recurrent backpropagation so a long Jacobian
@@ -560,65 +689,197 @@ fn train_adaptive_step_tbptt(
                 actual_trajectories,
                 adaptive.trajectory_tail_fraction,
             );
+            let base_objective = if event_loss_weight > 0.0 && active_post_event_rows > 0 {
+                let row_weights = post_event_rows
+                    .iter()
+                    .map(|active| 1.0 + event_loss_weight * f32::from(*active))
+                    .collect::<Vec<_>>();
+                let row_weight_sum = row_weights.iter().sum::<f32>();
+                let row_weights = Tensor::<BurnBackend, 1>::from_data(
+                    TensorData::new(row_weights, [actual_trajectories]),
+                    device,
+                );
+                optimization_total
+                    .clone()
+                    .mul(row_weights)
+                    .sum()
+                    .div_scalar(row_weight_sum.max(f32::MIN_POSITIVE))
+            } else {
+                optimization_total.clone().mean()
+            };
             let objective = if tail_count > 0 && adaptive.trajectory_tail_weight > 0.0 {
                 let tail_mean = optimization_total
                     .clone()
                     .topk_with_indices(tail_count, 0)
                     .0
                     .mean();
-                (optimization_total.mean()
-                    + tail_mean.mul_scalar(adaptive.trajectory_tail_weight))
+                (base_objective + tail_mean.mul_scalar(adaptive.trajectory_tail_weight))
                 .div_scalar(1.0 + adaptive.trajectory_tail_weight)
             } else {
-                optimization_total.mean()
+                base_objective
+            };
+            let objective = if active_post_event_rows > 0
+                && adaptive.event_training.post_event_degradation_weight > 0.0
+            {
+                let post_event_mask = Tensor::<BurnBackend, 1>::from_data(
+                    TensorData::new(
+                        post_event_rows.iter().copied().map(f32::from).collect(),
+                        [actual_trajectories],
+                    ),
+                    device,
+                );
+                let safe_reference = pre_event_reference_loss
+                    .clone()
+                    .mask_fill(
+                        pre_event_reference_loss
+                            .clone()
+                            .is_finite()
+                            .bool_not(),
+                        0.0,
+                    );
+                let optimization_reference = if adaptive.log1p_trajectory_loss {
+                    safe_reference.clamp_min(0.0).log1p()
+                } else {
+                    safe_reference
+                };
+                let degradation = (optimization_total - optimization_reference)
+                    .clamp_min(0.0)
+                    .mul(post_event_mask)
+                    .sum()
+                    .div_scalar(active_post_event_rows as f32);
+                objective
+                    + degradation
+                        .mul_scalar(adaptive.event_training.post_event_degradation_weight)
+            } else {
+                objective
             };
             let mut gradients = objective.mul_scalar(backward_scale).backward();
-            let (grad_norms, grad_scales) = if adaptive.optimize_material_scale_only {
-                params.apply_adamw_last_input_column(
-                    &mut gradients,
-                    optimizer,
-                    optimizer_config,
-                    config.per_parameter_grad_normalization,
-                    true,
-                )?
+            let chunk_gradients = params.take_gradients(&mut gradients);
+            if let Some(accumulated) = accumulated_gradients.as_mut() {
+                for (total, chunk) in accumulated.iter_mut().zip(chunk_gradients) {
+                    *total = total.clone() + chunk;
+                }
             } else {
-                params.apply_adamw(
-                    &mut gradients,
-                    optimizer,
-                    optimizer_config,
-                    config.per_parameter_grad_normalization,
-                    true,
-                )?
-            };
+                accumulated_gradients = Some(chunk_gradients);
+            }
+            accumulated_gradient_chunks += 1;
             loss_sum += scalar;
             optimization_loss_sum += optimization_scalar;
             loss_chunks += 1;
-            grad_norm_sum += grad_norms.first().copied().unwrap_or(0.0);
-            grad_scale_sum += grad_scales.first().copied().unwrap_or(1.0);
             backward_scale_sum += backward_scale;
+        }
+        if let Some(event_reference_loss) = event_reference_loss {
+            let event_mask = Tensor::<BurnBackend, 1>::from_data(
+                TensorData::new(
+                    scheduled_event_rows
+                        .iter()
+                        .copied()
+                        .map(f32::from)
+                        .collect(),
+                    [actual_trajectories],
+                ),
+                device,
+            );
+            pre_event_reference_loss = detach1(
+                pre_event_reference_loss
+                    .mul(event_mask.clone().neg().add_scalar(1.0))
+                    + event_reference_loss.mul(event_mask),
+            );
         }
         x = detach3(next_x);
         s = detach3(next_s);
         displacement = detach1(next_displacement);
         particle_steps += (actual_trajectories * material.active_particle_count * steps) as f64;
+        for remaining in &mut post_event_remaining {
+            *remaining = remaining.saturating_sub(steps);
+        }
         remaining_steps -= steps;
+        if adaptive.event_training.enabled {
+            for (row, scheduled) in scheduled_event_rows.iter().copied().enumerate() {
+                if scheduled {
+                    post_event_remaining[row] =
+                        adaptive.event_training.post_event_recovery_steps;
+                }
+            }
+            if scheduled_event_rows.iter().any(|scheduled| *scheduled) {
+                let required = adaptive
+                    .event_training
+                    .post_event_recovery_steps
+                    .saturating_sub(remaining_steps);
+                let extension = required.min(recovery_extension_budget);
+                remaining_steps = remaining_steps.saturating_add(extension);
+                recovery_extension_budget =
+                    recovery_extension_budget.saturating_sub(extension);
+                recovery_extension_steps =
+                    recovery_extension_steps.saturating_add(extension);
+            }
+        }
     }
 
+    let mut accumulated_gradients = accumulated_gradients.ok_or_else(|| {
+        AutomataError::InvalidArgument(
+            "adaptive Target2D produced no differentiable TBPTT objective".to_owned(),
+        )
+    })?;
+    let gradient_average = 1.0 / accumulated_gradient_chunks.max(1) as f32;
+    for gradient in &mut accumulated_gradients {
+        *gradient = gradient.clone().mul_scalar(gradient_average);
+    }
+    // Event boundaries may partition one sampled trajectory into many graph
+    // segments. Apply one update to keep optimizer cadence independent of pool
+    // ages, topology timing, and TBPTT partitioning.
+    let (grad_norms, grad_scales) = if adaptive.optimize_material_scale_only {
+        params.apply_adamw_last_input_column_gradients(
+            accumulated_gradients,
+            optimizer,
+            optimizer_config,
+            config.per_parameter_grad_normalization,
+            collect_metrics,
+        )?
+    } else {
+        params.apply_adamw_gradients(
+            accumulated_gradients,
+            optimizer,
+            optimizer_config,
+            config.per_parameter_grad_normalization,
+            collect_metrics,
+        )?
+    };
     pool.update_batch_with_ages(&pool_batch.pool_indices, &trajectory_ages, x, s)?;
     let elapsed = started.elapsed();
     let loss_chunks = loss_chunks.max(1);
+    let unique_event_exposed_rows = event_exposed.iter().filter(|exposed| **exposed).count();
+    let event_quota_shortfall_rows = if adaptive.event_training.enabled {
+        adaptive
+            .event_training
+            .min_event_trajectories_per_batch
+            .min(actual_trajectories)
+            .saturating_sub(unique_event_exposed_rows)
+    } else {
+        0
+    };
     Ok(AdaptiveTrainStepStats {
+        metrics_collected: collect_metrics,
         loss: loss_sum / loss_chunks as f32,
         optimization_loss: optimization_loss_sum / loss_chunks as f32,
         max_trajectory_loss,
-        grad_norm: grad_norm_sum / loss_chunks as f32,
-        grad_scale: grad_scale_sum / loss_chunks as f32,
+        grad_norm: grad_norms.first().copied().unwrap_or(0.0),
+        grad_scale: grad_scales.first().copied().unwrap_or(1.0),
         backward_scale: backward_scale_sum / loss_chunks as f32,
         topology_events,
+        event_exposed_rows,
+        unique_event_exposed_rows,
+        event_quota_shortfall_rows,
+        max_event_delay_steps,
+        post_event_row_chunks,
+        post_event_mean_loss: (post_event_loss_count > 0)
+            .then_some((post_event_loss_sum / post_event_loss_count as f64) as f32),
+        recovery_extension_steps,
         sampled_age_min,
         sampled_age_max,
         sampled_age_mean,
         particle_steps_per_sec: particle_steps / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
+        particle_steps,
         elapsed_ms: elapsed.as_secs_f64() * 1_000.0,
     })
 }
@@ -672,7 +933,12 @@ fn evaluate_adaptive_fresh_seed(
     let mut topology_events = 0usize;
     let mut total_loss = 0.0_f32;
     let mut loss_count = 0usize;
+    let mut total_render_rgb_mse = 0.0_f32;
+    let mut render_rgb_mse_count = 0usize;
     let mut selection_psnr_db = f32::INFINITY;
+    let mut horizon_seed_psnr_db = Vec::with_capacity(adaptive.checkpoint_horizons.len());
+    let mut horizon_mean_render_rgb_mse =
+        Vec::with_capacity(adaptive.checkpoint_horizons.len());
     let mut horizon_mean_psnr_db = Vec::with_capacity(adaptive.checkpoint_horizons.len());
     for horizon in adaptive.checkpoint_horizons.iter().copied() {
         while completed_steps < horizon {
@@ -757,6 +1023,10 @@ fn evaluate_adaptive_fresh_seed(
                 &dense_splat,
                 horizon,
             )?;
+            eprintln!(
+                "{LOG_BACKEND} adaptive-target2d primal-parity horizon={horizon} tiled_splat={:.8} dense_splat={:.8}",
+                splat_values[0], dense_splat[0],
+            );
         }
         total_loss += loss_values
             .iter()
@@ -783,6 +1053,13 @@ fn evaluate_adaptive_fresh_seed(
             .filter(|value| value.is_finite())
             .sum::<f32>()
             / finite_mse_count.max(1) as f32;
+        total_render_rgb_mse += mse_values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .sum::<f32>();
+        render_rgb_mse_count += finite_mse_count;
+        horizon_mean_render_rgb_mse.push(finite_mse_mean);
         let finite_loss_count = loss_values.iter().filter(|value| value.is_finite()).count();
         let finite_loss_mean = loss_values
             .iter()
@@ -790,8 +1067,18 @@ fn evaluate_adaptive_fresh_seed(
             .filter(|value| value.is_finite())
             .sum::<f32>()
             / finite_loss_count.max(1) as f32;
+        let finite_splat_count = splat_values
+            .iter()
+            .filter(|value| value.is_finite())
+            .count();
+        let finite_splat_mean = splat_values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .sum::<f32>()
+            / finite_splat_count.max(1) as f32;
         eprintln!(
-            "{LOG_BACKEND} adaptive-target2d eval horizon={horizon} loss_mean={finite_loss_mean:.8} render_rgb_mse_mean={finite_mse_mean:.8} finite_loss={finite_loss_count}/{batch_size} finite_mse={finite_mse_count}/{batch_size}"
+            "{LOG_BACKEND} adaptive-target2d eval horizon={horizon} loss_mean={finite_loss_mean:.8} splat_mean={finite_splat_mean:.8} render_rgb_mse_mean={finite_mse_mean:.8} finite_loss={finite_loss_count}/{batch_size} finite_splat={finite_splat_count}/{batch_size} finite_mse={finite_mse_count}/{batch_size}"
         );
         let psnr_values = mse_values
             .into_iter()
@@ -803,6 +1090,7 @@ fn evaluate_adaptive_fresh_seed(
                 }
             })
             .collect::<Vec<_>>();
+        horizon_seed_psnr_db.push(psnr_values.clone());
         selection_psnr_db = psnr_values
             .iter()
             .copied()
@@ -812,13 +1100,41 @@ fn evaluate_adaptive_fresh_seed(
                 / psnr_values.len().max(1) as f32,
         );
     }
+    let worst_psnr_drift_db = (0..batch_size)
+        .map(|seed_index| {
+            let values = horizon_seed_psnr_db
+                .iter()
+                .map(|horizon| horizon[seed_index])
+                .collect::<Vec<_>>();
+            if values.iter().any(|value| !value.is_finite()) {
+                f32::INFINITY
+            } else {
+                values.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                    - values.iter().copied().fold(f32::INFINITY, f32::min)
+            }
+        })
+        .fold(0.0_f32, f32::max);
+    let selection_score = if selection_psnr_db.is_finite() && worst_psnr_drift_db.is_finite() {
+        selection_psnr_db
+            - adaptive.event_training.checkpoint_drift_penalty_weight * worst_psnr_drift_db
+    } else {
+        f32::NEG_INFINITY
+    };
     Ok(AdaptiveFreshSeedEval {
         mean_loss: if loss_count == 0 {
             1.0e6
         } else {
             total_loss / loss_count as f32
         },
+        mean_render_rgb_mse: if render_rgb_mse_count == 0 {
+            1.0e6
+        } else {
+            total_render_rgb_mse / render_rgb_mse_count as f32
+        },
         selection_psnr_db,
+        worst_psnr_drift_db,
+        selection_score,
+        horizon_mean_render_rgb_mse,
         horizon_mean_psnr_db,
         topology_events,
     })
@@ -830,6 +1146,7 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
     plan: Target2dOracleTrainPlan,
     mut adaptive: AdaptiveTarget2dBurnConfig,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    mut observer: Option<&mut dyn Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     let config = plan.train;
     let total_steps = plan.total_steps();
@@ -964,20 +1281,39 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
         &eval_seed,
     )?;
     let mut best_eval_loss = Some(initial_eval.mean_loss);
+    let mut best_eval_render_rgb_mse = Some(initial_eval.mean_render_rgb_mse);
     let mut best_eval_psnr = Some(initial_eval.selection_psnr_db);
+    let mut best_eval_worst_psnr_drift = initial_eval.worst_psnr_drift_db;
+    let mut best_eval_selection_score = Some(initial_eval.selection_score);
+    let mut best_eval_horizon_render_rgb_mse =
+        initial_eval.horizon_mean_render_rgb_mse.clone();
     let mut best_eval_horizon_psnr = initial_eval.horizon_mean_psnr_db.clone();
     let mut best_eval_topology_events = initial_eval.topology_events;
     let mut best_eval_step = resume_completed_step;
     let mut best_params = params.detached();
     let mut measured_particle_steps = 0.0_f64;
-    let mut measured_elapsed_ms = 0.0_f64;
     let mut measured_topology_events = 0usize;
+    let mut measured_event_exposed_rows = 0usize;
+    let mut measured_unique_event_exposed_rows = 0usize;
+    let mut measured_event_quota_shortfall_rows = 0usize;
+    let mut measured_max_event_delay_steps = 0usize;
+    let mut event_quota_met_steps = 0usize;
+    let mut measured_post_event_row_chunks = 0usize;
+    let mut measured_post_event_loss_sum = 0.0_f64;
+    let mut measured_recovery_extension_steps = 0usize;
     let mut min_backward_scale = 1.0_f32;
     let mut max_backward_scale = 0.0_f32;
     let mut sampled_age_min = usize::MAX;
     let mut sampled_age_max = 0usize;
     let mut sampled_age_mean_sum = 0.0_f64;
     let mut sampled_age_batches = 0usize;
+    let training_started_at = Instant::now();
+    let mut observer_last_snapshot_at = training_started_at;
+    let mut observer_last_snapshot_step = resume_completed_step;
+    let mut steps_completed = resume_completed_step;
+    let mut stopped_early = false;
+    let mut metric_collection_steps = 0usize;
+    let mut evaluation_steps = 0usize;
     if resume_completed_step == 0
         && let Some(state) = checkpoint_state.as_mut()
     {
@@ -987,11 +1323,18 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             0,
             None,
             Some(initial_eval.mean_loss),
-            Some(initial_eval.selection_psnr_db),
+            Some(initial_eval.selection_score),
         )?;
     }
 
     for step in resume_completed_step.saturating_add(1)..=total_steps {
+        if observer
+            .as_deref()
+            .is_some_and(Target2dGpuTrainingObserver::should_stop)
+        {
+            stopped_early = true;
+            break;
+        }
         let (repetition, phase_step, upstream_epoch) =
             oracle_repetition_position(step, plan.steps_per_repetition);
         if phase_step == 1 && repetition > 0 {
@@ -1004,6 +1347,24 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             learning_rate: plan.optimizer.learning_rate * lr_scale,
             ..plan.optimizer
         };
+        let should_report =
+            step == total_steps || step.is_multiple_of(config.report_interval.max(1));
+        let should_eval = config.eval_interval > 0
+            && (step == total_steps || step.is_multiple_of(config.eval_interval.max(1)));
+        let checkpoint_due = checkpoint_state
+            .as_ref()
+            .is_some_and(|state| state.should_write_current(step));
+        let observer_due = observer.as_deref().is_some_and(|observer| {
+            step == resume_completed_step.saturating_add(1)
+                || step == total_steps
+                || (step.saturating_sub(observer_last_snapshot_step)
+                    >= observer.snapshot_interval_steps().max(1)
+                    && observer_last_snapshot_at.elapsed()
+                        >= observer.snapshot_interval_duration())
+        });
+        let collect_metrics = should_report || checkpoint_due || observer_due;
+        metric_collection_steps += usize::from(collect_metrics);
+        evaluation_steps += usize::from(should_eval);
         let stats = train_adaptive_step_tbptt(
             &mut params,
             frozen_base.as_ref(),
@@ -1018,29 +1379,39 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9)),
             &mut pool,
             upstream_epoch.is_multiple_of(config.inject_seed_interval.max(1)),
+            collect_metrics,
             optimizer_config,
         )?;
-        measured_particle_steps += stats.particle_steps_per_sec * stats.elapsed_ms / 1_000.0;
-        measured_elapsed_ms += stats.elapsed_ms;
+        debug_assert_eq!(stats.metrics_collected, collect_metrics);
+        measured_particle_steps += stats.particle_steps;
+        steps_completed = step;
         measured_topology_events += stats.topology_events;
+        measured_event_exposed_rows += stats.event_exposed_rows;
+        measured_unique_event_exposed_rows += stats.unique_event_exposed_rows;
+        measured_event_quota_shortfall_rows += stats.event_quota_shortfall_rows;
+        measured_max_event_delay_steps =
+            measured_max_event_delay_steps.max(stats.max_event_delay_steps);
+        event_quota_met_steps += usize::from(
+            adaptive.event_training.enabled && stats.event_quota_shortfall_rows == 0,
+        );
+        measured_post_event_row_chunks += stats.post_event_row_chunks;
+        if stats.metrics_collected {
+            measured_post_event_loss_sum += stats
+                .post_event_mean_loss
+                .map_or(0.0, |loss| f64::from(loss) * stats.post_event_row_chunks as f64);
+        }
+        measured_recovery_extension_steps += stats.recovery_extension_steps;
         min_backward_scale = min_backward_scale.min(stats.backward_scale);
         max_backward_scale = max_backward_scale.max(stats.backward_scale);
         sampled_age_min = sampled_age_min.min(stats.sampled_age_min);
         sampled_age_max = sampled_age_max.max(stats.sampled_age_max);
         sampled_age_mean_sum += stats.sampled_age_mean;
         sampled_age_batches += 1;
-        if best_train_loss.is_none_or(|best| stats.loss < best) {
+        if stats.metrics_collected && best_train_loss.is_none_or(|best| stats.loss < best) {
             best_train_loss = Some(stats.loss);
             best_train_step = step;
         }
 
-        let should_report =
-            step == total_steps || step.is_multiple_of(config.report_interval.max(1));
-        let should_eval = config.eval_interval > 0
-            && (step == total_steps || step.is_multiple_of(config.eval_interval.max(1)));
-        let checkpoint_due = checkpoint_state
-            .as_ref()
-            .is_some_and(|state| state.should_write_current(step));
         let evaluation = should_eval
             .then(|| {
                 evaluate_adaptive_fresh_seed(
@@ -1059,12 +1430,17 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             .transpose()?;
         if let Some(evaluation) = evaluation.as_ref()
             && adaptive_checkpoint_is_better(
-                evaluation.selection_psnr_db,
-                best_eval_psnr,
+                evaluation.selection_score,
+                best_eval_selection_score,
             )
         {
             best_eval_loss = Some(evaluation.mean_loss);
+            best_eval_render_rgb_mse = Some(evaluation.mean_render_rgb_mse);
             best_eval_psnr = Some(evaluation.selection_psnr_db);
+            best_eval_worst_psnr_drift = evaluation.worst_psnr_drift_db;
+            best_eval_selection_score = Some(evaluation.selection_score);
+            best_eval_horizon_render_rgb_mse
+                .clone_from(&evaluation.horizon_mean_render_rgb_mse);
             best_eval_horizon_psnr.clone_from(&evaluation.horizon_mean_psnr_db);
             best_eval_topology_events = evaluation.topology_events;
             best_eval_step = step;
@@ -1076,7 +1452,7 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                     step,
                     Some(stats.loss),
                     Some(evaluation.mean_loss),
-                    Some(evaluation.selection_psnr_db),
+                    Some(evaluation.selection_score),
                 )?;
             }
         }
@@ -1090,7 +1466,7 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 evaluation.as_ref().map(|value| value.mean_loss),
                 evaluation
                     .as_ref()
-                    .map(|value| value.selection_psnr_db),
+                    .map(|value| value.selection_score),
             )?;
             if let Some(checkpoint) = checkpoint {
                 write_adaptive_target2d_training_state(
@@ -1106,7 +1482,7 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
         }
         if should_report {
             println!(
-                "{LOG_BACKEND} adaptive-target2d step {step}/{total_steps} repetition={}/{} phase_step={phase_step}/{} lr={:.3e} loss={:.6} optimization_loss={:.6} max_trajectory_loss={:.6} eval_loss={} psnr_db={} grad_norm={:.3e} grad_scale={:.3e} backward_scale={:.3e} sampled_age={}/{:.0}/{} active={} reference={} topology_events={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
+                "{LOG_BACKEND} adaptive-target2d step {step}/{total_steps} repetition={}/{} phase_step={phase_step}/{} lr={:.3e} loss={:.6} optimization_loss={:.6} max_trajectory_loss={:.6} post_event_loss={} eval_loss={} psnr_db={} psnr_drift_db={} selection_score={} grad_norm={:.3e} grad_scale={:.3e} backward_scale={:.3e} sampled_age={}/{:.0}/{} active={} reference={} topology_events={} event_rows={} event_quota_shortfall={} max_event_delay_steps={} post_event_row_chunks={} recovery_extension_steps={} particle_steps_per_sec={:.0} elapsed_ms={:.1}",
                 repetition + 1,
                 plan.repetitions,
                 plan.steps_per_repetition,
@@ -1114,6 +1490,10 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 stats.loss,
                 stats.optimization_loss,
                 stats.max_trajectory_loss,
+                stats
+                    .post_event_mean_loss
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "n/a".to_owned()),
                 evaluation
                     .as_ref()
                     .map(|value| format!("{:.6}", value.mean_loss))
@@ -1121,6 +1501,14 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 evaluation
                     .as_ref()
                     .map(|value| format!("{:.3}", value.selection_psnr_db))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                evaluation
+                    .as_ref()
+                    .map(|value| format!("{:.3}", value.worst_psnr_drift_db))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                evaluation
+                    .as_ref()
+                    .map(|value| format!("{:.3}", value.selection_score))
                     .unwrap_or_else(|| "n/a".to_string()),
                 stats.grad_norm,
                 stats.grad_scale,
@@ -1131,6 +1519,11 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 material.active_particle_count,
                 material.reference_particle_count,
                 stats.topology_events,
+                stats.event_exposed_rows,
+                stats.event_quota_shortfall_rows,
+                stats.max_event_delay_steps,
+                stats.post_event_row_chunks,
+                stats.recovery_extension_steps,
                 stats.particle_steps_per_sec,
                 stats.elapsed_ms,
             );
@@ -1155,16 +1548,56 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 elapsed_ms: stats.elapsed_ms,
             });
         }
+        if observer_due {
+            params.write_to_models(std::slice::from_mut(model))?;
+            let eval_loss = evaluation.as_ref().map(|value| Target2dGpuLossSummary {
+                examples: eval_seed.seeds.len() * adaptive.checkpoint_horizons.len(),
+                mean_total_loss: value.mean_loss,
+                max_total_loss: value.mean_loss,
+                mean_splat_loss: value.mean_loss,
+                mean_color_loss: 0.0,
+                mean_density_loss: 0.0,
+            });
+            if let Some(observer) = observer.as_deref_mut() {
+                observer.on_progress(Target2dGpuTrainingProgress {
+                    step,
+                    total_steps,
+                    loss: stats.loss,
+                    eval_loss,
+                    render_rgb_psnr_db: evaluation
+                        .as_ref()
+                        .map(|value| value.selection_psnr_db),
+                    base_grad_norm: stats.grad_norm,
+                    base_grad_scale: stats.grad_scale,
+                    particle_steps_per_sec: stats.particle_steps_per_sec,
+                    elapsed_ms: training_started_at.elapsed().as_secs_f64() * 1_000.0,
+                    model: model.clone(),
+                });
+            }
+            observer_last_snapshot_step = if step == resume_completed_step.saturating_add(1) {
+                resume_completed_step
+            } else {
+                step
+            };
+            observer_last_snapshot_at = Instant::now();
+            if observer
+                .as_deref()
+                .is_some_and(Target2dGpuTrainingObserver::should_stop)
+            {
+                stopped_early = step < total_steps;
+                break;
+            }
+        }
     }
 
     if let Some(state) = checkpoint_state.as_mut() {
         state.write_current_batch(
             &params,
             "adaptive-target2d-final",
-            total_steps,
+            steps_completed,
             best_train_loss,
             best_eval_loss,
-            best_eval_psnr,
+            best_eval_selection_score,
         )?;
         if let Some(checkpoint) = checkpoint {
             write_adaptive_target2d_training_state(
@@ -1174,17 +1607,24 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                 &pool,
                 &params,
                 config,
-                total_steps,
+                steps_completed,
             )?;
         }
     }
     // Checkpoint the final optimizer state above, but publish the parameters
     // selected by the fresh-seed PSNR gate. Returning the last update can
     // silently replace a strong initialization with a divergent trajectory.
-    best_params.write_to_models(std::slice::from_mut(model))?;
+    if stopped_early {
+        params.write_to_models(std::slice::from_mut(model))?;
+    } else {
+        best_params.write_to_models(std::slice::from_mut(model))?;
+    }
     let material_scale_column = material_scale_column_stats(model);
-    let mean_throughput =
-        measured_particle_steps / (measured_elapsed_ms / 1_000.0).max(f64::MIN_POSITIVE);
+    let mean_throughput = measured_particle_steps
+        / training_started_at
+            .elapsed()
+            .as_secs_f64()
+            .max(f64::MIN_POSITIVE);
     let checkpoint_report = checkpoint_state
         .as_ref()
         .map(BurnDenseCheckpointState::report_json);
@@ -1200,6 +1640,65 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
         "final_mean_steps": (!pool.ages.is_empty()).then_some(
             pool.ages.iter().copied().sum::<usize>() as f64 / pool.ages.len() as f64
         ),
+    });
+    let event_training_report = json!({
+        "enabled": adaptive.event_training.enabled,
+        "post_event_recovery_steps": adaptive.event_training.post_event_recovery_steps,
+        "post_event_loss_weight": adaptive.event_training.post_event_loss_weight,
+        "post_event_degradation_weight":
+            adaptive.event_training.post_event_degradation_weight,
+        "checkpoint_drift_penalty_weight":
+            adaptive.event_training.checkpoint_drift_penalty_weight,
+        "degradation_objective": (adaptive.event_training.post_event_degradation_weight > 0.0)
+            .then_some("positive_part(post_event_loss-detached_pre_event_loss)"),
+        "min_event_trajectories_per_batch":
+            adaptive.event_training.min_event_trajectories_per_batch,
+        "max_recovery_extension_steps":
+            adaptive.event_training.recovery_extension_budget(),
+        "scheduled_event_rows": measured_event_exposed_rows,
+        "unique_event_rows_per_step_sum": measured_unique_event_exposed_rows,
+        "quota_shortfall_rows": measured_event_quota_shortfall_rows,
+        "quota_met_steps": event_quota_met_steps,
+        "max_event_delay_steps": measured_max_event_delay_steps,
+        "training_steps": steps_completed.saturating_sub(resume_completed_step),
+        "post_event_row_chunks": measured_post_event_row_chunks,
+        "mean_post_event_loss": (measured_post_event_row_chunks > 0).then_some(
+            measured_post_event_loss_sum / measured_post_event_row_chunks as f64
+        ),
+        "recovery_extension_steps": measured_recovery_extension_steps,
+    });
+    let loss_objective_report = json!({
+        "center": config.loss_config.center,
+        "splat_loss_weight": config.loss_config.splat_loss_weight,
+        "color_loss_weight": config.loss_config.color_loss_weight,
+        "density_loss_weight": config.loss_config.density_loss_weight,
+        "background_density_loss_weight":
+            config.loss_config.background_density_loss_weight,
+        "foreground_density_loss_weight":
+            config.loss_config.foreground_density_loss_weight,
+        "composited_rgb_loss_weight":
+            config.loss_config.composited_rgb_loss_weight,
+        "render_rgb_loss_weight": config.loss_config.render_rgb_loss_weight,
+        "shape_chamfer_loss_weight":
+            config.loss_config.shape_chamfer_loss_weight,
+        "displacement_regularizer_weight":
+            config.loss_config.displacement_regularizer_weight,
+        "overflow_regularizer_weight":
+            config.loss_config.overflow_regularizer_weight,
+        "bound_regularizer_weight":
+            config.loss_config.bound_regularizer_weight,
+        "psnr_aligned_render_only":
+            config.loss_config.splat_loss_weight > 0.0
+                && config.loss_config.render_rgb_loss_weight > 0.0
+                && config.loss_config.color_loss_weight == 0.0
+                && config.loss_config.density_loss_weight == 0.0
+                && config.loss_config.background_density_loss_weight == 0.0
+                && config.loss_config.foreground_density_loss_weight == 0.0
+                && config.loss_config.composited_rgb_loss_weight == 0.0
+                && config.loss_config.shape_chamfer_loss_weight == 0.0
+                && config.loss_config.displacement_regularizer_weight == 0.0
+                && config.loss_config.overflow_regularizer_weight == 0.0
+                && config.loss_config.bound_regularizer_weight == 0.0,
     });
     let mut metrics = json!({
         "training_path": if adaptive.residual_perception_semantics
@@ -1278,13 +1777,50 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
         "checkpoint_horizons": adaptive.checkpoint_horizons,
         "pool_age_sampling": pool_age_sampling,
         "best_fresh_seed_eval_step": best_eval_step,
-        "returned_model_selection": "best_worst_checkpoint_seed_horizon_psnr",
+        "returned_model_selection":
+            "best_worst_checkpoint_seed_horizon_psnr_minus_weighted_worst_seed_drift",
         "material_scale_w1_l2_norm": material_scale_column.map(|stats| stats.0),
         "material_scale_w1_rms": material_scale_column.map(|stats| stats.1),
         "material_scale_w1_max_abs": material_scale_column.map(|stats| stats.2),
         "checkpoint": checkpoint_report,
     });
     if let Some(metrics) = metrics.as_object_mut() {
+        metrics.insert("steps_completed".to_owned(), steps_completed.into());
+        metrics.insert("stopped_early".to_owned(), stopped_early.into());
+        metrics.insert(
+            "metric_collection_steps".to_owned(),
+            metric_collection_steps.into(),
+        );
+        metrics.insert(
+            "optimizer_steps_without_host_metrics".to_owned(),
+            steps_completed
+                .saturating_sub(resume_completed_step)
+                .saturating_sub(metric_collection_steps)
+                .into(),
+        );
+        metrics.insert("evaluation_steps".to_owned(), evaluation_steps.into());
+        metrics.insert(
+            "best_fresh_seed_worst_psnr_drift_db".to_owned(),
+            best_eval_worst_psnr_drift.into(),
+        );
+        metrics.insert(
+            "best_fresh_seed_selection_score".to_owned(),
+            best_eval_selection_score.into(),
+        );
+        metrics.insert(
+            "optimizer_update_cadence".to_owned(),
+            "once_per_outer_step_after_accumulating_tbptt_and_event_segments".into(),
+        );
+        metrics.insert("event_training".to_owned(), event_training_report);
+        metrics.insert("loss_objective".to_owned(), loss_objective_report);
+        metrics.insert(
+            "best_fresh_seed_render_rgb_mse".to_owned(),
+            best_eval_render_rgb_mse.into(),
+        );
+        metrics.insert(
+            "best_fresh_seed_horizon_mean_render_rgb_mse".to_owned(),
+            best_eval_horizon_render_rgb_mse.into(),
+        );
         metrics.insert(
             "compact_recurrent_memory_dims".to_owned(),
             adaptive.compact_recurrent_memory_dims.into(),

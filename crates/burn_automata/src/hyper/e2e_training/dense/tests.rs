@@ -3929,6 +3929,7 @@ fn direct_particle_pool_recycles_selected_rows_at_the_age_limit() {
                 fresh_seed_rows: 0,
                 max_age_steps: Some(32),
                 age_strata: 0,
+                event_preference: None,
             },
             config,
             &device,
@@ -3982,6 +3983,69 @@ fn age_stratified_pool_sampling_preserves_explicit_fresh_slots() {
             counts
         });
     assert!(persistent_counts.iter().all(|count| *count >= 1));
+}
+
+#[test]
+fn event_aware_pool_sampling_prefers_rows_that_cross_the_next_event() {
+    let ages = vec![0, 16, 32, 48, 56, 64, 96, 112];
+    let preference = BurnPoolEventPreference {
+        start_step: 64,
+        end_step: 0,
+        interval_steps: 64,
+        lookahead_steps: 16,
+        min_rows: 3,
+    };
+    let mut rng = StdRng::seed_from_u64(29);
+    let indices = sample_pool_indices_by_age_with_event_preference(
+        &mut rng,
+        &ages,
+        4,
+        0,
+        None,
+        0,
+        Some(preference),
+    );
+
+    assert_eq!(indices.len(), 4);
+    assert_eq!(
+        indices
+            .iter()
+            .filter(|index| pool_age_crosses_preferred_event(ages[**index], preference))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn event_aware_pool_sampling_restores_seed_rows_when_event_ages_are_absent() {
+    let device = BurnDevice::default();
+    let config = test_direct_config(4);
+    let mut pool = BurnDeviceParticlePool::new(8, 4, 16, 0.1, config, &device);
+    pool.ages.fill(700);
+    let mut rng = StdRng::seed_from_u64(31);
+    let batch = pool
+        .sample_batch_with_fresh_rows(
+            &mut rng,
+            4,
+            BurnPoolSampling {
+                fresh_seed_rows: 0,
+                max_age_steps: Some(1024),
+                age_strata: 4,
+                event_preference: Some(BurnPoolEventPreference {
+                    start_step: 64,
+                    end_step: 512,
+                    interval_steps: 64,
+                    lookahead_steps: 96,
+                    min_rows: 3,
+                }),
+            },
+            config,
+            &device,
+        )
+        .unwrap();
+
+    assert_eq!(batch.ages.iter().filter(|age| **age == 0).count(), 3);
+    assert_eq!(batch.ages.iter().filter(|age| **age == 700).count(), 1);
 }
 
 #[test]
@@ -6499,9 +6563,153 @@ fn target2d_cube_batched_tail_matches_dense_primal_and_vjp() {
     );
 }
 
+#[test]
+fn adaptive_render_only_objective_matches_reported_rgb_mse() {
+    const BATCHES: usize = 4;
+    const PARTICLES: usize = 3_070;
+    const IMAGE_SIZE: usize = 256;
+
+    let device = BurnDevice::default();
+    let indices = vec![0; BATCHES];
+    let state_dims = NpaConfig::growing_2d().state_dims;
+    let target_cpu = crate::TargetImage2d {
+        source_width: IMAGE_SIZE,
+        source_height: IMAGE_SIZE,
+        positions: vec![[-0.35, 0.25], [0.2, 0.05], [0.45, -0.3]],
+        colors: vec![[0.1, 0.8, 0.2], [0.7, 0.3, 0.1], [0.2, 0.4, 0.9]],
+        pixel_size: 2.0 / IMAGE_SIZE as f32,
+        threshold: 0.05,
+        aabb: [-1.0, 1.0, -1.0, 1.0],
+    };
+    let mut config = test_direct_config(PARTICLES);
+    config.example_batch_size = BATCHES;
+    config.target2d_loss_backend = Target2dLossBackend::Dense;
+    config.loss_config.image_size = IMAGE_SIZE;
+    config.loss_config.center = false;
+    config.loss_config.splat_loss_weight = 1.0;
+    config.loss_config.color_loss_weight = 0.0;
+    config.loss_config.density_loss_weight = 0.0;
+    config.loss_config.background_density_loss_weight = 0.0;
+    config.loss_config.foreground_density_loss_weight = 0.0;
+    config.loss_config.composited_rgb_loss_weight = 0.0;
+    config.loss_config.render_rgb_loss_weight = 1.0;
+    config.loss_config.shape_chamfer_loss_weight = 0.0;
+    config.loss_config.displacement_regularizer_weight = 0.0;
+    config.loss_config.overflow_regularizer_weight = 0.0;
+    config.loss_config.bound_regularizer_weight = 0.0;
+    config.max_splat_chunk_floats = 512 * 1024;
+    let pixels = IMAGE_SIZE * IMAGE_SIZE;
+    let render = render_target_2d_splat(&target_cpu, config.loss_config).unwrap();
+    let foreground = target_2d_foreground_mask(&target_cpu, config.loss_config).unwrap();
+    let foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
+    let target_mean = target_cpu.mean_position();
+    let target = BurnTargetExample {
+        target_rgb: tensor(render.rgb, [pixels, 3], &device),
+        target_density: tensor(render.density, [pixels, 1], &device),
+        target_foreground: tensor(foreground, [pixels, 1], &device),
+        target_foreground_scale: foreground_scale,
+        target_mean: tensor(
+            [target_mean[0], target_mean[1]].to_vec(),
+            [1, 2],
+            &device,
+        ),
+        target_positions: tensor(
+            target_cpu
+                .positions
+                .iter()
+                .flat_map(|position| [position[0], position[1]])
+                .collect(),
+            [target_cpu.positions.len(), 2],
+            &device,
+        ),
+        pixel_xy: tensor(pixel_xy_values(IMAGE_SIZE), [pixels, 2], &device),
+        pixel_size: target_cpu.pixel_size,
+        target_points: target_cpu.point_count(),
+        particle_count: PARTICLES,
+        update_prob: 1.0,
+        seed_scale: 0.2,
+        target_cpu,
+    };
+    let positions = (0..BATCHES)
+        .flat_map(|_| {
+            (0..PARTICLES).flat_map(|particle| {
+                let angle = particle as f32 * std::f32::consts::TAU / PARTICLES as f32;
+                [0.1 * angle.cos(), 0.1 * angle.sin()]
+            })
+        })
+        .collect::<Vec<_>>();
+    let states = vec![0.0; BATCHES * PARTICLES * state_dims];
+    let particle_pixel_size = tensor(
+        (0..BATCHES)
+            .flat_map(|_| {
+                (0..PARTICLES)
+                    .map(|particle| target.pixel_size * (1.0 + 0.5 * (particle % 3) as f32))
+            })
+            .collect(),
+        [BATCHES, PARTICLES],
+        &device,
+    );
+    let particle_output_scale = tensor(
+        vec![target.target_points as f32 / PARTICLES as f32; BATCHES * PARTICLES],
+        [BATCHES, PARTICLES],
+        &device,
+    );
+    let x = tensor3(positions, [BATCHES, PARTICLES, 2], &device);
+    let s = tensor3(states, [BATCHES, PARTICLES, state_dims], &device);
+    let render_mse = tensor1_vec(
+        adaptive_uncentered_render_rgb_mse_batch(
+            &x,
+            &s,
+            std::slice::from_ref(&target),
+            &indices,
+            config,
+            particle_pixel_size.clone(),
+            particle_output_scale.clone(),
+        )
+        .inner(),
+    )
+    .unwrap();
+
+    for backend in [
+        Target2dLossBackend::Dense,
+        Target2dLossBackend::TiledAdjoint,
+    ] {
+        let loss = adaptive_target_splat_loss_batch_vector_base_only_selected(
+            &x,
+            &s,
+            std::slice::from_ref(&target),
+            &indices,
+            DirectBasisTrainConfig {
+                target2d_loss_backend: backend,
+                ..config
+            },
+            tensor(
+                vec![1.0; BATCHES * PARTICLES],
+                [BATCHES, PARTICLES],
+                &device,
+            ),
+            particle_pixel_size.clone(),
+            particle_output_scale.clone(),
+            Tensor::<BurnBackend, 1>::zeros([BATCHES], &device),
+        )
+        .unwrap();
+        let splat = tensor1_vec(loss.splat.inner()).unwrap();
+        assert_eq!(splat.len(), render_mse.len());
+        for row in 0..BATCHES {
+            assert!(
+                (splat[row] - render_mse[row]).abs() < 1.0e-6,
+                "{backend:?} render-only adaptive loss diverged at row {row}: splat={} mse={}",
+                splat[row],
+                render_mse[row],
+            );
+        }
+    }
+}
+
 fn train_adaptive_recurrent_smoke(
     model: &mut NpaModel,
     frozen_base: Option<NpaModel>,
+    event_training: crate::adaptive::AdaptiveTarget2dEventTrainingConfig,
 ) -> BurnDenseOracleBatchOutput {
     let residual_perception_semantics = frozen_base.as_ref().map(|_| {
         burn_automata_kernels::AdaptivePerceptionSemantics::NpaCompatible
@@ -6596,7 +6804,9 @@ fn train_adaptive_recurrent_smoke(
             max_pool_age_steps: 0,
             pool_age_strata: 0,
             backward_loss_scale: 1.0,
+            event_training,
         },
+        None,
         None,
     )
     .unwrap();
@@ -6608,7 +6818,11 @@ fn train_adaptive_recurrent_smoke(
 fn adaptive_recurrent_target2d_smoke_updates_the_shared_rule() {
     let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 91);
     let initial = model.weights.clone();
-    let output = train_adaptive_recurrent_smoke(&mut model, None);
+    let output = train_adaptive_recurrent_smoke(
+        &mut model,
+        None,
+        crate::adaptive::AdaptiveTarget2dEventTrainingConfig::default(),
+    );
     assert_eq!(output.history.len(), 1);
     assert!(output.history[0].loss.is_finite());
     assert!(output.history[0].base_grad_norm > 0.0);
@@ -6624,6 +6838,59 @@ fn adaptive_recurrent_target2d_smoke_updates_the_shared_rule() {
 }
 
 #[test]
+fn adaptive_recurrent_target2d_event_training_adds_a_recovery_chunk() {
+    let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 93);
+    let output = train_adaptive_recurrent_smoke(
+        &mut model,
+        None,
+        crate::adaptive::AdaptiveTarget2dEventTrainingConfig {
+            enabled: true,
+            post_event_recovery_steps: 1,
+            post_event_loss_weight: 2.0,
+            post_event_degradation_weight: 1.0,
+            checkpoint_drift_penalty_weight: 1.0,
+            min_event_trajectories_per_batch: 1,
+            max_recovery_extension_steps: 1,
+        },
+    );
+
+    assert_eq!(
+        output.metrics["event_training"]["scheduled_event_rows"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        output.metrics["event_training"]["post_event_row_chunks"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        output.metrics["event_training"]["recovery_extension_steps"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        output.metrics["event_training"]["quota_shortfall_rows"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        output.metrics["event_training"]["quota_met_steps"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(output.metrics["optimizer_step"].as_u64(), Some(1));
+    assert_eq!(
+        output.metrics["event_training"]["post_event_degradation_weight"].as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(
+        output.metrics["event_training"]["checkpoint_drift_penalty_weight"].as_f64(),
+        Some(1.0)
+    );
+    assert!(
+        output.metrics["event_training"]["mean_post_event_loss"]
+            .as_f64()
+            .is_some_and(f64::is_finite)
+    );
+}
+
+#[test]
 fn adaptive_recurrent_target2d_smoke_updates_only_the_compatible_residual() {
     let base = NpaModel::upstream_seeded(NpaConfig::growing_2d(), 91);
     let frozen_weights = base.weights.clone();
@@ -6632,7 +6899,11 @@ fn adaptive_recurrent_target2d_smoke_updates_only_the_compatible_residual() {
         weights: NpaWeights::zero_output_seeded(&base.config, 0x6c6f_6361_6c5f_6e70),
     };
     let initial_residual = residual.weights.clone();
-    let output = train_adaptive_recurrent_smoke(&mut residual, Some(base.clone()));
+    let output = train_adaptive_recurrent_smoke(
+        &mut residual,
+        Some(base.clone()),
+        crate::adaptive::AdaptiveTarget2dEventTrainingConfig::default(),
+    );
 
     assert_eq!(
         output.metrics["training_path"].as_str(),
@@ -6716,6 +6987,7 @@ fn adaptive_paired_topology_conserves_material_and_is_batch_independent() {
             max_pool_age_steps: 0,
             pool_age_strata: 0,
             backward_loss_scale: 1.0,
+            event_training: crate::adaptive::AdaptiveTarget2dEventTrainingConfig::default(),
         },
         &device,
     )
@@ -6886,6 +7158,7 @@ fn adaptive_continuous_topology_conserves_material_and_is_batch_independent() {
             max_pool_age_steps: 0,
             pool_age_strata: 0,
             backward_loss_scale: 1.0,
+            event_training: crate::adaptive::AdaptiveTarget2dEventTrainingConfig::default(),
         },
         &device,
     )
@@ -6893,6 +7166,15 @@ fn adaptive_continuous_topology_conserves_material_and_is_batch_independent() {
     assert!(topology.should_apply(0));
     assert!(topology.should_apply(2));
     assert!(!topology.should_apply(3));
+    assert_eq!(topology.steps_until_next_event(&[0, 2], 4), 1);
+    assert_eq!(
+        topology.scheduled_event_delay_steps(&[0, 1], &[1, 2]),
+        vec![Some(0), Some(0)]
+    );
+    assert_eq!(
+        topology.scheduled_event_delay_steps(&[0, 1], &[2, 3]),
+        vec![Some(1), Some(1)]
+    );
 
     let positions = (0..2)
         .flat_map(|batch| {
@@ -6931,6 +7213,10 @@ fn adaptive_continuous_topology_conserves_material_and_is_batch_independent() {
         tensor(detail.clone(), [2, 8], &device),
         &[0, 2],
         &[1, 3],
+    );
+    assert_eq!(
+        topology.scheduled_event_rows(&[0, 2], &[1, 3]),
+        vec![true, false]
     );
     assert_eq!(scheduled_events, 2);
     let scheduled_positions = tensor3_vec(scheduled_positions.inner()).unwrap();

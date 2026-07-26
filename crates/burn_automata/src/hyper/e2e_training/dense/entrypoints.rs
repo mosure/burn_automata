@@ -2841,7 +2841,7 @@ use super::*;
             scheduler_milestones: Vec::new(),
             scheduler_gamma: 1.0,
         };
-        train_oracle_models_burn_dense_planned(models, examples, plan, None)
+        train_oracle_models_burn_dense_planned(models, examples, plan, None, None)
     }
 
     pub(crate) fn train_target2d_oracle_burn_dense(
@@ -2849,12 +2849,14 @@ use super::*;
         example: &DirectBasisExample,
         plan: Target2dOracleTrainPlan,
         checkpoint: Option<&Target2dBurnCheckpointConfig>,
+        observer: Option<&mut dyn Target2dGpuTrainingObserver>,
     ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
         train_oracle_models_burn_dense_planned(
             std::slice::from_mut(model),
             std::slice::from_ref(example),
             plan,
             checkpoint,
+            observer,
         )
     }
 
@@ -2863,6 +2865,7 @@ use super::*;
         examples: &[DirectBasisExample],
         plan: Target2dOracleTrainPlan,
         checkpoint: Option<&Target2dBurnCheckpointConfig>,
+        mut observer: Option<&mut dyn Target2dGpuTrainingObserver>,
     ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
         let config = plan.train;
         let total_steps = plan.total_steps();
@@ -2905,6 +2908,12 @@ use super::*;
             ))
             .into());
         }
+        if observer.is_some() && models.len() != 1 {
+            return Err(std::io::Error::other(
+                "Burn Target2D live observation requires exactly one model",
+            )
+            .into());
+        }
         if models
             .iter()
             .any(|model| model.config.spatial_dims != 2 || model.config != models[0].config)
@@ -2938,6 +2947,7 @@ use super::*;
             config,
         )?);
 
+        let model_state_dims = models[0].config.state_dims;
         let build_particle_pools = || config.use_particle_pool.then(|| {
             targets
                 .iter()
@@ -2950,7 +2960,7 @@ use super::*;
                     BurnDeviceParticlePool::new(
                         config.pool_size.max(config.example_batch_size).max(1),
                         particle_count,
-                        models[0].config.state_dims,
+                        model_state_dims,
                         target.seed_scale,
                         pool_config,
                         &device,
@@ -2975,8 +2985,20 @@ use super::*;
         let mut measured_elapsed_ms = 0.0_f64;
         let mut steady_particle_steps = 0.0_f64;
         let mut steady_elapsed_ms = 0.0_f64;
+        let observer_started_at = Instant::now();
+        let mut observer_last_snapshot_at = observer_started_at;
+        let mut observer_last_snapshot_step = 0usize;
+        let mut steps_completed = 0usize;
+        let mut stopped_early = false;
 
         for step in 1..=total_steps {
+            if observer
+                .as_deref()
+                .is_some_and(Target2dGpuTrainingObserver::should_stop)
+            {
+                stopped_early = true;
+                break;
+            }
             let (repetition, phase_step, upstream_epoch) =
                 oracle_repetition_position(step, plan.steps_per_repetition);
             if phase_step == 1 && repetition > 0 {
@@ -2994,7 +3016,15 @@ use super::*;
             let checkpoint_due = checkpoint_state
                 .as_ref()
                 .is_some_and(|state| state.should_write_current(step));
-            let collect_metrics = should_report || checkpoint_due;
+            let observer_due = observer.as_deref().is_some_and(|observer| {
+                step == 1
+                    || step == total_steps
+                    || (step.saturating_sub(observer_last_snapshot_step)
+                        >= observer.snapshot_interval_steps().max(1)
+                        && observer_last_snapshot_at.elapsed()
+                            >= observer.snapshot_interval_duration())
+            });
+            let collect_metrics = should_report || checkpoint_due || observer_due;
             let step_seed = config
                 .seed
                 .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9));
@@ -3023,21 +3053,22 @@ use super::*;
             let particle_steps = stats.particle_steps_per_sec * stats.elapsed_ms / 1_000.0;
             measured_particle_steps += particle_steps;
             measured_elapsed_ms += stats.elapsed_ms;
+            steps_completed = step;
             if step > 1 {
                 steady_particle_steps += particle_steps;
                 steady_elapsed_ms += stats.elapsed_ms;
             }
+            let eval_losses = if should_report && should_eval {
+                Some(evaluate_oracle_model_batch(
+                    &params,
+                    &targets,
+                    config,
+                    config.eval_seed,
+                )?)
+            } else {
+                None
+            };
             if should_report {
-                let eval_losses = if should_eval {
-                    Some(evaluate_oracle_model_batch(
-                        &params,
-                        &targets,
-                        config,
-                        config.eval_seed,
-                    )?)
-                } else {
-                    None
-                };
                 let mean_loss = stats
                     .per_model_loss
                     .iter()
@@ -3174,6 +3205,61 @@ use super::*;
                     None,
                 )?;
             }
+            if observer_due {
+                params.write_to_models(models)?;
+                let mean_loss = stats.per_model_loss.iter().copied().sum::<f32>()
+                    / stats.per_model_loss.len().max(1) as f32;
+                let mean_base_grad_norm = stats
+                    .per_model_base_grad_norm
+                    .iter()
+                    .copied()
+                    .sum::<f32>()
+                    / stats.per_model_base_grad_norm.len().max(1) as f32;
+                let mean_base_grad_scale = stats
+                    .per_model_base_grad_scale
+                    .iter()
+                    .copied()
+                    .sum::<f32>()
+                    / stats.per_model_base_grad_scale.len().max(1) as f32;
+                let eval_loss = eval_losses.as_ref().map(|losses| {
+                    let summary = aggregate_loss_summaries(losses);
+                    Target2dGpuLossSummary {
+                        examples: summary.examples,
+                        mean_total_loss: summary.mean_total_loss,
+                        max_total_loss: summary.max_total_loss,
+                        mean_splat_loss: summary.mean_splat_loss,
+                        mean_color_loss: summary.mean_color_loss,
+                        mean_density_loss: summary.mean_density_loss,
+                    }
+                });
+                let render_rgb_psnr_db = eval_losses
+                    .as_ref()
+                    .and_then(|losses| losses.first())
+                    .map(|eval| eval.render_rgb_psnr_db);
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.on_progress(Target2dGpuTrainingProgress {
+                        step,
+                        total_steps,
+                        loss: mean_loss,
+                        eval_loss,
+                        render_rgb_psnr_db,
+                        base_grad_norm: mean_base_grad_norm,
+                        base_grad_scale: mean_base_grad_scale,
+                        particle_steps_per_sec: stats.particle_steps_per_sec,
+                        elapsed_ms: observer_started_at.elapsed().as_secs_f64() * 1_000.0,
+                        model: models[0].clone(),
+                    });
+                }
+                observer_last_snapshot_step = if step == 1 { 0 } else { step };
+                observer_last_snapshot_at = Instant::now();
+                if observer
+                    .as_deref()
+                    .is_some_and(Target2dGpuTrainingObserver::should_stop)
+                {
+                    stopped_early = step < total_steps;
+                    break;
+                }
+            }
         }
 
         params.write_to_models(models)?;
@@ -3196,6 +3282,8 @@ use super::*;
             },
             "particle_count": particle_count,
             "steps": total_steps,
+            "steps_completed": steps_completed,
+            "stopped_early": stopped_early,
             "steps_per_repetition": plan.steps_per_repetition,
             "repetitions": plan.repetitions,
             "scheduler": {

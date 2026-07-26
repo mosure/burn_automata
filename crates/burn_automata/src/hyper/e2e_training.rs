@@ -25,6 +25,48 @@ struct AdaptiveTarget2dRuleMode {
     topology: crate::adaptive::AdaptiveTarget2dTopologyConfig,
 }
 
+struct AdaptiveTarget2dObserverBridge<'a> {
+    template: crate::adaptive::AdaptiveNpaModel,
+    frozen_base_residual: bool,
+    observer: &'a mut dyn crate::adaptive::AdaptiveTarget2dGpuTrainingObserver,
+}
+
+impl crate::Target2dGpuTrainingObserver for AdaptiveTarget2dObserverBridge<'_> {
+    fn should_stop(&self) -> bool {
+        self.observer.should_stop()
+    }
+
+    fn snapshot_interval_steps(&self) -> usize {
+        self.observer.snapshot_interval_steps()
+    }
+
+    fn snapshot_interval_duration(&self) -> std::time::Duration {
+        self.observer.snapshot_interval_duration()
+    }
+
+    fn on_progress(&mut self, progress: crate::Target2dGpuTrainingProgress) {
+        let mut model = self.template.clone();
+        if self.frozen_base_residual {
+            model.local_residual_rule = Some(progress.model);
+        } else {
+            model.rule = progress.model;
+        }
+        self.observer
+            .on_progress(crate::adaptive::AdaptiveTarget2dGpuTrainingProgress {
+                step: progress.step,
+                total_steps: progress.total_steps,
+                loss: progress.loss,
+                eval_loss: progress.eval_loss,
+                render_rgb_psnr_db: progress.render_rgb_psnr_db,
+                base_grad_norm: progress.base_grad_norm,
+                base_grad_scale: progress.base_grad_scale,
+                particle_steps_per_sec: progress.particle_steps_per_sec,
+                elapsed_ms: progress.elapsed_ms,
+                model,
+            });
+    }
+}
+
 fn configure_adaptive_target2d_model(
     model: &mut crate::adaptive::AdaptiveNpaModel,
     config: &crate::adaptive::AdaptiveTarget2dTrainingConfig,
@@ -249,6 +291,139 @@ fn configure_adaptive_target2d_model(
     Ok(mode)
 }
 
+fn adaptive_target2d_scale_limits_report(
+    model: &crate::adaptive::AdaptiveNpaModel,
+    config: &crate::adaptive::AdaptiveTarget2dTrainingConfig,
+    material: &crate::adaptive::AdaptiveTarget2dMaterialLayout,
+) -> serde_json::Value {
+    let finite_range = |values: &[f32]| {
+        values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+                (min.min(value), max.max(value))
+            })
+    };
+    let ratio =
+        |min: f32, max: f32| (min.is_finite() && max.is_finite() && min > 0.0).then_some(max / min);
+    let (min_units, max_units) = finite_range(&material.represented_fine_units);
+    let (min_footprint_ratio, max_footprint_ratio) = finite_range(&material.footprint_ratio);
+    let (min_bandwidth, max_bandwidth) = finite_range(&material.bandwidth);
+    let fine_footprint = crate::adaptive::material_footprint_radius(material.fine_measure, 2);
+    let material_footprints = material
+        .footprint_ratio
+        .iter()
+        .map(|value| fine_footprint * value)
+        .collect::<Vec<_>>();
+    let render_footprints = material_footprints
+        .iter()
+        .map(|value| model.config.render_footprint(*value))
+        .collect::<Vec<_>>();
+    let (min_material_footprint, max_material_footprint) = finite_range(&material_footprints);
+    let (min_render_footprint, max_render_footprint) = finite_range(&render_footprints);
+    let raw_scale_features = material
+        .footprint_ratio
+        .iter()
+        .map(|ratio| ratio - 1.0)
+        .collect::<Vec<_>>();
+    let (min_raw_scale_feature, max_raw_scale_feature) = finite_range(&raw_scale_features);
+    let support_bin_count = burn_automata_kernels::AdaptiveSupportBins::new(
+        min_bandwidth,
+        max_bandwidth,
+        model.config.perception.support_bin_ratio,
+    )
+    .ok()
+    .map(|bins| bins.len());
+    let fraction = |count: usize| count as f32 / material.active_particle_count().max(1) as f32;
+    let tolerance = 64.0 * f32::EPSILON;
+    let residual_gate = match config.rule_training {
+        crate::adaptive::AdaptiveTarget2dRuleTraining::FrozenBaseNormalizedAdaptiveResidual => {
+            serde_json::json!({
+                "active": true,
+                "encoding": "clamp(log2(footprint/reference), 0, 3)",
+                "representable_footprint_ratio_min": 1.0,
+                "representable_footprint_ratio_max": 8.0,
+                "purpose": "coarse-exposure gate; material scale remains a separate feature",
+            })
+        }
+        crate::adaptive::AdaptiveTarget2dRuleTraining::FrozenBaseCompatibleResidual
+        | crate::adaptive::AdaptiveTarget2dRuleTraining::FrozenBaseMaterialConditionedResidual => {
+            serde_json::json!({
+                "active": true,
+                "encoding": "batch-global binary coarse-exposure gate",
+                "representable_footprint_ratio_min": null,
+                "representable_footprint_ratio_max": null,
+                "purpose": "residual enablement, not continuous scale encoding",
+            })
+        }
+        _ => serde_json::json!({
+            "active": false,
+            "encoding": null,
+            "representable_footprint_ratio_min": null,
+            "representable_footprint_ratio_max": null,
+            "purpose": "the selected shared-rule path does not consume a residual gate",
+        }),
+    };
+    serde_json::json!({
+        "seed_layout": format!("{:?}", material.seed_layout),
+        "requested_seed_measure_ratio": config.material.seed_measure_ratio,
+        "observed_represented_fine_units_min": min_units,
+        "observed_represented_fine_units_max": max_units,
+        "observed_represented_measure_ratio": ratio(min_units, max_units),
+        "observed_material_footprint_ratio_min": min_footprint_ratio,
+        "observed_material_footprint_ratio_max": max_footprint_ratio,
+        "observed_material_footprint_span": ratio(min_footprint_ratio, max_footprint_ratio),
+        "observed_material_footprint_min": min_material_footprint,
+        "observed_material_footprint_max": max_material_footprint,
+        "configured_material_footprint_min": model.config.min_footprint,
+        "configured_material_footprint_max": model.config.max_footprint,
+        "material_rows_at_configured_min_fraction": fraction(material_footprints.iter()
+            .filter(|value| (**value - model.config.min_footprint).abs()
+                <= tolerance * model.config.min_footprint.max(1.0))
+            .count()),
+        "material_rows_at_configured_max_fraction": fraction(material_footprints.iter()
+            .filter(|value| (**value - model.config.max_footprint).abs()
+                <= tolerance * model.config.max_footprint.max(1.0))
+            .count()),
+        "observed_render_footprint_min": min_render_footprint,
+        "observed_render_footprint_max": max_render_footprint,
+        "observed_render_footprint_span": ratio(min_render_footprint, max_render_footprint),
+        "configured_render_footprint_min": model.config.min_render_footprint(),
+        "configured_render_footprint_max": model.config.max_render_footprint(),
+        "render_footprint_exponent": model.config.render_footprint_exponent,
+        "bandwidth_exponent": config.material.bandwidth_exponent,
+        "observed_interaction_bandwidth_min": min_bandwidth,
+        "observed_interaction_bandwidth_max": max_bandwidth,
+        "observed_interaction_bandwidth_span": ratio(min_bandwidth, max_bandwidth),
+        "configured_interaction_bandwidth_min": model.config.perception.min_bandwidth,
+        "configured_interaction_bandwidth_max": model.config.perception.max_bandwidth,
+        "support_bin_ratio": model.config.perception.support_bin_ratio,
+        "support_bin_count": support_bin_count,
+        "material_scale_feature": {
+            "encoding": "clamp(footprint/reference - 1, -0.75, 3.0)",
+            "raw_min": min_raw_scale_feature,
+            "raw_max": max_raw_scale_feature,
+            "lower_saturation_fraction": fraction(raw_scale_features.iter()
+                .filter(|value| **value <= -0.75).count()),
+            "upper_saturation_fraction": fraction(raw_scale_features.iter()
+                .filter(|value| **value >= 3.0).count()),
+            "representable_footprint_ratio_min": 0.25,
+            "representable_footprint_ratio_max": 4.0,
+        },
+        "residual_gate": residual_gate,
+        "topology": {
+            "fixed_material_scale_slots": material.seed_layout
+                == crate::adaptive::AdaptiveMaterialSeedLayout::GradedContinuous,
+            "one_pass_desired_current_ratio_min":
+                model.config.min_topology_footprint_ratio,
+            "one_pass_desired_current_ratio_max":
+                model.config.max_topology_footprint_ratio,
+            "max_neighbor_footprint_ratio": model.config.max_neighbor_footprint_ratio,
+        },
+    })
+}
+
 pub(crate) fn prepare_adaptive_target2d_model(
     model: &mut crate::adaptive::AdaptiveNpaModel,
     config: &crate::adaptive::AdaptiveTarget2dTrainingConfig,
@@ -265,6 +440,7 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
     config: crate::adaptive::AdaptiveTarget2dTrainingConfig,
     loss_config: crate::Target2dLossConfig,
     checkpoint_config: Option<&crate::Target2dGpuCheckpointConfig>,
+    observer: Option<&mut dyn crate::adaptive::AdaptiveTarget2dGpuTrainingObserver>,
 ) -> Result<crate::adaptive::AdaptiveTarget2dGpuTrainingReport, Box<dyn std::error::Error>> {
     use crate::adaptive::{
         AdaptiveLocalRuleSemantics, AdaptiveRulePerception, AdaptiveTarget2dGpuTrainingReport,
@@ -303,6 +479,11 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
     let normalized_adaptive_rule = rule_mode.normalized_adaptive_rule;
     let material_scale_conditioning = rule_mode.material_scale_conditioning;
     let topology_config = rule_mode.topology;
+    let first_topology_event_step = topology_config
+        .start_step
+        .max(1)
+        .div_ceil(topology_config.interval_steps.max(1))
+        * topology_config.interval_steps.max(1);
     let training_rule_is_valid = if frozen_base_residual {
         model.local_residual_rule.is_some()
             && model.config.local_rule_semantics
@@ -370,6 +551,25 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
         || !(0.0..=1.0).contains(&config.trajectory_tail_fraction)
         || !config.trajectory_tail_weight.is_finite()
         || config.trajectory_tail_weight < 0.0
+        || !config.event_training.post_event_loss_weight.is_finite()
+        || config.event_training.post_event_loss_weight < 0.0
+        || !config
+            .event_training
+            .post_event_degradation_weight
+            .is_finite()
+        || config.event_training.post_event_degradation_weight < 0.0
+        || !config
+            .event_training
+            .checkpoint_drift_penalty_weight
+            .is_finite()
+        || config.event_training.checkpoint_drift_penalty_weight < 0.0
+        || (config.event_training.enabled
+            && (!topology_config.enabled
+                || config.event_training.post_event_recovery_steps == 0
+                || config.event_training.min_event_trajectories_per_batch == 0
+                || config.event_training.min_event_trajectories_per_batch > training.batch_size
+                || training.step_min < first_topology_event_step
+                || config.event_training.recovery_extension_budget() > 4_096))
         || !(0.0..=1.0).contains(&training.update_prob)
         || training.update_prob == 0.0
     {
@@ -395,6 +595,7 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
     let coarse_particle_count = material.coarse_particle_count();
     let measure_error =
         (material.represented_measure.iter().sum::<f32>() - config.material.total_measure).abs();
+    let scale_limits_report = adaptive_target2d_scale_limits_report(model, &config, &material);
     let seed_bank = build_adaptive_target2d_seed_bank(
         model,
         &material,
@@ -539,6 +740,7 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
         max_pool_age_steps: config.max_pool_age_steps,
         pool_age_strata: config.pool_age_strata,
         backward_loss_scale: config.backward_loss_scale,
+        event_training: config.event_training,
     };
     let checkpoint = checkpoint_config.map(|checkpoint| Target2dBurnCheckpointConfig {
         current_model_output: checkpoint.current_model_output.clone(),
@@ -555,13 +757,21 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
         interval_steps: checkpoint.interval_steps,
         interval_duration: checkpoint.interval_duration,
     });
-    let output = match (backend, frozen_base_residual) {
+    let mut observer_bridge = observer.map(|observer| AdaptiveTarget2dObserverBridge {
+        template: model.clone(),
+        frozen_base_residual,
+        observer,
+    });
+    let mut output = match (backend, frozen_base_residual) {
         (crate::Target2dGpuBackend::Wgpu, false) => dense::train_adaptive_target2d_burn_wgpu(
             &mut model.rule,
             &training_example,
             plan,
             adaptive,
             checkpoint.as_ref(),
+            observer_bridge
+                .as_mut()
+                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
         )?,
         (crate::Target2dGpuBackend::Cuda, false) => dense::train_adaptive_target2d_burn_cuda(
             &mut model.rule,
@@ -569,6 +779,9 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
             plan,
             adaptive,
             checkpoint.as_ref(),
+            observer_bridge
+                .as_mut()
+                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
         )?,
         (crate::Target2dGpuBackend::Wgpu, true) => dense::train_adaptive_target2d_burn_wgpu(
             model
@@ -579,6 +792,9 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
             plan,
             adaptive,
             checkpoint.as_ref(),
+            observer_bridge
+                .as_mut()
+                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
         )?,
         (crate::Target2dGpuBackend::Cuda, true) => dense::train_adaptive_target2d_burn_cuda(
             model
@@ -589,8 +805,14 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
             plan,
             adaptive,
             checkpoint.as_ref(),
+            observer_bridge
+                .as_mut()
+                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
         )?,
     };
+    if let Some(metrics) = output.metrics.as_object_mut() {
+        metrics.insert("scale_limits".to_owned(), scale_limits_report);
+    }
     if let Some(checkpoint) = checkpoint_config
         && checkpoint.best_model_output.is_file()
     {

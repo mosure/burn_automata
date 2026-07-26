@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -678,6 +678,9 @@ pub struct AdaptiveTarget2dTrainingConfig {
     /// Use the update probability as its mean gate instead of one correlated
     /// Bernoulli draw for the complete represented material.
     pub expected_coarse_update_mask: bool,
+    /// Event-relative sampling and loss controls for learning recovery after
+    /// detached topology changes.
+    pub event_training: AdaptiveTarget2dEventTrainingConfig,
     pub target2d: Target2dTrainingConfig,
     pub material: AdaptiveTarget2dMaterialConfig,
     pub topology: AdaptiveTarget2dTopologyConfig,
@@ -701,12 +704,70 @@ impl Default for AdaptiveTarget2dTrainingConfig {
             pool_age_strata: 0,
             backward_loss_scale: 1.0,
             expected_coarse_update_mask: false,
+            event_training: AdaptiveTarget2dEventTrainingConfig::default(),
             target2d: Target2dTrainingConfig {
                 particle_count: 3_070,
                 ..Target2dTrainingConfig::default()
             },
             material: AdaptiveTarget2dMaterialConfig::default(),
             topology: AdaptiveTarget2dTopologyConfig::default(),
+        }
+    }
+}
+
+/// Event-relative objective for adaptive recurrent Target2D training.
+///
+/// Topology selection remains detached at TBPTT boundaries. This objective
+/// ensures that selected events are followed by a bounded differentiable
+/// recovery rollout instead of being scored only at the instant of exchange.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveTarget2dEventTrainingConfig {
+    /// Enable event-aware pool sampling and post-event loss weighting.
+    pub enabled: bool,
+    /// Number of rollout steps for which a trajectory remains in the
+    /// post-event recovery objective.
+    pub post_event_recovery_steps: usize,
+    /// Additional relative weight applied to post-event trajectory losses.
+    /// The weighted mean is normalized by the sum of row weights.
+    pub post_event_loss_weight: f32,
+    /// Weight of the positive post-event degradation relative to the same
+    /// row's detached loss immediately before its topology event.
+    pub post_event_degradation_weight: f32,
+    /// Penalty applied to the worst per-seed PSNR drift across checkpoint
+    /// horizons when selecting the returned model.
+    pub checkpoint_drift_penalty_weight: f32,
+    /// Minimum number of batch rows whose sampled age should cross a scheduled
+    /// topology event during the sampled rollout. If the persistent pool lacks
+    /// eligible ages and a fresh trajectory can reach an event, additional
+    /// rows are restored from the immutable seed bank.
+    pub min_event_trajectories_per_batch: usize,
+    /// Maximum suffix appended when an event occurs too near the end of a
+    /// sampled rollout to expose the requested recovery horizon. Zero reuses
+    /// `post_event_recovery_steps`.
+    pub max_recovery_extension_steps: usize,
+}
+
+impl AdaptiveTarget2dEventTrainingConfig {
+    pub fn recovery_extension_budget(self) -> usize {
+        if self.max_recovery_extension_steps == 0 {
+            self.post_event_recovery_steps
+        } else {
+            self.max_recovery_extension_steps
+        }
+    }
+}
+
+impl Default for AdaptiveTarget2dEventTrainingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            post_event_recovery_steps: 64,
+            post_event_loss_weight: 1.0,
+            post_event_degradation_weight: 0.0,
+            checkpoint_drift_penalty_weight: 0.0,
+            min_event_trajectories_per_batch: 1,
+            max_recovery_extension_steps: 0,
         }
     }
 }
@@ -794,6 +855,38 @@ pub struct AdaptiveTarget2dGpuTrainingReport {
     pub training: Target2dGpuTrainingReport,
 }
 
+/// Bounded live update from canonical adaptive Target2D training.
+#[derive(Clone, Debug)]
+pub struct AdaptiveTarget2dGpuTrainingProgress {
+    pub step: usize,
+    pub total_steps: usize,
+    pub loss: f32,
+    pub eval_loss: Option<crate::Target2dGpuLossSummary>,
+    pub render_rgb_psnr_db: Option<f32>,
+    pub base_grad_norm: f32,
+    pub base_grad_scale: f32,
+    pub particle_steps_per_sec: f64,
+    pub elapsed_ms: f64,
+    pub model: AdaptiveNpaModel,
+}
+
+/// Receives throttled adaptive-model snapshots between optimizer steps.
+pub trait AdaptiveTarget2dGpuTrainingObserver: Send {
+    fn should_stop(&self) -> bool {
+        false
+    }
+
+    fn snapshot_interval_steps(&self) -> usize {
+        1
+    }
+
+    fn snapshot_interval_duration(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn on_progress(&mut self, progress: AdaptiveTarget2dGpuTrainingProgress);
+}
+
 pub fn train_adaptive_target_2d_gpu(
     backend: Target2dGpuBackend,
     model: &mut AdaptiveNpaModel,
@@ -811,6 +904,31 @@ pub fn train_adaptive_target_2d_gpu(
         config,
         loss_config,
         checkpoint,
+        None,
+    )
+}
+
+/// Canonical adaptive Target2D training with cancellable live model updates.
+#[allow(clippy::too_many_arguments)]
+pub fn train_adaptive_target_2d_gpu_with_observer(
+    backend: Target2dGpuBackend,
+    model: &mut AdaptiveNpaModel,
+    hashgrid: &burn_automata_kernels::HashGridConfig,
+    target: crate::TargetImage2d,
+    config: AdaptiveTarget2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+    checkpoint: Option<&Target2dGpuCheckpointConfig>,
+    observer: &mut dyn AdaptiveTarget2dGpuTrainingObserver,
+) -> Result<AdaptiveTarget2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    crate::hyper::e2e_training::train_adaptive_target_2d_gpu_impl(
+        backend,
+        model,
+        hashgrid,
+        target,
+        config,
+        loss_config,
+        checkpoint,
+        Some(observer),
     )
 }
 

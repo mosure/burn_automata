@@ -279,42 +279,64 @@ where
         );
     }
 
-    // A duplicate guard row absorbs a Cube/Fusion custom-output tail overwrite
-    // observed for batched adjoints. It is deliberately applied at the kernel
-    // boundary so fixed- and variable-footprint consumers cannot diverge.
-    let pad3 = |value: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 3>| {
-        BurnTensor::cat(
-            vec![value.clone(), value.narrow(0, batches.saturating_sub(1), 1)],
-            0,
-        )
-    };
-    let pad2 = |value: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 2>| {
-        BurnTensor::cat(
-            vec![value.clone(), value.narrow(0, batches.saturating_sub(1), 1)],
-            0,
-        )
-    };
-    let output = target2d_cube_adjoint_fusion_inner::<R, F, I, BT>(
-        pad3(x),
-        pad3(centered_x),
-        pad3(s),
-        pad3(target_rgb),
-        pad3(target_density),
-        pad3(target_foreground),
-        pad3(target_foreground_scale),
-        pad2(particle_pixel_size),
-        pad2(particle_output_scale),
-        particle_center_weight.map(pad2),
-        cfg,
-    )?;
+    // The Cube/Fusion custom-op path corrupts interior rows at quality-scale
+    // image and particle counts even when every input row is identical. Keep
+    // each custom op sample-local, then concatenate its outputs. This preserves
+    // true batched rollout upstream while making the loss/adjoint boundary
+    // equivalent to independent per-sample evaluation.
+    let mut outputs = Vec::with_capacity(batches);
+    for batch in 0..batches {
+        outputs.push(target2d_cube_adjoint_fusion_inner::<R, F, I, BT>(
+            x.clone().narrow(0, batch, 1),
+            centered_x.clone().narrow(0, batch, 1),
+            s.clone().narrow(0, batch, 1),
+            target_rgb.clone().narrow(0, batch, 1),
+            target_density.clone().narrow(0, batch, 1),
+            target_foreground.clone().narrow(0, batch, 1),
+            target_foreground_scale.clone().narrow(0, batch, 1),
+            particle_pixel_size.clone().narrow(0, batch, 1),
+            particle_output_scale.clone().narrow(0, batch, 1),
+            particle_center_weight
+                .as_ref()
+                .map(|weight| weight.clone().narrow(0, batch, 1)),
+            cfg,
+        )?);
+    }
 
     Ok(Target2dCubeLossOutput {
-        position_grad: output.position_grad.narrow(0, 0, batches),
-        state_grad: output.state_grad.narrow(0, 0, batches),
-        constant: output.constant.narrow(0, 0, batches),
-        splat: output.splat.narrow(0, 0, batches),
-        color: output.color.narrow(0, 0, batches),
-        density: output.density.narrow(0, 0, batches),
+        position_grad: BurnTensor::cat(
+            outputs
+                .iter()
+                .map(|output| output.position_grad.clone())
+                .collect(),
+            0,
+        ),
+        state_grad: BurnTensor::cat(
+            outputs
+                .iter()
+                .map(|output| output.state_grad.clone())
+                .collect(),
+            0,
+        ),
+        constant: BurnTensor::cat(
+            outputs
+                .iter()
+                .map(|output| output.constant.clone())
+                .collect(),
+            0,
+        ),
+        splat: BurnTensor::cat(
+            outputs.iter().map(|output| output.splat.clone()).collect(),
+            0,
+        ),
+        color: BurnTensor::cat(
+            outputs.iter().map(|output| output.color.clone()).collect(),
+            0,
+        ),
+        density: BurnTensor::cat(
+            outputs.into_iter().map(|output| output.density).collect(),
+            0,
+        ),
     })
 }
 

@@ -70,9 +70,11 @@ pub use rule_dataset::{adaptive_rule_distillation_batch, adaptive_rule_on_policy
 #[cfg(feature = "gpu_wgpu")]
 pub(crate) use target2d::adaptive_target2d_seed_particles;
 pub use target2d::{
-    AdaptiveTarget2dGpuTrainingReport, AdaptiveTarget2dMaterialConfig,
-    AdaptiveTarget2dMaterialLayout, AdaptiveTarget2dRuleTraining, AdaptiveTarget2dTopologyConfig,
-    AdaptiveTarget2dTrainingConfig, train_adaptive_target_2d_gpu,
+    AdaptiveTarget2dEventTrainingConfig, AdaptiveTarget2dGpuTrainingObserver,
+    AdaptiveTarget2dGpuTrainingProgress, AdaptiveTarget2dGpuTrainingReport,
+    AdaptiveTarget2dMaterialConfig, AdaptiveTarget2dMaterialLayout, AdaptiveTarget2dRuleTraining,
+    AdaptiveTarget2dTopologyConfig, AdaptiveTarget2dTrainingConfig, train_adaptive_target_2d_gpu,
+    train_adaptive_target_2d_gpu_with_observer,
 };
 pub(crate) use target2d::{
     AdaptiveTarget2dSeedBank, AdaptiveTarget2dUpdateMask, build_adaptive_target2d_seed_bank,

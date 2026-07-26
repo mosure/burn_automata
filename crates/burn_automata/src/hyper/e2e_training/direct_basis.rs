@@ -192,4 +192,5 @@ pub(crate) struct AdaptiveTarget2dBurnConfig {
     pub(crate) max_pool_age_steps: usize,
     pub(crate) pool_age_strata: usize,
     pub(crate) backward_loss_scale: f32,
+    pub(crate) event_training: crate::adaptive::AdaptiveTarget2dEventTrainingConfig,
 }

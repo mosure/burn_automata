@@ -1796,15 +1796,27 @@ use super::*;
         max_age_steps: Option<usize>,
         age_strata: usize,
     ) -> Vec<usize> {
+        sample_pool_indices_by_age_with_event_preference(
+            rng,
+            ages,
+            batch_size,
+            fresh_seed_rows,
+            max_age_steps,
+            age_strata,
+            None,
+        )
+    }
+
+    pub(super) fn sample_pool_indices_by_age_with_event_preference(
+        rng: &mut StdRng,
+        ages: &[usize],
+        batch_size: usize,
+        fresh_seed_rows: usize,
+        max_age_steps: Option<usize>,
+        age_strata: usize,
+        event_preference: Option<BurnPoolEventPreference>,
+    ) -> Vec<usize> {
         let sample_count = batch_size.min(ages.len());
-        let Some(max_age_steps) =
-            max_age_steps.filter(|max_age| *max_age > 0 && age_strata >= 2)
-        else {
-            let mut indices = (0..ages.len()).collect::<Vec<_>>();
-            indices.shuffle(rng);
-            indices.truncate(sample_count);
-            return indices;
-        };
         if sample_count == 0 {
             return Vec::new();
         }
@@ -1813,7 +1825,37 @@ use super::*;
         let mut available = (0..ages.len()).collect::<Vec<_>>();
         available.shuffle(rng);
         let mut selected = available.drain(..fresh_count).collect::<Vec<_>>();
-        let persistent_count = sample_count - fresh_count;
+        if let Some(preference) = event_preference {
+            let fresh_event_rows = usize::from(pool_age_crosses_preferred_event(0, preference))
+                * fresh_count;
+            let preferred_rows = preference
+                .min_rows
+                .min(sample_count)
+                .saturating_sub(fresh_event_rows)
+                .min(sample_count - selected.len());
+            if preferred_rows > 0 {
+                let mut candidates = available
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        pool_age_crosses_preferred_event(ages[*index], preference)
+                    })
+                    .collect::<Vec<_>>();
+                candidates.shuffle(rng);
+                candidates.truncate(preferred_rows);
+                available.retain(|index| !candidates.contains(index));
+                selected.extend(candidates);
+            }
+        }
+
+        let persistent_count = sample_count - selected.len();
+        let Some(max_age_steps) =
+            max_age_steps.filter(|max_age| *max_age > 0 && age_strata >= 2)
+        else {
+            available.shuffle(rng);
+            selected.extend(available.into_iter().take(persistent_count));
+            return selected;
+        };
         let mut buckets = vec![Vec::new(); age_strata];
         for index in available {
             buckets[pool_age_stratum(ages[index], max_age_steps, age_strata)].push(index);
@@ -1837,6 +1879,22 @@ use super::*;
             selected.extend(remaining.into_iter().take(missing));
         }
         selected
+    }
+
+    pub(super) fn pool_age_crosses_preferred_event(
+        age: usize,
+        preference: BurnPoolEventPreference,
+    ) -> bool {
+        if preference.interval_steps == 0 || preference.lookahead_steps == 0 {
+            return false;
+        }
+        let after = age.saturating_add(preference.lookahead_steps);
+        let lower = age
+            .saturating_add(1)
+            .max(preference.start_step)
+            .max(1);
+        let next = lower.div_ceil(preference.interval_steps) * preference.interval_steps;
+        next <= after && (preference.end_step == 0 || next <= preference.end_step)
     }
 
     impl BurnDeviceParticlePool {
@@ -2056,6 +2114,7 @@ use super::*;
                     fresh_seed_rows: usize::from(replace_seed),
                     max_age_steps: None,
                     age_strata: 0,
+                    event_preference: None,
                 },
                 config,
                 device,
@@ -2070,13 +2129,14 @@ use super::*;
             config: DirectBasisTrainConfig,
             device: &BurnDevice,
         ) -> AutomataResult<BurnPoolBatch> {
-            let pool_indices = sample_pool_indices_by_age(
+            let pool_indices = sample_pool_indices_by_age_with_event_preference(
                 rng,
                 &self.ages,
                 batch_size,
                 sampling.fresh_seed_rows,
                 sampling.max_age_steps,
                 sampling.age_strata,
+                sampling.event_preference,
             );
             let inner_device = self.positions.device();
             let indices = inner_index_tensor(&pool_indices, &inner_device);
@@ -2091,7 +2151,7 @@ use super::*;
                 .collect::<Vec<_>>();
 
             let fresh_seed_rows = sampling.fresh_seed_rows.min(pool_indices.len());
-            let fresh_batch_rows = ages
+            let mut fresh_batch_rows = ages
                 .iter()
                 .copied()
                 .enumerate()
@@ -2103,6 +2163,41 @@ use super::*;
                     .then_some(batch_row)
                 })
                 .collect::<Vec<_>>();
+            if let Some(preference) = sampling.event_preference
+                && pool_age_crosses_preferred_event(0, preference)
+            {
+                let preferred_rows = ages
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(batch_row, age)| {
+                        let effective_age = if fresh_batch_rows.contains(batch_row) {
+                            0
+                        } else {
+                            *age
+                        };
+                        pool_age_crosses_preferred_event(effective_age, preference)
+                    })
+                    .count();
+                let mut deficit = preference
+                    .min_rows
+                    .min(pool_indices.len())
+                    .saturating_sub(preferred_rows);
+                if deficit > 0 {
+                    for (batch_row, age) in ages.iter().copied().enumerate() {
+                        if deficit == 0 {
+                            break;
+                        }
+                        if !fresh_batch_rows.contains(&batch_row)
+                            && !pool_age_crosses_preferred_event(age, preference)
+                        {
+                            fresh_batch_rows.push(batch_row);
+                            deficit -= 1;
+                        }
+                    }
+                }
+            }
+            fresh_batch_rows.sort_unstable();
             if !fresh_batch_rows.is_empty() {
                 for batch_row in fresh_batch_rows.iter().copied() {
                     ages[batch_row] = 0;

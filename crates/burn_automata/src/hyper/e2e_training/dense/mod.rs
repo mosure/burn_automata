@@ -100,7 +100,8 @@ macro_rules! dense_backend_impl {
         };
         use crate::{
             AdamWConfig, AutomataError, AutomataResult, BpkModelManifest, NpaConfig,
-            NpaLowRankAdapter, NpaModel, NpaWeights, SgdConfig, TargetImage2d,
+            NpaLowRankAdapter, NpaModel, NpaWeights, SgdConfig, Target2dGpuLossSummary,
+            Target2dGpuTrainingObserver, Target2dGpuTrainingProgress, TargetImage2d,
             rollout::{seed_particles_scaled, stochastic_mask},
             target2d::{render_target_2d_splat, target_2d_foreground_mask},
         };
@@ -395,6 +396,16 @@ macro_rules! dense_backend_impl {
             fresh_seed_rows: usize,
             max_age_steps: Option<usize>,
             age_strata: usize,
+            event_preference: Option<BurnPoolEventPreference>,
+        }
+
+        #[derive(Clone, Copy)]
+        struct BurnPoolEventPreference {
+            start_step: usize,
+            end_step: usize,
+            interval_steps: usize,
+            lookahead_steps: usize,
+            min_rows: usize,
         }
 
         #[derive(Clone)]
