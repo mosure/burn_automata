@@ -28,10 +28,10 @@ backend_wgpu = [
   "burn/fusion",
   "burn/autodiff",
 ]
-cli = ["dep:base64", "dep:clap", "dep:image", "dep:toml", "dep:ureq"]
-dino = ["dep:burn_dino", "dep:image", "backend_ndarray"]
+cli = ["dep:base64", "dep:clap", "dep:toml", "dep:ureq"]
+dino = ["dep:burn_dino", "backend_ndarray"]
 gpu_wgpu = ["dep:bytemuck", "dep:wgpu"]
-import = ["dep:image"]
+import = []
 train = []
 
 [dependencies]
@@ -41,7 +41,7 @@ burn_dino = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
-image = { workspace = true, optional = true }
+image.workspace = true
 pollster.workspace = true
 rand.workspace = true
 rayon.workspace = true

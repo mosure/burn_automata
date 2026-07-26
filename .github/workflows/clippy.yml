@@ -16,6 +16,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p burn_automata_kernels -p burn_automata -p bevy_burn --all-targets -- -D warnings
       - run: cargo clippy -p burn_automata --examples --benches -- -D warnings
-      - run: cargo clippy -p burn_automata --no-default-features --features gpu_wgpu -- -D warnings
+      - run: cargo clippy -p burn_automata --no-default-features --features "backend_wgpu gpu_wgpu" -- -D warnings
       - run: cargo clippy -p bevy_automata --no-default-features --features viewer -- -D warnings
       - run: cargo clippy -p bevy_automata --no-default-features --features "splatting gpu_wgpu" --test gaussian_gpu_link -- -D warnings
