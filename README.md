@@ -1,423 +1,210 @@
 # burn_automata
 
-[![CI](https://github.com/mosure/burn_automata/actions/workflows/test.yml/badge.svg)](https://github.com/mosure/burn_automata/actions/workflows/test.yml)
-[![Bevy](https://img.shields.io/badge/bevy-0.19.0-232326)](https://bevy.org)
-[![Burn](https://img.shields.io/badge/burn-0.21.0-8a4fff)](https://burn.dev)
+[![test](https://github.com/mosure/burn_automata/actions/workflows/test.yml/badge.svg)](https://github.com/mosure/burn_automata/actions/workflows/test.yml)
+[![clippy](https://github.com/mosure/burn_automata/actions/workflows/clippy.yml/badge.svg)](https://github.com/mosure/burn_automata/actions/workflows/clippy.yml)
+[![pages](https://github.com/mosure/burn_automata/actions/workflows/pages.yml/badge.svg)](https://github.com/mosure/burn_automata/actions/workflows/pages.yml)
+[![license](https://img.shields.io/github/license/mosure/burn_automata)](LICENSE)
 
-Burn Neural Particle Automata kernels, rollout/training code, and a Bevy viewer.
+Burn-native Neural Particle Automata inference and training with optimized 2D
+GPU kernels and a native/web Bevy Gaussian Splatting viewer. Try the
+[live WebGPU demo](https://mosure.github.io/burn_automata/).
 
-This repository is structured after `burn_reconstruction`: a kernel crate, a Burn-facing core crate, a Bevy app crate, version correlation in the workspace manifest, CI workflows, scripts, and a `www/` publishing surface.
+![4096-particle lizard rollout](docs/hyper_npa_figures/lizard_wgpu_gaussian_4096_rollout.png)
 
-## Crates
+## features
 
-| crate | purpose |
-| --- | --- |
-| `burn_automata_kernels` | optimized deterministic CPU kernels for hashgrid SPH perception, 2D splatting, 3D Gaussian decoding, and Euler integration |
-| `burn_automata` | NPA model config, rollout, `.bpk` import/export, CLI, Burn tensor bridge, direct WGPU inference executor, and supervised forward/backward training baseline |
-| `bevy_automata` | Bevy 0.19 viewer with BSN UI, live rollout/backward/training status, optional Gaussian splatting startup, and GPU interop extension points |
-| `vendor/bevy_burn` | local bridge facade for binding Burn metadata and Bevy `ShaderBuffer` assets while upstream APIs settle |
+- [x] upstream NPA checkpoint import and strict CPU/WGPU parity validation
+- [x] device-resident WGPU hashgrid, perception, rollout, and Gaussian decoding
+- [x] Burn/WGPU and Burn/CUDA Target2D training infrastructure
+- [x] DINO spatial-token conditioned HyperNPA training and inference
+- [x] fixed and adaptive image-target training from the Bevy viewer
+- [x] native and WebGPU viewer with an isolated browser training worker
+- [x] headless PNG rollout capture for paper and benchmark automation
+- [x] versioned `.bpk` models with checksums and timed training checkpoints
+- [x] verified TOML smoke, quality, and throughput configurations
+- [ ] from-scratch Burn 2D oracle quality parity with the official trainer
+- [ ] broad held-out HyperNPA quality parity with per-image oracle NPAs
+- [ ] adaptive long-horizon quality parity with the fixed 2D path
+- [ ] quality-scale 3D training and generalization
 
-## Version Matrix
+The hardened fixed 2D inference path and imported upstream catalog are the
+reference baseline. Local oracle training, generalized HyperNPA, adaptive NPA,
+and 3D training remain research paths until their checked-in parity gates pass.
 
-| stack | version |
-| --- | --- |
-| Rust | `1.95` workspace minimum |
-| Burn | `0.21.0` |
-| Bevy | `0.19.0` |
-| WGPU | `29` |
-| bevy_gaussian_splatting | `8.0.1` |
-| bevy_interleave | pulled through `bevy_gaussian_splatting` as `0.10` |
+## viewer
 
-## Status
-
-Implemented:
-
-- 2D and 3D NPA presets based on the self-organising NPA reference project.
-- Deterministic CPU SPH perception using normalized upstream poly6/spiky kernels, moment-matrix state-gradient correction, log-normalized feature scaling, hashgrid neighbor traversal, and fused operator passes.
-- Optional `gpu_wgpu` executor with GPU linked-cell or fixed-bucket local neighbor traversal, density pass, perception/MLP update, stochastic update masking, Euler integration, persistent ping-pong rollout state, and direct gaussian planar-buffer writes on WGPU storage buffers. CLI export/bench convenience paths still read back for reporting.
-- Additive [budgeted adaptive NPA](docs/budgeted_adaptive_npa.md) path with represented measure, exact mixed-scale spatial search, hard graph budgets, conservative topology, Burn training, and binary artifacts. Every visible adaptive leaf decodes to one isotropic Gaussian with equal XYZ scale and identity rotation; covariance is simulation-only. The direct-active lizard candidate uses 3,070 visible/recurrent rows to represent 4,096 fine material units, spans 33 continuous material-scale audit bins and a measured `2.001x` Gaussian-radius range, and performs paired local-detail exchanges without state reallocation or readback. Across 32 seeds it reaches `26.12/26.32 dB` mean PSNR at steps 256/512 with `74.95%` of the 4,096-row interaction work, but misses the 1,024-step tail gate. The hardened fixed 2D path remains the production default.
-- Opt-in [continuous material scale](docs/adaptive_continuous_scale.md) supports conservative unequal-measure children, a verified mixed 2/3/4-child fractional-octave LoD restriction, and a bounded direct-active continuous-scale lizard smoke while keeping Gaussian radius measure-derived. The direct-active candidate still uses fixed interaction bandwidth and a fixed resident row count; continuous communication scale, variable leaf count, and broad quality promotion remain research paths. Execution support classes remain candidate-search metadata rather than particle state.
-- Seeded MLP update model, checksumed `.bpk` container, direct upstream `.pth` import, JSON fallback, and CLI import/infer/train/bench commands.
-- Manual supervised NPA training baseline with finite gradient checks, clipping, repeatable convergence history, rollout-local teacher-seed/teacher-BPK distillation targets, explicit feature-row fallback, and trained `.bpk` export.
-- Configurable inference equivariance modes: `None`, `ParticleDensity`, and default upstream-compatible `ParticleDensityAndScale`.
-- Bevy 0.19 viewer crate using BSN for UI construction, model switching through `BURN_AUTOMATA_MODEL`, live forward status, backward-gradient probe, live training/convergence controls, `bevy_gaussian_splatting` compile coverage, and helpers for borrowing Bevy planar gaussian storage as Burn WGPU output buffers.
-- Local `bevy_burn` buffer binding facade with Bevy `ShaderBuffer` asset helpers for future render-world and Burn backend handoff.
-- Tests for kernel constants, rollout, training/backward gradients, `.bpk` manifest roundtrip/checksum rejection, upstream checkpoint import, Burn tensor bridge, WGPU/CPU one-step and persistent 3D parity, Bevy planar gaussian GPU-buffer linkage, headless offscreen gaussian rendering, and buffer bridge descriptors.
-- Dependency-free imported-model parity script comparing CPU or WGPU BPK rollouts against a pure Python upstream-formula reference, including 2D raster PSNR.
-
-Tracked next:
-
-- Coalesced sorted/prefix-sum or tiled neighbor kernels for dense tens-of-thousands particle workloads.
-- Native Burn training graph and autodiff rollout losses; the current 3D render-loss trainer defaults to a CPU direct-rollout backend that applies analytic render position/opacity/color adjoints through stored rollout MLP outputs, direct Euler position integration, fixed-neighborhood SPH state-perception adjoints, and a damped fixed-neighborhood SPH position-perception adjoint, while still treating changing neighbor membership and rollout-time render visibility as stop-gradient.
-- Render-world extraction from native Burn buffers into the persistent WGPU automata state.
-- Browser visual regression checks.
-
-## Usage
-
-Generate a seeded manifest:
-
-```bash
-cargo run -p burn_automata --bin burn_automata -- manifest --preset growing-2d --output models/seed.bpk
-```
-
-Run CPU inference:
-
-```bash
-cargo run --release -p burn_automata --bin burn_automata -- infer --model models/seed.bpk --steps 32 --particles 4096 --update-prob 1.0 --output artifacts/rollout.json
-```
-
-Run deterministic WGPU inference export:
-
-```bash
-cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- infer --gpu --model models/seed.bpk --steps 32 --particles 4096 --update-prob 1.0 --output artifacts/gpu_rollout.json
-```
-
-The Bevy growing/lizard viewer defaults to the upstream stochastic rollout setting `update_prob=0.5`; deterministic examples use `1.0` for exact CPU/WGPU parity checks.
-
-Run rollout-local supervised training with a deterministic seeded teacher
-target. If neither `--target-seed` nor `--target-model` is provided, the CLI
-defaults to a seeded teacher target (`42`) and samples actual local rollout
-states instead of random feature rows or a zero-update hold objective:
-
-```bash
-cargo run -p burn_automata --bin burn_automata -- train \
-  --preset growing-2d \
-  --rows 64 \
-  --steps 64 \
-  --report-interval 8 \
-  --learning-rate 0.01 \
-  --target-seed 99 \
-  --batch-source rollout \
-  --rollout-particles 1024 \
-  --rollout-steps 16 \
-  --output artifacts/training_report.json \
-  --model-output artifacts/trained_student.bpk
-```
-
-For imported-model parity or distillation experiments, replace `--target-seed 99` with `--target-model models/catalog/growing/lizard.bpk`. The JSON report records initial/final/best loss and sampled convergence history; `--model-output` writes the trained student as a checksumed `.bpk`.
-Use `--zero-update` only for deliberate stationary/hold artifacts; it is
-mutually exclusive with teacher-seed and teacher-model targets.
-Use `--batch-source features` only for low-level MLP regression checks; it is no
-longer the default path for 2D or 3D training.
-
-Validate 2D NPA parity against the official SelfOrg-NPA lizard baseline before
-trusting local oracle experiments. The upstream checkout is external and cached
-under `.cache/`; the full gate also consumes a small exported fixture:
-
-```bash
-scripts/fetch_selforg_npa.sh
-python3 scripts/export_selforg_npa_fixture.py \
-  --upstream-root .cache/selforg_npa/NPA \
-  --target-image assets/reference_targets/lizard_upstream_120.png \
-  --output artifacts/reference/selforg_npa/lizard_fixture.json
-
-cargo run -p burn_automata --features cli --bin burn_automata -- \
-  validate-npa2d-parity --config configs/verified/2d/parity/lizard_smoke.toml
-```
-
-`train-target2d` is deliberately hidden and marked experimental until it passes
-that official parity harness with the same target extraction, initialization,
-rollout, loss, gradients, optimizer update, and 4096-particle rollout behavior.
-Use `--experimental` only for diagnostics; do not treat its outputs as oracle
-baselines. Burn/GPU `train-target2d` writes viewer-loadable checkpoint BPKs
-during long runs when `--model-output` is set: by default
-`<model>.checkpoint.bpk`, `<model>.best.bpk`, and `<model>.checkpoint.json` are
-updated every `--checkpoint-interval-seconds` seconds, with optional
-`--checkpoint-interval-steps` for step-based checkpointing.
-
-Canonical 2D HyperNPA configs live under `configs/verified/2d/hyper_e2e/`.
-The maintained trainer is `train-hyper2d-e2e-rollout` (alias
-`train-hypernpa2d`), which conditions on online DINO tokens and optimizes the
-generated structured NPA residual plus shared-base NPA rollout image loss
-directly. Legacy LoRA generators remain available for controlled comparisons;
-the canonical row-flow path emits identifiable dense controller rows instead
-of regressing non-identifiable LoRA factors. Its
-`[validation].interval` is intentionally separate from `[training].report_interval`
-so expensive holdout PSNR checks remain bounded. Use
-`[gpu].condition_device_cache_max_bytes` to cap resident DINO-token cache memory,
-and use `[model].shared_base_train_start_step` plus the base/generator optimizer
-overrides for warmup or different shared-trunk versus hypernetwork learning
-rates. Checked-in HyperNPA TOMLs also include `[gates]` for minimum reported
-particle throughput, bounded validation overhead, held-out p10 PSNR,
-condition-shuffle separation, generated-controller gain, and optional strict
-matched-oracle gaps; gate
-failures are written into the JSON report and fail the command when
-`fail_on_violation = true`. Exploratory TOMLs belong in gitignored
-`configs/sandbox/`.
-
-Quality-scale CUDA throughput runs should use a release build. The repository
-`cubecl.toml` persists compiled CubeCL kernels and autotune choices under
-ignored `target/`, avoiding repeated CUDA kernel compilation across runs. The
-validated B64/1,024-particle/fixed-96-step profile is
-`configs/verified/2d/hyper_e2e/throughput_omnisvg_64_b64_p1024_s96_cuda.toml`;
-its report uses synchronized interval and aggregate optimizer throughput.
-
-The retired built-in 3D mesh commands now default to writing legacy diagnostic
-artifacts under `artifacts/`, not catalog models. Multi-view render-proxy
-experiments should write to `target/` or `artifacts/` until they pass the
-strict mesh/render gates. `train-render3d` refuses `assets/models/*` outputs
-unless the run starts from a conditionless-local base model and uses the
-matching local 3D growth seed; catalog-bound candidates are validated from a
-temporary `target/` path and only promoted after strict app-scale multi-seed
-growth validation passes at the 1024-particle catalog and viewer horizons.
-Legacy, ablation, and retiming 3D commands refuse
-catalog-bound output paths entirely. The preferred scaling path is the
-many-object shared-base plus LoRA suite:
-
-```bash
-cargo run -p burn_automata --release --bin burn_automata -- train-render3d-adapters \
-  --target-set many \
-  --output-dir artifacts/render_3d_adapter_suite \
-  --report-output artifacts/render_3d_adapter_suite_report.json
-```
-
-Use single-target `train-render3d` commands for focused diagnostics:
-
-```bash
-cargo run -p burn_automata --release --bin burn_automata -- train-render3d \
-  --target torus \
-  --base-model assets/models/uv_torus_growth_3d.bpk \
-  --seed-mode torus-growth-3d \
-  --extra-selection-seed 42 \
-  --extra-selection-seed 99 \
-  --model-output target/uv_torus_render_probe_3d.bpk \
-  --report-output artifacts/uv_torus_render_probe_3d_training_report.json
-
-cargo run -p burn_automata --release --bin burn_automata -- train-render3d \
-  --target teapot \
-  --base-model assets/models/teapot_growth_3d.bpk \
-  --seed-mode teapot-growth-3d \
-  --extra-selection-seed 42 \
-  --extra-selection-seed 99 \
-  --model-output target/teapot_render_probe_3d.bpk \
-  --report-output artifacts/teapot_render_probe_3d_training_report.json
-```
-
-The legacy projection/seed-frame batch is still available as
-`--training-mode projection-baseline` for mesh-target sanity checks, and
-`--training-mode rollout-local` remains available for local teacher
-distillation experiments. `--training-mode rollout-position-field` is available
-for rollout-state mesh rows, but those commands are no longer catalog defaults.
-`train-render3d` defaults to `--training-backend direct-rollout` and
-`--weight-update-mode adapter`. Without `--base-model`, it starts from a
-conditionless-local compact-growth prior with `position_features=false` and
-target-agnostic local growth seed defaults; with `--base-model`, it treats the
-provided local-growth BPK as a frozen shared base and trains a LoRA-style
-low-rank object adapter (`--adapter-rank`, `--adapter-alpha`,
-`--adapter-seed`). Reports serialize the adapter parameter count and base/full
-parameter counts; the exported `.bpk` is a materialized compatibility model.
-For many-object shared-base sweeps, use `train-render3d-adapters`. It defaults
-to `--target-set many`, covering torus, teapot, sphere, ellipsoid, cube,
-cylinder, cone, capsule, pyramid, bicone, dumbbell, and cross. `--target-set
-core` is the smaller torus/teapot diagnostic set, and `--target-set primitives`
-expands to the ten object-agnostic procedural mesh classes. Explicit
-`--targets` runs focused subsets.
-`--holdout-targets` removes targets from shared-base cycles while still fitting
-adapter-only held-out objects. By default, no-arg many-object suites use an
-effective `--auto-holdout-stride 4 --auto-holdout-offset 3`, holding out
-ellipsoid, capsule, and cross while keeping torus and teapot in shared-base
-training; override these flags for a different split. Without `--base-model`,
-the suite initializes an object-agnostic conditionless-local 3D growth base,
-alternates full-weight shared-base training for `--shared-base-cycles` cycles
-(`many` defaults to two cycles), saves `shared_base.bpk`, evaluates that frozen
-base on every target, then trains one compact `.adapter.json` LoRA artifact per
-target. With `--base-model`, the suite freezes the supplied base by default;
-pass `--shared-base-cycles` to continue shared-base training before adapter
-fitting. Materialized validation/viewer BPKs are written beside the adapters,
-and the suite report records shared-base generalization, adapted train/holdout
-quality, explicit shared/holdout/adapter target counts, single-adapter
-efficiency, and shared-base-plus-adapter-bank efficiency. The suite also writes
-`adapter_bank.json` by default; this compact manifest includes the same split
-counts and is the intended target format for future HyperNPA models that
-predict object LoRA adapters from conditions. Both the suite report and
-adapter-bank manifest include `strategy="shared_base_low_rank_object_adapters"`
-and a `contract` block. The no-arg many-object contract fails if the run
-collapses back to only torus/teapot, if too few non-core objects participate, or
-if adapters are not produced for every target. Use `train-render3d` for
-single-target diagnostics and `--target-set core` only for the small
-torus/teapot regression suite; use `--weight-update-mode full` only for legacy
-full-model ablations. The backend
-backpropagates the deterministic CPU multi-view splat loss analytically to
-final particle positions, opacity, and color, and applies those adjoints through
-the stored rollout MLP outputs. It also
-propagates RGB/opacity state adjoints through direct, blurred, and
-state-gradient SPH perception channels over stored snapshots, carries position
-adjoints through direct Euler integration, and applies a conservative
-`--perception-position-gain` to fixed-neighborhood SPH position-perception
-adjoints. Direct-rollout training now averages clipped SGD deltas over the
-selection seed set by default; use `--no-direct-selection-seed-training` only
-for the older single-seed ablation. `--trajectory-render-gain`/`--trajectory-render-samples`
-can inject render adjoints at stored rollout snapshots, while
-`--trajectory-mesh-gain` uses the same snapshot schedule for mesh
-coverage/surface adjoints without enabling intermediate render gradients.
-`--liveness-gain`
-adds a bounded local-front state adjoint on the strict liveness channel
-(`state[3]`), so render/coverage training can teach progressive activation
-instead of only material opacity. This liveness snapshot path uses
-`--trajectory-render-samples` but does not require nonzero
-`--trajectory-render-gain`; far dormant particles receive no global activation
-pressure. The direct backend now applies target-coverage pressure to
-all active particles by default instead of only sampled render-gradient rows.
-Coverage adjoints use `--coverage-gain` directly rather than being scaled by
-the render `--motion-gain`; use `--no-full-coverage-adjoint` only for the older
-sparse-row ablation. The older supervised row projection remains
-available as `--training-backend proxy`.
-`--coverage-mode soft-chamfer` adds an opt-in detached soft target-coverage
-proxy, and `--coverage-repulsion-gain`/`--coverage-repulsion-radius` can add
-mesh-tangent particle spread pressure for collapse ablations. These improve
-some teapot/torus diagnostics but remain non-default because the strict
-multi-seed render and torus tube-coverage gates still fail.
-`--coverage-mode sliced-ot` is also available for balanced distributional
-coverage in local 3D ablations; it is tested, but current torus probes regress
-strict validation, so it is diagnostic only. `retime-growth3d --alpha` can
-scale motion in a copied BPK, and `--skip-front-retime` isolates that from
-front-controller retiming. Alpha retiming improves some torus diagnostics but
-does not pass strict coverage/render gates and should not be promoted directly.
-Mesh target sampling is now area-weighted and low-discrepancy instead of
-face-prefix centroid sampling, so low sample counts exercise the whole target
-surface during render/coverage training and validation. Random mesh surface
-sampling uses the same area-weighted policy.
-Gradient rows are sampled across the whole cloud instead of only the particle
-array prefix, so under-covered regions participate in continuation probes.
-`--gradient-mode finite-diff` remains available for regression checks. This is
-an honest backend scaffold, not full WGPU/autodiff BPTT through particle
-positions inside perception, changing neighbor membership, and render
-visibility through time. `--surface-escape-gain` weights active particles that
-escape past the strict surface-distance threshold more strongly in the
-terminal, trajectory, and proxy surface projection objectives, so reported
-surface tails have a matching training signal instead of being diagnostics
-only. `train-render3d` reports serialize a
-`growth_validation` section with the same strict gate and seed set used by
-catalog promotion, and `--fail-on-validation` fails on that strict
-runtime-dynamics gate rather than render PSNR alone. Candidate selection uses
-that strict score, including active-surface max/tail and render-density
-penalties. It also records target-normal-bin coverage, so missing broad surface
-normal families such as torus tube collapse are strict blockers even when
-pointwise target coverage looks acceptable. Selection only allows bounded
-render/density slack when the strict score improves materially. Rejected rounds
-are rolled back before the next rollout, so subsequent training continues from
-the best strict-scored checkpoint instead of a regressed candidate.
-
-For the stricter no-position experiment, use the explicit ablation command:
-
-```bash
-cargo run -p burn_automata --release --bin burn_automata -- ablate-local-3d --target torus
-cargo run -p burn_automata --release --bin burn_automata -- ablate-local-3d --target teapot
-```
-
-This path uses `position_features=false`, compact random-ball seeds, refreshed
-local rollout rows, full-cloud perception/target context before supervised row
-sampling, and writes reports such as
-`artifacts/conditionless_torus_3d_ablation_report.json`. Current 3D growth
-artifacts also use compact growth seeds and no absolute position features, but
-they are still experimental because they fail strict rendered density/mesh
-validation. The Bevy app catalog currently exposes only the generic 3D preset
-at 1024 particles; the latest teapot and torus artifacts are kept as hidden
-regression targets because they still fail strict coverage/render gates at that
-interactive scale. Catalog validation uses the app-eval seed from the render
-sanity tests (`0x51a7_3d`) so viewer behavior matches the validated rollout
-path; see `docs/local_3d_morphogenesis.md`.
-Use `--base-model <local-growth.bpk>` to continue a previous conditionless-local
-artifact with refreshed rollout rows; the command rejects position-field,
-seed-frame, and render-proxy shortcut lineages.
-
-Evaluate multi-view rendered density/color/depth loss for a saved 3D model:
-
-```bash
-cargo run -p burn_automata --release --bin burn_automata -- render-loss-3d \
-  --model assets/models/uv_torus_growth_3d.bpk \
-  --target torus \
-  --seed-mode torus-growth-3d
-```
-
-The render harness uses deterministic orthographic Gaussian splats over
-`xy`/`xz`/`yz`/isometric views, count-matches mesh target samples to rollout
-particles by default, and reports relative density MSE/PSNR, gated color
-MSE/PSNR, and depth-moment MSE/PSNR. It is currently a CPU correctness oracle
-and validation objective. The `train-render3d` direct-rollout backend trains
-against the analytic-gradient version of this objective over stored trajectory
-snapshots, carries a fixed-neighborhood recurrent SPH state adjoint for
-RGB/opacity channels, backpropagates through direct Euler position integration,
-and can add bounded target-coverage residual rows. Native differentiable/GPU
-training through position-dependent perception, changing neighborhoods, render
-visibility, and the full rollout remains the next backend step. Checkpoint
-selection uses the training seed, `--selection-seed`, and any
-`--extra-selection-seed` values as a worst-case strict-score guard.
-
-Run the viewer:
+Run the native viewer:
 
 ```bash
 cargo run --release -p bevy_automata
-cargo run --release -p bevy_automata --no-default-features --features "viewer splatting"
 ```
 
-The default viewer command runs the resident render-world WGPU automata state
-and writes directly into `bevy_gaussian_splatting` buffers. The
-`--no-default-features` command keeps the CPU rollout-to-planar-gaussian
-fallback for environments where the direct WGPU bridge is being isolated. The
-viewer has a `train` toggle and `train lr` slider. Live training freezes the
-current model as a local rollout teacher, samples a bounded probe batch from
-the current rollout, applies clipped supervised SGD on the CPU-side model,
-reports convergence in the BSN status panel, and pushes updated weights into
-the resident render-world WGPU automata state without a host readback path for
-gaussian rendering.
-
-Run profiled target benchmarks:
+Load a specific fixed or adaptive model:
 
 ```bash
-scripts/bench_rollout.sh
-PRESET=growing-3d-gs PARTICLES=16384 STEPS=1 scripts/bench_rollout.sh
-cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset growing-3d-gs --particles 4096 --steps 2 --gpu
-cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset texture-2d --particles 4096 --steps 16 --gpu --neighbor-mode auto
-cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset texture-2d --particles 4096 --steps 16 --gpu --neighbor-mode auto --step-timing
-cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset texture-2d --particles 4096 --steps 16 --gpu --neighbor-mode linked-list
-cargo run --release -p burn_automata --features gpu_wgpu --bin burn_automata -- bench --preset growing-3d-gs --particles 16384 --steps 16 --gpu --gaussian
+cargo run --release -p bevy_automata -- view \
+  --model path/to/model.bpk \
+  --particles 4096
+
+cargo run --release -p bevy_automata -- view \
+  --adaptive-model path/to/adaptive_model.bpk
 ```
 
-Run the focused checks:
+The image workflow is:
+
+1. `open image` selects the target.
+2. `infer` runs DINO -> conditioned HyperNPA -> NPA generation.
+3. `train fresh` starts fixed or adaptive Target2D training.
+4. `stop` ends training after the current optimizer step.
+
+Training runs independently from the displayed rollout. Live model snapshots
+update the viewer without reseeding it, while `reset` only resets the visible
+rollout. The reset-period and learning-rate controls are configurable in the
+training panel.
+
+## headless export
+
+Render selected rollout steps to PNG without opening the interactive viewer:
 
 ```bash
-scripts/ci_check.sh
+cargo run --release -p bevy_automata -- export \
+  --model path/to/model.bpk \
+  --particles 4096 \
+  --steps 512 \
+  --capture-steps 32,96,256,512 \
+  --output-dir target/lizard_rollout
+```
+
+Use `--hyper-image`, `--hyper-base`, `--hyper-model`, and `--dino-model` for
+image-conditioned exports. Adaptive exports accept `--adaptive-model`.
+
+## inference
+
+Run the core WGPU inference path and export the final rollout state:
+
+```bash
+cargo run --release -p burn_automata --features gpu_wgpu -- \
+  infer \
+  --gpu \
+  --model path/to/model.bpk \
+  --particles 4096 \
+  --steps 128 \
+  --output target/rollout.json
+```
+
+Profile the resident GPU path:
+
+```bash
+cargo run --release -p burn_automata --features gpu_wgpu -- \
+  bench \
+  --preset growing-2d \
+  --particles 4096 \
+  --steps 128 \
+  --gpu \
+  --neighbor-mode auto
+```
+
+## hypernpa
+
+The maintained image-conditioned path is trained end to end:
+
+```text
+image
+  -> DINO ViT-S spatial tokens
+  -> conditioned rectified row flow
+  -> shared NPA + generated controller residual
+  -> particle rollout
+  -> Target2D image and dynamics loss
+```
+
+Run the bounded WGPU smoke after provisioning the model and target paths named
+by the config:
+
+```bash
+cargo run --release -p burn_automata \
+  --no-default-features \
+  --features cli,backend_ndarray,backend_wgpu,dino -- \
+  train-hypernpa2d \
+  --config configs/verified/2d/hyper_e2e/smoke_conditional_row_flow.toml
+```
+
+Reproducible configs belong under `configs/verified/`; local experiments belong
+under the gitignored `configs/sandbox/`. The CUDA quality configuration is
+`configs/verified/2d/hyper_e2e/production_omnisvg_1k_conditional_row_flow_e2e_cuda.toml`.
+
+## web
+
+The deployed viewer supports the same image dialog, HyperNPA inference, fixed
+training, and adaptive training controls as native. Browser optimization runs
+in a dedicated Web Worker so training does not block the Bevy render loop.
+
+Build the viewer and worker:
+
+```bash
+scripts/build_wasm.sh
+python3 -m http.server 4173 --directory www
+```
+
+Run the real browser WebGPU gate:
+
+```bash
+WEB_BASE_URL=http://127.0.0.1:4173/ \
+  node scripts/validate_web_runtime.mjs --all
+```
+
+See [the web deployment notes](www/README.md) for model packaging, checksums,
+GitHub Pages, and GPU-less CI validation.
+
+## crates
+
+| crate | purpose |
+| --- | --- |
+| `burn_automata_kernels` | CubeCL/WGPU/CUDA and CPU NPA kernels |
+| `burn_automata` | models, inference, training, import, validation, and CLI |
+| `bevy_automata` | native/web viewer, headless renderer, and GPU interop |
+| `burn_automata_web_worker` | isolated browser Target2D training worker |
+| `vendor/bevy_burn` | local Burn-to-Bevy buffer bridge |
+
+## compatibility
+
+| burn_automata | Burn | Bevy | Rust |
+| --- | --- | --- | --- |
+| `0.1` | `0.21` | `0.19` | `1.95` |
+
+The default native core enables NdArray and WGPU backends. CUDA training uses
+`--no-default-features --features cli,backend_ndarray,backend_cuda,dino`.
+
+## docs
+
+- [NPA reference and parity contract](docs/npa_reference.md)
+- [HyperNPA paper](docs/hyper_npa.pdf)
+- [HyperNPA quality status](docs/hypernpa_dino_flow_quality_status.md)
+- [budgeted adaptive NPA](docs/budgeted_adaptive_npa.md)
+- [continuous-scale adaptive NPA](docs/adaptive_continuous_scale.md)
+- [kernel strategy](docs/kernel_strategy.md)
+- [GPU interop](docs/gpu_interop.md)
+- [validation](docs/validation.md)
+
+## validation
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --lib
+cargo clippy --workspace --all-targets -- -D warnings
 scripts/check_inference_features.sh
-scripts/validate_3d_catalog.py
-REQUIRE_BPK=1 scripts/validate_gpu_e2e.sh
-CATALOG_PARITY=1 SELFORG_WEB_ROOT=/tmp/selforg_npa_web scripts/validate_gpu_e2e.sh
+scripts/build_wasm.sh
 ```
 
-## Upstream NPA Import
+Hardware-specific WGPU/CUDA benchmarks and the browser runtime gate are kept
+separate from CPU-only CI checks.
 
-The upstream project at <https://selforg-npa.github.io/> publishes PyTorch checkpoints for 2D neural particle automata. This workspace can import the published PyTorch zip checkpoints directly:
+## license
 
-```bash
-cargo run -p burn_automata --bin burn_automata -- import \
-  --input data/pretrained/lizard.pth \
-  --output models/catalog/growing/lizard.bpk
-```
+Licensed under the [MIT License](LICENSE).
 
-The importer reads the checkpoint storages, infers NPA dimensions from the first two MLP layers, records source metadata, and writes a checksumed `.bpk` container. JSON interchange files from `scripts/export_npa_checkpoint.py` are still supported for debugging or unsupported checkpoint variants.
+## references
 
-The web demo publishes many additional 2D growing/texture models as base64 JSON tensors. Import the curated Bevy catalog from a clone of `SelfOrg-NPA.github.io`:
-
-```bash
-git clone --depth 1 https://github.com/SelfOrg-NPA/SelfOrg-NPA.github.io /tmp/selforg_npa_web
-python3 scripts/import_selforg_catalog.py --web-root /tmp/selforg_npa_web
-```
-
-Validate numerical parity for an imported checkpoint:
-
-```bash
-python3 scripts/validate_import_parity.py --model models/catalog/growing/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2
-python3 scripts/validate_import_parity.py --model models/catalog/texture/polka_dotted_0121.bpk --particles 64 --preset texture-2d --seed-scale 1.0
-python3 scripts/validate_import_parity.py --model models/catalog/growing/lizard.bpk --particles 64 --preset growing-2d --seed-scale 0.2 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
-python3 scripts/validate_import_parity.py --model models/catalog/texture/polka_dotted_0121.bpk --particles 64 --preset texture-2d --seed-scale 1.0 --gpu --steps 4 --psnr-threshold 70 --hidden-psnr-threshold 70
-python3 scripts/validate_catalog_parity.py --web-root /tmp/selforg_npa_web --gpu --build-binary --require-all
-```
-
-On the current ARM/NVIDIA workstation, release-mode CPU inference measures roughly 14-29 ms for `growing-2d` at 4096 particles depending on benchmark harness, 6-25 ms for `texture-2d` at 4096 particles, and about 21 ms for `growing-3d-gs` at 16,384 particles in criterion. The resident WGPU benchmark keeps rollout state on GPU, times submit/wait separately from final readback, normalizes particle-grid `eps` to seed scale by default, and reports `grid_overflow_count`; `--step-timing` also reports p95/p99/max step latency plus `grid_max_overflow_count` across the rollout. Any nonzero fixed-bucket overflow is not a valid exact result, and under-capacity fixed buckets are rejected at state creation when initial occupancy already exceeds capacity. `--fixed-eps` intentionally reproduces density-sensitive pathological seed-scale sweeps. `--neighbor-mode auto` routes validated 1024-8192 particle 2D and 3D workloads through cooperative sorted cells, keeps larger unvalidated cases bounded, and rejects larger pathological exact scans before dispatch instead of entering known stall-prone kernels. `--neighbor-mode tiled` enables the active-cell/shared-memory tiled fixed-bucket kernel for profiling; `--neighbor-mode sorted` enables the exact overflow-free prefix-sum cell layout with `O(cells + particles)` grid memory; `--neighbor-mode cooperative-sorted-cells` runs one workgroup per target particle over sorted cell ranges and cooperatively evaluates the MLP update across lanes. `--neighbor-mode subgroup-cooperative-sorted-cells` is an experimental opt-in variant that requests WGPU subgroup support and only runs on fixed 32-wide subgroup devices; current 4k/8k dense/point/micro sweeps did not justify promoting it into `auto`. Recent exact auto timings from the clustered-density sweep are about 3.2 ms/step for 4k dense `growing-2d`, 1.3 ms/step for 4k dense `texture-2d`, 1.6 ms/step for 4k dense `growing-3d-gs`, 10.5 ms/step for 8k dense `growing-2d`, 3.1 ms/step for 8k dense `texture-2d`, 3.4 ms/step for 8k dense `growing-3d-gs`, and 37.1 ms/step for the guarded 8k 3D micro-cluster case.
-
-## References
-
-- Self-Organising Neural Particle Automata: <https://selforg-npa.github.io/>
-- Burn: <https://burn.dev>
-- Bevy: <https://bevy.org>
-- bevy_gaussian_splatting: <https://github.com/mosure/bevy_gaussian_splatting>
+- [Self-Organising Neural Particle Automata](https://selforg-npa.github.io/)
+- [Burn](https://burn.dev/)
+- [Bevy](https://bevy.org/)
+- [bevy_gaussian_splatting](https://github.com/mosure/bevy_gaussian_splatting)
