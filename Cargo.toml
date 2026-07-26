@@ -54,7 +54,7 @@ wasm-bindgen-futures = "0.4"
 web-time = "1.1"
 web-sys = "0.3"
 wgpu = "29"
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [profile.dev.package."*"]
 opt-level = 3
