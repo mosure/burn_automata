@@ -47,6 +47,8 @@
 *.bin
 *.wasm
 *.pdf
+!docs/adaptive_npa.pdf
+!docs/hyper_npa.pdf
 
 # Top-level LaTeX intermediates. Paper source, bibliography, and figures remain tracked.
 /docs/*.aux

@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "burn_automata: Burn-Native Neural Particle Automata"
+type: software
+authors:
+  - family-names: Mosure
+    given-names: Mitchell
+    email: mitchell@mosure.me
+repository-code: "https://github.com/mosure/burn_automata"
+url: "https://github.com/mosure/burn_automata"
+license: MIT
+version: 0.1.0
+keywords:
+  - neural particle automata
+  - adaptive resolution
+  - hypernetworks
+  - Burn
+  - Bevy
+abstract: >-
+  Burn-native Neural Particle Automata inference, training, adaptive
+  resolution, image-conditioned HyperNPA research, and Bevy/WebGPU
+  visualization.

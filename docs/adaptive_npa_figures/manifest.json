@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "generated_on": "2026-07-26",
+  "renderer": "bevy_automata export / bevy_gaussian_splatting",
+  "resolution": [768, 768],
+  "capture_steps": [0, 96, 256, 512, 1024],
+  "seeds": [42, 46, 57, 73],
+  "update_probability": 0.5,
+  "steps_per_frame": 4,
+  "adaptive": {
+    "artifact": "artifacts/adaptive/continuous_scale_ratio4/lizard_ratio4_candidate.adaptive.bpk",
+    "artifact_sha256": "51d8f4698cc325682a31ade7fb1147bd29fd989c084017f567211931cdceaf45",
+    "requested_particles": 4096,
+    "active_particles": 3070,
+    "represented_fine_units": 4096,
+    "minimum_gaussian_scale": 0.00942341,
+    "maximum_gaussian_scale": 0.018855624,
+    "gaussian_scale_ratio": 2.000934,
+    "anisotropic_particle_fraction": 0.0,
+    "represented_measure_relative_error": 1.2228518e-7
+  },
+  "fixed": {
+    "artifact": "models/catalog/growing/lizard.bpk",
+    "particles": 4096
+  },
+  "target": {
+    "source": ".cache/selforg_npa/targets/growing/lizard.png",
+    "tracked_copy": "lizard_target.png"
+  },
+  "figures": [
+    {
+      "path": "lizard_target.png",
+      "dimensions": [512, 512],
+      "sha256": "ad2f253ce249b7da4c90aec51476d699f13f013ec2be6234e9e0e0a4cd5ed410"
+    },
+    {
+      "path": "lizard_rollout_seed42.png",
+      "dimensions": [1880, 814],
+      "sha256": "8daa1d2bb8a4705c5b6fac9aa1eb0212dc19ae7f58435b511443d3ce9abda985"
+    },
+    {
+      "path": "lizard_seed_robustness.png",
+      "dimensions": [1504, 1212],
+      "sha256": "11578d30c3411dbd6d7691ca4417e22b4b2ec088d5eb0805bdf66c0b7415e274"
+    },
+    {
+      "path": "lizard_scale_comparison.png",
+      "dimensions": [1840, 493],
+      "sha256": "a0ff723a0fdd6d270abde9b8fb6c3a7e0987376ac771c7cf475f885379dc9f5b"
+    }
+  ]
+}

@@ -1,5 +1,10 @@
 # Continuous-Scale Adaptive NPA
 
+The publication, measured claim boundary, and current renderer evidence are in
+[`adaptive_npa.pdf`](adaptive_npa.pdf) and
+[`adaptive_npa.md`](adaptive_npa.md). This document is the deeper implementation
+contract.
+
 ## Objective
 
 Adaptive NPA should expose a continuous material-resolution field without
@@ -180,6 +185,47 @@ This path continuously reallocates represented measure among a fixed set of
 measurable spatial resolution allocation. It does not yet demonstrate a robust
 quality advantage, continuous communication bandwidth, runtime row births or
 deaths, or a generalized adaptive rule. Those boundaries prevent promotion.
+
+### Scale limits and event-aware training
+
+The runtime clamps are not the active limit on the measured lizard candidates.
+The configured material and render footprint range is `0.0015625..0.1`
+(`64x` in radius), while the interaction-bandwidth range is `0.025..0.4`
+(`16x`). The scale feature supplied to a scale-conditioned rule represents
+footprint ratios from `0.25x` through `4x`. The shared-rule experiments do not
+consume the residual gate.
+
+The narrower effective range comes from the fixed graded material spectrum.
+`seed_measure_ratio` values of `4`, `6.25`, and `9` produce measured 2D radius
+spans of `2.001x`, `2.499x`, and `2.999x`, respectively. Topology events
+relocate these preallocated scale slots; they do not synthesize radii outside
+the material layout. The `9x` experiment occupied only
+`0.001892..0.005674` of the configured footprint range, and its raw scale
+feature occupied `-0.395..0.816`, with zero lower or upper saturation.
+Interaction bandwidth was intentionally held at `0.1` for these comparisons.
+Allowing it to widen with particle radius degraded quality rather than exposing
+a clamp.
+
+Event-aware recurrent training now:
+
+- samples persistent trajectories that cross scheduled topology events;
+- splits TBPTT chunks at the exact event step;
+- scores a bounded differentiable post-event recovery rollout;
+- accumulates segment gradients and applies one Adam update per outer step; and
+- optionally selects checkpoints by worst seed/horizon PSNR minus a drift
+  penalty.
+
+The exact-event `4x` candidate improved broad mean PSNR from `25.310` to
+`25.351 dB` and improved the step-1,024 mean from `24.916` to `25.007 dB`.
+However, worst per-seed drift increased from `2.222` to `2.475 dB`. A paired
+pre/post-event degradation loss and a 16-seed drift-aware checkpoint selector
+did not generalize to the 32-seed protocol. The `6.25x` and `9x` candidates
+reached `24.934` and `24.650 dB` broad means. Therefore, the original `4x`
+quality candidate remains the deployment leader. The remaining quality problem
+is broad stochastic long-horizon recovery, not renderer scale decoding, hard
+scale clipping, or another topology schedule sweep. Full measurements and
+correctness gates are recorded in
+`docs/benchmarks/adaptive_event_aware_long_horizon_2026-07-25.json`.
 
 ## Validated 2D LoD Path
 

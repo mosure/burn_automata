@@ -2,8 +2,8 @@
 
 The publication source is [`hyper_npa.tex`](hyper_npa.tex), with references in
 [`hyper_npa.bib`](hyper_npa.bib) and renderer evidence under
-[`hyper_npa_figures/latest`](hyper_npa_figures/latest). The generated local PDF
-is `docs/hyper_npa.pdf`.
+[`hyper_npa_figures/latest`](hyper_npa_figures/latest). The compiled,
+versioned publication is [`hyper_npa.pdf`](hyper_npa.pdf).
 
 This document records the claim boundary and the exact evidence used by the
 paper. It is not a second manuscript.

@@ -9,7 +9,7 @@ Burn-native Neural Particle Automata inference and training with optimized 2D
 GPU kernels and a native/web Bevy Gaussian Splatting viewer. Try the
 [live WebGPU demo](https://mosure.github.io/burn_automata/).
 
-![4096-particle lizard rollout](docs/hyper_npa_figures/lizard_wgpu_gaussian_4096_rollout.png)
+![Matched adaptive and fixed lizard rollouts](docs/adaptive_npa_figures/lizard_rollout_seed42.png)
 
 ## features
 
@@ -176,10 +176,13 @@ The default native core enables NdArray and WGPU backends. CUDA training uses
 
 ## docs
 
+- [documentation index](docs/README.md)
 - [NPA reference and parity contract](docs/npa_reference.md)
 - [HyperNPA paper](docs/hyper_npa.pdf)
+- [HyperNPA paper companion and sources](docs/hyper_npa.md)
 - [HyperNPA quality status](docs/hypernpa_dino_flow_quality_status.md)
-- [budgeted adaptive NPA](docs/budgeted_adaptive_npa.md)
+- [budgeted adaptive NPA paper](docs/adaptive_npa.pdf)
+- [adaptive NPA paper companion and sources](docs/adaptive_npa.md)
 - [continuous-scale adaptive NPA](docs/adaptive_continuous_scale.md)
 - [kernel strategy](docs/kernel_strategy.md)
 - [GPU interop](docs/gpu_interop.md)
@@ -197,6 +200,24 @@ scripts/build_wasm.sh
 
 Hardware-specific WGPU/CUDA benchmarks and the browser runtime gate are kept
 separate from CPU-only CI checks.
+
+## citation
+
+To cite this repository and its maintained implementation:
+
+```bibtex
+@software{mosure2026burnautomata,
+  author = {Mitchell Mosure},
+  title = {burn\_automata: Burn-Native Neural Particle Automata},
+  year = {2026},
+  version = {0.1.0},
+  url = {https://github.com/mosure/burn_automata}
+}
+```
+
+GitHub also exposes this metadata through [`CITATION.cff`](CITATION.cff). The
+adaptive and HyperNPA manuscripts have paper-specific citations in their
+respective PDFs and BibTeX sources.
 
 ## license
 

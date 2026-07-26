@@ -1,8 +1,0 @@
-*.aux
-*.fdb_latexmk
-*.fls
-*.log
-*.out
-!hyper2d_direct_basis_10k.pdf
-/materialized_models/
-/traces/

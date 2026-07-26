@@ -1,0 +1,167 @@
+{
+  "date": "2026-07-25",
+  "status": "event_aware_training_implemented_broad_tail_promotion_failed",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "objective": "Improve topology-event recovery and long-horizon stability without changing continuous Gaussian decoding or the fixed resident-row budget.",
+  "protocol": {
+    "target": "lizard",
+    "active_particle_count": 3070,
+    "reference_fine_units": 4096,
+    "broad_seed_count": 32,
+    "horizons": [
+      96,
+      256,
+      512,
+      1024
+    ],
+    "rows": 128
+  },
+  "implemented_training_contract": {
+    "event_biased_persistent_pool_sampling": true,
+    "exact_event_tbptt_splitting": true,
+    "maximum_observed_scheduled_event_delay_steps": 0,
+    "bounded_post_event_recovery_objective": true,
+    "optimizer_update_cadence": "once per outer step after accumulating TBPTT and event-segment gradients",
+    "optional_paired_degradation_objective": "positive_part(post_event_loss - detached_pre_event_loss)",
+    "checkpoint_selection": "minimum seed/horizon PSNR - drift_penalty * worst per-seed cross-horizon PSNR drift"
+  },
+  "target2d_correctness": {
+    "regression_shape": {
+      "batch": 4,
+      "particles": 3070,
+      "resolution": [
+        256,
+        256
+      ]
+    },
+    "issue": "The former batched custom Target2D dispatch corrupted interior rows and produced a NaN tail row at quality scale.",
+    "resolution": "Keep the recurrent rollout batched but dispatch one device Target2D custom op per sample row and concatenate its outputs.",
+    "dense_tiled_primal_tolerance": 0.000001,
+    "reported_loss_vs_exact_render_rgb_mse_tolerance": 0.00000001,
+    "cuda_quality_scale_rows_finite": true
+  },
+  "scale_limit_audit": {
+    "configured_material_and_render_footprint": {
+      "minimum": 0.0015625,
+      "maximum": 0.1,
+      "radius_span": 64.0
+    },
+    "configured_interaction_bandwidth": {
+      "minimum": 0.025,
+      "maximum": 0.4,
+      "span": 16.0
+    },
+    "material_scale_feature": {
+      "encoding": "clamp(footprint / reference - 1, -0.75, 3)",
+      "representable_footprint_ratio_minimum": 0.25,
+      "representable_footprint_ratio_maximum": 4.0
+    },
+    "shared_rule_residual_gate_active": false,
+    "topology_single_event_desired_current_footprint_ratio": {
+      "minimum": 0.5,
+      "maximum": 2.0
+    },
+    "effective_range_owner": "The graded material seed layout preallocates fixed continuous-scale slots according to seed_measure_ratio; topology relocates those slots.",
+    "measured_layouts": [
+      {
+        "seed_measure_ratio": 4.0,
+        "material_footprint_minimum": 0.0024540133,
+        "material_footprint_maximum": 0.0049103191,
+        "material_footprint_span": 2.0009341,
+        "interaction_bandwidth_minimum": 0.1,
+        "interaction_bandwidth_maximum": 0.1,
+        "scale_feature_saturation_fraction": 0.0
+      },
+      {
+        "seed_measure_ratio": 6.25,
+        "material_footprint_minimum": 0.002132935,
+        "material_footprint_maximum": 0.0053298515,
+        "material_footprint_span": 2.4988346,
+        "interaction_bandwidth_minimum": 0.1,
+        "interaction_bandwidth_maximum": 0.1,
+        "scale_feature_saturation_fraction": 0.0
+      },
+      {
+        "seed_measure_ratio": 9.0,
+        "material_footprint_minimum": 0.001892042,
+        "material_footprint_maximum": 0.0056743054,
+        "material_footprint_span": 2.9990377,
+        "interaction_bandwidth_minimum": 0.1,
+        "interaction_bandwidth_maximum": 0.1,
+        "scale_feature_raw_minimum": -0.39454657,
+        "scale_feature_raw_maximum": 0.81577766,
+        "scale_feature_saturation_fraction": 0.0
+      }
+    ],
+    "conclusion": "No measured candidate touched a material, render, interaction, or scale-feature clamp."
+  },
+  "broad_results": [
+    {
+      "name": "ratio4_prior_quality_leader",
+      "mean_psnr_db": 25.309637,
+      "worst_psnr_db": 23.202938,
+      "worst_seed_drift_db": 2.2216377,
+      "mean_psnr_1024_db": 24.916195,
+      "decision": "retained quality leader"
+    },
+    {
+      "name": "ratio4_exact_event_recovery128",
+      "mean_psnr_db": 25.351402,
+      "worst_psnr_db": 23.184666,
+      "worst_seed_drift_db": 2.474928,
+      "mean_psnr_1024_db": 25.007313,
+      "decision": "rejected by broad drift"
+    },
+    {
+      "name": "ratio4_paired_degradation_recovery128",
+      "mean_psnr_db": 25.338215,
+      "worst_psnr_db": 23.185398,
+      "worst_seed_drift_db": 2.7290306,
+      "mean_psnr_1024_db": 24.961683,
+      "decision": "rejected by broad drift"
+    },
+    {
+      "name": "ratio4_drift_aware_checkpoint_selection",
+      "mean_psnr_db": 25.320452,
+      "worst_psnr_db": 23.183552,
+      "worst_seed_drift_db": 2.924202,
+      "mean_psnr_1024_db": 24.958769,
+      "decision": "rejected after an unseen broad seed escaped the 16-seed checkpoint gate"
+    },
+    {
+      "name": "ratio625_exact_event_recovery128",
+      "mean_psnr_db": 24.934252,
+      "worst_psnr_db": 22.882656,
+      "worst_seed_drift_db": 2.0895863,
+      "mean_psnr_1024_db": 24.642117,
+      "decision": "rejected by quality"
+    },
+    {
+      "name": "ratio9_corrected_fixed_support",
+      "mean_psnr_db": 24.64957,
+      "worst_psnr_db": 22.626886,
+      "worst_seed_drift_db": 1.972866,
+      "mean_psnr_1024_db": 24.47888,
+      "decision": "rejected by quality"
+    }
+  ],
+  "training_throughput": {
+    "ratio4_exact_event_particle_steps_per_second_range": [
+      3050000,
+      3420000
+    ],
+    "ratio625_mean_particle_steps_per_second": 3125000,
+    "paired_degradation_particle_steps_per_second_range": [
+      2860000,
+      3360000
+    ],
+    "interpretation": "Exact event splitting and one-update-per-outer-step training retained the established throughput range. The optional paired degradation render costs approximately 6-10 percent."
+  },
+  "remaining_boundaries": [
+    "The original ratio4 checkpoint remains the quality leader because no event-aware candidate improved both broad quality and worst-seed drift.",
+    "Checkpoint evaluation over large seed-horizon matrices remains too slow and must move to an optimized batched no-grad executor before it can become an every-checkpoint gate.",
+    "Training reports scheduled topology opportunities; broad validation separately reports device-accepted exchanges.",
+    "The recurrent rule has not learned robust dynamics over the 2.5x and 3x radius material distributions even though those distributions do not saturate hard limits."
+  ],
+  "next_step": "Train for broad stochastic long-horizon recovery with an efficient batched no-grad evaluator and held-out tail selection; do not widen scale ranges or tune topology schedules again until that gate improves."
+}

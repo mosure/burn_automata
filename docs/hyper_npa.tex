@@ -68,7 +68,9 @@ released NPA checkpoints, HyperNPA obtains 9.63--11.65 dB versus
 captures expose failures that white-background PSNR can obscure, including
 coarse silhouettes, color-only matches, and collapsed particle masses. These
 results establish an auditable end-to-end baseline and conditional
-controllability, but not oracle-quality generalization.
+controllability, but not oracle-quality generalization. The maintained trainer
+now includes a conditional row-flow generator; no row-flow quality is
+retroactively attributed to the deterministic checkpoint evaluated here.
 \end{abstract}
 
 \keywords{neural particle automata, hypernetworks, self-organization,
@@ -146,6 +148,18 @@ Our contributions are:
   NPA oracles, with evidence locating the dominant gap in the shared recurrent
   substrate and its training objective.
 \end{itemize}
+
+\paragraph{Revision and artifact boundary.}
+This manuscript was refreshed on July 26, 2026. Its numerical quality claims
+remain attached to the serialized
+\path{module_token_cross_attention_lora_v2} checkpoint. The maintained source
+tree additionally implements a versioned conditional row-flow architecture
+with noisy controller sources, a timestep-conditioned velocity transformer,
+and a deterministic Heun solve. That path has passed bounded controllability
+and throughput checks, but no identity-disjoint 1k/10k quality run has
+established oracle parity. We therefore describe it only as post-study
+implementation status in Appendix~\ref{app:row-flow}, not as a relabeling of
+the measured model.
 
 \section{Background and Related Work}
 
@@ -852,7 +866,23 @@ reproduce those checkpoints from scratch. The direct adapter table uses the
 same NPA runtime and loss as HyperNPA, but evaluates training identities and
 must not be compared as held-out generalization.
 
-\clearpage
+\section{Maintained Conditional Row-Flow Path}
+\label{app:row-flow}
+
+The current trainer preserves all 257 DINOv2 tokens and appends the aligned
+$14\times14$ RGBA patch payload to each of the 256 patch tokens. Deterministic
+seeded source rows for the two NPA affine layers are transported by a
+timestep-conditioned self/cross-attention velocity network. An eight-step
+Heun solve produces 10,898 identifiable controller residuals. End-to-end image
+and rollout loss updates both the generated residual and shared NPA trunk.
+Detached TBPTT accumulates controller-endpoint VJPs on device and contracts
+them through the flow graph once per optimizer step.
+
+This architecture is stored as version 5 inside the versioned BPK artifact
+container and remains load-compatible with legacy version-4 row-flow
+artifacts. Its bounded four-condition control shows active conditioning, but
+its p10 quality remains far below the 26 dB target. Consequently, broad
+generalized row-flow quality is an open result, not a paper conclusion.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{hyper_npa}
