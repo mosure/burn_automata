@@ -13,7 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p burn_automata_kernels -p burn_automata -p bevy_burn --all-targets -- -D warnings
       - run: cargo clippy -p burn_automata --examples --benches -- -D warnings
       - run: cargo clippy -p burn_automata --no-default-features --features gpu_wgpu -- -D warnings
