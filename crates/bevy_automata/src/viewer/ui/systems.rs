@@ -353,14 +353,26 @@ pub(in crate::viewer) fn sync_adaptive_training_checkbox(
 }
 
 #[cfg(feature = "hyper_dino")]
+type AdaptiveTrainingCheckboxFilter = (
+    With<AdaptiveTrainingCheckbox>,
+    Without<AdaptiveTrainingCheckboxMark>,
+);
+
+#[cfg(feature = "hyper_dino")]
+type AdaptiveTrainingCheckboxMarkFilter = (
+    With<AdaptiveTrainingCheckboxMark>,
+    Without<AdaptiveTrainingCheckbox>,
+);
+
+#[cfg(feature = "hyper_dino")]
 pub(in crate::viewer) fn update_adaptive_training_checkbox_style(
     settings: Res<AutomataSettings>,
     state: Res<ImageTargetTrainingState>,
     mut checkboxes: Query<
         (&Hovered, &mut BackgroundColor, &mut BorderColor),
-        With<AdaptiveTrainingCheckbox>,
+        AdaptiveTrainingCheckboxFilter,
     >,
-    mut marks: Query<&mut BackgroundColor, With<AdaptiveTrainingCheckboxMark>>,
+    mut marks: Query<&mut BackgroundColor, AdaptiveTrainingCheckboxMarkFilter>,
 ) {
     let available = !state.is_training();
     for (hovered, mut background, mut border) in &mut checkboxes {

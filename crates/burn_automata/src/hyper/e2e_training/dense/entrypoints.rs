@@ -39,6 +39,43 @@ use super::*;
         NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, values)
     }
 
+    pub(crate) async fn predict_conditional_row_flow_adapter_async(
+        hyper: &E2eHyperNpa2d,
+        config: &NpaConfig,
+        condition: &[f32],
+    ) -> AutomataResult<NpaLowRankAdapter> {
+        hyper.validate()?;
+        if !hyper.is_conditional_row_flow() {
+            return Err(AutomataError::InvalidArgument(
+                "Burn row-flow inference requires a conditional-row-flow artifact".to_string(),
+            ));
+        }
+        let flow = hyper
+            .row_flow
+            .as_ref()
+            .expect("validated conditional row flow");
+        let expected = flow.condition_tokens * flow.condition_dims;
+        if condition.len() != expected || condition.iter().any(|value| !value.is_finite()) {
+            return Err(AutomataError::InvalidArgument(format!(
+                "conditional row flow expected {expected} finite condition values, got {}",
+                condition.len()
+            )));
+        }
+        let device = BurnDevice::default();
+        let params = BurnRowFlowParams::from_artifact(hyper, config, &device)?;
+        let adapter = params.sample_adapter_batch(
+            tensor3(
+                condition.to_vec(),
+                [1, flow.condition_tokens, flow.condition_dims],
+                &device,
+            ),
+            config,
+        );
+        let values = tensor_vec_async(adapter.to_parameter_vector().inner()).await?;
+        let spec = hyper.adapter_spec(config)?;
+        NpaLowRankAdapter::from_parameter_vector(config, spec.rank, spec.alpha, values)
+    }
+
     pub(crate) fn train_direct_basis_burn_dense(
         base: &mut NpaModel,
         train_examples: &mut [DirectBasisExample],
@@ -2841,10 +2878,23 @@ use super::*;
             scheduler_milestones: Vec::new(),
             scheduler_gamma: 1.0,
         };
-        train_oracle_models_burn_dense_planned(models, examples, plan, None, None)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            pollster::block_on(train_oracle_models_burn_dense_planned(
+                models, examples, plan, None, None,
+            ))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (models, examples, plan);
+            Err(std::io::Error::other(
+                "synchronous Burn/WGPU training is unavailable on wasm32; use the async Target2D API",
+            )
+            .into())
+        }
     }
 
-    pub(crate) fn train_target2d_oracle_burn_dense(
+    pub(crate) async fn train_target2d_oracle_burn_dense_async(
         model: &mut NpaModel,
         example: &DirectBasisExample,
         plan: Target2dOracleTrainPlan,
@@ -2858,9 +2908,10 @@ use super::*;
             checkpoint,
             observer,
         )
+        .await
     }
 
-    fn train_oracle_models_burn_dense_planned(
+    async fn train_oracle_models_burn_dense_planned(
         models: &mut [NpaModel],
         examples: &[DirectBasisExample],
         plan: Target2dOracleTrainPlan,
@@ -3049,7 +3100,8 @@ use super::*;
                     && upstream_epoch.is_multiple_of(config.inject_seed_interval.max(1)),
                 collect_metrics,
                 optimizer_config,
-            )?;
+            )
+            .await?;
             let particle_steps = stats.particle_steps_per_sec * stats.elapsed_ms / 1_000.0;
             measured_particle_steps += particle_steps;
             measured_elapsed_ms += stats.elapsed_ms;
@@ -3059,12 +3111,10 @@ use super::*;
                 steady_elapsed_ms += stats.elapsed_ms;
             }
             let eval_losses = if should_report && should_eval {
-                Some(evaluate_oracle_model_batch(
-                    &params,
-                    &targets,
-                    config,
-                    config.eval_seed,
-                )?)
+                Some(
+                    evaluate_oracle_model_batch(&params, &targets, config, config.eval_seed)
+                        .await?,
+                )
             } else {
                 None
             };
@@ -3206,7 +3256,7 @@ use super::*;
                 )?;
             }
             if observer_due {
-                params.write_to_models(models)?;
+                params.write_to_models_async(models).await?;
                 let mean_loss = stats.per_model_loss.iter().copied().sum::<f32>()
                     / stats.per_model_loss.len().max(1) as f32;
                 let mean_base_grad_norm = stats
@@ -3262,7 +3312,7 @@ use super::*;
             }
         }
 
-        params.write_to_models(models)?;
+        params.write_to_models_async(models).await?;
         memory_snapshots.push(check_process_memory_budget("oracle_batch:end", config)?);
         gpu_memory_snapshots.push(check_gpu_memory_budget("oracle_batch:end", config)?);
         let metrics = json!({
@@ -3339,19 +3389,27 @@ use super::*;
         render_rgb_psnr_db: f32,
     }
 
-    fn evaluate_oracle_model_batch(
+    async fn evaluate_oracle_model_batch(
         params: &BurnBaseBatch,
         targets: &[BurnTargetExample],
         config: DirectBasisTrainConfig,
         seed: u64,
     ) -> Result<Vec<OracleModelEval>, Box<dyn std::error::Error>> {
-        targets
+        let mut models = targets
             .iter()
             .enumerate()
-            .map(|(index, target)| {
+            .map(|(index, _)| {
                 let eval_seed = seed.wrapping_add(index as u64);
-                let mut model = NpaModel::upstream_seeded(NpaConfig::growing_2d(), eval_seed);
-                params.model(index).write_to_model(&mut model)?;
+                NpaModel::upstream_seeded(NpaConfig::growing_2d(), eval_seed)
+            })
+            .collect::<Vec<_>>();
+        params.write_to_models_async(&mut models).await?;
+        targets
+            .iter()
+            .zip(models)
+            .enumerate()
+            .map(|(index, (target, model))| {
+                let eval_seed = seed.wrapping_add(index as u64);
                 let mut grid = crate::upstream_growing_2d_hashgrid();
                 grid.eps = config.grid_eps;
                 let trace = crate::run_rollout(

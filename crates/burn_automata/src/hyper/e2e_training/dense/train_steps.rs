@@ -2248,7 +2248,7 @@ use super::*;
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn train_oracle_model_batch_step_tbptt(
+    pub(super) async fn train_oracle_model_batch_step_tbptt(
         params: &mut BurnBaseBatch,
         optimizer: &mut BurnBaseBatchAdamWState,
         targets: &[BurnTargetExample],
@@ -2356,7 +2356,7 @@ use super::*;
                 next_displacement.clone(),
             )?;
             if let Some(loss_sums) = loss_sums.as_mut() {
-                let row_losses = loss_vector_scalars(loss.clone())?;
+                let row_losses = loss_vector_scalars_async(loss.clone()).await?;
                 for (model, model_rows) in row_losses.chunks(trajectories_per_model).enumerate() {
                     loss_sums[model] += model_rows
                         .iter()
@@ -2371,13 +2371,15 @@ use super::*;
                 .mean_dim(1)
                 .sum()
                 .backward();
-            let (grad_norms, grad_scales) = params.apply_adamw(
-                &mut grads,
-                optimizer,
-                optimizer_config,
-                config.per_parameter_grad_normalization,
-                collect_metrics,
-            )?;
+            let (grad_norms, grad_scales) = params
+                .apply_adamw_async(
+                    &mut grads,
+                    optimizer,
+                    optimizer_config,
+                    config.per_parameter_grad_normalization,
+                    collect_metrics,
+                )
+                .await?;
             if collect_metrics {
                 for (sum, value) in grad_norm_sums.iter_mut().zip(grad_norms) {
                     *sum += value;

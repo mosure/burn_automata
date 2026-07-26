@@ -168,7 +168,7 @@ pub struct AutomataRenderDiagnostics {
     pub last_error: Option<String>,
 }
 
-#[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
+#[cfg(all(feature = "headless", feature = "splatting", feature = "gpu_wgpu"))]
 pub(super) fn adaptive_render_particle_counts(apps: &bevy::app::SubApps) -> Option<(usize, usize)> {
     apps.iter().find_map(|app| {
         let diagnostics = app.world().get_resource::<AutomataRenderDiagnostics>()?;
@@ -179,7 +179,7 @@ pub(super) fn adaptive_render_particle_counts(apps: &bevy::app::SubApps) -> Opti
     })
 }
 
-#[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
+#[cfg(all(feature = "headless", feature = "splatting", feature = "gpu_wgpu"))]
 pub(super) fn synchronize_adaptive_render_particles(
     apps: &mut bevy::app::SubApps,
 ) -> burn_automata::AutomataResult<Option<burn_automata::AdaptiveParticleSet>> {

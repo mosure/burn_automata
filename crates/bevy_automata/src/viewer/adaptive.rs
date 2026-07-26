@@ -269,6 +269,7 @@ pub(super) fn sync_adaptive_particles_to_gaussian_asset(
 pub(super) fn sync_adaptive_particles_to_gaussian_asset() {}
 
 #[cfg(feature = "splatting")]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn particle_gaussian(
     position: [f32; 4],
     state: &[f32],
@@ -313,6 +314,7 @@ pub(super) fn particle_gaussian(
 /// one visible adaptive particle remains one isotropic render primitive.
 #[cfg(feature = "splatting")]
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) struct AdaptiveGaussianMaterial {
     pub represented_measure: f32,
     pub render_footprint: f32,
@@ -320,6 +322,7 @@ pub(super) struct AdaptiveGaussianMaterial {
 }
 
 #[cfg(feature = "splatting")]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn adaptive_particle_gaussian(
     position: [f32; 4],
     state: &[f32],
@@ -345,6 +348,7 @@ pub(super) fn adaptive_particle_gaussian(
 }
 
 #[cfg(feature = "splatting")]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn adaptive_display_scale_per_footprint(model: &AdaptiveNpaModel) -> f32 {
     burn_automata::adaptive_display_scale_per_footprint(model)
 }

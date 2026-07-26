@@ -8,7 +8,7 @@ use burn::backend::NdArray;
 use burn::backend::Wgpu;
 use burn::{
     module::Module,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder},
+    record::{FullPrecisionSettings, NamedMpkBytesRecorder, NamedMpkFileRecorder, Recorder},
     tensor::{Tensor, backend::Backend, module::adaptive_avg_pool2d},
 };
 use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransformerConfig};
@@ -207,6 +207,30 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
         })
     }
 
+    pub fn load_bytes(
+        bytes: Vec<u8>,
+        image_size: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if image_size == 0 {
+            return Err(std::io::Error::other("DINO image size must be greater than zero").into());
+        }
+        let device = burn::tensor::Device::<B>::default();
+        let config = DinoVisionTransformerConfig {
+            register_token_count: 0,
+            use_register_tokens: false,
+            normalize_intermediate_tokens: false,
+            ..DinoVisionTransformerConfig::vits(Some(image_size), None)
+        };
+        let recorder = NamedMpkBytesRecorder::<FullPrecisionSettings>::default();
+        let record = recorder.load(bytes, &device)?;
+        let model = DinoVisionTransformer::new(&device, config.clone()).load_record(record);
+        Ok(Self {
+            config,
+            device,
+            model,
+        })
+    }
+
     pub fn encode_batch(
         &self,
         conditions: &[ConditionImage2d],
@@ -349,8 +373,21 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
         let encoded = self.encode_batch_tensor_with_contract(conditions, contract)?;
         let dims = encoded.dims();
         let values = encoded.into_data().to_vec::<f32>()?;
-        let row_len = dims[1] * dims[2];
-        Ok(values.chunks_exact(row_len).map(<[f32]>::to_vec).collect())
+        condition_tensor_rows(dims, values)
+    }
+
+    pub async fn encode_batch_with_contract_async(
+        &self,
+        conditions: &[ConditionImage2d],
+        contract: DinoVitsConditionContract,
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        if conditions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = self.encode_batch_tensor_with_contract(conditions, contract)?;
+        let dims = encoded.dims();
+        let values = encoded.into_data_async().await?.to_vec::<f32>()?;
+        condition_tensor_rows(dims, values)
     }
 
     pub fn encode_batch_tensor_with_options(
@@ -542,6 +579,22 @@ impl<B: Backend> DinoVitsConditionEncoderBackend<B> {
             Ok(encoded)
         }
     }
+}
+
+fn condition_tensor_rows(
+    dims: [usize; 3],
+    values: Vec<f32>,
+) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    let row_len = dims[1].saturating_mul(dims[2]);
+    let expected = dims[0].saturating_mul(row_len);
+    if row_len == 0 || values.len() != expected {
+        return Err(std::io::Error::other(format!(
+            "DINO condition tensor shape {dims:?} does not match {} values",
+            values.len()
+        ))
+        .into());
+    }
+    Ok(values.chunks_exact(row_len).map(<[f32]>::to_vec).collect())
 }
 
 #[derive(Clone, Copy)]

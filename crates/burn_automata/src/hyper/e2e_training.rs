@@ -442,6 +442,50 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
     checkpoint_config: Option<&crate::Target2dGpuCheckpointConfig>,
     observer: Option<&mut dyn crate::adaptive::AdaptiveTarget2dGpuTrainingObserver>,
 ) -> Result<crate::adaptive::AdaptiveTarget2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        pollster::block_on(train_adaptive_target_2d_gpu_impl_async(
+            backend,
+            model,
+            hashgrid,
+            target,
+            config,
+            loss_config,
+            checkpoint_config,
+            observer,
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (
+            backend,
+            model,
+            hashgrid,
+            target,
+            config,
+            loss_config,
+            checkpoint_config,
+            observer,
+        );
+        Err(crate::AutomataError::InvalidArgument(
+            "synchronous adaptive Target2D GPU training is unavailable on wasm32; use train_adaptive_target_2d_gpu_with_observer_async"
+                .to_string(),
+        )
+        .into())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn train_adaptive_target_2d_gpu_impl_async(
+    backend: crate::Target2dGpuBackend,
+    model: &mut crate::adaptive::AdaptiveNpaModel,
+    hashgrid: &burn_automata_kernels::HashGridConfig,
+    target: crate::TargetImage2d,
+    config: crate::adaptive::AdaptiveTarget2dTrainingConfig,
+    loss_config: crate::Target2dLossConfig,
+    checkpoint_config: Option<&crate::Target2dGpuCheckpointConfig>,
+    observer: Option<&mut dyn crate::adaptive::AdaptiveTarget2dGpuTrainingObserver>,
+) -> Result<crate::adaptive::AdaptiveTarget2dGpuTrainingReport, Box<dyn std::error::Error>> {
     use crate::adaptive::{
         AdaptiveLocalRuleSemantics, AdaptiveRulePerception, AdaptiveTarget2dGpuTrainingReport,
         build_adaptive_target2d_seed_bank,
@@ -763,52 +807,64 @@ pub(crate) fn train_adaptive_target_2d_gpu_impl(
         observer,
     });
     let mut output = match (backend, frozen_base_residual) {
-        (crate::Target2dGpuBackend::Wgpu, false) => dense::train_adaptive_target2d_burn_wgpu(
-            &mut model.rule,
-            &training_example,
-            plan,
-            adaptive,
-            checkpoint.as_ref(),
-            observer_bridge
-                .as_mut()
-                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
-        )?,
-        (crate::Target2dGpuBackend::Cuda, false) => dense::train_adaptive_target2d_burn_cuda(
-            &mut model.rule,
-            &training_example,
-            plan,
-            adaptive,
-            checkpoint.as_ref(),
-            observer_bridge
-                .as_mut()
-                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
-        )?,
-        (crate::Target2dGpuBackend::Wgpu, true) => dense::train_adaptive_target2d_burn_wgpu(
-            model
-                .local_residual_rule
-                .as_mut()
-                .expect("compatible residual was initialized"),
-            &training_example,
-            plan,
-            adaptive,
-            checkpoint.as_ref(),
-            observer_bridge
-                .as_mut()
-                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
-        )?,
-        (crate::Target2dGpuBackend::Cuda, true) => dense::train_adaptive_target2d_burn_cuda(
-            model
-                .local_residual_rule
-                .as_mut()
-                .expect("compatible residual was initialized"),
-            &training_example,
-            plan,
-            adaptive,
-            checkpoint.as_ref(),
-            observer_bridge
-                .as_mut()
-                .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
-        )?,
+        (crate::Target2dGpuBackend::Wgpu, false) => {
+            dense::train_adaptive_target2d_burn_wgpu_async(
+                &mut model.rule,
+                &training_example,
+                plan,
+                adaptive,
+                checkpoint.as_ref(),
+                observer_bridge
+                    .as_mut()
+                    .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
+            )
+            .await?
+        }
+        (crate::Target2dGpuBackend::Cuda, false) => {
+            dense::train_adaptive_target2d_burn_cuda_async(
+                &mut model.rule,
+                &training_example,
+                plan,
+                adaptive,
+                checkpoint.as_ref(),
+                observer_bridge
+                    .as_mut()
+                    .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
+            )
+            .await?
+        }
+        (crate::Target2dGpuBackend::Wgpu, true) => {
+            dense::train_adaptive_target2d_burn_wgpu_async(
+                model
+                    .local_residual_rule
+                    .as_mut()
+                    .expect("compatible residual was initialized"),
+                &training_example,
+                plan,
+                adaptive,
+                checkpoint.as_ref(),
+                observer_bridge
+                    .as_mut()
+                    .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
+            )
+            .await?
+        }
+        (crate::Target2dGpuBackend::Cuda, true) => {
+            dense::train_adaptive_target2d_burn_cuda_async(
+                model
+                    .local_residual_rule
+                    .as_mut()
+                    .expect("compatible residual was initialized"),
+                &training_example,
+                plan,
+                adaptive,
+                checkpoint.as_ref(),
+                observer_bridge
+                    .as_mut()
+                    .map(|observer| observer as &mut dyn crate::Target2dGpuTrainingObserver),
+            )
+            .await?
+        }
     };
     if let Some(metrics) = output.metrics.as_object_mut() {
         metrics.insert("scale_limits".to_owned(), scale_limits_report);

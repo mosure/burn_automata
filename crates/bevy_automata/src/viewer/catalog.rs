@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use burn_automata::{AutomataPreset, ParticleSeed, RolloutConfig};
@@ -18,6 +19,7 @@ pub(super) const AUTOMATA_UI_PANEL_WIDTH: f32 = 540.0;
 #[cfg(feature = "splatting")]
 pub(super) const AUTOMATA_MIN_VIEWPORT_WIDTH: u32 = 256;
 #[cfg(feature = "splatting")]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) const GAUSSIAN_SH_C0: f32 = 0.282_094_8;
 #[cfg(feature = "splatting")]
 pub(super) const SORTED_ENTRY_MIN_CAPACITY: usize = 16_384;
@@ -542,8 +544,16 @@ pub(super) fn catalog_entry_matches_settings(
 }
 
 pub(super) fn catalog_entry_is_available(entry: &ModelCatalogEntry) -> bool {
-    matches!(entry.source, ModelCatalogSource::Preset)
-        || resolved_catalog_model_path(entry).is_some()
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = entry;
+        true
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        matches!(entry.source, ModelCatalogSource::Preset)
+            || resolved_catalog_model_path(entry).is_some()
+    }
 }
 
 pub(super) fn missing_catalog_model_status(entry: &ModelCatalogEntry) -> String {
@@ -617,7 +627,15 @@ pub(super) fn resolved_catalog_model_path(entry: &ModelCatalogEntry) -> Option<S
     match entry.source {
         ModelCatalogSource::Preset => None,
         ModelCatalogSource::Bpk { primary, fallback } => {
-            resolve_catalog_path(primary).or_else(|| fallback.and_then(resolve_catalog_path))
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = fallback;
+                Some(primary.to_string())
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                resolve_catalog_path(primary).or_else(|| fallback.and_then(resolve_catalog_path))
+            }
         }
     }
 }
@@ -629,6 +647,7 @@ fn catalog_primary_model_path(entry: &ModelCatalogEntry) -> Option<&'static str>
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_catalog_path(path: &'static str) -> Option<String> {
     if Path::new(path).exists() {
         return Some(path.to_string());

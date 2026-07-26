@@ -1,9 +1,12 @@
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
     time::Duration,
 };
 
@@ -13,23 +16,42 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use burn_automata::{
-    AdaptiveNpaConfig, AdaptiveNpaModel, AdaptiveTarget2dGpuTrainingObserver,
-    AdaptiveTarget2dGpuTrainingProgress, AdaptiveTarget2dGpuTrainingReport,
+    AdaptiveNpaConfig, AdaptiveNpaModel, AdaptiveTarget2dGpuTrainingReport,
     AdaptiveTarget2dRuleTraining, AdaptiveTarget2dTrainingConfig, Target2dGpuBackend,
-    Target2dGpuTrainingObserver, Target2dGpuTrainingProgress, Target2dGpuTrainingReport,
-    Target2dLossConfig, Target2dTrainingConfig, decode_target_image_2d_upstream,
-    train_adaptive_target_2d_gpu_with_observer, train_target_2d_gpu_with_observer,
-    upstream_growing_2d_hashgrid, upstream_growing_2d_model,
+    Target2dGpuTrainingReport, Target2dTrainingConfig, upstream_growing_2d_hashgrid,
+    upstream_growing_2d_model,
 };
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+#[cfg(not(target_arch = "wasm32"))]
+use burn_automata::{
+    AdaptiveTarget2dGpuTrainingObserver, AdaptiveTarget2dGpuTrainingProgress,
+    Target2dGpuTrainingObserver, Target2dGpuTrainingProgress, Target2dLossConfig,
+    decode_target_image_2d_upstream, train_adaptive_target_2d_gpu_with_observer,
+    train_target_2d_gpu_with_observer,
+};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use super::*;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "image_training_web.rs"]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub(in crate::viewer) use web::{BrowserTrainingWorker, stop_stale_browser_training};
 
 const LIVE_MODEL_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(4);
 const LIVE_MODEL_SNAPSHOT_FALLBACK_STEPS: usize = 100;
 const LIVE_TRAINING_REPORT_INTERVAL: usize = 1_000;
+#[cfg(any(target_arch = "wasm32", test))]
+const BROWSER_TRAINING_SESSION_STEPS: usize = 1_000;
+#[cfg(any(target_arch = "wasm32", test))]
+const BROWSER_TRAINING_PARTICLES: usize = 256;
+#[cfg(any(target_arch = "wasm32", test))]
+const BROWSER_ADAPTIVE_ACTIVE_PARTICLES: usize = 192;
+#[cfg(not(target_arch = "wasm32"))]
 const TARGET_ALPHA_THRESHOLD: f32 = 0.05;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_LIVE_TRAINING_LOSS: f32 = 100.0;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_LIVE_TRAINING_GRAD_NORM: f32 = 10_000.0;
 
 #[derive(Message, Clone, Copy, Debug, Default)]
@@ -41,6 +63,7 @@ pub(in crate::viewer) enum ImageTargetTrainingPhase {
     Empty,
     Ready,
     Running,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Stopping,
     Complete,
     Failed,
@@ -211,7 +234,7 @@ pub(in crate::viewer) struct ImageTargetTrainingChannel {
 
 impl Default for ImageTargetTrainingChannel {
     fn default() -> Self {
-        let (sender, receiver) = bounded(2);
+        let (sender, receiver) = unbounded();
         Self { sender, receiver }
     }
 }
@@ -282,11 +305,13 @@ struct ImageTargetTrainingProgress {
     loss: f32,
     render_rgb_psnr_db: Option<f32>,
     base_grad_norm: f32,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     base_grad_scale: f32,
     particle_steps_per_sec: f64,
     model: ImageTargetTrainingModel,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct ViewerTrainingObserver {
     job_id: u64,
     target_id: u64,
@@ -297,6 +322,7 @@ struct ViewerTrainingObserver {
     snapshot_interval_duration: Duration,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Target2dGpuTrainingObserver for ViewerTrainingObserver {
     fn should_stop(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
@@ -324,6 +350,7 @@ impl Target2dGpuTrainingObserver for ViewerTrainingObserver {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AdaptiveTarget2dGpuTrainingObserver for ViewerTrainingObserver {
     fn should_stop(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
@@ -351,6 +378,7 @@ impl AdaptiveTarget2dGpuTrainingObserver for ViewerTrainingObserver {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ViewerTrainingObserver {
     fn publish_progress(&mut self, progress: ImageTargetTrainingProgress) {
         if let Some(reason) = unsafe_training_progress_reason(&progress) {
@@ -361,19 +389,21 @@ impl ViewerTrainingObserver {
             self.cancel.store(true, Ordering::Release);
             return;
         }
-        match self.sender.try_send(ImageTargetTrainingEvent::Progress {
-            job_id: self.job_id,
-            target_id: self.target_id,
-            progress,
-        }) {
-            Ok(()) | Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Disconnected(_)) => {
-                self.cancel.store(true, Ordering::Release);
-            }
+        if self
+            .sender
+            .send(ImageTargetTrainingEvent::Progress {
+                job_id: self.job_id,
+                target_id: self.target_id,
+                progress,
+            })
+            .is_err()
+        {
+            self.cancel.store(true, Ordering::Release);
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unsafe_training_progress_reason(progress: &ImageTargetTrainingProgress) -> Option<String> {
     if !progress.loss.is_finite()
         || !progress.base_grad_norm.is_finite()
@@ -405,15 +435,31 @@ pub(in crate::viewer) fn handle_toggle_image_target_training(
     mut state: ResMut<ImageTargetTrainingState>,
     mut settings: ResMut<AutomataSettings>,
     mut runtime: ResMut<AutomataRuntime>,
+    #[cfg(target_arch = "wasm32")] mut browser_worker: NonSendMut<BrowserTrainingWorker>,
 ) {
     for _request in requests.read() {
         if matches!(state.phase, ImageTargetTrainingPhase::Running) {
+            #[cfg(target_arch = "wasm32")]
+            {
+                browser_worker.stop();
+                state.active_job_id = None;
+                state.cancel = None;
+                state.phase = ImageTargetTrainingPhase::Complete;
+                runtime.status = format!(
+                    "image-target training stopped | {}",
+                    image_training_status(&state)
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(cancel) = state.cancel.as_ref() {
                 cancel.store(true, Ordering::Release);
             }
-            state.phase = ImageTargetTrainingPhase::Stopping;
-            runtime.status =
-                "stopping image-target training after the current optimizer step".to_string();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                state.phase = ImageTargetTrainingPhase::Stopping;
+                runtime.status =
+                    "stopping image-target training after the current optimizer step".to_string();
+            }
             continue;
         }
         if matches!(state.phase, ImageTargetTrainingPhase::Stopping) {
@@ -432,10 +478,15 @@ pub(in crate::viewer) fn handle_toggle_image_target_training(
 
         state.next_job_id = state.next_job_id.wrapping_add(1).max(1);
         let job_id = state.next_job_id;
+        #[cfg(not(target_arch = "wasm32"))]
         let cancel = Arc::new(AtomicBool::new(false));
+        #[cfg(not(target_arch = "wasm32"))]
         let worker_cancel = cancel.clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let safety_failure = Arc::new(Mutex::new(None));
+        #[cfg(not(target_arch = "wasm32"))]
         let observer_safety_failure = safety_failure.clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let sender = channel.sender.clone();
         let mode = ImageTargetTrainingMode::from_settings(&settings);
         let fixed_config = image_training_config(&settings);
@@ -475,6 +526,8 @@ pub(in crate::viewer) fn handle_toggle_image_target_training(
                     .saturating_mul(adaptive_config.target2d.repetitions),
             ),
         };
+        #[cfg(target_arch = "wasm32")]
+        let _ = target_point_count;
         let starting_fresh = !state.training_initialized || state.initialized_mode != Some(mode);
         runtime.hashgrid = upstream_growing_2d_hashgrid();
         let training_model = match mode {
@@ -551,6 +604,7 @@ pub(in crate::viewer) fn handle_toggle_image_target_training(
         } else {
             Duration::ZERO
         };
+        #[cfg(not(target_arch = "wasm32"))]
         let spawn = thread::Builder::new()
             .name("bevy-automata-target2d".to_string())
             .spawn(move || {
@@ -621,11 +675,32 @@ pub(in crate::viewer) fn handle_toggle_image_target_training(
                 });
             });
 
+        #[cfg(target_arch = "wasm32")]
+        let spawn = browser_worker.start(
+            &channel,
+            job_id,
+            target_id,
+            target.source.bytes.as_slice(),
+            training_model,
+            hashgrid,
+            &fixed_config,
+            &adaptive_config,
+            snapshot_interval_steps,
+            snapshot_interval_duration,
+        );
+
         match spawn {
             Ok(_handle) => {
                 state.phase = ImageTargetTrainingPhase::Running;
                 state.active_job_id = Some(job_id);
-                state.cancel = Some(cancel);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    state.cancel = Some(cancel);
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    state.cancel = None;
+                }
                 state.step = 0;
                 state.total_steps = total_steps;
                 state.loss = None;
@@ -827,7 +902,33 @@ fn image_training_config(settings: &AutomataSettings) -> Target2dTrainingConfig 
     let mut config = Target2dTrainingConfig::default();
     config.optimizer.learning_rate = settings.training_learning_rate;
     config.report_interval = LIVE_TRAINING_REPORT_INTERVAL;
+    #[cfg(target_arch = "wasm32")]
+    apply_browser_training_budget(&mut config);
     config
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn apply_browser_training_budget(config: &mut Target2dTrainingConfig) {
+    config.epochs = BROWSER_TRAINING_SESSION_STEPS - 1;
+    config.repetitions = 1;
+    config.report_interval = 100;
+    config.batch_size = 1;
+    config.pool_size = 16;
+    config.particle_count = BROWSER_TRAINING_PARTICLES;
+    config.step_min = 8;
+    config.step_max = 16;
+    config.tbptt_chunk_steps = 8;
+    config.inject_seed_interval = 4;
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn apply_browser_adaptive_training_budget(config: &mut AdaptiveTarget2dTrainingConfig) {
+    apply_browser_training_budget(&mut config.target2d);
+    config.target2d.particle_count = BROWSER_ADAPTIVE_ACTIVE_PARTICLES;
+    config.material.reference_particle_count = BROWSER_TRAINING_PARTICLES;
+    config.event_training.post_event_recovery_steps = 8;
+    config.event_training.max_recovery_extension_steps = 8;
+    config.checkpoint_horizons = vec![config.target2d.step_max];
 }
 
 fn image_adaptive_training_config(settings: &AutomataSettings) -> AdaptiveTarget2dTrainingConfig {
@@ -847,6 +948,8 @@ fn image_adaptive_training_config(settings: &AutomataSettings) -> AdaptiveTarget
     config.event_training.max_recovery_extension_steps = 32;
     config.target2d.report_interval = LIVE_TRAINING_REPORT_INTERVAL;
     config.target2d.optimizer.learning_rate = settings.training_learning_rate;
+    #[cfg(target_arch = "wasm32")]
+    apply_browser_adaptive_training_budget(&mut config);
     config
 }
 
@@ -1067,6 +1170,34 @@ mod tests {
     }
 
     #[test]
+    fn browser_training_budget_is_bounded_but_keeps_temporal_credit() {
+        let mut config = Target2dTrainingConfig::default();
+        apply_browser_training_budget(&mut config);
+
+        assert_eq!(config.epochs + 1, BROWSER_TRAINING_SESSION_STEPS);
+        assert_eq!(config.repetitions, 1);
+        assert_eq!(config.batch_size, 1);
+        assert_eq!(config.particle_count, BROWSER_TRAINING_PARTICLES);
+        assert_eq!(config.step_min, 8);
+        assert_eq!(config.step_max, 16);
+        assert_eq!(config.tbptt_chunk_steps, 8);
+        assert!(config.pool_size >= config.batch_size);
+
+        let mut adaptive = AdaptiveTarget2dTrainingConfig::default();
+        apply_browser_adaptive_training_budget(&mut adaptive);
+        assert_eq!(
+            adaptive.target2d.particle_count,
+            BROWSER_ADAPTIVE_ACTIVE_PARTICLES
+        );
+        assert_eq!(
+            adaptive.material.reference_particle_count,
+            BROWSER_TRAINING_PARTICLES
+        );
+        assert_eq!(adaptive.checkpoint_horizons, vec![16]);
+        assert_eq!(adaptive.event_training.post_event_recovery_steps, 8);
+    }
+
+    #[test]
     fn adaptive_image_training_uses_device_resident_sparse_telemetry_contract() {
         let settings = AutomataSettings {
             training_learning_rate: 2.5e-4,
@@ -1146,5 +1277,50 @@ mod tests {
                 .unwrap()
                 .contains("non-finite")
         );
+    }
+
+    #[test]
+    fn training_channel_retains_terminal_event_behind_progress() {
+        let channel = ImageTargetTrainingChannel::default();
+        for step in 1..=3 {
+            channel
+                .sender
+                .send(ImageTargetTrainingEvent::Progress {
+                    job_id: 7,
+                    target_id: 9,
+                    progress: ImageTargetTrainingProgress {
+                        step,
+                        total_steps: 3,
+                        loss: 1.0 / step as f32,
+                        render_rgb_psnr_db: None,
+                        base_grad_norm: 1.0,
+                        base_grad_scale: 1.0,
+                        particle_steps_per_sec: 64.0,
+                        model: ImageTargetTrainingModel::Fixed(upstream_growing_2d_model(
+                            step as u64,
+                        )),
+                    },
+                })
+                .unwrap();
+        }
+        channel
+            .sender
+            .send(ImageTargetTrainingEvent::Finished {
+                job_id: 7,
+                target_id: 9,
+                result: Err("terminal".to_string()),
+            })
+            .unwrap();
+
+        let events = channel.receiver.try_iter().collect::<Vec<_>>();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            events.last(),
+            Some(ImageTargetTrainingEvent::Finished {
+                job_id: 7,
+                target_id: 9,
+                result: Err(error),
+            }) if error == "terminal"
+        ));
     }
 }

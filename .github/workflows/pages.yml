@@ -10,17 +10,93 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WEB_MODELS_TAG: web-models-v1
+  WEB_MODELS_ARCHIVE: burn_automata_web_models_v1.tar.gz
+  WASM_BINDGEN_VERSION: 0.2.126
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version "${WASM_BINDGEN_VERSION}" --locked
+
+      - name: Download validated web models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p target/web-models
+          gh release download "${WEB_MODELS_TAG}" \
+            --pattern "${WEB_MODELS_ARCHIVE}" \
+            --dir target/web-models
+          tar -xzf "target/web-models/${WEB_MODELS_ARCHIVE}" -C www
+          (cd www && sha256sum -c web_models.sha256)
+
+      - name: Build browser viewer and training worker
+        run: scripts/build_wasm.sh
+
+      - name: Install browser smoke dependencies
+        run: |
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Validate browser inference and training runtime
+        env:
+          WEB_SMOKE_HEADED: "1"
+          WEB_SMOKE_INFERENCE: "0"
+          WEB_SMOKE_SOFTWARE_GPU: "1"
+          WEB_SMOKE_SCREENSHOT: target/web-runtime-smoke.png
+        run: |
+          python3 -m http.server 4173 --directory www >target/web-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}"' EXIT
+          for _ in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:4173/smoke.html >/dev/null && break
+            sleep 1
+          done
+          xvfb-run -a node scripts/validate_web_runtime.mjs --all
+
       - uses: actions/configure-pages@v6
+
       - uses: actions/upload-pages-artifact@v4
         with:
           path: www
+
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Verify deployed Pages runtime
+        env:
+          WEB_BASE_URL: ${{ steps.deployment.outputs.page_url }}
+          WEB_SMOKE_HEADED: "1"
+          WEB_SMOKE_INFERENCE: "0"
+          WEB_SMOKE_SOFTWARE_GPU: "1"
+        run: |
+          for attempt in $(seq 1 5); do
+            if xvfb-run -a node scripts/validate_web_runtime.mjs --all; then
+              exit 0
+            fi
+            echo "deployed runtime attempt ${attempt} failed; waiting for Pages propagation"
+            sleep 15
+          done
+          exit 1

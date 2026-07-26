@@ -39,13 +39,13 @@ pub use dino::{
 };
 #[cfg(feature = "backend_cuda")]
 pub use e2e::generate_e2e_conditioned_npa_2d_cuda;
-#[cfg(feature = "backend_wgpu")]
-pub use e2e::generate_e2e_conditioned_npa_2d_wgpu;
 pub use e2e::{
     E2eConditionedNpa2d, E2eHyperNpa2d, E2eHyperNpa2dAdapterSpec, E2eHyperNpa2dWeights,
     PerceptionRolloutBackend, Target2dLossBackend, generate_e2e_conditioned_npa_2d,
     load_e2e_hyper_npa_2d, save_e2e_hyper_npa_2d,
 };
+#[cfg(feature = "backend_wgpu")]
+pub use e2e::{generate_e2e_conditioned_npa_2d_wgpu, generate_e2e_conditioned_npa_2d_wgpu_async};
 #[cfg(feature = "cli")]
 pub use e2e_rollout::run_train_hyper_2d_e2e_rollout_config_path;
 pub use hypernet::{

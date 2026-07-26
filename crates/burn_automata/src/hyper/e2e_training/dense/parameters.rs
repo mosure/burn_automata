@@ -2685,6 +2685,19 @@ use super::*;
             model.validate()
         }
 
+        pub(super) async fn write_to_model_async(
+            &self,
+            model: &mut NpaModel,
+        ) -> AutomataResult<()> {
+            model.weights = NpaWeights {
+                w1: tensor_vec_async(self.w1.clone().inner()).await?,
+                b1: tensor_vec_async(self.b1.clone().inner()).await?,
+                w2: tensor_vec_async(self.w2.clone().inner()).await?,
+                b2: vec![0.0; model.config.update_dims()],
+            };
+            model.validate()
+        }
+
         pub(super) fn detached(&self) -> Self {
             Self {
                 w1: detach2(self.w1.clone()),
@@ -2852,6 +2865,25 @@ use super::*;
             self.apply_adamw_gradients(tensors, state, cfg, normalize, collect_metrics)
         }
 
+        pub(super) async fn apply_adamw_async(
+            &mut self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            let tensors = self.take_gradients(grads);
+            self.apply_adamw_gradients_async(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+            )
+            .await
+        }
+
         pub(super) fn apply_adamw_last_input_column(
             &mut self,
             grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
@@ -2873,6 +2905,30 @@ use super::*;
                 normalize,
                 collect_metrics,
             )
+        }
+
+        pub(super) async fn apply_adamw_last_input_column_async(
+            &mut self,
+            grads: &mut <BurnBackend as burn::tensor::backend::AutodiffBackend>::Gradients,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            if cfg.weight_decay != 0.0 {
+                return Err(AutomataError::InvalidArgument(
+                    "last-input-column optimization requires zero weight decay".to_owned(),
+                ));
+            }
+            let tensors = self.take_gradients(grads);
+            self.apply_adamw_last_input_column_gradients_async(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+            )
+            .await
         }
 
         pub(super) fn take_gradients(
@@ -2913,6 +2969,25 @@ use super::*;
             )
         }
 
+        pub(super) async fn apply_adamw_gradients_async(
+            &mut self,
+            tensors: Vec<Tensor3Inner>,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            self.apply_adamw_masked_gradients_async(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+                false,
+            )
+            .await
+        }
+
         pub(super) fn apply_adamw_last_input_column_gradients(
             &mut self,
             tensors: Vec<Tensor3Inner>,
@@ -2934,6 +3009,30 @@ use super::*;
                 collect_metrics,
                 true,
             )
+        }
+
+        pub(super) async fn apply_adamw_last_input_column_gradients_async(
+            &mut self,
+            tensors: Vec<Tensor3Inner>,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            if cfg.weight_decay != 0.0 {
+                return Err(AutomataError::InvalidArgument(
+                    "last-input-column optimization requires zero weight decay".to_owned(),
+                ));
+            }
+            self.apply_adamw_masked_gradients_async(
+                tensors,
+                state,
+                cfg,
+                normalize,
+                collect_metrics,
+                true,
+            )
+            .await
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -3007,6 +3106,78 @@ use super::*;
             Ok((norms, scales))
         }
 
+        #[allow(clippy::too_many_arguments)]
+        async fn apply_adamw_masked_gradients_async(
+            &mut self,
+            mut tensors: Vec<Tensor3Inner>,
+            state: &mut BurnBaseBatchAdamWState,
+            cfg: AdamWConfig,
+            normalize: bool,
+            collect_metrics: bool,
+            last_input_column_only: bool,
+        ) -> AutomataResult<(Vec<f32>, Vec<f32>)> {
+            if tensors.len() != 4 {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "NPA model batch expected 4 gradient tensors, got {}",
+                    tensors.len()
+                )));
+            }
+            if last_input_column_only {
+                tensors[0] = retain_last_model_batch_input_column(tensors[0].clone());
+                for tensor in &mut tensors[1..] {
+                    *tensor = tensor.clone().zeros_like();
+                }
+                state.w1_m = retain_last_model_batch_input_column(state.w1_m.clone());
+                state.w1_v = retain_last_model_batch_input_column(state.w1_v.clone());
+                state.b1_m = state.b1_m.clone().zeros_like();
+                state.b1_v = state.b1_v.clone().zeros_like();
+                state.w2_m = state.w2_m.clone().zeros_like();
+                state.w2_v = state.w2_v.clone().zeros_like();
+                state.b2_m = state.b2_m.clone().zeros_like();
+                state.b2_v = state.b2_v.clone().zeros_like();
+            }
+            let (norms, scales, scale_tensor) = prepare_model_batch_grad_group_async(
+                &mut tensors,
+                cfg.grad_clip_norm,
+                normalize,
+                collect_metrics,
+            )
+            .await?;
+            let bias = state.next_bias_correction(cfg);
+            self.w1 = track3(apply_adamw_tensor3(
+                self.w1.clone().inner(),
+                tensors.remove(0),
+                &mut state.w1_m,
+                &mut state.w1_v,
+                cfg,
+                scale_tensor.clone(),
+                bias,
+            ));
+            self.b1 = track3(apply_adamw_tensor3(
+                self.b1.clone().inner(),
+                tensors.remove(0),
+                &mut state.b1_m,
+                &mut state.b1_v,
+                cfg,
+                scale_tensor.clone(),
+                bias,
+            ));
+            self.w2 = track3(apply_adamw_tensor3(
+                self.w2.clone().inner(),
+                tensors.remove(0),
+                &mut state.w2_m,
+                &mut state.w2_v,
+                cfg,
+                scale_tensor.clone(),
+                bias,
+            ));
+            let _unused_output_bias_gradient = tensors.remove(0);
+            self.b2 = track3(self.b2.clone().inner().zeros_like());
+            state.b2_m = state.b2_m.clone().zeros_like();
+            state.b2_v = state.b2_v.clone().zeros_like();
+            Ok((norms, scales))
+        }
+
         pub(super) fn write_to_models(&self, models: &mut [NpaModel]) -> AutomataResult<()> {
             if models.len() != self.model_count() {
                 return Err(AutomataError::InvalidArgument(format!(
@@ -3018,6 +3189,33 @@ use super::*;
             let w1 = tensor3_vec(self.w1.clone().inner())?;
             let b1 = tensor3_vec(self.b1.clone().inner())?;
             let w2 = tensor3_vec(self.w2.clone().inner())?;
+            let w1_len = models[0].weights.w1.len();
+            let b1_len = models[0].weights.b1.len();
+            let w2_len = models[0].weights.w2.len();
+            for (index, model) in models.iter_mut().enumerate() {
+                model.weights.w1 = w1[index * w1_len..(index + 1) * w1_len].to_vec();
+                model.weights.b1 = b1[index * b1_len..(index + 1) * b1_len].to_vec();
+                model.weights.w2 = w2[index * w2_len..(index + 1) * w2_len].to_vec();
+                model.weights.b2.fill(0.0);
+                model.validate()?;
+            }
+            Ok(())
+        }
+
+        pub(super) async fn write_to_models_async(
+            &self,
+            models: &mut [NpaModel],
+        ) -> AutomataResult<()> {
+            if models.len() != self.model_count() {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "Burn oracle model writeback mismatch: models={} batch={}",
+                    models.len(),
+                    self.model_count(),
+                )));
+            }
+            let w1 = tensor3_vec_async(self.w1.clone().inner()).await?;
+            let b1 = tensor3_vec_async(self.b1.clone().inner()).await?;
+            let w2 = tensor3_vec_async(self.w2.clone().inner()).await?;
             let w1_len = models[0].weights.w1.len();
             let b1_len = models[0].weights.b1.len();
             let w2_len = models[0].weights.w2.len();

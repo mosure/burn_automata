@@ -14,6 +14,9 @@
 
 # Web build output
 /www/pkg/
+/www/worker_pkg/
+/www/models/
+/www/artifacts/
 /www/dist/
 /www/.parcel-cache/
 /node_modules/

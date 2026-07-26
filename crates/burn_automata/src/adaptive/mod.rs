@@ -31,7 +31,8 @@ mod training;
 mod validation;
 
 pub use artifact::{
-    AdaptiveModelArtifact, AdaptiveTrainingStage, load_adaptive_model, save_adaptive_model,
+    AdaptiveModelArtifact, AdaptiveTrainingStage, encode_adaptive_model, load_adaptive_model,
+    load_adaptive_model_bytes, save_adaptive_model,
 };
 pub use budget::{
     BudgetAllocation, allocate_resolution_budget, boundary_protected_spacing,
@@ -128,8 +129,9 @@ pub use training::{
     train_adaptive_deployment_rule_wgpu, train_adaptive_multiscale_rule_cuda,
     train_adaptive_multiscale_rule_ndarray, train_adaptive_multiscale_rule_wgpu,
     train_adaptive_target_2d_gpu, train_adaptive_target_2d_gpu_with_observer,
-    validate_adaptive_restriction_selection,
+    train_adaptive_target_2d_gpu_with_observer_async, validate_adaptive_restriction_selection,
 };
+#[allow(unused_imports)]
 pub(crate) use training::{
     AdaptiveTarget2dSeedBank, AdaptiveTarget2dUpdateMask, build_adaptive_target2d_seed_bank,
 };

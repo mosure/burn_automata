@@ -332,7 +332,7 @@ impl BurnAdaptiveTopology {
                 .reshape([1, 4])
                 .expand([batch_size, 4])
         } else {
-            merge_score.topk_with_indices(4, 1).1
+            device_topk_indices(merge_score, 4)
         };
         let merge_rows = self
             .fine_indices
@@ -426,12 +426,8 @@ impl BurnAdaptiveTopology {
             particle_count,
             false,
         );
-        let coarse_local = coarse_rank
-            .topk_with_indices(exchange_count, 1)
-            .1;
-        let fine_local = fine_rank
-            .topk_with_indices(exchange_count, 1)
-            .1;
+        let coarse_local = device_topk_indices(coarse_rank, exchange_count);
+        let fine_local = device_topk_indices(fine_rank, exchange_count);
         let coarse_rows = self
             .coarse_indices
             .clone()

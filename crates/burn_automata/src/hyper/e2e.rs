@@ -490,6 +490,24 @@ pub fn generate_e2e_conditioned_npa_2d_wgpu(
     Ok(E2eConditionedNpa2d { adapter, model })
 }
 
+#[cfg(feature = "backend_wgpu")]
+pub async fn generate_e2e_conditioned_npa_2d_wgpu_async(
+    base_model: &NpaModel,
+    hyper: &E2eHyperNpa2d,
+    condition_tokens: &[f32],
+) -> AutomataResult<E2eConditionedNpa2d> {
+    base_model.validate()?;
+    let mut adapter = super::e2e_training::dense::predict_conditional_row_flow_adapter_wgpu_async(
+        hyper,
+        &base_model.config,
+        condition_tokens,
+    )
+    .await?;
+    hyper.enforce_output_bias_contract(&mut adapter);
+    let model = adapter.apply_to_model(base_model)?;
+    Ok(E2eConditionedNpa2d { adapter, model })
+}
+
 #[cfg(feature = "backend_cuda")]
 pub fn generate_e2e_conditioned_npa_2d_cuda(
     base_model: &NpaModel,

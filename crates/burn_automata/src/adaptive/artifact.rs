@@ -93,6 +93,18 @@ pub fn save_adaptive_model(
     path: impl AsRef<Path>,
     artifact: &AdaptiveModelArtifact,
 ) -> AutomataResult<String> {
+    let (bytes, digest) = encode_adaptive_model(artifact)?;
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)?;
+    Ok(digest)
+}
+
+pub fn encode_adaptive_model(
+    artifact: &AdaptiveModelArtifact,
+) -> AutomataResult<(Vec<u8>, String)> {
     artifact.validate()?;
     let payload = rmp_serde::to_vec_named(artifact)
         .map_err(|error| AutomataError::InvalidFormat(error.to_string()))?;
@@ -105,16 +117,15 @@ pub fn save_adaptive_model(
     bytes.extend_from_slice(&payload_len.to_le_bytes());
     bytes.extend_from_slice(&digest);
     bytes.extend_from_slice(&payload);
-    let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, bytes)?;
-    Ok(hex_digest(&digest))
+    Ok((bytes, hex_digest(&digest)))
 }
 
 pub fn load_adaptive_model(path: impl AsRef<Path>) -> AutomataResult<AdaptiveModelArtifact> {
     let bytes = fs::read(path)?;
+    load_adaptive_model_bytes(&bytes)
+}
+
+pub fn load_adaptive_model_bytes(bytes: &[u8]) -> AutomataResult<AdaptiveModelArtifact> {
     if bytes.len() < HEADER_LEN || !bytes.starts_with(&ADAPTIVE_MAGIC) {
         return Err(AutomataError::InvalidFormat(
             "missing budgeted adaptive NPA binary header".to_string(),

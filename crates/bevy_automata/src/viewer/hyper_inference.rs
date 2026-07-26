@@ -1,14 +1,14 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::{path::PathBuf, sync::Arc};
 
 use bevy::{tasks::AsyncComputeTaskPool, window::FileDragAndDrop};
 use burn_automata::{
-    DinoVitsConditionEncoder, NpaConfig, NpaModel, decode_condition_image,
-    generate_e2e_conditioned_npa_2d, hyper::DinoVitsConditionContract, import::load_manifest,
-    load_e2e_hyper_npa_2d,
+    DinoVitsConditionEncoder, E2eHyperNpa2d, NpaConfig, NpaModel, decode_condition_image,
+    generate_e2e_conditioned_npa_2d, hyper::DinoVitsConditionContract, import::BpkModelManifest,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use burn_automata::{import::load_manifest, load_e2e_hyper_npa_2d};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use super::*;
@@ -134,6 +134,7 @@ pub(in crate::viewer) fn handle_open_hyper_npa_image_dialog(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(in crate::viewer) fn handle_hyper_npa_image_drop(
     mut drops: MessageReader<FileDragAndDrop>,
     channel: Res<HyperNpaImageDialogChannel>,
@@ -157,6 +158,16 @@ pub(in crate::viewer) fn handle_hyper_npa_image_drop(
                 let _ = sender.send(result);
             })
             .detach();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(in crate::viewer) fn handle_hyper_npa_image_drop(
+    mut drops: MessageReader<FileDragAndDrop>,
+    mut runtime: ResMut<AutomataRuntime>,
+) {
+    if drops.read().next().is_some() {
+        runtime.status = "use open image to select a browser-local target".to_string();
     }
 }
 
@@ -221,7 +232,7 @@ pub(in crate::viewer) fn handle_run_hyper_npa_inference(
         runtime.status = format!("inferring NPA from {file_name} with DINO -> HyperNPA");
         AsyncComputeTaskPool::get()
             .spawn(async move {
-                let result = run_hyper_npa_inference(request);
+                let result = run_hyper_npa_inference(request).await;
                 let _ = sender.send(result);
             })
             .detach();
@@ -330,14 +341,26 @@ fn required_existing_path(
             "missing {label}; set {env_key} or place the default artifact in the workspace"
         ));
     };
-    resolve_workspace_path(value).ok_or_else(|| format!("missing {label} at {value}"))
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(PathBuf::from(value))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        resolve_workspace_path(value).ok_or_else(|| format!("missing {label} at {value}"))
+    }
 }
 
-fn run_hyper_npa_inference(request: HyperNpaInferenceRequest) -> HyperNpaInferenceResult {
+async fn run_hyper_npa_inference(request: HyperNpaInferenceRequest) -> HyperNpaInferenceResult {
     let request_id = request.request_id;
     let target_id = request.target_id;
     let file_name = request.source.file_name.clone();
+    #[cfg(not(target_arch = "wasm32"))]
     let result = generate_model_for_source(request).map_err(|err| err.to_string());
+    #[cfg(target_arch = "wasm32")]
+    let result = generate_model_for_source_web(request)
+        .await
+        .map_err(|err| err.to_string());
     HyperNpaInferenceResult {
         request_id,
         target_id,
@@ -346,6 +369,7 @@ fn run_hyper_npa_inference(request: HyperNpaInferenceRequest) -> HyperNpaInferen
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "headless"))]
 pub(in crate::viewer) fn generate_hyper_npa_model_from_image_path(
     path: &Path,
     settings: &AutomataSettings,
@@ -355,13 +379,47 @@ pub(in crate::viewer) fn generate_hyper_npa_model_from_image_path(
     generate_model_for_source(request)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn generate_model_for_source(
     request: HyperNpaInferenceRequest,
 ) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
-    let condition = decode_condition_image(request.source.bytes.as_slice())?;
-    let image_width = condition.width as u32;
-    let image_height = condition.height as u32;
     let hyper = load_e2e_hyper_npa_2d(&request.hyper_model_path)?;
+    let dino_image_size = request_dino_image_size(&request, &hyper)?;
+    let dino = DinoVitsConditionEncoder::load(&request.dino_model_path, dino_image_size)?;
+    let base_bytes = std::fs::read(&request.base_model_path)?;
+    let manifest = load_manifest(&request.base_model_path)?;
+    generate_model_from_artifacts(request, hyper, dino, &base_bytes, manifest)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn generate_model_for_source_web(
+    request: HyperNpaInferenceRequest,
+) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
+    let hyper_url = request.hyper_model_path.to_string_lossy();
+    let hyper_bytes = super::web::fetch_bytes(&hyper_url)
+        .await
+        .map_err(std::io::Error::other)?;
+    let hyper = burn_automata::hyper::e2e::decode_e2e_hyper_npa_2d(&hyper_bytes)?;
+    hyper.validate()?;
+    let dino_image_size = request_dino_image_size(&request, &hyper)?;
+    let dino_url = request.dino_model_path.to_string_lossy();
+    let dino_bytes = super::web::fetch_bytes(&dino_url)
+        .await
+        .map_err(std::io::Error::other)?;
+    burn_automata::initialize_webgpu_backend().await;
+    let dino = DinoVitsConditionEncoder::load_bytes(dino_bytes, dino_image_size)?;
+    let base_url = request.base_model_path.to_string_lossy();
+    let base_bytes = super::web::fetch_bytes(&base_url)
+        .await
+        .map_err(std::io::Error::other)?;
+    let manifest = burn_automata::import::load_manifest_bytes(&base_bytes)?;
+    generate_model_from_artifacts_web(request, hyper, dino, &base_bytes, manifest).await
+}
+
+fn request_dino_image_size(
+    request: &HyperNpaInferenceRequest,
+    hyper: &E2eHyperNpa2d,
+) -> Result<usize, Box<dyn std::error::Error>> {
     if hyper.condition_application.as_deref() == Some("per-step-field")
         || hyper.has_spatial_condition_control()
     {
@@ -380,52 +438,29 @@ fn generate_model_for_source(
         ))
         .into());
     }
-    let default_token_grid = dino_image_size / request.dino_patch_size;
-    let token_grid_width = hyper
-        .condition_token_grid_width
-        .unwrap_or(default_token_grid);
-    let token_grid_height = hyper
-        .condition_token_grid_height
-        .unwrap_or(default_token_grid);
-    let dino = DinoVitsConditionEncoder::load(&request.dino_model_path, dino_image_size)?;
-    let l2_normalize_features = hyper.condition_l2_normalize_features.unwrap_or(true);
+    Ok(dino_image_size)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn generate_model_from_artifacts(
+    request: HyperNpaInferenceRequest,
+    hyper: E2eHyperNpa2d,
+    dino: DinoVitsConditionEncoder,
+    base_bytes: &[u8],
+    manifest: BpkModelManifest,
+) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
+    let prepared = prepare_hyper_npa_generation(&request, &hyper, base_bytes, manifest)?;
     let mut encoded = dino.encode_batch_with_contract(
-        &[condition],
-        DinoVitsConditionContract::token_grid(
-            token_grid_width,
-            token_grid_height,
-            l2_normalize_features,
-            hyper.condition_rgb_channels.unwrap_or(false),
-            hyper.condition_rgb_channel_scale.unwrap_or(1.0),
-            hyper.condition_alpha_channel.unwrap_or(false),
-            hyper.condition_alpha_channel_scale.unwrap_or(1.0),
-        )
-        .with_patch_pixels(hyper.condition_patch_pixels.unwrap_or(false)),
+        std::slice::from_ref(&prepared.condition),
+        prepared.condition_contract,
     )?;
-    let condition_tokens = encoded
-        .pop()
-        .ok_or_else(|| std::io::Error::other("DINO did not return condition tokens"))?;
-    let base_bytes = std::fs::read(&request.base_model_path)?;
-    if let Some(expected) = &hyper.shared_base_sha256 {
-        let actual = burn_automata::import::bpk_payload_sha256(&base_bytes)?;
-        if &actual != expected {
-            return Err(std::io::Error::other(format!(
-                "HyperNPA shared-base checksum mismatch: artifact expects {expected}, loaded {actual}"
-            ))
-            .into());
-        }
-    }
-    let manifest = load_manifest(&request.base_model_path)?;
-    let hashgrid = manifest.hashgrid.clone();
-    let base_model = manifest.into_model();
-    let embed_dims = hyper.embed_dims()?;
-    let token_count = condition_tokens.len() / embed_dims;
-    let spec = hyper.adapter_spec(&base_model.config)?;
+    let condition_tokens = take_condition_tokens(&mut encoded)?;
+    let token_count = condition_token_count(&condition_tokens, prepared.embed_dims)?;
     let conditioned = if hyper.is_conditional_row_flow() {
         #[cfg(feature = "hyper_dino_cuda")]
         {
             burn_automata::generate_e2e_conditioned_npa_2d_cuda(
-                &base_model,
+                &prepared.base_model,
                 &hyper,
                 &condition_tokens,
             )?
@@ -433,30 +468,168 @@ fn generate_model_for_source(
         #[cfg(all(not(feature = "hyper_dino_cuda"), feature = "hyper_dino_wgpu"))]
         {
             burn_automata::generate_e2e_conditioned_npa_2d_wgpu(
-                &base_model,
+                &prepared.base_model,
                 &hyper,
                 &condition_tokens,
             )?
         }
         #[cfg(not(any(feature = "hyper_dino_cuda", feature = "hyper_dino_wgpu")))]
         {
-            generate_e2e_conditioned_npa_2d(&base_model, &hyper, &condition_tokens)?
+            generate_e2e_conditioned_npa_2d(&prepared.base_model, &hyper, &condition_tokens)?
         }
     } else {
-        generate_e2e_conditioned_npa_2d(&base_model, &hyper, &condition_tokens)?
+        generate_e2e_conditioned_npa_2d(&prepared.base_model, &hyper, &condition_tokens)?
     };
-    Ok(GeneratedHyperNpaModel {
-        model: conditioned.model,
+    Ok(prepared.finish(conditioned.model, token_count))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn generate_model_from_artifacts_web(
+    request: HyperNpaInferenceRequest,
+    hyper: E2eHyperNpa2d,
+    dino: DinoVitsConditionEncoder,
+    base_bytes: &[u8],
+    manifest: BpkModelManifest,
+) -> Result<GeneratedHyperNpaModel, Box<dyn std::error::Error>> {
+    let prepared = prepare_hyper_npa_generation(&request, &hyper, base_bytes, manifest)?;
+    let mut encoded = dino
+        .encode_batch_with_contract_async(
+            std::slice::from_ref(&prepared.condition),
+            prepared.condition_contract,
+        )
+        .await?;
+    let condition_tokens = take_condition_tokens(&mut encoded)?;
+    let token_count = condition_token_count(&condition_tokens, prepared.embed_dims)?;
+    let conditioned = if hyper.is_conditional_row_flow() {
+        #[cfg(feature = "hyper_dino_wgpu")]
+        {
+            burn_automata::generate_e2e_conditioned_npa_2d_wgpu_async(
+                &prepared.base_model,
+                &hyper,
+                &condition_tokens,
+            )
+            .await?
+        }
+        #[cfg(all(not(feature = "hyper_dino_wgpu"), feature = "hyper_dino_cuda"))]
+        {
+            burn_automata::generate_e2e_conditioned_npa_2d_cuda(
+                &prepared.base_model,
+                &hyper,
+                &condition_tokens,
+            )?
+        }
+        #[cfg(not(any(feature = "hyper_dino_cuda", feature = "hyper_dino_wgpu")))]
+        {
+            generate_e2e_conditioned_npa_2d(&prepared.base_model, &hyper, &condition_tokens)?
+        }
+    } else {
+        generate_e2e_conditioned_npa_2d(&prepared.base_model, &hyper, &condition_tokens)?
+    };
+    Ok(prepared.finish(conditioned.model, token_count))
+}
+
+struct PreparedHyperNpaGeneration {
+    condition: burn_automata::ConditionImage2d,
+    condition_contract: DinoVitsConditionContract,
+    base_model: NpaModel,
+    hashgrid: HashGridConfig,
+    image_width: u32,
+    image_height: u32,
+    adapter_rank: usize,
+    adapter_alpha: f32,
+    embed_dims: usize,
+}
+
+impl PreparedHyperNpaGeneration {
+    fn finish(self, model: NpaModel, token_count: usize) -> GeneratedHyperNpaModel {
+        GeneratedHyperNpaModel {
+            model,
+            hashgrid: self.hashgrid,
+            image_width: self.image_width,
+            image_height: self.image_height,
+            adapter_rank: self.adapter_rank,
+            adapter_alpha: self.adapter_alpha,
+            token_count,
+            embed_dims: self.embed_dims,
+        }
+    }
+}
+
+fn prepare_hyper_npa_generation(
+    request: &HyperNpaInferenceRequest,
+    hyper: &E2eHyperNpa2d,
+    base_bytes: &[u8],
+    manifest: BpkModelManifest,
+) -> Result<PreparedHyperNpaGeneration, Box<dyn std::error::Error>> {
+    let condition = decode_condition_image(request.source.bytes.as_slice())?;
+    let image_width = condition.width as u32;
+    let image_height = condition.height as u32;
+    let dino_image_size = request_dino_image_size(request, hyper)?;
+    let default_token_grid = dino_image_size / request.dino_patch_size;
+    let token_grid_width = hyper
+        .condition_token_grid_width
+        .unwrap_or(default_token_grid);
+    let token_grid_height = hyper
+        .condition_token_grid_height
+        .unwrap_or(default_token_grid);
+    let condition_contract = DinoVitsConditionContract::token_grid(
+        token_grid_width,
+        token_grid_height,
+        hyper.condition_l2_normalize_features.unwrap_or(true),
+        hyper.condition_rgb_channels.unwrap_or(false),
+        hyper.condition_rgb_channel_scale.unwrap_or(1.0),
+        hyper.condition_alpha_channel.unwrap_or(false),
+        hyper.condition_alpha_channel_scale.unwrap_or(1.0),
+    )
+    .with_patch_pixels(hyper.condition_patch_pixels.unwrap_or(false));
+    if let Some(expected) = &hyper.shared_base_sha256 {
+        let actual = burn_automata::import::bpk_payload_sha256(base_bytes)?;
+        if &actual != expected {
+            return Err(std::io::Error::other(format!(
+                "HyperNPA shared-base checksum mismatch: artifact expects {expected}, loaded {actual}"
+            ))
+            .into());
+        }
+    }
+    let hashgrid = manifest.hashgrid.clone();
+    let base_model = manifest.into_model();
+    let spec = hyper.adapter_spec(&base_model.config)?;
+    Ok(PreparedHyperNpaGeneration {
+        condition,
+        condition_contract,
+        base_model,
         hashgrid,
         image_width,
         image_height,
         adapter_rank: spec.rank,
         adapter_alpha: spec.alpha,
-        token_count,
-        embed_dims,
+        embed_dims: hyper.embed_dims()?,
     })
 }
 
+fn take_condition_tokens(
+    encoded: &mut Vec<Vec<f32>>,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    encoded
+        .pop()
+        .ok_or_else(|| std::io::Error::other("DINO did not return condition tokens").into())
+}
+
+fn condition_token_count(
+    condition_tokens: &[f32],
+    embed_dims: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if embed_dims == 0 || !condition_tokens.len().is_multiple_of(embed_dims) {
+        return Err(std::io::Error::other(format!(
+            "condition vector has {} values, which is not divisible by {embed_dims} embedding dimensions",
+            condition_tokens.len()
+        ))
+        .into());
+    }
+    Ok(condition_tokens.len() / embed_dims)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn read_image_source_from_path(path: &Path) -> Result<HyperNpaImageSource, String> {
     let bytes = std::fs::read(path)
         .map_err(|err| format!("failed to read dropped image {}: {err}", path.display()))?;

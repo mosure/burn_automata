@@ -50,6 +50,27 @@ use super::*;
         let splat = tensor1_vec(loss.splat.inner())?;
         let color = tensor1_vec(loss.color.inner())?;
         let density = tensor1_vec(loss.density.inner())?;
+        loss_vector_scalars_from_parts(total, splat, color, density)
+    }
+
+    pub(super) async fn loss_vector_scalars_async(
+        loss: BurnLossBatchTensors,
+    ) -> AutomataResult<Vec<BurnLossScalars>> {
+        let (total, splat, color, density) = (
+            tensor1_vec_async(loss.total.inner()).await?,
+            tensor1_vec_async(loss.splat.inner()).await?,
+            tensor1_vec_async(loss.color.inner()).await?,
+            tensor1_vec_async(loss.density.inner()).await?,
+        );
+        loss_vector_scalars_from_parts(total, splat, color, density)
+    }
+
+    fn loss_vector_scalars_from_parts(
+        total: Vec<f32>,
+        splat: Vec<f32>,
+        color: Vec<f32>,
+        density: Vec<f32>,
+    ) -> AutomataResult<Vec<BurnLossScalars>> {
         if total.len() != splat.len() || total.len() != color.len() || total.len() != density.len()
         {
             return Err(AutomataError::InvalidArgument(
@@ -223,6 +244,64 @@ use super::*;
         Ok((original_norms, scales, scale_tensor))
     }
 
+    pub(super) async fn prepare_model_batch_grad_group_async(
+        tensors: &mut [Tensor3Inner],
+        clip_norm: f32,
+        normalize: bool,
+        collect_metrics: bool,
+    ) -> AutomataResult<(Vec<f32>, Vec<f32>, Tensor1Inner)> {
+        sanitize_nonfinite_model_batch_gradients(tensors);
+        let model_count = tensors
+            .first()
+            .map(|tensor| tensor.shape().dims::<3>()[0])
+            .unwrap_or(0);
+        let original_norm_tensor = model_batch_group_norm_tensor(tensors);
+        let original_norms = if collect_metrics {
+            tensor1_vec_async(original_norm_tensor.clone())
+                .await?
+                .into_iter()
+                .enumerate()
+                .map(|(model, value)| {
+                    finite_scalar(&format!("Burn oracle model batch grad norm[{model}]"), value)
+                })
+                .collect::<AutomataResult<Vec<_>>>()?
+        } else {
+            vec![0.0; model_count]
+        };
+        if normalize {
+            for tensor in tensors.iter_mut() {
+                *tensor = normalize_model_batch_tensor(tensor);
+            }
+        }
+        let clip_norm_source = if normalize {
+            model_batch_group_norm_tensor(tensors)
+        } else {
+            original_norm_tensor
+        };
+        let scale_tensor = if clip_norm > 0.0 {
+            clip_norm_source
+                .clone()
+                .clamp_min(clip_norm)
+                .recip()
+                .mul_scalar(clip_norm)
+        } else {
+            clip_norm_source.zeros_like().add_scalar(1.0)
+        };
+        let scales = if collect_metrics {
+            tensor1_vec_async(scale_tensor.clone())
+                .await?
+                .into_iter()
+                .enumerate()
+                .map(|(model, value)| {
+                    finite_scalar(&format!("Burn oracle model batch grad scale[{model}]"), value)
+                })
+                .collect::<AutomataResult<Vec<_>>>()?
+        } else {
+            vec![1.0; model_count]
+        };
+        Ok((original_norms, scales, scale_tensor))
+    }
+
     pub(super) fn model_batch_group_norm_tensor(tensors: &[Tensor3Inner]) -> Tensor1Inner {
         let mut maximum = None::<Tensor1Inner>;
         for tensor in tensors {
@@ -248,6 +327,31 @@ use super::*;
             .sqrt()
             .mul(maximum)
             .clamp_max(f32::MAX)
+    }
+
+    /// Select small top-k index sets without Burn's host sorting fallback.
+    ///
+    /// Adaptive topology uses very small `k` values. Repeated device argmax is
+    /// cheaper than a full sort at that shape and remains valid in browser
+    /// workers, where synchronous tensor readback is unavailable.
+    pub(super) fn device_topk_indices(scores: Tensor2, count: usize) -> Tensor2Int {
+        let [batch_size, width] = scores.shape().dims::<2>();
+        let count = count.min(width);
+        assert!(count > 0, "device top-k requires at least one selected row");
+        let columns = Tensor::<BurnBackend, 1, Int>::arange(0..width as i64, &scores.device())
+            .reshape([1, width])
+            .expand([batch_size, width]);
+        let mut remaining = scores;
+        let mut selected = Vec::with_capacity(count);
+        for _ in 0..count {
+            let index = remaining.clone().argmax(1);
+            let selected_mask = columns
+                .clone()
+                .equal(index.clone().expand([batch_size, width]));
+            remaining = remaining.mask_fill(selected_mask, f32::NEG_INFINITY);
+            selected.push(index);
+        }
+        Tensor::cat(selected, 1)
     }
 
     pub(super) fn model_batch_tensor_l2_norm_tensor(tensor: &Tensor3Inner) -> Tensor1Inner {
@@ -800,6 +904,25 @@ use super::*;
         })
     }
 
+    pub(super) async fn tensor_vec_async(
+        tensor: Tensor2Inner,
+    ) -> AutomataResult<Vec<f32>> {
+        tensor
+            .into_data_async()
+            .await
+            .map_err(|err| {
+                AutomataError::InvalidArgument(format!(
+                    "Burn dense tensor readback failed: {err}"
+                ))
+            })?
+            .to_vec::<f32>()
+            .map_err(|err| {
+                AutomataError::InvalidArgument(format!(
+                    "Burn dense tensor conversion failed: {err}"
+                ))
+            })
+    }
+
     pub(super) fn tensor2_snapshot(name: &str, tensor: Tensor2Inner) -> AutomataResult<E2eTensorSnapshot> {
         let shape = tensor.shape().dims::<2>();
         Ok(E2eTensorSnapshot {
@@ -840,6 +963,23 @@ use super::*;
         })
     }
 
+    pub(super) async fn tensor3_vec_async(tensor: Tensor3Inner) -> AutomataResult<Vec<f32>> {
+        tensor
+            .into_data_async()
+            .await
+            .map_err(|err| {
+                AutomataError::InvalidArgument(format!(
+                    "Burn dense tensor readback failed: {err}"
+                ))
+            })?
+            .to_vec::<f32>()
+            .map_err(|err| {
+                AutomataError::InvalidArgument(format!(
+                    "Burn dense tensor conversion failed: {err}"
+                ))
+            })
+    }
+
     pub(super) fn tensor3_snapshot(name: &str, tensor: Tensor3Inner) -> AutomataResult<E2eTensorSnapshot> {
         let shape = tensor.shape().dims::<3>();
         Ok(E2eTensorSnapshot {
@@ -878,6 +1018,23 @@ use super::*;
         tensor.into_data().to_vec::<f32>().map_err(|err| {
             AutomataError::InvalidArgument(format!("Burn dense tensor readback failed: {err}"))
         })
+    }
+
+    pub(super) async fn tensor1_vec_async(tensor: Tensor1Inner) -> AutomataResult<Vec<f32>> {
+        tensor
+            .into_data_async()
+            .await
+            .map_err(|err| {
+                AutomataError::InvalidArgument(format!(
+                    "Burn dense tensor readback failed: {err}"
+                ))
+            })?
+            .to_vec::<f32>()
+            .map_err(|err| {
+                AutomataError::InvalidArgument(format!(
+                    "Burn dense tensor conversion failed: {err}"
+                ))
+            })
     }
 
     pub(super) fn finite_scalar(name: &str, value: f32) -> AutomataResult<f32> {

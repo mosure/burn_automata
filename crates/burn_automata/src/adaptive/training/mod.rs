@@ -74,7 +74,7 @@ pub use target2d::{
     AdaptiveTarget2dGpuTrainingProgress, AdaptiveTarget2dGpuTrainingReport,
     AdaptiveTarget2dMaterialConfig, AdaptiveTarget2dMaterialLayout, AdaptiveTarget2dRuleTraining,
     AdaptiveTarget2dTopologyConfig, AdaptiveTarget2dTrainingConfig, train_adaptive_target_2d_gpu,
-    train_adaptive_target_2d_gpu_with_observer,
+    train_adaptive_target_2d_gpu_with_observer, train_adaptive_target_2d_gpu_with_observer_async,
 };
 pub(crate) use target2d::{
     AdaptiveTarget2dSeedBank, AdaptiveTarget2dUpdateMask, build_adaptive_target2d_seed_bank,

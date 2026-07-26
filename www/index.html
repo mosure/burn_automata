@@ -2,36 +2,37 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d1114" />
     <title>burn_automata</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main>
-      <section class="hero">
-        <p class="eyebrow">Burn + Bevy + WGPU</p>
-        <h1>burn_automata</h1>
-        <p>Neural particle automata kernels, rollout code, and Bevy viewing tools.</p>
-        <nav>
-          <a href="../README.md">README</a>
-          <a href="../docs/validation.md">Validation</a>
-          <a href="./infer.html">Wasm viewer</a>
-        </nav>
-      </section>
-      <section class="grid">
-        <article>
-          <h2>CPU oracle</h2>
-          <p>Reference kernels define the expected behavior for future CubeCL/WGPU kernels.</p>
-        </article>
-        <article>
-          <h2>Bevy viewer</h2>
-          <p>Bevy 0.19 BSN UI and optional Gaussian splatting integration compile from the workspace.</p>
-        </article>
-        <article>
-          <h2>Import path</h2>
-          <p>Published PyTorch checkpoints can be imported directly into checksumed BPK packages.</p>
-        </article>
-      </section>
-    </main>
+    <div id="boot-status" role="status" aria-live="polite">
+      <strong>burn_automata</strong>
+      <span id="boot-message">initializing WebGPU</span>
+    </div>
+    <noscript>JavaScript is required to run burn_automata.</noscript>
+    <script type="module">
+      const status = document.getElementById("boot-status");
+      const message = document.getElementById("boot-message");
+
+      if (!navigator.gpu) {
+        status.dataset.state = "error";
+        message.textContent = "WebGPU is unavailable. Use a current Chrome, Edge, or Firefox build.";
+      } else {
+        try {
+          const { default: init } = await import("./pkg/bevy_automata.js");
+          await init();
+          status.dataset.state = "ready";
+          window.setTimeout(() => status.remove(), 500);
+        } catch (error) {
+          console.error(error);
+          status.dataset.state = "error";
+          message.textContent = `failed to start: ${error?.message ?? error}`;
+        }
+      }
+    </script>
   </body>
 </html>

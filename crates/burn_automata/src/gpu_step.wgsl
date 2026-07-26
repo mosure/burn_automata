@@ -63,7 +63,7 @@ struct AtomicU32Buffer {
 };
 
 struct ParamsBuffer {
-    values: array<vec4<u32>, 26>,
+    values: array<vec4<u32>, 27>,
 };
 
 struct MaterialGaussianGeometry {
@@ -95,6 +95,8 @@ var<workgroup> tile_positions: array<vec4<f32>, TILE_SIZE>;
 var<workgroup> tile_density: array<f32, TILE_SIZE>;
 var<workgroup> tile_states: array<f32, TILE_SIZE * MAX_STATE_DIMS>;
 var<workgroup> tile_center: vec3<i32>;
+var<workgroup> tile_dispatch: vec4<u32>;
+var<workgroup> tile_neighbor: vec2<u32>;
 var<workgroup> tile_mismatch: atomic<u32>;
 var<workgroup> scan_values: array<u32, SCAN_SIZE>;
 var<workgroup> coop_values: array<f32, COOP_SIZE * COOP_COMPONENTS>;
@@ -102,7 +104,9 @@ var<workgroup> coop_reduced_values: array<f32, COOP_COMPONENTS>;
 var<workgroup> coop_feature: array<f32, MAX_FEATURE_DIMS>;
 var<workgroup> coop_hidden: array<f32, MAX_HIDDEN_DIMS>;
 var<workgroup> coop_update_values: array<f32, MAX_OUTPUT_DIMS>;
+var<workgroup> cooperative_mask: f32;
 var<workgroup> adaptive_radix_counts: array<atomic<u32>, ADAPTIVE_RADIX_BINS>;
+var<workgroup> adaptive_update_active: atomic<u32>;
 var<workgroup> adaptive_support_count: atomic<u32>;
 var<workgroup> adaptive_selection_prefix: u32;
 var<workgroup> adaptive_selection_rank: u32;
@@ -2140,10 +2144,35 @@ fn tiled_density_main(
         return;
     }
 
-    let target_cell = active_cell(workgroup.x);
     let local_id = local.x;
     let block_start = workgroup.y * TILE_SIZE;
-    let target_count = min(atomicLoad(&linked_grid.values[target_cell]), bucket_capacity());
+    if (local_id == 0u) {
+        let loaded_target_cell = active_cell(workgroup.x);
+        let loaded_target_count = min(
+            atomicLoad(&linked_grid.values[loaded_target_cell]),
+            bucket_capacity(),
+        );
+        var reference_index = 0u;
+        tile_center = vec3<i32>(0, 0, 0);
+        if (block_start < loaded_target_count) {
+            reference_index = atomicLoad(
+                &linked_grid.values[bucket_slot_index(loaded_target_cell, block_start)],
+            );
+            tile_center = cell_coords(position(reference_index));
+        }
+        tile_dispatch = vec4<u32>(
+            loaded_target_cell,
+            loaded_target_count,
+            reference_index,
+            0u,
+        );
+        atomicStore(&tile_mismatch, 0u);
+    }
+    let dispatch = workgroupUniformLoad(&tile_dispatch);
+    let common_center = workgroupUniformLoad(&tile_center);
+    let target_cell = dispatch.x;
+    let target_count = dispatch.y;
+    let reference_index = dispatch.z;
     if (block_start >= target_count) {
         return;
     }
@@ -2159,19 +2188,11 @@ fn tiled_density_main(
         center = cell_coords(pi);
     }
 
-    if (local_id == 0u) {
-        let first_idx = atomicLoad(&linked_grid.values[bucket_slot_index(target_cell, block_start)]);
-        tile_center = cell_coords(position(first_idx));
-        atomicStore(&tile_mismatch, 0u);
-    }
-    workgroupBarrier();
-
-    if (has_target && !same_cell_coords(center, tile_center)) {
+    if (has_target && !same_cell_coords(center, common_center)) {
         atomicStore(&tile_mismatch, 1u);
     }
-    workgroupBarrier();
-
-    if (atomicLoad(&tile_mismatch) != 0u) {
+    let mismatch = workgroupUniformLoad(&tile_mismatch);
+    if (mismatch != 0u) {
         if (has_target) {
             density.values[idx] = compute_density_particle(idx);
         }
@@ -2184,13 +2205,30 @@ fn tiled_density_main(
     for (var dz = z_min(); dz <= z_max(); dz = dz + 1) {
         for (var dy = -1; dy <= 1; dy = dy + 1) {
             for (var dx = -1; dx <= 1; dx = dx + 1) {
-                let coords = vec3<i32>(tile_center.x + dx, tile_center.y + dy, tile_center.z + dz);
-                let cell = cell_index(coords, idx);
-                if (cell < 0) {
+                let coords = vec3<i32>(
+                    common_center.x + dx,
+                    common_center.y + dy,
+                    common_center.z + dz,
+                );
+                if (local_id == 0u) {
+                    let cell = cell_index(coords, reference_index);
+                    var cell_u = NIL;
+                    var count = 0u;
+                    if (cell >= 0) {
+                        cell_u = u32(cell);
+                        count = min(
+                            atomicLoad(&linked_grid.values[cell_u]),
+                            bucket_capacity(),
+                        );
+                    }
+                    tile_neighbor = vec2<u32>(cell_u, count);
+                }
+                let neighbor = workgroupUniformLoad(&tile_neighbor);
+                let cell_u = neighbor.x;
+                let count = neighbor.y;
+                if (cell_u == NIL) {
                     continue;
                 }
-                let cell_u = u32(cell);
-                let count = min(atomicLoad(&linked_grid.values[cell_u]), bucket_capacity());
                 for (var chunk = 0u; chunk < count; chunk = chunk + TILE_SIZE) {
                     let load_slot = chunk + local_id;
                     if (load_slot < count) {
@@ -2707,7 +2745,7 @@ fn adaptive_spacing_occupancy_cooperative(
         }
         workgroupBarrier();
     }
-    return coop_values[0u];
+    return workgroupUniformLoad(&coop_values[0u]);
 }
 
 fn adaptive_histogram_distance(
@@ -3227,20 +3265,23 @@ fn adaptive_local_residual_cooperative_main(
     let fd = feature_dims();
     let position_base = idx * 4u;
     let state_base = idx * sd;
-    let update_active = update_mask(idx) != 0.0;
-    let perception_active = update_active || adaptive_diagnostics_enabled();
-    let paired_detail_only = adaptive_diagnostics_enabled() && pu(99u) != 0u;
 
     let pi = position(idx);
     let center = cell_coords(pi);
     let support_cell_radius = adaptive_support_cell_radius(idx);
     let max_neighbors = adaptive_max_neighbors();
     if (local_id == 0u) {
+        atomicStore(
+            &adaptive_update_active,
+            select(0u, 1u, update_mask(idx) != 0.0),
+        );
         atomicStore(&adaptive_support_count, 0u);
         adaptive_cutoff_distance = 0xffffffffu;
         adaptive_cutoff_index = 0xffffffffu;
     }
-    workgroupBarrier();
+    let update_active = workgroupUniformLoad(&adaptive_update_active) != 0u;
+    let perception_active = update_active || adaptive_diagnostics_enabled();
+    let paired_detail_only = adaptive_diagnostics_enabled() && pu(99u) != 0u;
     if (perception_active
         && (max_neighbors > 0u
             || (adaptive_diagnostics_enabled() && !paired_detail_only))) {
@@ -3298,7 +3339,7 @@ fn adaptive_local_residual_cooperative_main(
         }
     }
 
-    let support_count = atomicLoad(&adaptive_support_count);
+    let support_count = workgroupUniformLoad(&adaptive_support_count);
     if (perception_active && max_neighbors > 0u && support_count > max_neighbors) {
         if (local_id == 0u) {
             adaptive_selection_prefix = 0u;
@@ -3331,7 +3372,8 @@ fn adaptive_local_residual_cooperative_main(
             adaptive_selection_prefix = 0u;
         }
         workgroupBarrier();
-        if (adaptive_selection_rank == 0u) {
+        let selection_rank = workgroupUniformLoad(&adaptive_selection_rank);
+        if (selection_rank == 0u) {
             if (local_id == 0u) {
                 atomicStore(&adaptive_min_cutoff_index, 0xffffffffu);
             }
@@ -4151,7 +4193,10 @@ fn cooperative_update_main(
 
     let sd = state_dims();
     let dim = spatial_dims();
-    let mask = update_mask(idx);
+    if (local_id == 0u) {
+        cooperative_mask = update_mask(idx);
+    }
+    let mask = workgroupUniformLoad(&cooperative_mask);
     if (mask == 0.0 && !adaptive_diagnostics_enabled() && pu(99u) != 2u) {
         if (local_id == 0u) {
             copy_particle_to_output(idx);
@@ -4653,10 +4698,35 @@ fn tiled_update_main(
         return;
     }
 
-    let target_cell = active_cell(workgroup.x);
     let local_id = local.x;
     let block_start = workgroup.y * TILE_SIZE;
-    let target_count = min(atomicLoad(&linked_grid.values[target_cell]), bucket_capacity());
+    if (local_id == 0u) {
+        let loaded_target_cell = active_cell(workgroup.x);
+        let loaded_target_count = min(
+            atomicLoad(&linked_grid.values[loaded_target_cell]),
+            bucket_capacity(),
+        );
+        var reference_index = 0u;
+        tile_center = vec3<i32>(0, 0, 0);
+        if (block_start < loaded_target_count) {
+            reference_index = atomicLoad(
+                &linked_grid.values[bucket_slot_index(loaded_target_cell, block_start)],
+            );
+            tile_center = cell_coords(position(reference_index));
+        }
+        tile_dispatch = vec4<u32>(
+            loaded_target_cell,
+            loaded_target_count,
+            reference_index,
+            0u,
+        );
+        atomicStore(&tile_mismatch, 0u);
+    }
+    let dispatch = workgroupUniformLoad(&tile_dispatch);
+    let common_center = workgroupUniformLoad(&tile_center);
+    let target_cell = dispatch.x;
+    let target_count = dispatch.y;
+    let reference_index = dispatch.z;
     if (block_start >= target_count) {
         return;
     }
@@ -4672,19 +4742,11 @@ fn tiled_update_main(
         center = cell_coords(pi);
     }
 
-    if (local_id == 0u) {
-        let first_idx = atomicLoad(&linked_grid.values[bucket_slot_index(target_cell, block_start)]);
-        tile_center = cell_coords(position(first_idx));
-        atomicStore(&tile_mismatch, 0u);
-    }
-    workgroupBarrier();
-
-    if (has_target && !same_cell_coords(center, tile_center)) {
+    if (has_target && !same_cell_coords(center, common_center)) {
         atomicStore(&tile_mismatch, 1u);
     }
-    workgroupBarrier();
-
-    if (atomicLoad(&tile_mismatch) != 0u) {
+    let mismatch = workgroupUniformLoad(&tile_mismatch);
+    if (mismatch != 0u) {
         if (has_target) {
             update_particle(idx);
         }
@@ -4706,13 +4768,30 @@ fn tiled_update_main(
     for (var dz = z_min(); dz <= z_max(); dz = dz + 1) {
         for (var dy = -1; dy <= 1; dy = dy + 1) {
             for (var dx = -1; dx <= 1; dx = dx + 1) {
-                let coords = vec3<i32>(tile_center.x + dx, tile_center.y + dy, tile_center.z + dz);
-                let cell = cell_index(coords, idx);
-                if (cell < 0) {
+                let coords = vec3<i32>(
+                    common_center.x + dx,
+                    common_center.y + dy,
+                    common_center.z + dz,
+                );
+                if (local_id == 0u) {
+                    let cell = cell_index(coords, reference_index);
+                    var cell_u = NIL;
+                    var count = 0u;
+                    if (cell >= 0) {
+                        cell_u = u32(cell);
+                        count = min(
+                            atomicLoad(&linked_grid.values[cell_u]),
+                            bucket_capacity(),
+                        );
+                    }
+                    tile_neighbor = vec2<u32>(cell_u, count);
+                }
+                let neighbor = workgroupUniformLoad(&tile_neighbor);
+                let cell_u = neighbor.x;
+                let count = neighbor.y;
+                if (cell_u == NIL) {
                     continue;
                 }
-                let cell_u = u32(cell);
-                let count = min(atomicLoad(&linked_grid.values[cell_u]), bucket_capacity());
                 for (var chunk = 0u; chunk < count; chunk = chunk + TILE_SIZE) {
                     let load_slot = chunk + local_id;
                     if (load_slot < count) {

@@ -24,6 +24,8 @@ pub mod target_geometry;
 pub mod training;
 #[cfg(feature = "backend_wgpu")]
 pub mod training_wgpu;
+#[cfg(all(target_arch = "wasm32", feature = "backend_wgpu"))]
+mod webgpu;
 
 pub use adaptive::{
     AdaptiveBaseTrainingConfig, AdaptiveBaseTrainingPhase, AdaptiveBaseTrainingPhaseReport,
@@ -61,12 +63,13 @@ pub use adaptive::{
     adaptive_oracle_training_batch, adaptive_rule_distillation_batch,
     adaptive_rule_on_policy_batch, advance_adaptive_rollout, apply_adaptive_topology_at_step,
     audit_adaptive_closure_identifiability, audit_adaptive_closure_identifiability_wgpu,
-    evaluate_adaptive_task_quality, evaluate_adaptive_task_quality_validation, load_adaptive_model,
+    encode_adaptive_model, evaluate_adaptive_task_quality,
+    evaluate_adaptive_task_quality_validation, load_adaptive_model, load_adaptive_model_bytes,
     material_footprint_radius, normalize_footprint_budget, run_adaptive_closure_audit,
     run_adaptive_experiment_suite, run_adaptive_rollout, run_adaptive_topology_audit,
     save_adaptive_model, seed_adaptive_particles_scaled, train_adaptive_target_2d_gpu,
-    train_adaptive_target_2d_gpu_with_observer, unit_ball_measure,
-    validate_adaptive_task_quality_validation_gates,
+    train_adaptive_target_2d_gpu_with_observer, train_adaptive_target_2d_gpu_with_observer_async,
+    unit_ball_measure, validate_adaptive_task_quality_validation_gates,
 };
 #[cfg(feature = "gpu_wgpu")]
 pub use adaptive::{
@@ -91,8 +94,6 @@ pub use config::{AutomataPreset, EquivarianceMode, ModelFormat, NpaConfig};
 pub use error::{AutomataError, AutomataResult};
 #[cfg(feature = "backend_cuda")]
 pub use hyper::generate_e2e_conditioned_npa_2d_cuda;
-#[cfg(feature = "backend_wgpu")]
-pub use hyper::generate_e2e_conditioned_npa_2d_wgpu;
 pub use hyper::{
     AdapterParameterGroup2d, AdapterParameterLayout2d, AdapterParameterSegment2d,
     AlphaAwareImageMetrics, CONDITION_FEATURE_DIMS, CONDITION_TOKEN_FEATURE_DIMS,
@@ -116,6 +117,8 @@ pub use hyper::{
     DINO_CONDITION_BACKGROUND_RGB, DinoVitsConditionEncoder, decode_condition_image,
     load_condition_image,
 };
+#[cfg(feature = "backend_wgpu")]
+pub use hyper::{generate_e2e_conditioned_npa_2d_wgpu, generate_e2e_conditioned_npa_2d_wgpu_async};
 pub use import::{
     BpkAdapterManifest, BpkModelManifest, ExportedCheckpoint, ImportReport,
     import_exported_checkpoint, import_model, load_adapter_manifest, save_adapter_manifest,
@@ -150,8 +153,8 @@ pub use target2d::{
     foreground_alpha_count_upstream, load_rgba_thumbnail_upstream, load_target_image_2d_upstream,
     target_2d_loss, target_2d_loss_with_adjoint, target_2d_rollout_loss_with_gradients,
     target_2d_upstream_one_step_with_gradients, train_target_2d, train_target_2d_gpu,
-    train_target_2d_gpu_with_observer, upstream_adaptive_target_image_size,
-    upstream_growing_2d_hashgrid, upstream_growing_2d_model,
+    train_target_2d_gpu_with_observer, train_target_2d_gpu_with_observer_async,
+    upstream_adaptive_target_image_size, upstream_growing_2d_hashgrid, upstream_growing_2d_model,
 };
 pub use training::{
     AdamWConfig, AdamWState, LowRankAdapterGradients, SgdConfig, SupervisedBatch,
@@ -164,6 +167,8 @@ pub use training::{
 };
 #[cfg(feature = "backend_wgpu")]
 pub use training_wgpu::run_supervised_training_wgpu;
+#[cfg(all(target_arch = "wasm32", feature = "backend_wgpu"))]
+pub use webgpu::initialize_webgpu_backend;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

@@ -89,6 +89,43 @@ fn performance_label_system_uses_disjoint_text_queries() {
     assert!(app.world().entity(adaptive).get::<Text>().is_some());
 }
 
+#[cfg(feature = "hyper_dino")]
+#[test]
+fn adaptive_training_style_uses_disjoint_background_queries() {
+    let mut app = App::new();
+    app.init_resource::<AutomataSettings>()
+        .init_resource::<ImageTargetTrainingState>()
+        .add_systems(Update, update_adaptive_training_checkbox_style);
+    let checkbox = app
+        .world_mut()
+        .spawn((
+            AdaptiveTrainingCheckbox,
+            Hovered::default(),
+            BackgroundColor(Color::NONE),
+            BorderColor::from(Color::NONE),
+        ))
+        .id();
+    let mark = app
+        .world_mut()
+        .spawn((AdaptiveTrainingCheckboxMark, BackgroundColor(Color::NONE)))
+        .id();
+
+    app.update();
+
+    assert_ne!(
+        app.world()
+            .entity(checkbox)
+            .get::<BackgroundColor>()
+            .unwrap()
+            .0,
+        Color::NONE
+    );
+    assert_eq!(
+        app.world().entity(mark).get::<BackgroundColor>().unwrap().0,
+        Color::NONE
+    );
+}
+
 #[test]
 fn m_key_toggles_ui_visibility() {
     let mut app = App::new();

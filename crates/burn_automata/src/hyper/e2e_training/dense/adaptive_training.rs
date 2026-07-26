@@ -310,7 +310,7 @@ fn write_adaptive_target2d_training_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn train_adaptive_step_tbptt(
+async fn train_adaptive_step_tbptt(
     params: &mut BurnBaseBatch,
     frozen_base: Option<&BurnBaseBatch>,
     optimizer: &mut BurnBaseBatchAdamWState,
@@ -588,7 +588,7 @@ fn train_adaptive_step_tbptt(
             let mut scalar = 0.0_f32;
             let mut optimization_scalar = 0.0_f32;
             if collect_metrics {
-                let loss_values = tensor1_vec(loss.total.clone().inner())?;
+                let loss_values = tensor1_vec_async(loss.total.clone().inner()).await?;
                 let finite_losses = loss_values
                     .iter()
                     .copied()
@@ -708,13 +708,16 @@ fn train_adaptive_step_tbptt(
                 optimization_total.clone().mean()
             };
             let objective = if tail_count > 0 && adaptive.trajectory_tail_weight > 0.0 {
-                let tail_mean = optimization_total
-                    .clone()
-                    .topk_with_indices(tail_count, 0)
-                    .0
-                    .mean();
+                let tail_indices = device_topk_indices(
+                    optimization_total
+                        .clone()
+                        .reshape([1, actual_trajectories]),
+                    tail_count,
+                )
+                .reshape([tail_count]);
+                let tail_mean = optimization_total.clone().select(0, tail_indices).mean();
                 (base_objective + tail_mean.mul_scalar(adaptive.trajectory_tail_weight))
-                .div_scalar(1.0 + adaptive.trajectory_tail_weight)
+                    .div_scalar(1.0 + adaptive.trajectory_tail_weight)
             } else {
                 base_objective
             };
@@ -829,21 +832,25 @@ fn train_adaptive_step_tbptt(
     // segments. Apply one update to keep optimizer cadence independent of pool
     // ages, topology timing, and TBPTT partitioning.
     let (grad_norms, grad_scales) = if adaptive.optimize_material_scale_only {
-        params.apply_adamw_last_input_column_gradients(
-            accumulated_gradients,
-            optimizer,
-            optimizer_config,
-            config.per_parameter_grad_normalization,
-            collect_metrics,
-        )?
+        params
+            .apply_adamw_last_input_column_gradients_async(
+                accumulated_gradients,
+                optimizer,
+                optimizer_config,
+                config.per_parameter_grad_normalization,
+                collect_metrics,
+            )
+            .await?
     } else {
-        params.apply_adamw_gradients(
-            accumulated_gradients,
-            optimizer,
-            optimizer_config,
-            config.per_parameter_grad_normalization,
-            collect_metrics,
-        )?
+        params
+            .apply_adamw_gradients_async(
+                accumulated_gradients,
+                optimizer,
+                optimizer_config,
+                config.per_parameter_grad_normalization,
+                collect_metrics,
+            )
+            .await?
     };
     pool.update_batch_with_ages(&pool_batch.pool_indices, &trajectory_ages, x, s)?;
     let elapsed = started.elapsed();
@@ -894,7 +901,7 @@ struct AdaptiveFreshSeedEvalContext<'a> {
     config: DirectBasisTrainConfig,
 }
 
-fn evaluate_adaptive_fresh_seed(
+async fn evaluate_adaptive_fresh_seed(
     context: AdaptiveFreshSeedEvalContext<'_>,
     seed: &BurnAdaptiveEvalSeed,
 ) -> Result<AdaptiveFreshSeedEval, Box<dyn std::error::Error>> {
@@ -998,8 +1005,8 @@ fn evaluate_adaptive_fresh_seed(
             output_scale.clone(),
             displacement.clone(),
         )?;
-        let splat_values = tensor1_vec(loss.splat.clone().inner())?;
-        let loss_values = tensor1_vec(loss.total.inner())?;
+        let splat_values = tensor1_vec_async(loss.splat.clone().inner()).await?;
+        let loss_values = tensor1_vec_async(loss.total.inner()).await?;
         if adaptive.checkpoint_horizons.first().copied() == Some(horizon) {
             let dense_config = DirectBasisTrainConfig {
                 example_batch_size: 1,
@@ -1017,7 +1024,7 @@ fn evaluate_adaptive_fresh_seed(
                 output_scale.clone().narrow(0, 0, 1),
                 displacement.clone().narrow(0, 0, 1),
             )?;
-            let dense_splat = tensor1_vec(dense_loss.splat.inner())?;
+            let dense_splat = tensor1_vec_async(dense_loss.splat.inner()).await?;
             validate_adaptive_target2d_primal_parity(
                 &splat_values[..1],
                 &dense_splat,
@@ -1034,7 +1041,7 @@ fn evaluate_adaptive_fresh_seed(
             .filter(|value| value.is_finite())
             .sum::<f32>();
         loss_count += loss_values.iter().filter(|value| value.is_finite()).count();
-        let mse_values = tensor1_vec(
+        let mse_values = tensor1_vec_async(
             adaptive_uncentered_render_rgb_mse_batch(
                 &x,
                 &s,
@@ -1045,7 +1052,8 @@ fn evaluate_adaptive_fresh_seed(
                 output_scale.clone(),
             )
             .inner(),
-        )?;
+        )
+        .await?;
         let finite_mse_count = mse_values.iter().filter(|value| value.is_finite()).count();
         let finite_mse_mean = mse_values
             .iter()
@@ -1140,7 +1148,32 @@ fn evaluate_adaptive_fresh_seed(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn train_adaptive_target2d_burn_dense(
+    model: &mut NpaModel,
+    example: &DirectBasisExample,
+    plan: Target2dOracleTrainPlan,
+    adaptive: AdaptiveTarget2dBurnConfig,
+    checkpoint: Option<&Target2dBurnCheckpointConfig>,
+    observer: Option<&mut dyn Target2dGpuTrainingObserver>,
+) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        pollster::block_on(train_adaptive_target2d_burn_dense_async(
+            model, example, plan, adaptive, checkpoint, observer,
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (model, example, plan, adaptive, checkpoint, observer);
+        Err(std::io::Error::other(
+            "synchronous adaptive Burn/WGPU training is unavailable on wasm32; use the async adaptive Target2D API",
+        )
+        .into())
+    }
+}
+
+pub(crate) async fn train_adaptive_target2d_burn_dense_async(
     model: &mut NpaModel,
     example: &DirectBasisExample,
     plan: Target2dOracleTrainPlan,
@@ -1279,7 +1312,8 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             config,
         },
         &eval_seed,
-    )?;
+    )
+    .await?;
     let mut best_eval_loss = Some(initial_eval.mean_loss);
     let mut best_eval_render_rgb_mse = Some(initial_eval.mean_render_rgb_mse);
     let mut best_eval_psnr = Some(initial_eval.selection_psnr_db);
@@ -1381,7 +1415,8 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             upstream_epoch.is_multiple_of(config.inject_seed_interval.max(1)),
             collect_metrics,
             optimizer_config,
-        )?;
+        )
+        .await?;
         debug_assert_eq!(stats.metrics_collected, collect_metrics);
         measured_particle_steps += stats.particle_steps;
         steps_completed = step;
@@ -1412,8 +1447,8 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             best_train_step = step;
         }
 
-        let evaluation = should_eval
-            .then(|| {
+        let evaluation = if should_eval {
+            Some(
                 evaluate_adaptive_fresh_seed(
                     AdaptiveFreshSeedEvalContext {
                         params: &params,
@@ -1426,8 +1461,11 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
                     },
                     &eval_seed,
                 )
-            })
-            .transpose()?;
+                .await?,
+            )
+        } else {
+            None
+        };
         if let Some(evaluation) = evaluation.as_ref()
             && adaptive_checkpoint_is_better(
                 evaluation.selection_score,
@@ -1549,7 +1587,9 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
             });
         }
         if observer_due {
-            params.write_to_models(std::slice::from_mut(model))?;
+            params
+                .write_to_models_async(std::slice::from_mut(model))
+                .await?;
             let eval_loss = evaluation.as_ref().map(|value| Target2dGpuLossSummary {
                 examples: eval_seed.seeds.len() * adaptive.checkpoint_horizons.len(),
                 mean_total_loss: value.mean_loss,
@@ -1615,9 +1655,13 @@ pub(crate) fn train_adaptive_target2d_burn_dense(
     // selected by the fresh-seed PSNR gate. Returning the last update can
     // silently replace a strong initialization with a divergent trajectory.
     if stopped_early {
-        params.write_to_models(std::slice::from_mut(model))?;
+        params
+            .write_to_models_async(std::slice::from_mut(model))
+            .await?;
     } else {
-        best_params.write_to_models(std::slice::from_mut(model))?;
+        best_params
+            .write_to_models_async(std::slice::from_mut(model))
+            .await?;
     }
     let material_scale_column = material_scale_column_stats(model);
     let mean_throughput = measured_particle_steps

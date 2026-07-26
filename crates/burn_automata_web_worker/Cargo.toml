@@ -1,0 +1,30 @@
+[package]
+name = "burn_automata_web_worker"
+description = "Dedicated browser WebGPU training worker for burn_automata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+burn_automata = { path = "../burn_automata", default-features = false, features = [
+  "backend_ndarray",
+  "backend_wgpu",
+  "import",
+] }
+console_error_panic_hook.workspace = true
+getrandom.workspace = true
+getrandom_03.workspace = true
+js-sys.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["DedicatedWorkerGlobalScope"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"

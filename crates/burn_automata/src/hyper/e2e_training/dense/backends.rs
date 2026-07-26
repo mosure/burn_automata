@@ -6,7 +6,7 @@ use super::super::{
 };
 
 #[cfg(feature = "backend_wgpu")]
-pub(crate) fn train_adaptive_target2d_burn_wgpu(
+pub(crate) async fn train_adaptive_target2d_burn_wgpu_async(
     model: &mut crate::NpaModel,
     example: &DirectBasisTrainingExample,
     plan: Target2dOracleTrainPlan,
@@ -14,13 +14,14 @@ pub(crate) fn train_adaptive_target2d_burn_wgpu(
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
     observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::wgpu_imp::adaptive_training::train_adaptive_target2d_burn_dense(
+    super::wgpu_imp::adaptive_training::train_adaptive_target2d_burn_dense_async(
         model, example, plan, adaptive, checkpoint, observer,
     )
+    .await
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
-pub(crate) fn train_adaptive_target2d_burn_wgpu(
+pub(crate) async fn train_adaptive_target2d_burn_wgpu_async(
     _model: &mut crate::NpaModel,
     _example: &DirectBasisTrainingExample,
     _plan: Target2dOracleTrainPlan,
@@ -35,7 +36,7 @@ pub(crate) fn train_adaptive_target2d_burn_wgpu(
 }
 
 #[cfg(feature = "backend_cuda")]
-pub(crate) fn train_adaptive_target2d_burn_cuda(
+pub(crate) async fn train_adaptive_target2d_burn_cuda_async(
     model: &mut crate::NpaModel,
     example: &DirectBasisTrainingExample,
     plan: Target2dOracleTrainPlan,
@@ -43,13 +44,14 @@ pub(crate) fn train_adaptive_target2d_burn_cuda(
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
     observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::cuda_imp::adaptive_training::train_adaptive_target2d_burn_dense(
+    super::cuda_imp::adaptive_training::train_adaptive_target2d_burn_dense_async(
         model, example, plan, adaptive, checkpoint, observer,
     )
+    .await
 }
 
 #[cfg(not(feature = "backend_cuda"))]
-pub(crate) fn train_adaptive_target2d_burn_cuda(
+pub(crate) async fn train_adaptive_target2d_burn_cuda_async(
     _model: &mut crate::NpaModel,
     _example: &DirectBasisTrainingExample,
     _plan: Target2dOracleTrainPlan,
@@ -70,6 +72,18 @@ pub(crate) fn predict_conditional_row_flow_adapter_wgpu(
     condition: &[f32],
 ) -> crate::AutomataResult<crate::NpaLowRankAdapter> {
     super::wgpu_imp::entrypoints::predict_conditional_row_flow_adapter(hyper, config, condition)
+}
+
+#[cfg(feature = "backend_wgpu")]
+pub(crate) async fn predict_conditional_row_flow_adapter_wgpu_async(
+    hyper: &crate::E2eHyperNpa2d,
+    config: &crate::NpaConfig,
+    condition: &[f32],
+) -> crate::AutomataResult<crate::NpaLowRankAdapter> {
+    super::wgpu_imp::entrypoints::predict_conditional_row_flow_adapter_async(
+        hyper, config, condition,
+    )
+    .await
 }
 
 #[cfg(feature = "backend_cuda")]
@@ -159,20 +173,21 @@ pub(crate) fn train_oracle_models_burn_wgpu(
 }
 
 #[cfg(feature = "backend_wgpu")]
-pub(crate) fn train_target2d_oracle_burn_wgpu(
+pub(crate) async fn train_target2d_oracle_burn_wgpu_async(
     model: &mut crate::NpaModel,
     example: &DirectBasisTrainingExample,
     plan: Target2dOracleTrainPlan,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
     observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::wgpu_imp::entrypoints::train_target2d_oracle_burn_dense(
+    super::wgpu_imp::entrypoints::train_target2d_oracle_burn_dense_async(
         model, example, plan, checkpoint, observer,
     )
+    .await
 }
 
 #[cfg(not(feature = "backend_wgpu"))]
-pub(crate) fn train_target2d_oracle_burn_wgpu(
+pub(crate) async fn train_target2d_oracle_burn_wgpu_async(
     _model: &mut crate::NpaModel,
     _example: &DirectBasisTrainingExample,
     _plan: Target2dOracleTrainPlan,
@@ -180,7 +195,7 @@ pub(crate) fn train_target2d_oracle_burn_wgpu(
     _observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
     Err(std::io::Error::other(
-        "Burn/WGPU target2d oracle training requires the backend_wgpu feature; rebuild with --features cli,backend_wgpu",
+        "async Burn/WGPU target2d oracle training requires the backend_wgpu feature",
     )
     .into())
 }
@@ -275,20 +290,21 @@ pub(crate) fn train_oracle_models_burn_cuda(
 }
 
 #[cfg(feature = "backend_cuda")]
-pub(crate) fn train_target2d_oracle_burn_cuda(
+pub(crate) async fn train_target2d_oracle_burn_cuda_async(
     model: &mut crate::NpaModel,
     example: &DirectBasisTrainingExample,
     plan: Target2dOracleTrainPlan,
     checkpoint: Option<&Target2dBurnCheckpointConfig>,
     observer: Option<&mut dyn crate::Target2dGpuTrainingObserver>,
 ) -> Result<BurnDenseOracleBatchOutput, Box<dyn std::error::Error>> {
-    super::cuda_imp::entrypoints::train_target2d_oracle_burn_dense(
+    super::cuda_imp::entrypoints::train_target2d_oracle_burn_dense_async(
         model, example, plan, checkpoint, observer,
     )
+    .await
 }
 
 #[cfg(not(feature = "backend_cuda"))]
-pub(crate) fn train_target2d_oracle_burn_cuda(
+pub(crate) async fn train_target2d_oracle_burn_cuda_async(
     _model: &mut crate::NpaModel,
     _example: &DirectBasisTrainingExample,
     _plan: Target2dOracleTrainPlan,

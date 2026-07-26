@@ -252,6 +252,7 @@ impl AdaptiveNpaModel {
         self.validate()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn uses_canonical_compatible_residual(&self) -> bool {
         self.local_residual_rule.is_some()
             && self.config.local_rule_semantics == AdaptiveLocalRuleSemantics::CompatibleResidual
@@ -261,6 +262,7 @@ impl AdaptiveNpaModel {
             && (self.config.local_residual_state_scale - 1.0).abs() <= 1.0e-6
     }
 
+    #[allow(dead_code)]
     pub(crate) fn uses_canonical_normalized_residual(&self) -> bool {
         self.local_residual_rule.is_some()
             && self.config.rule_perception == super::AdaptiveRulePerception::NpaCompatible

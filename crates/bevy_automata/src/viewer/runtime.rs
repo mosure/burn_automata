@@ -1,5 +1,33 @@
 use super::*;
 
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource)]
+pub(super) struct BrowserModelLoadChannel {
+    sender: crossbeam_channel::Sender<BrowserModelLoadResult>,
+    receiver: crossbeam_channel::Receiver<BrowserModelLoadResult>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for BrowserModelLoadChannel {
+    fn default() -> Self {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        Self { sender, receiver }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+pub(super) struct BrowserModelLoadState {
+    requested_path: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct BrowserModelLoadResult {
+    path: String,
+    result: Result<burn_automata::import::BpkModelManifest, String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn load_selected_model(
     mut runtime: ResMut<AutomataRuntime>,
     settings: Res<AutomataSettings>,
@@ -12,19 +40,7 @@ pub(super) fn load_selected_model(
             return;
         }
         match burn_automata::import::load_manifest(model_path) {
-            Ok(manifest) => {
-                runtime.hashgrid = manifest.hashgrid.clone();
-                runtime.model = manifest.into_model();
-                runtime.loaded_model_path = Some(model_path.clone());
-                runtime.loaded_preset = None;
-                runtime.trace = None;
-                runtime.frame = 0;
-                runtime.status = format!("loaded model {model_path}");
-                runtime.backward_loss = None;
-                runtime.backward_grad_norm = None;
-                reset_training_stats(&mut runtime);
-                runtime.model_revision = runtime.model_revision.wrapping_add(1);
-            }
+            Ok(manifest) => apply_loaded_manifest(&mut runtime, model_path, manifest),
             Err(err) => {
                 runtime.status = format!("model load failed: {err}");
             }
@@ -39,17 +55,91 @@ pub(super) fn load_selected_model(
     if runtime.loaded_model_path.is_none() && runtime.loaded_preset == Some(settings.preset) {
         return;
     }
-    let (config, hashgrid) = NpaConfig::for_preset(settings.preset);
+    apply_seeded_preset(&mut runtime, settings.preset);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn load_selected_model(
+    mut runtime: ResMut<AutomataRuntime>,
+    settings: Res<AutomataSettings>,
+    channel: Res<BrowserModelLoadChannel>,
+    mut state: ResMut<BrowserModelLoadState>,
+) {
+    for loaded in channel.receiver.try_iter() {
+        if settings.model_path.as_deref() != Some(loaded.path.as_str()) {
+            continue;
+        }
+        match loaded.result {
+            Ok(manifest) => apply_loaded_manifest(&mut runtime, &loaded.path, manifest),
+            Err(error) => runtime.status = format!("model load failed: {error}"),
+        }
+    }
+
+    if settings.adaptive_model_path.is_some() {
+        return;
+    }
+    if let Some(model_path) = &settings.model_path {
+        if runtime.loaded_model_path.as_ref() == Some(model_path)
+            || state.requested_path.as_ref() == Some(model_path)
+        {
+            return;
+        }
+        state.requested_path = Some(model_path.clone());
+        runtime.status = format!("downloading model {model_path}");
+        let path = model_path.clone();
+        let sender = channel.sender.clone();
+        bevy::tasks::IoTaskPool::get()
+            .spawn(async move {
+                let result = super::web::fetch_bytes(&path).await.and_then(|bytes| {
+                    burn_automata::import::load_manifest_bytes(&bytes)
+                        .map_err(|error| error.to_string())
+                });
+                let _ = sender.send(BrowserModelLoadResult { path, result });
+            })
+            .detach();
+        return;
+    }
+
+    state.requested_path = None;
+    if settings.generated_model_label.is_some() {
+        return;
+    }
+    if runtime.loaded_model_path.is_none() && runtime.loaded_preset == Some(settings.preset) {
+        return;
+    }
+    apply_seeded_preset(&mut runtime, settings.preset);
+}
+
+fn apply_loaded_manifest(
+    runtime: &mut AutomataRuntime,
+    model_path: &str,
+    manifest: burn_automata::import::BpkModelManifest,
+) {
+    runtime.hashgrid = manifest.hashgrid.clone();
+    runtime.model = manifest.into_model();
+    runtime.loaded_model_path = Some(model_path.to_string());
+    runtime.loaded_preset = None;
+    runtime.trace = None;
+    runtime.frame = 0;
+    runtime.status = format!("loaded model {model_path}");
+    runtime.backward_loss = None;
+    runtime.backward_grad_norm = None;
+    reset_training_stats(runtime);
+    runtime.model_revision = runtime.model_revision.wrapping_add(1);
+}
+
+fn apply_seeded_preset(runtime: &mut AutomataRuntime, preset: AutomataPreset) {
+    let (config, hashgrid) = NpaConfig::for_preset(preset);
     runtime.model = NpaModel::seeded(config, 42);
     runtime.hashgrid = hashgrid;
     runtime.loaded_model_path = None;
-    runtime.loaded_preset = Some(settings.preset);
+    runtime.loaded_preset = Some(preset);
     runtime.trace = None;
     runtime.frame = 0;
-    runtime.status = format!("seeded preset {:?}", settings.preset);
+    runtime.status = format!("seeded preset {preset:?}");
     runtime.backward_loss = None;
     runtime.backward_grad_norm = None;
-    reset_training_stats(&mut runtime);
+    reset_training_stats(runtime);
     runtime.model_revision = runtime.model_revision.wrapping_add(1);
 }
 

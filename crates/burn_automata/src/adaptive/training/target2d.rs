@@ -932,6 +932,35 @@ pub fn train_adaptive_target_2d_gpu_with_observer(
     )
 }
 
+/// Async canonical adaptive Burn/WGPU training for browser workers.
+///
+/// The adaptive material, topology, event-aware objective, and optimizer are
+/// shared with [`train_adaptive_target_2d_gpu_with_observer`]. Backend
+/// readbacks used for progress snapshots are awaited instead of blocked.
+#[allow(clippy::too_many_arguments)]
+pub async fn train_adaptive_target_2d_gpu_with_observer_async(
+    backend: Target2dGpuBackend,
+    model: &mut AdaptiveNpaModel,
+    hashgrid: &burn_automata_kernels::HashGridConfig,
+    target: crate::TargetImage2d,
+    config: AdaptiveTarget2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+    checkpoint: Option<&Target2dGpuCheckpointConfig>,
+    observer: &mut dyn AdaptiveTarget2dGpuTrainingObserver,
+) -> Result<AdaptiveTarget2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    crate::hyper::e2e_training::train_adaptive_target_2d_gpu_impl_async(
+        backend,
+        model,
+        hashgrid,
+        target,
+        config,
+        loss_config,
+        checkpoint,
+        Some(observer),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

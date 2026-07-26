@@ -454,7 +454,7 @@ fn paired_local_detail_topology_main(
         }
     }
     workgroupBarrier();
-    if (atomicLoad(&paired_invalid) != 0u) {
+    if (workgroupUniformLoad(&paired_invalid) != 0u) {
         return;
     }
 
@@ -509,7 +509,7 @@ fn paired_local_detail_topology_main(
             }
         }
         workgroupBarrier();
-        if (atomicLoad(&paired_invalid) != 0u) {
+        if (workgroupUniformLoad(&paired_invalid) != 0u) {
             return;
         }
     }

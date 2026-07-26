@@ -6,7 +6,12 @@ use burn_automata::{AutomataPreset, ParticleSeed};
 #[cfg(feature = "headless")]
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-#[cfg(not(feature = "headless"))]
+#[cfg(all(not(feature = "headless"), not(target_arch = "wasm32")))]
+fn main() {
+    bevy_automata::run();
+}
+
+#[cfg(all(not(feature = "headless"), target_arch = "wasm32"))]
 fn main() {
     bevy_automata::run();
 }

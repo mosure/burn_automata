@@ -7321,22 +7321,42 @@ fn adaptive_continuous_topology_ranking_matches_wgpu_quantization_and_ties() {
         &device,
     );
     let ranked = stable_local_detail_rank(detail);
-    let high = stable_local_detail_score(ranked.clone(), rows.clone(), 8, true)
+    let high_scores = stable_local_detail_score(ranked.clone(), rows.clone(), 8, true);
+    let high_reference = high_scores
+        .clone()
         .topk_with_indices(3, 1)
         .1
         .inner()
+        .float()
         .into_data()
-        .to_vec::<i32>()
+        .to_vec::<f32>()
         .unwrap();
-    let low = stable_local_detail_score(ranked, rows, 8, false)
+    let high = device_topk_indices(high_scores, 3)
+        .inner()
+        .float()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let low_scores = stable_local_detail_score(ranked, rows, 8, false);
+    let low_reference = low_scores
+        .clone()
         .topk_with_indices(3, 1)
         .1
         .inner()
+        .float()
         .into_data()
-        .to_vec::<i32>()
+        .to_vec::<f32>()
+        .unwrap();
+    let low = device_topk_indices(low_scores, 3)
+        .inner()
+        .float()
+        .into_data()
+        .to_vec::<f32>()
         .unwrap();
     // Local row 1 maps to global row 2, then local row 2 maps to row 5.
-    assert_eq!(high, vec![1, 2, 0, 1, 2, 0]);
+    assert_eq!(high, high_reference);
+    assert_eq!(low, low_reference);
+    assert_eq!(high, vec![1.0, 2.0, 0.0, 1.0, 2.0, 0.0]);
     assert_eq!(low, high);
 }
 

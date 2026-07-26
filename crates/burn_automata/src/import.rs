@@ -323,10 +323,14 @@ pub fn load_pytorch_npa_checkpoint(path: impl AsRef<Path>) -> AutomataResult<Exp
 
 pub fn load_manifest(path: impl AsRef<Path>) -> AutomataResult<BpkModelManifest> {
     let bytes = fs::read(path)?;
+    load_manifest_bytes(&bytes)
+}
+
+pub fn load_manifest_bytes(bytes: &[u8]) -> AutomataResult<BpkModelManifest> {
     if bytes.starts_with(&BPK_MAGIC) {
-        return decode_bpk_manifest(&bytes);
+        return decode_bpk_manifest(bytes);
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(serde_json::from_slice(bytes)?)
 }
 
 pub fn save_manifest(

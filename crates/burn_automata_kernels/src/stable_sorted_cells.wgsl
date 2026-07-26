@@ -11,6 +11,7 @@ const STABLE_SORT_CAPACITY: u32 = 512u;
 const STABLE_SORT_SENTINEL: u32 = 0xffffffffu;
 
 var<workgroup> stable_sort_values: array<u32, STABLE_SORT_CAPACITY>;
+var<workgroup> stable_sort_range: vec2<u32>;
 
 fn stable_serial_insertion_sort(begin: u32, count: u32) {
     var source = 1u;
@@ -51,8 +52,15 @@ fn stable_sort_cell_particles_main(
     if (cell >= cell_count()) {
         return;
     }
-    let begin = sorted_offset(cell);
-    let end = sorted_offset(cell + 1u);
+    if (local.x == 0u) {
+        stable_sort_range = vec2<u32>(
+            sorted_offset(cell),
+            sorted_offset(cell + 1u),
+        );
+    }
+    let range = workgroupUniformLoad(&stable_sort_range);
+    let begin = range.x;
+    let end = range.y;
     let count = end - begin;
     if (count <= 1u) {
         return;

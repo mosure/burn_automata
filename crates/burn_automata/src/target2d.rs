@@ -630,16 +630,36 @@ pub fn train_target_2d_gpu(
     loss_config: Target2dLossConfig,
     checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
 ) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
-    train_target_2d_gpu_impl(
-        backend,
-        model,
-        hashgrid,
-        target,
-        training_config,
-        loss_config,
-        checkpoint_config,
-        None,
-    )
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        pollster::block_on(train_target_2d_gpu_impl_async(
+            backend,
+            model,
+            hashgrid,
+            target,
+            training_config,
+            loss_config,
+            checkpoint_config,
+            None,
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (
+            backend,
+            model,
+            hashgrid,
+            target,
+            training_config,
+            loss_config,
+            checkpoint_config,
+        );
+        Err(AutomataError::InvalidArgument(
+            "synchronous Target2D GPU training is unavailable on wasm32; use train_target_2d_gpu_with_observer_async"
+                .to_string(),
+        )
+        .into())
+    }
 }
 
 /// Canonical Burn Target2D training with cancellable, throttled model updates.
@@ -654,7 +674,55 @@ pub fn train_target_2d_gpu_with_observer(
     checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
     observer: &mut dyn Target2dGpuTrainingObserver,
 ) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
-    train_target_2d_gpu_impl(
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        pollster::block_on(train_target_2d_gpu_impl_async(
+            backend,
+            model,
+            hashgrid,
+            target,
+            training_config,
+            loss_config,
+            checkpoint_config,
+            Some(observer),
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (
+            backend,
+            model,
+            hashgrid,
+            target,
+            training_config,
+            loss_config,
+            checkpoint_config,
+            observer,
+        );
+        Err(AutomataError::InvalidArgument(
+            "synchronous Target2D GPU training is unavailable on wasm32; use train_target_2d_gpu_with_observer_async"
+                .to_string(),
+        )
+        .into())
+    }
+}
+
+/// Async canonical Burn/WGPU Target2D training for browser workers.
+///
+/// GPU execution is identical to [`train_target_2d_gpu_with_observer`]; only
+/// tensor metrics and model snapshots use asynchronous backend readback.
+#[allow(clippy::too_many_arguments)]
+pub async fn train_target_2d_gpu_with_observer_async(
+    backend: Target2dGpuBackend,
+    model: &mut NpaModel,
+    hashgrid: &HashGridConfig,
+    target: TargetImage2d,
+    training_config: Target2dTrainingConfig,
+    loss_config: Target2dLossConfig,
+    checkpoint_config: Option<&Target2dGpuCheckpointConfig>,
+    observer: &mut dyn Target2dGpuTrainingObserver,
+) -> Result<Target2dGpuTrainingReport, Box<dyn std::error::Error>> {
+    train_target_2d_gpu_impl_async(
         backend,
         model,
         hashgrid,
@@ -664,10 +732,11 @@ pub fn train_target_2d_gpu_with_observer(
         checkpoint_config,
         Some(observer),
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-fn train_target_2d_gpu_impl(
+async fn train_target_2d_gpu_impl_async(
     backend: Target2dGpuBackend,
     model: &mut NpaModel,
     hashgrid: &HashGridConfig,
@@ -803,20 +872,26 @@ fn train_target_2d_gpu_impl(
         interval_duration: config.interval_duration,
     });
     let output = match backend {
-        Target2dGpuBackend::Wgpu => dense::train_target2d_oracle_burn_wgpu(
-            model,
-            &training_example,
-            plan,
-            checkpoint.as_ref(),
-            observer,
-        )?,
-        Target2dGpuBackend::Cuda => dense::train_target2d_oracle_burn_cuda(
-            model,
-            &training_example,
-            plan,
-            checkpoint.as_ref(),
-            observer,
-        )?,
+        Target2dGpuBackend::Wgpu => {
+            dense::train_target2d_oracle_burn_wgpu_async(
+                model,
+                &training_example,
+                plan,
+                checkpoint.as_ref(),
+                observer,
+            )
+            .await?
+        }
+        Target2dGpuBackend::Cuda => {
+            dense::train_target2d_oracle_burn_cuda_async(
+                model,
+                &training_example,
+                plan,
+                checkpoint.as_ref(),
+                observer,
+            )
+            .await?
+        }
     };
     let promoted_best_checkpoint = if let Some(config) = checkpoint_config
         && config.best_model_output.is_file()

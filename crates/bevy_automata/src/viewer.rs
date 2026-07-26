@@ -76,6 +76,8 @@ mod hyper_inference;
 mod image_training;
 mod runtime;
 mod ui;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use adaptive::*;
 use camera::*;
@@ -151,11 +153,7 @@ pub struct AutomataSettings {
 impl Default for AutomataSettings {
     fn default() -> Self {
         let preset = AutomataPreset::Growing2d;
-        let model_path = std::env::var("BURN_AUTOMATA_MODEL").ok().or_else(|| {
-            std::path::Path::new(DEFAULT_LIZARD_MODEL)
-                .exists()
-                .then(|| DEFAULT_LIZARD_MODEL.to_string())
-        });
+        let model_path = default_model_path();
         Self {
             preset,
             steps_per_frame: 1,
@@ -217,11 +215,35 @@ fn effective_hashgrid(runtime: &AutomataRuntime, settings: &AutomataSettings) ->
 }
 
 fn env_or_workspace_path(env_key: &str, workspace_relative: &str) -> Option<String> {
-    std::env::var(env_key).ok().or_else(|| {
-        resolve_workspace_path(workspace_relative).map(|path| path.display().to_string())
-    })
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = env_key;
+        Some(workspace_relative.to_string())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var(env_key).ok().or_else(|| {
+            resolve_workspace_path(workspace_relative).map(|path| path.display().to_string())
+        })
+    }
 }
 
+fn default_model_path() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(DEFAULT_LIZARD_MODEL.to_string())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("BURN_AUTOMATA_MODEL").ok().or_else(|| {
+            std::path::Path::new(DEFAULT_LIZARD_MODEL)
+                .exists()
+                .then(|| DEFAULT_LIZARD_MODEL.to_string())
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_workspace_path(path: &str) -> Option<std::path::PathBuf> {
     let direct = std::path::Path::new(path);
     if direct.exists() {
@@ -313,6 +335,9 @@ impl Plugin for AutomataViewerPlugin {
             .init_resource::<PerformanceUiState>()
             .init_resource::<CatalogPreviewState>()
             .init_resource::<CatalogPreviewImageState>();
+        #[cfg(target_arch = "wasm32")]
+        app.init_resource::<BrowserModelLoadChannel>()
+            .init_resource::<BrowserModelLoadState>();
         #[cfg(feature = "hyper_dino")]
         app.init_resource::<HyperNpaImageDialogChannel>()
             .init_resource::<HyperNpaInferenceChannel>()
@@ -323,6 +348,8 @@ impl Plugin for AutomataViewerPlugin {
             .add_message::<OpenHyperNpaImage>()
             .add_message::<RunHyperNpaInference>()
             .add_message::<ToggleImageTargetTraining>();
+        #[cfg(all(feature = "hyper_dino", target_arch = "wasm32"))]
+        app.init_non_send::<BrowserTrainingWorker>();
         #[cfg(feature = "splatting")]
         app.init_resource::<AutomataCloudState>();
         #[cfg(feature = "splatting")]
@@ -387,6 +414,8 @@ impl Plugin for AutomataViewerPlugin {
                 poll_hyper_npa_inference_results,
                 handle_toggle_image_target_training,
                 poll_image_target_training,
+                #[cfg(target_arch = "wasm32")]
+                stop_stale_browser_training,
                 sync_image_target_summary,
                 sync_image_training_button_label,
                 sync_adaptive_training_checkbox,

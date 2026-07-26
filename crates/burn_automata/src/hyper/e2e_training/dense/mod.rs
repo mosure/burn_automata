@@ -9,12 +9,14 @@ mod backends;
 #[cfg(feature = "backend_cuda")]
 pub(crate) use backends::predict_conditional_row_flow_adapter_cuda;
 #[cfg(feature = "backend_wgpu")]
-pub(crate) use backends::predict_conditional_row_flow_adapter_wgpu;
 pub(crate) use backends::{
-    train_adaptive_target2d_burn_cuda, train_adaptive_target2d_burn_wgpu,
+    predict_conditional_row_flow_adapter_wgpu, predict_conditional_row_flow_adapter_wgpu_async,
+};
+pub(crate) use backends::{
+    train_adaptive_target2d_burn_cuda_async, train_adaptive_target2d_burn_wgpu_async,
     train_direct_basis_burn_cuda, train_direct_basis_burn_wgpu, train_oracle_models_burn_cuda,
-    train_oracle_models_burn_wgpu, train_target2d_oracle_burn_cuda,
-    train_target2d_oracle_burn_wgpu,
+    train_oracle_models_burn_wgpu, train_target2d_oracle_burn_cuda_async,
+    train_target2d_oracle_burn_wgpu_async,
 };
 pub(crate) use backends::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 
@@ -41,7 +43,6 @@ macro_rules! dense_backend_impl {
             process::Command,
             sync::atomic::{AtomicUsize, Ordering},
             thread,
-            time::Instant,
         };
 
         use burn::{
@@ -65,6 +66,7 @@ macro_rules! dense_backend_impl {
         use serde::Serialize;
         use serde_json::json;
         use sha2::{Digest, Sha256};
+        use web_time::Instant;
 
         use super::super::{
             AdaptiveTarget2dBurnConfig, BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics,
