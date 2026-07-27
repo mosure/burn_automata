@@ -56,6 +56,7 @@ pub(super) struct AutomataRenderConfig {
     seed_mode: ParticleSeed,
     neighbor_mode: WgpuNeighborMode,
     paused: bool,
+    pca_visualization: bool,
     model_revision: u64,
 }
 
@@ -74,6 +75,7 @@ pub(super) struct AdaptiveAutomataRenderConfig {
     neighbor_mode: WgpuNeighborMode,
     topology_enabled: bool,
     paused: bool,
+    pca_visualization: bool,
 }
 
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
@@ -135,6 +137,8 @@ pub(super) struct AutomataRenderState {
     state: Option<burn_automata::gpu::WgpuAutomataState>,
     adaptive_state: Option<burn_automata::WgpuAdaptiveNpaState>,
     gaussian_bind_group: Option<burn_automata::gpu::WgpuGaussianBindGroup>,
+    pca: Option<burn_automata::gpu::WgpuStatePca>,
+    pca_visualization: bool,
     reinit_key: AutomataRenderReinitKey,
     adaptive_reinit_key: AdaptiveAutomataRenderReinitKey,
     param_key: AutomataRenderParamKey,
@@ -316,6 +320,7 @@ pub(super) fn extract_automata_render_config(
             neighbor_mode,
             topology_enabled: settings.adaptive_topology_enabled,
             paused: settings.paused,
+            pca_visualization: settings.pca_visualization,
         });
         return;
     }
@@ -343,6 +348,7 @@ pub(super) fn extract_automata_render_config(
         seed_mode: settings.seed_mode,
         neighbor_mode,
         paused: settings.paused,
+        pca_visualization: settings.pca_visualization,
         model_revision: runtime.model_revision,
     });
 }
@@ -443,6 +449,8 @@ pub(super) fn step_automata_into_gaussians(
                 render_state.state = Some(state);
                 render_state.adaptive_state = None;
                 render_state.gaussian_bind_group = None;
+                render_state.pca = None;
+                render_state.pca_visualization = config.pca_visualization;
                 render_state.reinit_key = config.reinit_key;
                 render_state.param_key = config.param_key;
                 render_state.model_revision = config.model_revision;
@@ -509,6 +517,25 @@ pub(super) fn step_automata_into_gaussians(
             }
         }
     }
+    if config.pca_visualization && render_state.pca.is_none() {
+        let result = match (render_state.executor.as_ref(), render_state.state.as_ref()) {
+            (Some(executor), Some(state)) => {
+                executor.create_state_pca(state, burn_automata::gpu::WgpuStatePcaConfig::default())
+            }
+            _ => return,
+        };
+        match result {
+            Ok(pca) => render_state.pca = Some(pca),
+            Err(error) => {
+                let message = error.to_string();
+                render_state.last_error = Some(message.clone());
+                diagnostics.last_error = Some(message);
+                return;
+            }
+        }
+    }
+    let color_mode_changed = render_state.pca_visualization != config.pca_visualization;
+    render_state.pca_visualization = config.pca_visualization;
     if let (Some(executor), Some(state)) =
         (render_state.executor.as_ref(), render_state.state.as_ref())
     {
@@ -516,12 +543,25 @@ pub(super) fn step_automata_into_gaussians(
         update_neighbor_diagnostics(&mut diagnostics, neighbor);
     }
     if config.paused {
-        if needs_reinit {
+        if needs_reinit || color_mode_changed {
+            let AutomataRenderState {
+                executor,
+                state,
+                gaussian_bind_group,
+                pca,
+                ..
+            } = &mut *render_state;
             let export = match (
-                render_state.executor.as_ref(),
-                render_state.state.as_ref(),
-                render_state.gaussian_bind_group.as_ref(),
+                executor.as_ref(),
+                state.as_ref(),
+                gaussian_bind_group.as_ref(),
             ) {
+                (Some(executor), Some(state), Some(gaussian)) if config.pca_visualization => {
+                    let Some(pca) = pca.as_mut() else {
+                        return;
+                    };
+                    executor.write_state_pca_into_gaussian_bind_group(state, gaussian, pca)
+                }
                 (Some(executor), Some(state), Some(gaussian)) => {
                     executor.write_state_into_gaussian_bind_group(state, gaussian)
                 }
@@ -543,6 +583,7 @@ pub(super) fn step_automata_into_gaussians(
             executor,
             state,
             gaussian_bind_group,
+            pca,
             ..
         } = &mut *render_state;
         let Some(executor) = executor.as_ref() else {
@@ -554,9 +595,23 @@ pub(super) fn step_automata_into_gaussians(
         let Some(gaussian_bind_group) = gaussian_bind_group.as_ref() else {
             return;
         };
-        executor
-            .step_state_many_into_gaussian_bind_group(state, gaussian_bind_group, steps)
-            .map_err(|err| err.to_string())
+        if config.pca_visualization {
+            let Some(pca) = pca.as_mut() else {
+                return;
+            };
+            executor
+                .step_state_many_pca_into_gaussian_bind_group(
+                    state,
+                    gaussian_bind_group,
+                    steps,
+                    pca,
+                )
+                .map_err(|err| err.to_string())
+        } else {
+            executor
+                .step_state_many_into_gaussian_bind_group(state, gaussian_bind_group, steps)
+                .map_err(|err| err.to_string())
+        }
     };
     match step_result {
         Ok(completed) => {
@@ -701,6 +756,8 @@ pub(super) fn step_adaptive_automata_into_gaussians(
                 render_state.state = None;
                 render_state.adaptive_state = Some(state);
                 render_state.gaussian_bind_group = None;
+                render_state.pca = None;
+                render_state.pca_visualization = config.pca_visualization;
                 render_state.adaptive_reinit_key = config.reinit_key;
                 render_state.asset_id = Some(asset_id);
                 render_state.frame = 0;
@@ -730,12 +787,36 @@ pub(super) fn step_adaptive_automata_into_gaussians(
             }
         }
     }
+    if config.pca_visualization && render_state.pca.is_none() {
+        let result = match (
+            render_state.executor.as_ref(),
+            render_state.adaptive_state.as_ref(),
+        ) {
+            (Some(executor), Some(state)) => executor.create_adaptive_state_pca(
+                state,
+                burn_automata::gpu::WgpuStatePcaConfig::default(),
+            ),
+            _ => return,
+        };
+        match result {
+            Ok(pca) => render_state.pca = Some(pca),
+            Err(error) => {
+                let message = error.to_string();
+                render_state.last_error = Some(message.clone());
+                diagnostics.last_error = Some(message);
+                return;
+            }
+        }
+    }
+    let color_mode_changed = render_state.pca_visualization != config.pca_visualization;
+    render_state.pca_visualization = config.pca_visualization;
     if config.paused {
-        if needs_reinit {
+        if needs_reinit || color_mode_changed {
             let AutomataRenderState {
                 executor,
                 adaptive_state,
                 gaussian_bind_group,
+                pca,
                 ..
             } = &mut *render_state;
             let export = match (
@@ -743,6 +824,12 @@ pub(super) fn step_adaptive_automata_into_gaussians(
                 adaptive_state.as_mut(),
                 gaussian_bind_group.as_ref(),
             ) {
+                (Some(executor), Some(state), Some(gaussian)) if config.pca_visualization => {
+                    let Some(pca) = pca.as_mut() else {
+                        return;
+                    };
+                    executor.write_adaptive_state_pca_into_gaussian_bind_group(state, gaussian, pca)
+                }
                 (Some(executor), Some(state), Some(gaussian)) => {
                     executor.write_adaptive_state_into_gaussian_bind_group(state, gaussian)
                 }
@@ -767,6 +854,7 @@ pub(super) fn step_adaptive_automata_into_gaussians(
             executor,
             adaptive_state,
             gaussian_bind_group,
+            pca,
             ..
         } = &mut *render_state;
         match (
@@ -774,6 +862,20 @@ pub(super) fn step_adaptive_automata_into_gaussians(
             adaptive_state.as_mut(),
             gaussian_bind_group.as_ref(),
         ) {
+            (Some(executor), Some(state), Some(gaussian)) if config.pca_visualization => {
+                let Some(pca) = pca.as_mut() else {
+                    return;
+                };
+                executor
+                    .step_adaptive_state_many_pca_into_gaussian_bind_group(
+                        state,
+                        gaussian,
+                        config.steps_per_frame,
+                        config.topology_enabled,
+                        pca,
+                    )
+                    .map_err(|error| error.to_string())
+            }
             (Some(executor), Some(state), Some(gaussian)) => executor
                 .step_adaptive_state_many_into_gaussian_bind_group(
                     state,

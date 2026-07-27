@@ -6,7 +6,6 @@ use bevy::camera::primitives::Aabb;
 use bevy::camera::{CameraProjection, Viewport};
 #[cfg(test)]
 use bevy::render::render_resource::TextureFormat;
-#[cfg(feature = "hyper_dino")]
 use bevy::ui::Checked;
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -16,11 +15,9 @@ use bevy::{
     prelude::*,
     time::Real,
 };
-#[cfg(feature = "hyper_dino")]
-use bevy_ui_widgets::Checkbox;
 use bevy_ui_widgets::{
-    CheckboxPlugin, Slider, SliderDragState, SliderOrientation, SliderPlugin, SliderRange,
-    SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange, slider_self_update,
+    Checkbox, CheckboxPlugin, Slider, SliderDragState, SliderOrientation, SliderPlugin,
+    SliderRange, SliderStep, SliderThumb, SliderValue, TrackClick, ValueChange, slider_self_update,
 };
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use burn_automata::gpu::WgpuNeighborMode;
@@ -133,6 +130,7 @@ pub struct AutomataSettings {
     pub seed_mode: ParticleSeed,
     pub render_scale: f32,
     pub render_opacity: f32,
+    pub pca_visualization: bool,
     #[cfg(feature = "splatting")]
     pub render_sort_mode_3d: SortMode,
     #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
@@ -172,6 +170,7 @@ impl Default for AutomataSettings {
             seed_mode: ParticleSeed::UniformCircle,
             render_scale: 0.5,
             render_opacity: 2.0,
+            pca_visualization: false,
             #[cfg(feature = "splatting")]
             render_sort_mode_3d: SortMode::Radix,
             #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
@@ -399,6 +398,8 @@ impl Plugin for AutomataViewerPlugin {
                     sync_slider_values,
                     update_slider_visuals,
                     update_slider_value_labels,
+                    sync_pca_visualization_checkbox,
+                    update_pca_visualization_checkbox_style,
                     update_run_control_button_styles,
                     update_status_label,
                     update_performance_labels,

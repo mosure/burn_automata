@@ -89,6 +89,49 @@ fn performance_label_system_uses_disjoint_text_queries() {
     assert!(app.world().entity(adaptive).get::<Text>().is_some());
 }
 
+#[test]
+fn pca_visualization_style_uses_disjoint_background_queries() {
+    let mut app = App::new();
+    app.init_resource::<AutomataSettings>()
+        .add_systems(Update, update_pca_visualization_checkbox_style);
+    let checkbox = app
+        .world_mut()
+        .spawn((
+            PcaVisualizationCheckbox,
+            Hovered::default(),
+            BackgroundColor(Color::NONE),
+            BorderColor::from(Color::NONE),
+        ))
+        .id();
+    let mark = app
+        .world_mut()
+        .spawn((PcaVisualizationCheckboxMark, BackgroundColor(Color::NONE)))
+        .id();
+
+    app.update();
+    assert_ne!(
+        app.world()
+            .entity(checkbox)
+            .get::<BackgroundColor>()
+            .unwrap()
+            .0,
+        Color::NONE
+    );
+    assert_eq!(
+        app.world().entity(mark).get::<BackgroundColor>().unwrap().0,
+        Color::NONE
+    );
+
+    app.world_mut()
+        .resource_mut::<AutomataSettings>()
+        .pca_visualization = true;
+    app.update();
+    assert_ne!(
+        app.world().entity(mark).get::<BackgroundColor>().unwrap().0,
+        Color::NONE
+    );
+}
+
 #[cfg(feature = "hyper_dino")]
 #[test]
 fn adaptive_training_style_uses_disjoint_background_queries() {
@@ -154,6 +197,7 @@ fn catalog_selection_preserves_visualization_settings() {
     let mut settings = AutomataSettings {
         render_scale: 1.5,
         render_opacity: 0.375,
+        pca_visualization: true,
         steps_per_frame: 3,
         training_learning_rate: 0.004,
         model_path: Some("previous-model.bpk".to_string()),
@@ -170,6 +214,7 @@ fn catalog_selection_preserves_visualization_settings() {
     assert!((settings.reference_seed_scale - 0.35).abs() < f32::EPSILON);
     assert!((settings.render_scale - 1.5).abs() < f32::EPSILON);
     assert!((settings.render_opacity - 0.375).abs() < f32::EPSILON);
+    assert!(settings.pca_visualization);
     assert!((settings.training_learning_rate - 0.004).abs() < f32::EPSILON);
 
     if catalog_entry_is_available(catalog_entry(ModelCatalogKey::UvTorusMorphogen3d)) {
@@ -187,6 +232,7 @@ fn catalog_selection_preserves_visualization_settings() {
         assert!((settings.reference_seed_scale - 0.54).abs() < f32::EPSILON);
         assert!((settings.render_scale - 1.5).abs() < f32::EPSILON);
         assert!((settings.render_opacity - 0.375).abs() < f32::EPSILON);
+        assert!(settings.pca_visualization);
         assert!((settings.training_learning_rate - 0.004).abs() < f32::EPSILON);
     }
 
@@ -807,6 +853,20 @@ fn live_weight_snapshots_do_not_reseed_the_gpu_rollout() {
         automata_render_reinit_key(&model_before, &hashgrid, &settings, WgpuNeighborMode::Auto);
     let after =
         automata_render_reinit_key(&model_after, &hashgrid, &settings, WgpuNeighborMode::Auto);
+
+    assert_eq!(before, after);
+}
+
+#[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
+#[test]
+fn pca_visualization_toggle_does_not_reseed_the_gpu_rollout() {
+    let mut settings = AutomataSettings::default();
+    let (config, hashgrid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    let model = NpaModel::upstream_seeded(config, 1);
+    let before = automata_render_reinit_key(&model, &hashgrid, &settings, WgpuNeighborMode::Auto);
+
+    settings.pca_visualization = true;
+    let after = automata_render_reinit_key(&model, &hashgrid, &settings, WgpuNeighborMode::Auto);
 
     assert_eq!(before, after);
 }

@@ -18,6 +18,7 @@ pub(crate) use diagnostics::WgpuPendingAdaptiveDiagnostics;
 mod gaussian;
 mod maintenance;
 mod passes;
+mod pca;
 mod persistent_modes;
 mod readback;
 mod state;

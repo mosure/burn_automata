@@ -16,8 +16,9 @@ fn gpu_parameter_uniform_covers_every_host_parameter() {
 #[test]
 fn paired_topology_composed_wgsl_is_valid() {
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         include_str!("../gpu_step.wgsl"),
+        include_str!("../gpu_pca.wgsl"),
         burn_automata_kernels::PAIRED_LOCAL_DETAIL_TOPOLOGY_WGSL,
     );
     let module = naga::front::wgsl::parse_str(&source)

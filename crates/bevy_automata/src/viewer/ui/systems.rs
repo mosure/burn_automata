@@ -320,6 +320,69 @@ pub(in crate::viewer) fn run_control_is_active(
     }
 }
 
+pub(in crate::viewer) fn handle_pca_visualization_toggle(
+    value_change: On<ValueChange<bool>>,
+    mut settings: ResMut<AutomataSettings>,
+) {
+    settings.pca_visualization = value_change.value;
+}
+
+pub(in crate::viewer) fn sync_pca_visualization_checkbox(
+    settings: Res<AutomataSettings>,
+    mut commands: Commands,
+    checkboxes: Query<(Entity, Has<Checked>), With<PcaVisualizationCheckbox>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (entity, checked) in &checkboxes {
+        if settings.pca_visualization != checked {
+            let mut entity = commands.entity(entity);
+            if settings.pca_visualization {
+                entity.insert(Checked);
+            } else {
+                entity.remove::<Checked>();
+            }
+        }
+    }
+}
+
+type PcaVisualizationCheckboxFilter = (
+    With<PcaVisualizationCheckbox>,
+    Without<PcaVisualizationCheckboxMark>,
+);
+
+type PcaVisualizationCheckboxMarkFilter = (
+    With<PcaVisualizationCheckboxMark>,
+    Without<PcaVisualizationCheckbox>,
+);
+
+pub(in crate::viewer) fn update_pca_visualization_checkbox_style(
+    settings: Res<AutomataSettings>,
+    mut checkboxes: Query<
+        (&Hovered, &mut BackgroundColor, &mut BorderColor),
+        PcaVisualizationCheckboxFilter,
+    >,
+    mut marks: Query<&mut BackgroundColor, PcaVisualizationCheckboxMarkFilter>,
+) {
+    for (hovered, mut background, mut border) in &mut checkboxes {
+        background.0 = match (settings.pca_visualization, hovered.0) {
+            (true, true) => Color::srgb(0.16, 0.31, 0.30),
+            (true, false) => Color::srgb(0.12, 0.24, 0.24),
+            (false, true) => Color::srgb(0.11, 0.13, 0.14),
+            (false, false) => Color::srgb(0.075, 0.09, 0.10),
+        };
+        *border = BorderColor::from(Color::srgb(0.32, 0.43, 0.43));
+    }
+    for mut mark in &mut marks {
+        mark.0 = if settings.pca_visualization {
+            Color::srgb(0.48, 0.86, 0.76)
+        } else {
+            Color::NONE
+        };
+    }
+}
+
 #[cfg(feature = "hyper_dino")]
 pub(in crate::viewer) fn handle_adaptive_training_toggle(
     value_change: On<ValueChange<bool>>,

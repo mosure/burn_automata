@@ -1,5 +1,244 @@
 use super::common::*;
 
+const SH_C0: f32 = 0.282_094_8;
+
+#[test]
+fn wgpu_state_pca_is_orthonormal_and_writes_finite_varied_rgb()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
+    let particles = 257;
+    let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    let model = NpaModel {
+        weights: NpaWeights::zeros(&config),
+        config,
+    };
+    let (positions, mut states) = seed_particles_scaled(
+        1,
+        particles,
+        model.config.state_dims,
+        model.config.spatial_dims,
+        91,
+        ParticleSeed::UniformCircle,
+        NpaConfig::seed_scale_for_preset(AutomataPreset::Growing2d),
+    );
+    for particle in 0..particles {
+        let x = particle as f32 / (particles - 1) as f32;
+        let phase = x * std::f32::consts::TAU;
+        let latent = [
+            3.0 * phase.sin(),
+            2.0 * (2.0 * phase).cos(),
+            (3.0 * phase).sin(),
+        ];
+        for feature in 0..model.config.state_dims {
+            states[particle * model.config.state_dims + feature] = if feature < 3 {
+                latent[feature]
+            } else {
+                0.01 * ((feature + 1) as f32 * phase).sin()
+            };
+        }
+    }
+    let executor = match new_executor_or_skip()? {
+        Some(executor) => executor,
+        None => return Ok(()),
+    };
+    let mut state = executor.create_state(&model, &positions, &states, 1, particles, &grid, 1.0)?;
+    let gaussian_buffers = executor.create_gaussian_buffers(particles)?;
+    let gaussian = executor.create_gaussian_bind_group(&gaussian_buffers.refs(), particles)?;
+    let mut pca =
+        executor.create_state_pca(&state, burn_automata::gpu::WgpuStatePcaConfig::default())?;
+    executor.step_state_many_pca_into_gaussian_bind_group(&mut state, &gaussian, 2, &mut pca)?;
+
+    let snapshot = executor.read_state_pca_snapshot(&pca)?;
+    assert_eq!(snapshot.update_count, 1);
+    assert!(snapshot.mean.iter().all(|value| value.is_finite()));
+    assert!(
+        snapshot
+            .display_spread
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+    );
+    for lhs in 0..3 {
+        for rhs in 0..3 {
+            let dot = (0..model.config.state_dims)
+                .map(|feature| {
+                    snapshot.components[feature * 3 + lhs] * snapshot.components[feature * 3 + rhs]
+                })
+                .sum::<f32>();
+            let expected = if lhs == rhs { 1.0 } else { 0.0 };
+            assert!(
+                (dot - expected).abs() < 2.0e-4,
+                "PCA basis dot({lhs}, {rhs})={dot}"
+            );
+        }
+    }
+    let mut leading_subspace_energy = 0.0;
+    for feature in 0..3 {
+        for component in 0..3 {
+            leading_subspace_energy += snapshot.components[feature * 3 + component].powi(2);
+        }
+    }
+    assert!(
+        leading_subspace_energy > 2.95,
+        "PCA basis captured only {leading_subspace_energy:.4}/3 variance-axis energy"
+    );
+    let mut component_variance = [0.0; 3];
+    for particle in 0..particles {
+        for component in 0..3 {
+            let projection = (0..model.config.state_dims)
+                .map(|feature| {
+                    let centered = states[particle * model.config.state_dims + feature]
+                        - snapshot.mean[feature];
+                    centered * snapshot.components[feature * 3 + component]
+                })
+                .sum::<f32>();
+            component_variance[component] += projection * projection / particles as f32;
+        }
+    }
+    assert!(
+        component_variance[0] > component_variance[1]
+            && component_variance[1] > component_variance[2],
+        "PCA variance is not descending: {component_variance:?}"
+    );
+
+    let rendered = executor.read_gaussian_buffers(&gaussian_buffers)?;
+    let stepped = executor.read_state(&state)?;
+    let mut channel_min = [f32::INFINITY; 3];
+    let mut channel_max = [f32::NEG_INFINITY; 3];
+    for particle in 0..particles {
+        let position_base = particle * 4;
+        for axis in 0..3 {
+            assert!(
+                (rendered.position_visibility[position_base + axis]
+                    - stepped.next_positions[particle][axis])
+                    .abs()
+                    <= 1.0e-6
+            );
+        }
+        let sh_base = particle * burn_automata::gpu::GAUSSIAN_SH_COEFF_COUNT;
+        for channel in 0..3 {
+            let color = rendered.spherical_harmonic[sh_base + channel] * SH_C0 + 0.5;
+            assert!(color.is_finite());
+            assert!((-1.0e-5..=1.000_01).contains(&color));
+            channel_min[channel] = channel_min[channel].min(color);
+            channel_max[channel] = channel_max[channel].max(color);
+        }
+    }
+    for channel in 0..3 {
+        assert!(
+            channel_max[channel] - channel_min[channel] > 0.1,
+            "PCA RGB channel {channel} collapsed to [{}, {}]",
+            channel_min[channel],
+            channel_max[channel]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn wgpu_state_pca_respects_update_cadence() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
+    let particles = 64;
+    let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    let model = NpaModel::seeded(config, 42);
+    let (positions, states) = seed_particles_scaled(
+        1,
+        particles,
+        model.config.state_dims,
+        model.config.spatial_dims,
+        37,
+        ParticleSeed::UniformCircle,
+        NpaConfig::seed_scale_for_preset(AutomataPreset::Growing2d),
+    );
+    let executor = match new_executor_or_skip()? {
+        Some(executor) => executor,
+        None => return Ok(()),
+    };
+    let state = executor.create_state(&model, &positions, &states, 1, particles, &grid, 1.0)?;
+    let buffers = executor.create_gaussian_buffers(particles)?;
+    let gaussian = executor.create_gaussian_bind_group(&buffers.refs(), particles)?;
+    let config = burn_automata::gpu::WgpuStatePcaConfig {
+        update_every: 4,
+        ..Default::default()
+    };
+    let mut pca = executor.create_state_pca(&state, config)?;
+    executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut pca)?;
+    assert_eq!(pca.update_count(), 1);
+    for _ in 0..3 {
+        executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut pca)?;
+    }
+    assert_eq!(pca.update_count(), 1);
+    executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut pca)?;
+    assert_eq!(pca.update_count(), 2);
+    Ok(())
+}
+
+#[test]
+#[ignore = "real-device throughput benchmark"]
+fn bench_wgpu_state_pca_gaussian_export_4096() -> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
+    let particles = 4_096;
+    let iterations = 256;
+    let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
+    let model = NpaModel::seeded(config, 42);
+    let (positions, states) = seed_particles_scaled(
+        1,
+        particles,
+        model.config.state_dims,
+        model.config.spatial_dims,
+        37,
+        ParticleSeed::UniformCircle,
+        NpaConfig::seed_scale_for_preset(AutomataPreset::Growing2d),
+    );
+    let executor = match new_executor_or_skip()? {
+        Some(executor) => executor,
+        None => return Ok(()),
+    };
+    let state = executor.create_state(&model, &positions, &states, 1, particles, &grid, 1.0)?;
+    let buffers = executor.create_gaussian_buffers(particles)?;
+    let gaussian = executor.create_gaussian_bind_group(&buffers.refs(), particles)?;
+
+    for _ in 0..16 {
+        executor.write_state_into_gaussian_bind_group(&state, &gaussian)?;
+    }
+    executor.wait_idle()?;
+    let decoded_start = std::time::Instant::now();
+    for _ in 0..iterations {
+        executor.write_state_into_gaussian_bind_group(&state, &gaussian)?;
+    }
+    executor.wait_idle()?;
+    let decoded = decoded_start.elapsed().as_secs_f64() * 1_000.0 / iterations as f64;
+
+    let steady_config = burn_automata::gpu::WgpuStatePcaConfig {
+        update_every: usize::MAX,
+        ..Default::default()
+    };
+    let mut steady_pca = executor.create_state_pca(&state, steady_config)?;
+    executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut steady_pca)?;
+    executor.wait_idle()?;
+    let steady_start = std::time::Instant::now();
+    for _ in 0..iterations {
+        executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut steady_pca)?;
+    }
+    executor.wait_idle()?;
+    let steady = steady_start.elapsed().as_secs_f64() * 1_000.0 / iterations as f64;
+
+    let mut amortized_pca =
+        executor.create_state_pca(&state, burn_automata::gpu::WgpuStatePcaConfig::default())?;
+    executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut amortized_pca)?;
+    executor.wait_idle()?;
+    let amortized_start = std::time::Instant::now();
+    for _ in 0..iterations {
+        executor.write_state_pca_into_gaussian_bind_group(&state, &gaussian, &mut amortized_pca)?;
+    }
+    executor.wait_idle()?;
+    let amortized = amortized_start.elapsed().as_secs_f64() * 1_000.0 / iterations as f64;
+    println!(
+        "state PCA Gaussian export 4096p: decoded={decoded:.4} ms/frame steady_pca={steady:.4} ms/frame amortized_pca={amortized:.4} ms/frame updates={}",
+        amortized_pca.update_count(),
+    );
+    Ok(())
+}
+
 #[test]
 fn wgpu_state_writes_gaussian_buffers_on_gpu() -> Result<(), Box<dyn std::error::Error>> {
     let _wgpu_guard = wgpu_test_guard();
@@ -189,8 +428,6 @@ fn wgpu_batched_gaussian_steps_match_repeated_steps_with_stochastic_updates()
 fn wgpu_uv_torus_seed_writes_stationary_gaussians_on_gpu() -> Result<(), Box<dyn std::error::Error>>
 {
     let _wgpu_guard = wgpu_test_guard();
-    const SH_C0: f32 = 0.282_094_8;
-
     let particles = 256;
     let seed_scale = 0.72;
     let (config, grid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);

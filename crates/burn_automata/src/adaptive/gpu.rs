@@ -26,7 +26,8 @@ use crate::{
     gpu::{
         WGPU_MATERIAL_UPDATE_MASK_MEMBERS, WgpuAdaptiveDiagnostics, WgpuAutomataExecutor,
         WgpuAutomataState, WgpuGaussianBindGroup, WgpuMaterialStateInit, WgpuMaterialUpdateMask,
-        WgpuNeighborMode, WgpuPersistentModeRestriction, WgpuSupportBinConfig,
+        WgpuNeighborMode, WgpuPersistentModeRestriction, WgpuStatePca, WgpuStatePcaConfig,
+        WgpuSupportBinConfig,
     },
 };
 
@@ -502,6 +503,25 @@ fn persistent_active_position_state_values(
 }
 
 impl WgpuAutomataExecutor {
+    /// Creates a PCA projector large enough for the full adaptive resident
+    /// allocation, including rows activated by later topology updates.
+    pub fn create_adaptive_state_pca(
+        &self,
+        state: &WgpuAdaptiveNpaState,
+        config: WgpuStatePcaConfig,
+    ) -> AutomataResult<WgpuStatePca> {
+        let projection_state = state
+            .persistent_modes
+            .as_ref()
+            .map(|persistent| &persistent.active_resident)
+            .filter(|active| {
+                active.particle_capacity * active.batch_size
+                    > state.resident.particle_capacity * state.resident.batch_size
+            })
+            .unwrap_or(&state.resident);
+        self.create_state_pca(projection_state, config)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_adaptive_state(
         &self,
@@ -683,6 +703,19 @@ impl WgpuAutomataExecutor {
         )
     }
 
+    pub fn step_adaptive_state_many_pca_into_gaussian_bind_group(
+        &self,
+        state: &mut WgpuAdaptiveNpaState,
+        gaussian: &WgpuGaussianBindGroup,
+        steps: usize,
+        topology_enabled: bool,
+        pca: &mut WgpuStatePca,
+    ) -> AutomataResult<WgpuAdaptiveStepReport> {
+        let report = self.step_adaptive_state_many(state, steps, topology_enabled)?;
+        self.write_adaptive_state_pca_into_gaussian_bind_group(state, gaussian, pca)?;
+        Ok(report)
+    }
+
     /// Exports the current visible adaptive material without advancing it.
     ///
     /// Persistent-fine rollout keeps a larger internal quadrature state. The
@@ -706,6 +739,32 @@ impl WgpuAutomataExecutor {
             }
         } else {
             self.write_state_into_gaussian_bind_group(&state.resident, gaussian)
+        }
+    }
+
+    /// Exports the visible adaptive state with rolling PCA color. Persistent
+    /// quadrature is restricted to its visible partition before projection.
+    pub fn write_adaptive_state_pca_into_gaussian_bind_group(
+        &self,
+        state: &mut WgpuAdaptiveNpaState,
+        gaussian: &WgpuGaussianBindGroup,
+        pca: &mut WgpuStatePca,
+    ) -> AutomataResult<()> {
+        if let Some(persistent) = state.persistent_modes.as_mut() {
+            if persistent.persistent_detail {
+                self.restrict_persistent_modes(
+                    &persistent.restriction,
+                    &state.resident,
+                    &persistent.active_resident,
+                )?;
+            }
+            self.write_state_pca_into_gaussian_bind_group(
+                &persistent.active_resident,
+                gaussian,
+                pca,
+            )
+        } else {
+            self.write_state_pca_into_gaussian_bind_group(&state.resident, gaussian, pca)
         }
     }
 

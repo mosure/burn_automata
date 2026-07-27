@@ -382,7 +382,6 @@ impl WgpuAutomataExecutor {
                 cache: None,
             })
         });
-
         Ok(Self {
             device,
             queue,
@@ -419,6 +418,7 @@ impl WgpuAutomataExecutor {
             subgroup_cooperative_update_pipeline,
             subgroup_adaptive_local_pipeline,
             gaussian_pipeline,
+            pca_pipelines: std::sync::OnceLock::new(),
             persistent_mode_restriction_pipeline: std::sync::OnceLock::new(),
         })
     }
@@ -440,5 +440,67 @@ impl WgpuAutomataExecutor {
 
     pub fn subgroup_cooperative_supported(&self) -> bool {
         self.subgroup_cooperative_supported
+    }
+}
+
+pub(super) fn create_pca_pipelines(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    gaussian_source_layout: &wgpu::BindGroupLayout,
+    gaussian_layout: &wgpu::BindGroupLayout,
+) -> WgpuPcaPipelines {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("burn_automata_state_pca_bind_group_layout"),
+        entries: &[uniform_layout_entry(0), storage_layout_entry(1, false)],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("burn_automata_state_pca_pipeline_layout"),
+        bind_group_layouts: &[
+            Some(gaussian_source_layout),
+            Some(gaussian_layout),
+            Some(&bind_group_layout),
+        ],
+        immediate_size: 0,
+    });
+    let create = |label: &'static str, entry_point: &'static str| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            module: shader,
+            entry_point: Some(entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        })
+    };
+    WgpuPcaPipelines {
+        partial_mean: create(
+            "burn_automata_state_pca_partial_mean",
+            "pca_partial_mean_main",
+        ),
+        finalize_mean: create(
+            "burn_automata_state_pca_finalize_mean",
+            "pca_finalize_mean_main",
+        ),
+        project_update: create(
+            "burn_automata_state_pca_project_update",
+            "pca_project_update_main",
+        ),
+        oja_candidate: create(
+            "burn_automata_state_pca_oja_candidate",
+            "pca_oja_candidate_main",
+        ),
+        stabilize_basis: create(
+            "burn_automata_state_pca_stabilize_basis",
+            "pca_stabilize_basis_main",
+        ),
+        display_stats: create(
+            "burn_automata_state_pca_display_stats",
+            "pca_display_stats_main",
+        ),
+        write_gaussian: create(
+            "burn_automata_state_pca_write_gaussians",
+            "write_gaussian_pca_main",
+        ),
+        bind_group_layout,
     }
 }

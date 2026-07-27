@@ -245,6 +245,48 @@ pub(in crate::viewer) fn adaptive_training_toggle() -> impl Scene {
     }
 }
 
+pub(in crate::viewer) fn pca_visualization_toggle() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            height: px(28),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(8),
+            align_items: AlignItems::Center,
+        }
+        Children [
+            (
+                Checkbox
+                Node {
+                    width: px(18),
+                    height: px(18),
+                    border: px(1),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                }
+                PcaVisualizationCheckbox
+                Hovered::default()
+                BorderColor::from(Color::srgb(0.32, 0.39, 0.42))
+                BackgroundColor(Color::srgb(0.075, 0.09, 0.10))
+                on(handle_pca_visualization_toggle)
+                Children [(
+                    Node {
+                        width: px(10),
+                        height: px(10),
+                    }
+                    PcaVisualizationCheckboxMark
+                    BackgroundColor(Color::NONE)
+                )]
+            ),
+            (
+                Text("particle state PCA")
+                template_value(ModelCatalogTextSize(12.0))
+                TextColor(Color::srgb(0.72, 0.78, 0.81))
+            ),
+        ]
+    }
+}
+
 #[cfg(not(feature = "hyper_dino"))]
 pub(in crate::viewer) fn adaptive_training_toggle() -> impl Scene {
     bsn! {

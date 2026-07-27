@@ -60,10 +60,14 @@ fn bevy_gaussian_splatting_renders_headless_image() {
 }
 
 #[test]
-fn viewer_bridge_renders_compact_headless_capture() -> Result<(), Box<dyn std::error::Error>> {
+fn viewer_bridge_pca_renders_compact_headless_capture() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = bevy_test_guard();
     let particles = 512;
     let mut apps = headless_automata_viewer(particles);
+    apps.main
+        .world_mut()
+        .resource_mut::<AutomataSettings>()
+        .pca_visualization = true;
     pump_headless_frame(&mut apps);
     let target = add_render_target(&mut apps, 256, 256);
 

@@ -592,7 +592,7 @@ pub(super) fn update_settings_label(
             "off".to_string()
         };
         text.0 = format!(
-            "preset: {:?} | model: {}\nparticles: {} | steps: {} | p: {:.2} | dt: {:.3}\nmodel scale: {:.3} | splat: {:.2}x | opacity: {:.2}x\nbackward: {} | train: {} | lr: {:.4}",
+            "preset: {:?} | model: {}\nparticles: {} | steps: {} | p: {:.2} | dt: {:.3}\nmodel scale: {:.3} | splat: {:.2}x | opacity: {:.2}x | color: {}\nbackward: {} | train: {} | lr: {:.4}",
             settings.preset,
             model_display_name(&settings),
             settings.particle_count,
@@ -602,6 +602,11 @@ pub(super) fn update_settings_label(
             settings.seed_scale,
             settings.render_scale,
             settings.render_opacity,
+            if settings.pca_visualization {
+                "state PCA"
+            } else {
+                "decoded"
+            },
             settings.visualize_backward,
             train_state,
             settings.training_learning_rate,

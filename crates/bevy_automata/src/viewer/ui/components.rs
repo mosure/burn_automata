@@ -95,6 +95,12 @@ pub(in crate::viewer) struct AdaptiveTrainingCheckbox;
 pub(in crate::viewer) struct AdaptiveTrainingCheckboxMark;
 
 #[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct PcaVisualizationCheckbox;
+
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct PcaVisualizationCheckboxMark;
+
+#[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct AutomataUiPanel;
 
 #[derive(Component, Clone, Debug, Default)]

@@ -87,6 +87,9 @@ struct ViewArgs {
     render_scale: f32,
     #[arg(long, default_value_t = 2.0)]
     render_opacity: f32,
+    /// Visualize the leading particle-state principal components as RGB.
+    #[arg(long)]
+    pca: bool,
 }
 
 #[cfg(feature = "headless")]
@@ -144,6 +147,7 @@ impl ViewArgs {
             dt: self.dt,
             render_scale: self.render_scale,
             render_opacity: self.render_opacity,
+            pca_visualization: self.pca,
             model_path,
             adaptive_model_path,
             adaptive_bandwidth_enabled: !self.no_adaptive_bandwidth,

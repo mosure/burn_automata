@@ -332,6 +332,7 @@ pub(in crate::viewer) fn view_controls_row() -> impl Scene {
             row_gap: px(8),
         }
         Children [
+            pca_visualization_toggle(),
             slider_row("splat scale", "0.50x", AutomataSliderKind::RenderScaleLog2, -1.0, -5.0, 2.0, 0.0625),
             slider_row("splat opacity", "2.00x", AutomataSliderKind::RenderOpacityLog2, 1.0, -4.0, 1.0, 0.0625),
         ]

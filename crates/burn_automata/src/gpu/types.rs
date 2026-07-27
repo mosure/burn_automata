@@ -83,6 +83,82 @@ pub struct WgpuGaussianBindGroup {
     pub(super) count: usize,
 }
 
+/// Resident particle-state PCA settings used by the Gaussian viewer export.
+///
+/// Basis fitting follows the rolling Oja update used by `burn_jepa`: projection
+/// and display normalization run every frame, while mean and basis statistics
+/// are refreshed on a bounded cadence without host readback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WgpuStatePcaConfig {
+    pub update_every: usize,
+    pub warmup_iterations: usize,
+    pub update_iterations: usize,
+    pub warmup_learning_rate: f32,
+    pub learning_rate: f32,
+    pub mean_momentum: f32,
+    pub display_momentum: f32,
+    pub display_clip_sigma: f32,
+    pub display_std_floor: f32,
+    pub epsilon: f32,
+}
+
+impl Default for WgpuStatePcaConfig {
+    fn default() -> Self {
+        Self {
+            update_every: 8,
+            warmup_iterations: 8,
+            update_iterations: 2,
+            warmup_learning_rate: 0.5,
+            learning_rate: 0.12,
+            mean_momentum: 0.2,
+            display_momentum: 0.2,
+            display_clip_sigma: 2.5,
+            display_std_floor: 1.0e-3,
+            epsilon: 1.0e-6,
+        }
+    }
+}
+
+pub struct WgpuStatePca {
+    pub(super) config: WgpuStatePcaConfig,
+    pub(super) state_dims: usize,
+    pub(super) particle_capacity: usize,
+    pub(super) partial_capacity: usize,
+    pub(super) observed_frames: usize,
+    pub(super) last_particle_count: usize,
+    pub(super) update_count: usize,
+    pub(super) initialized: bool,
+    pub(super) force_update: bool,
+    pub(super) params: [u32; 12],
+    pub(super) params_buffer: wgpu::Buffer,
+    pub(super) data_buffer: wgpu::Buffer,
+    pub(super) mean_offset: usize,
+    pub(super) components_offset: usize,
+    pub(super) display_center_offset: usize,
+    pub(super) display_spread_offset: usize,
+    pub(super) bind_group: wgpu::BindGroup,
+}
+
+impl WgpuStatePca {
+    pub fn update_count(&self) -> usize {
+        self.update_count
+    }
+
+    pub fn force_update(&mut self) {
+        self.force_update = true;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WgpuStatePcaSnapshot {
+    pub mean: Vec<f32>,
+    /// Row-major `[state_dims, 3]` projection basis.
+    pub components: Vec<f32>,
+    pub display_center: [f32; 3],
+    pub display_spread: [f32; 3],
+    pub update_count: usize,
+}
+
 pub const WGPU_MATERIAL_UPDATE_MASK_MEMBERS: usize = 6;
 
 /// Declared continuous bandwidth range used to construct conservative device
@@ -375,8 +451,20 @@ pub struct WgpuAutomataExecutor {
     pub(super) subgroup_cooperative_update_pipeline: Option<wgpu::ComputePipeline>,
     pub(super) subgroup_adaptive_local_pipeline: Option<wgpu::ComputePipeline>,
     pub(super) gaussian_pipeline: Option<wgpu::ComputePipeline>,
+    pub(super) pca_pipelines: std::sync::OnceLock<WgpuPcaPipelines>,
     pub(super) persistent_mode_restriction_pipeline:
         std::sync::OnceLock<WgpuPersistentModePipeline>,
+}
+
+pub(super) struct WgpuPcaPipelines {
+    pub(super) bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) partial_mean: wgpu::ComputePipeline,
+    pub(super) finalize_mean: wgpu::ComputePipeline,
+    pub(super) project_update: wgpu::ComputePipeline,
+    pub(super) oja_candidate: wgpu::ComputePipeline,
+    pub(super) stabilize_basis: wgpu::ComputePipeline,
+    pub(super) display_stats: wgpu::ComputePipeline,
+    pub(super) write_gaussian: wgpu::ComputePipeline,
 }
 
 pub(super) struct WgpuPersistentModePipeline {

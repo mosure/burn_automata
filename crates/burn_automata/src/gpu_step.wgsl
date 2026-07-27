@@ -4926,20 +4926,28 @@ fn write_gaussian_from_output(idx: u32) {
     gaussian_position_visibility.values[base4 + 2u] = select(0.0, pos.z, spatial_dims() == 3u);
     gaussian_position_visibility.values[base4 + 3u] = 1.0;
 
-    let sh_base = idx * GAUSSIAN_SH_COEFF_COUNT;
-    for (var coeff = 0u; coeff < GAUSSIAN_SH_COEFF_COUNT; coeff = coeff + 1u) {
-        gaussian_spherical_harmonic.values[sh_base + coeff] = 0.0;
-    }
     let tail_rgb = vec3<f32>(
         output_tail_state_channel(idx, 2u),
         output_tail_state_channel(idx, 1u),
         output_tail_state_channel(idx, 0u),
     );
     let color = clamp(tail_rgb + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+    write_gaussian_sh0_color(idx, color);
+    write_gaussian_geometry_from_output(idx);
+}
+
+fn write_gaussian_sh0_color(idx: u32, color: vec3<f32>) {
+    let sh_base = idx * GAUSSIAN_SH_COEFF_COUNT;
+    for (var coeff = 0u; coeff < GAUSSIAN_SH_COEFF_COUNT; coeff = coeff + 1u) {
+        gaussian_spherical_harmonic.values[sh_base + coeff] = 0.0;
+    }
     gaussian_spherical_harmonic.values[sh_base] = (color.x - 0.5) / SH_C0;
     gaussian_spherical_harmonic.values[sh_base + 1u] = (color.y - 0.5) / SH_C0;
     gaussian_spherical_harmonic.values[sh_base + 2u] = (color.z - 0.5) / SH_C0;
+}
 
+fn write_gaussian_geometry_from_output(idx: u32) {
+    let base4 = idx * 4u;
     var material_geometry = MaterialGaussianGeometry(
         vec3<f32>(max(eps() * 0.12, 0.00008)),
         vec4<f32>(1.0, 0.0, 0.0, 0.0),

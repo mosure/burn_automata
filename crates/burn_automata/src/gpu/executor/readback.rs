@@ -240,9 +240,19 @@ impl WgpuAutomataExecutor {
         })
     }
 
-    fn read_storage_f32(
+    pub(super) fn read_storage_f32(
         &self,
         source: &wgpu::Buffer,
+        f32_len: usize,
+        label: &'static str,
+    ) -> AutomataResult<Vec<f32>> {
+        self.read_storage_f32_range(source, 0, f32_len, label)
+    }
+
+    pub(super) fn read_storage_f32_range(
+        &self,
+        source: &wgpu::Buffer,
+        source_offset: usize,
         f32_len: usize,
         label: &'static str,
     ) -> AutomataResult<Vec<f32>> {
@@ -252,7 +262,13 @@ impl WgpuAutomataExecutor {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("burn_automata_read_storage_encoder"),
             });
-        encoder.copy_buffer_to_buffer(source, 0, &staging, 0, byte_len::<f32>(f32_len)?);
+        encoder.copy_buffer_to_buffer(
+            source,
+            byte_len::<f32>(source_offset)?,
+            &staging,
+            0,
+            byte_len::<f32>(f32_len)?,
+        );
         self.queue.submit(Some(encoder.finish()));
         read_f32_buffer(&self.device, &staging, f32_len)
     }

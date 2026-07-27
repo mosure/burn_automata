@@ -17,6 +17,7 @@ GPU kernels and a native/web Bevy Gaussian Splatting viewer. Try the
 - [x] device-resident WGPU hashgrid, perception, rollout, and Gaussian decoding
 - [x] Burn/WGPU and Burn/CUDA Target2D training infrastructure
 - [x] DINO spatial-token conditioned HyperNPA training and inference
+- [x] GPU-resident rolling particle-state PCA visualization
 - [x] fixed and adaptive image-target training from the Bevy viewer
 - [x] native and WebGPU viewer with an isolated browser training worker
 - [x] headless PNG rollout capture for paper and benchmark automation
@@ -49,6 +50,10 @@ cargo run --release -p bevy_automata -- view \
 cargo run --release -p bevy_automata -- view \
   --adaptive-model path/to/adaptive_model.bpk
 ```
+
+Enable `particle state PCA` in the view panel, or pass `view --pca`, to map the
+three leading state components to RGB. Projection runs every rendered frame;
+the rolling basis is updated periodically without GPU readback.
 
 The image workflow is:
 

@@ -21,7 +21,7 @@ pub use types::{
     WGPU_MATERIAL_UPDATE_MASK_MEMBERS, WgpuAutomataExecutor, WgpuAutomataState,
     WgpuGaussianBindGroup, WgpuGaussianBufferRefs, WgpuGaussianReadback, WgpuMaterialStateInit,
     WgpuMaterialUpdateMask, WgpuNeighborMode, WgpuNeighborReport, WgpuOwnedGaussianBuffers,
-    WgpuStepOutput, WgpuSupportBinConfig,
+    WgpuStatePca, WgpuStatePcaConfig, WgpuStatePcaSnapshot, WgpuStepOutput, WgpuSupportBinConfig,
 };
 pub(crate) use types::{
     WgpuActiveQuadratureProlongation, WgpuAdaptiveDiagnostics, WgpuAdaptiveLocalRuleMode,
