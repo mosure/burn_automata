@@ -273,7 +273,7 @@ fn adaptive_auto_keeps_sparse_particle_grid_linked_list() {
 }
 
 #[test]
-fn adaptive_auto_uses_tiled_buckets_for_2d_particle_grid_cells() {
+fn adaptive_auto_uses_cooperative_cells_for_2d_particle_grid_cells() {
     let grid = HashGridConfig::growing_2d();
     let positions = vec![[0.0, 0.0, 0.0, 0.0]; 128];
 
@@ -281,8 +281,8 @@ fn adaptive_auto_uses_tiled_buckets_for_2d_particle_grid_cells() {
         resolve_neighbor_mode_for_state(&grid, positions.len(), &positions, WgpuNeighborMode::Auto)
             .unwrap();
 
-    assert!(capacity >= 128);
-    assert_eq!(mode, WgpuNeighborMode::TiledFixedCellBuckets { capacity });
+    assert_eq!(capacity, 0);
+    assert_eq!(mode, WgpuNeighborMode::CooperativeSortedCells);
 }
 
 #[test]
@@ -318,7 +318,7 @@ fn adaptive_auto_keeps_large_2d_tiled_storage_under_binding_limit() {
 }
 
 #[test]
-fn adaptive_auto_uses_tiled_buckets_for_periodic_2d_grid() {
+fn adaptive_auto_uses_cooperative_sorted_cells_for_periodic_2d_grid() {
     let grid = HashGridConfig::texture_2d();
     let positions = (0..512)
         .map(|idx| {
@@ -332,8 +332,37 @@ fn adaptive_auto_uses_tiled_buckets_for_periodic_2d_grid() {
         resolve_neighbor_mode_for_state(&grid, positions.len(), &positions, WgpuNeighborMode::Auto)
             .unwrap();
 
-    assert!(capacity > 0);
-    assert_eq!(mode, WgpuNeighborMode::TiledFixedCellBuckets { capacity });
+    assert_eq!(capacity, 0);
+    assert_eq!(mode, WgpuNeighborMode::CooperativeSortedCells);
+}
+
+#[test]
+fn auto_promotes_cooperative_cells_when_fixed_subgroups_are_supported() {
+    assert_eq!(
+        promote_auto_subgroup_mode(
+            WgpuNeighborMode::Auto,
+            WgpuNeighborMode::CooperativeSortedCells,
+            true,
+        ),
+        WgpuNeighborMode::SubgroupCooperativeSortedCells
+    );
+    assert_eq!(
+        promote_auto_subgroup_mode(
+            WgpuNeighborMode::Auto,
+            WgpuNeighborMode::CooperativeSortedCells,
+            false,
+        ),
+        WgpuNeighborMode::CooperativeSortedCells
+    );
+    assert_eq!(
+        promote_auto_subgroup_mode(
+            WgpuNeighborMode::CooperativeSortedCells,
+            WgpuNeighborMode::CooperativeSortedCells,
+            true,
+        ),
+        WgpuNeighborMode::CooperativeSortedCells,
+        "an explicit portable mode must not be rewritten"
+    );
 }
 
 #[test]

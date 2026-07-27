@@ -180,6 +180,8 @@ pub(super) fn train_e2e_amortization_distillation_step(
             generator_grad_norm,
             generator_grad_scale,
             examples_seen: generator_indices.len(),
+            optimizer_examples_per_sec: generator_indices.len() as f64
+                / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
             pool_seed_replacements: 0,
             particle_steps_per_sec: 0.0,
             dense_pair_interactions_per_sec: 0.0,

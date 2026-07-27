@@ -213,6 +213,8 @@ pub(super) fn train_e2e_functional_teacher_step(
             generator_grad_norm,
             generator_grad_scale,
             examples_seen: batch_len,
+            optimizer_examples_per_sec: batch_len as f64
+                / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
             pool_seed_replacements: 0,
             particle_steps_per_sec: particle_steps as f64
                 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),

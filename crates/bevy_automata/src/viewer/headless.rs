@@ -51,12 +51,15 @@ pub struct HeadlessExportConfig {
     pub dino_model_path: Option<PathBuf>,
     pub dino_image_size: usize,
     pub dino_patch_size: usize,
+    pub mesh_damage_radius: Option<f32>,
     pub seed: u64,
     pub seed_scale: Option<f32>,
     pub update_prob: f32,
     pub dt: f32,
     pub render_scale: f32,
     pub render_opacity: f32,
+    #[serde(default)]
+    pub pca_visualization: bool,
 }
 
 impl Default for HeadlessExportConfig {
@@ -84,12 +87,14 @@ impl Default for HeadlessExportConfig {
             dino_model_path: None,
             dino_image_size: 224,
             dino_patch_size: 14,
+            mesh_damage_radius: None,
             seed: RolloutConfig::default().seed,
             seed_scale: None,
             update_prob: RolloutConfig::default().update_prob,
             dt: RolloutConfig::default().dt,
             render_scale: 0.5,
             render_opacity: 2.0,
+            pca_visualization: false,
         }
     }
 }
@@ -235,6 +240,7 @@ pub fn run_headless_export(
 
     let target = add_render_target(&mut apps, config.width, config.height);
     pump_headless_frame(&mut apps);
+    apply_mesh_damage_if_requested(&mut apps, config.mesh_damage_radius)?;
     assign_render_target_to_gaussian_cameras(&mut apps, target.clone());
     for _ in 0..config.warmup_frames {
         pump_headless_frame(&mut apps);
@@ -325,6 +331,64 @@ fn validate_config(config: &HeadlessExportConfig) -> Result<(), Box<dyn std::err
     if config.dino_image_size == 0 || config.dino_patch_size == 0 {
         return Err(std::io::Error::other("DINO image and patch sizes must be positive").into());
     }
+    if config
+        .mesh_damage_radius
+        .is_some_and(|radius| !radius.is_finite() || radius <= 0.0)
+    {
+        return Err(std::io::Error::other("mesh damage radius must be finite and positive").into());
+    }
+    Ok(())
+}
+
+fn apply_mesh_damage_if_requested(
+    apps: &mut SubApps,
+    radius: Option<f32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(radius) = radius else {
+        return Ok(());
+    };
+    let world = apps.main.world_mut();
+    let mut runtime = world.resource_mut::<AutomataRuntime>();
+    if runtime.model.config.spatial_dims != 3 || !runtime.model.config.position_features {
+        return Err(std::io::Error::other(
+            "--mesh-damage-radius requires a mesh-conditioned 3D NPA model",
+        )
+        .into());
+    }
+    let Some(source) = runtime.particle_initialization.as_ref() else {
+        return Err(std::io::Error::other(
+            "--mesh-damage-radius requires a model with embedded particle initialization",
+        )
+        .into());
+    };
+    let mut damaged = source.as_ref().clone();
+    let center = damaged.positions[0];
+    let state_dims = runtime.model.config.state_dims;
+    let mut erased = 0usize;
+    for (row, position) in damaged.positions.iter().enumerate() {
+        let delta = [
+            position[0] - center[0],
+            position[1] - center[1],
+            position[2] - center[2],
+        ];
+        if delta.iter().map(|value| value * value).sum::<f32>() > radius * radius {
+            continue;
+        }
+        let state = &mut damaged.states[row * state_dims..(row + 1) * state_dims];
+        state.fill(0.0);
+        state[burn_automata::rollout::GROWTH_3D_RENDER_OPACITY_CHANNEL] = -4.0;
+        erased += 1;
+    }
+    if erased == 0 {
+        return Err(std::io::Error::other(
+            "--mesh-damage-radius did not select any embedded particles",
+        )
+        .into());
+    }
+    set_particle_initialization(&mut runtime, Some(Arc::new(damaged)));
+    runtime.trace = None;
+    runtime.frame = 0;
+    runtime.status = format!("erased {erased} mesh particles within radius {radius:.3}");
     Ok(())
 }
 
@@ -386,6 +450,7 @@ fn settings_from_config(
         seed_mode: config.seed_mode,
         render_scale: config.render_scale,
         render_opacity: config.render_opacity,
+        pca_visualization: config.pca_visualization,
         adaptive_bandwidth_enabled: config.adaptive_bandwidth_enabled,
         adaptive_topology_enabled: config.adaptive_topology_enabled,
         paused: true,
@@ -470,6 +535,7 @@ fn install_generated_model(apps: &mut SubApps, label: String, generated: Generat
         let mut runtime = world.resource_mut::<AutomataRuntime>();
         runtime.model = generated.model;
         runtime.hashgrid = generated.hashgrid;
+        set_particle_initialization(&mut runtime, None);
         runtime.loaded_model_path = None;
         runtime.loaded_adaptive_model_path = None;
         runtime.adaptive = None;
@@ -877,5 +943,15 @@ mod tests {
             planned_capture_steps(64, Some(8), &[64, 16, 128, 16]).unwrap(),
             vec![16usize, 64]
         );
+    }
+
+    #[test]
+    fn headless_settings_enable_device_pca_visualization() {
+        let settings = settings_from_config(&HeadlessExportConfig {
+            pca_visualization: true,
+            ..HeadlessExportConfig::default()
+        })
+        .unwrap();
+        assert!(settings.pca_visualization);
     }
 }

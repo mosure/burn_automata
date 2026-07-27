@@ -535,6 +535,7 @@ pub(in crate::viewer) fn handle_toggle_image_target_training(
                 if starting_fresh {
                     runtime.model = upstream_growing_2d_model(training_seed);
                     runtime.adaptive = None;
+                    set_particle_initialization(&mut runtime, None);
                     runtime.trace = None;
                     runtime.frame = 0;
                     runtime.model_revision = runtime.model_revision.wrapping_add(1);
@@ -884,6 +885,7 @@ fn apply_live_model_snapshot(
         ImageTargetTrainingModel::Fixed(model) => {
             runtime.model = model;
             runtime.adaptive = None;
+            set_particle_initialization(runtime, None);
             if reset_rollout {
                 runtime.trace = None;
                 runtime.frame = 0;

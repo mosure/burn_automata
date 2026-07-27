@@ -68,6 +68,15 @@ task_loss_weight = 1.0
 flow_matching_weight = 0.0
 flow_self_rectification_weight = 0.05
 flow_train_sample_steps = 4
+# Stabilize recurrent outliers and optimize hard rollouts within each identity
+# before applying a second tail objective over the two hardest identities.
+log1p_trajectory_loss = true
+trajectory_tail_fraction = 0.25
+trajectory_tail_weight = 0.25
+trajectory_tail_warmup_steps = 2000
+trajectory_tail_per_identity = true
+identity_tail_fraction = 0.25
+identity_tail_weight = 0.5
 # Permit the verified frozen-trunk checkpoint to enter the joint-training
 # curriculum without weakening source/hash validation.
 curriculum_resume = true
@@ -132,6 +141,8 @@ splat_sigma = 1.0
 splat_loss_weight = 2.0
 color_loss_weight = 5.0
 density_loss_weight = 1.0
+background_density_loss_weight = 0.1
+foreground_density_loss_weight = 0.5
 # HyperNPA is selected on composited RGB PSNR. The zero-weight control learned
 # conditional separation but plateaued near 12 dB, so train the measured image
 # objective directly while retaining upstream color and density terms.
@@ -166,12 +177,14 @@ horizons = [96, 256]
 selection_horizon_min_steps = 256
 update_prob = 0.5
 seed = 42
+seed_count = 2
 psnr_threshold_db = 26.0
 final_examples = 100
 final_particles = 4096
 final_steps = 512
 final_horizons = [96, 256, 512]
 final_selection_horizon_min_steps = 256
+final_seed_count = 4
 # Final-only, generated-adapter, graph-detached stability contract. The same
 # held-out trajectories are measured at 512 and 4096 in one bounded rollout.
 stability_examples = 16

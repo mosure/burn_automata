@@ -1,0 +1,56 @@
+[mesh]
+builtin = "utah_teapot"
+
+[output]
+model = "artifacts/mesh3d/utah_teapot/model.bpk"
+report = "artifacts/mesh3d/utah_teapot/report.json"
+
+[training]
+scale = 0.72
+hidden_dims = 320
+dataset_particles = 4096
+dataset_trajectories = 8
+teacher_rollout_max_steps = 32
+dataset_refreshes = 1
+replay_accumulate = false
+steps = 500
+report_interval = 100
+seed = 42
+near_surface_fraction = 0.4
+surface_fraction = 0.2
+surface_erasure_fraction = 0.5
+deployment_surface_fraction = 0.75
+deployment_damage_fraction = 0.8
+max_motion_per_step = 0.065
+normal_gain = 0.35
+signed_distance_gain = 0.35
+opacity_gain = 0.25
+color_gain = 0.35
+
+[training.optimizer]
+learning_rate = 7.5e-4
+weight_decay = 1.0e-6
+grad_clip_norm = 1.0
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+
+[training.evaluation]
+particle_count = 16384
+seed_scale = 0.72
+rollout_steps = [0, 32, 96, 256]
+seeds = [42, 97, 131]
+target_samples = 8192
+render_image_size = 128
+render_target_samples = 16384
+damage_radius = 0.22
+damage_displacement = 0.0
+recovery_min_steps = 32
+max_mean_surface_distance = 0.018
+max_p95_surface_distance = 0.045
+max_mean_coverage_distance = 0.035
+min_coverage_fraction = 0.985
+min_density_psnr_db = 24.0
+min_color_psnr_db = 24.0
+min_damage_region_color_psnr_db = 24.0
+max_long_horizon_drift = 0.012

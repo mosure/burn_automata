@@ -29,6 +29,7 @@ use burn_automata::{
     rollout_supervised_batch, run_rollout, supervised_backward, supervised_loss,
     supervised_train_step,
 };
+use std::sync::Arc;
 
 #[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
 use bevy::render::{
@@ -74,6 +75,8 @@ pub mod headless;
 mod hyper_inference;
 #[cfg(feature = "hyper_dino")]
 mod image_training;
+#[cfg(feature = "mesh_training")]
+mod mesh_training;
 mod runtime;
 mod ui;
 #[cfg(target_arch = "wasm32")]
@@ -92,11 +95,11 @@ pub use gpu_bridge::{
 use hyper_inference::*;
 #[cfg(feature = "hyper_dino")]
 use image_training::*;
+#[cfg(feature = "mesh_training")]
+use mesh_training::*;
 use runtime::*;
 use ui::*;
 
-#[cfg(feature = "splatting")]
-use catalog::AUTOMATA_MIN_VIEWPORT_WIDTH;
 #[cfg(all(
     feature = "splatting",
     any(not(feature = "gpu_wgpu"), feature = "headless", test)
@@ -105,9 +108,11 @@ use catalog::GAUSSIAN_SH_C0;
 #[cfg(feature = "splatting")]
 use catalog::SORTED_ENTRY_MIN_CAPACITY;
 use catalog::{
-    AUTOMATA_UI_PANEL_WIDTH, BACKWARD_PROBE_PARTICLES, CATALOG_DOUBLE_CLICK_SECONDS,
-    DEFAULT_LIZARD_MODEL, LIVE_TRAINING_TARGET, ModelCatalogKey, TRAINING_INTERVAL_FRAMES,
-    TRAINING_PROBE_PARTICLES, catalog_entry, catalog_entry_is_available,
+    AUTOMATA_MIN_VIEWPORT_WIDTH, AUTOMATA_UI_DESKTOP_MIN_WIDTH, AUTOMATA_UI_MOBILE_MIN_VIEW_HEIGHT,
+    AUTOMATA_UI_MOBILE_PANEL_HEIGHT_RATIO, AUTOMATA_UI_MOBILE_PANEL_MAX_HEIGHT,
+    AUTOMATA_UI_MOBILE_PANEL_MIN_HEIGHT, AUTOMATA_UI_PANEL_WIDTH, BACKWARD_PROBE_PARTICLES,
+    CATALOG_DOUBLE_CLICK_SECONDS, DEFAULT_LIZARD_MODEL, LIVE_TRAINING_TARGET, ModelCatalogKey,
+    TRAINING_INTERVAL_FRAMES, TRAINING_PROBE_PARTICLES, catalog_entry, catalog_entry_is_available,
     catalog_entry_matches_settings, catalog_preview_image, catalog_thumbnail_image,
     select_catalog_entry,
 };
@@ -279,6 +284,8 @@ pub struct AutomataRuntime {
     pub training_grad_norm: Option<f32>,
     pub training_teacher: Option<NpaModel>,
     pub model_revision: u64,
+    pub particle_initialization: Option<Arc<burn_automata::NpaParticleInitialization>>,
+    pub particle_initialization_revision: u64,
 }
 
 impl Default for AutomataRuntime {
@@ -302,6 +309,8 @@ impl Default for AutomataRuntime {
             training_grad_norm: None,
             training_teacher: None,
             model_revision: 1,
+            particle_initialization: None,
+            particle_initialization_revision: 1,
         }
     }
 }
@@ -338,6 +347,7 @@ impl Plugin for AutomataViewerPlugin {
             .init_resource::<AutomataUiState>()
             .init_resource::<AutomataPerformanceTelemetry>()
             .init_resource::<PerformanceUiState>()
+            .init_resource::<AutomataUiTouchScroll>()
             .init_resource::<CatalogPreviewState>()
             .init_resource::<CatalogPreviewImageState>();
         #[cfg(target_arch = "wasm32")]
@@ -355,6 +365,13 @@ impl Plugin for AutomataViewerPlugin {
             .add_message::<ToggleImageTargetTraining>();
         #[cfg(all(feature = "hyper_dino", target_arch = "wasm32"))]
         app.init_non_send::<BrowserTrainingWorker>();
+        #[cfg(feature = "mesh_training")]
+        app.init_resource::<MeshTargetDialogChannel>()
+            .init_resource::<MeshTargetTrainingState>()
+            .add_message::<OpenNpaMesh>()
+            .add_message::<ToggleMeshTargetTraining>();
+        #[cfg(all(feature = "mesh_training", not(target_arch = "wasm32")))]
+        app.init_resource::<MeshTargetTrainingChannel>();
         #[cfg(feature = "splatting")]
         app.init_resource::<AutomataCloudState>();
         #[cfg(feature = "splatting")]
@@ -378,6 +395,7 @@ impl Plugin for AutomataViewerPlugin {
                     load_selected_adaptive_model,
                     load_selected_model,
                     toggle_ui_visibility,
+                    sync_responsive_ui_layout,
                     sync_view_cameras,
                     sync_automata_camera_viewports,
                     sync_gaussian_cloud_asset,
@@ -431,6 +449,24 @@ impl Plugin for AutomataViewerPlugin {
                 update_hyper_image_button_styles,
                 update_hyper_inference_button_styles,
                 sync_hyper_inference_button_label,
+            )
+                .chain()
+                .before(sync_gaussian_cloud_asset),
+        );
+
+        #[cfg(feature = "mesh_training")]
+        app.add_systems(
+            Update,
+            (
+                handle_open_npa_mesh_dialog,
+                handle_npa_mesh_drop,
+                poll_mesh_target_sources,
+                handle_toggle_mesh_target_training,
+                #[cfg(not(target_arch = "wasm32"))]
+                poll_mesh_target_training,
+                sync_mesh_target_summary,
+                sync_mesh_training_button_label,
+                update_mesh_button_styles,
             )
                 .chain()
                 .before(sync_gaussian_cloud_asset),

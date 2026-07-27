@@ -61,6 +61,8 @@ pub(crate) fn run_command(command: Command) -> Result<(), Box<dyn std::error::Er
         command @ Command::ReportHyper2d { .. } => reporting::run_report_hyper_2d(command),
         command @ Command::InferHyper2d { .. } => hyper::run_infer_hyper_2d(command),
         command @ Command::EvalHyper2d { .. } => hyper::run_eval_hyper_2d(command),
+        command @ Command::TrainMesh3d { .. } => mesh::run_train_mesh_3d(command),
+        command @ Command::EvaluateMesh3d { .. } => mesh::run_evaluate_mesh_3d(command),
         command @ Command::TrainTorus3d { .. } => mesh::run_train_torus_3d(command),
         command @ Command::TrainTorusMorphogen3d { .. } => {
             mesh::run_train_torus_morphogen_3d(command)

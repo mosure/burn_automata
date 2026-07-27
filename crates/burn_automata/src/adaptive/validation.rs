@@ -74,6 +74,15 @@ pub struct AdaptiveTarget2dValidationConfig {
     pub min_accepted_local_detail_exchanges: usize,
     pub min_mean_scale_detail_correlation_gain_vs_static: f32,
     pub min_worst_scale_detail_correlation_gain_vs_static: f32,
+    /// Require dynamic reallocation to improve alignment between material
+    /// fineness and detail measured directly from the target image.
+    pub min_mean_target_scale_detail_correlation_gain_vs_static: f32,
+    pub min_worst_target_scale_detail_correlation_gain_vs_static: f32,
+    /// Minimum fraction of coarse rows that lie in low-detail foreground
+    /// regions of the target. This measures the intended large-particle fill
+    /// behavior directly instead of inferring it from latent-state gradients.
+    pub min_mean_coarse_constant_region_fraction: f32,
+    pub min_worst_coarse_constant_region_fraction: f32,
     pub min_mean_static_graded_psnr_gain_db: f32,
     pub min_worst_static_graded_psnr_gain_db: f32,
 }
@@ -119,6 +128,10 @@ impl Default for AdaptiveTarget2dValidationConfig {
             min_accepted_local_detail_exchanges: 1,
             min_mean_scale_detail_correlation_gain_vs_static: 0.1,
             min_worst_scale_detail_correlation_gain_vs_static: -0.1,
+            min_mean_target_scale_detail_correlation_gain_vs_static: 0.0,
+            min_worst_target_scale_detail_correlation_gain_vs_static: -0.1,
+            min_mean_coarse_constant_region_fraction: 0.0,
+            min_worst_coarse_constant_region_fraction: 0.0,
             min_mean_static_graded_psnr_gain_db: 0.25,
             min_worst_static_graded_psnr_gain_db: -0.25,
         }
@@ -167,6 +180,22 @@ pub struct AdaptiveTarget2dValidationRow {
     pub fine_to_coarse_detail_ratio: f32,
     #[serde(default)]
     pub static_fine_to_coarse_detail_ratio: f32,
+    #[serde(default)]
+    pub initial_target_scale_detail_correlation: f32,
+    #[serde(default)]
+    pub target_scale_detail_correlation: f32,
+    #[serde(default)]
+    pub static_target_scale_detail_correlation: f32,
+    #[serde(default)]
+    pub target_scale_detail_correlation_gain_vs_static: f32,
+    #[serde(default)]
+    pub fine_to_coarse_target_detail_ratio: f32,
+    #[serde(default)]
+    pub static_fine_to_coarse_target_detail_ratio: f32,
+    #[serde(default)]
+    pub coarse_constant_region_fraction: f32,
+    #[serde(default)]
+    pub static_coarse_constant_region_fraction: f32,
     #[serde(default)]
     pub material_scale_ratio: f32,
     #[serde(default)]
@@ -253,6 +282,11 @@ pub struct AdaptiveResolutionValidationSummary {
     pub accepted_local_detail_exchanges: usize,
     pub mean_scale_detail_correlation_gain_vs_static: f32,
     pub worst_scale_detail_correlation_gain_vs_static: f32,
+    pub mean_target_scale_detail_correlation_gain_vs_static: f32,
+    pub worst_target_scale_detail_correlation_gain_vs_static: f32,
+    pub mean_coarse_constant_region_fraction: f32,
+    pub worst_coarse_constant_region_fraction: f32,
+    pub mean_coarse_constant_region_fraction_gain_vs_static: f32,
     pub mean_static_graded_psnr_gain_db: f32,
     pub worst_static_graded_psnr_gain_db: f32,
 }
@@ -412,6 +446,16 @@ pub fn validate_adaptive_target2d_wgpu(
         || !config
             .min_worst_scale_detail_correlation_gain_vs_static
             .is_finite()
+        || !config
+            .min_mean_target_scale_detail_correlation_gain_vs_static
+            .is_finite()
+        || !config
+            .min_worst_target_scale_detail_correlation_gain_vs_static
+            .is_finite()
+        || !config.min_mean_coarse_constant_region_fraction.is_finite()
+        || !(0.0..=1.0).contains(&config.min_mean_coarse_constant_region_fraction)
+        || !config.min_worst_coarse_constant_region_fraction.is_finite()
+        || !(0.0..=1.0).contains(&config.min_worst_coarse_constant_region_fraction)
         || !config.min_mean_static_graded_psnr_gain_db.is_finite()
         || !config.min_worst_static_graded_psnr_gain_db.is_finite()
         || (config.adaptive_resolution_horizon_min_steps > 0
@@ -524,6 +568,7 @@ pub fn validate_adaptive_target2d_wgpu(
     let fine_measure = material.total_measure / reference as f32;
     let output_scale = target.point_count() as f32 / reference as f32;
     let target_render = render_target_2d_splat(target, loss)?;
+    let target_detail = TargetDetailField::from_target(target)?;
     let executor = WgpuAutomataExecutor::new_blocking()?;
     let mut rows = Vec::with_capacity(seeds.len() * horizons.len());
 
@@ -554,8 +599,12 @@ pub fn validate_adaptive_target2d_wgpu(
                 "adaptive validation seed retained hidden fine templates".to_owned(),
             ));
         }
-        let initial_adaptation =
-            adaptation_diagnostics(&evaluation_model, &adaptive_seed, fine_measure)?;
+        let initial_adaptation = adaptation_diagnostics(
+            &evaluation_model,
+            &adaptive_seed,
+            fine_measure,
+            &target_detail,
+        )?;
         let static_adaptive_seed = adaptive_seed.clone();
         let (fine_positions, fine_states) = seed_particles_scaled(
             1,
@@ -572,7 +621,7 @@ pub fn validate_adaptive_target2d_wgpu(
             adaptive_seed,
             grid,
             config.dt,
-            WgpuNeighborMode::Auto,
+            WgpuNeighborMode::CooperativeSortedCells,
             config.update_prob,
             seed,
         )?;
@@ -581,7 +630,7 @@ pub fn validate_adaptive_target2d_wgpu(
             static_adaptive_seed,
             grid,
             config.dt,
-            WgpuNeighborMode::Auto,
+            WgpuNeighborMode::CooperativeSortedCells,
             config.update_prob,
             seed,
         )?;
@@ -593,7 +642,7 @@ pub fn validate_adaptive_target2d_wgpu(
             reference,
             grid,
             config.dt,
-            WgpuNeighborMode::Auto,
+            WgpuNeighborMode::CooperativeSortedCells,
             config.update_prob,
             seed,
         )?;
@@ -605,7 +654,7 @@ pub fn validate_adaptive_target2d_wgpu(
             reference,
             grid,
             config.dt,
-            WgpuNeighborMode::Auto,
+            WgpuNeighborMode::CooperativeSortedCells,
             config.update_prob,
             seed,
         )?;
@@ -772,12 +821,17 @@ pub fn validate_adaptive_target2d_wgpu(
                 .count() as f32
                 / adaptive_render.density.len().max(1) as f32;
             let grid_overflow = executor.read_adaptive_grid_overflow(&adaptive_state)?;
-            let adaptation =
-                adaptation_diagnostics(&evaluation_model, &adaptive_state.particles, fine_measure)?;
+            let adaptation = adaptation_diagnostics(
+                &evaluation_model,
+                &adaptive_state.particles,
+                fine_measure,
+                &target_detail,
+            )?;
             let static_adaptation = adaptation_diagnostics(
                 &evaluation_model,
                 &static_adaptive_state.particles,
                 fine_measure,
+                &target_detail,
             )?;
             let adaptive_neighbor = executor.neighbor_report(&adaptive_state.resident);
             let oracle_neighbor = executor.neighbor_report(&oracle_state);
@@ -821,6 +875,20 @@ pub fn validate_adaptive_target2d_wgpu(
                     - static_adaptation.scale_detail_correlation,
                 fine_to_coarse_detail_ratio: adaptation.fine_to_coarse_detail_ratio,
                 static_fine_to_coarse_detail_ratio: static_adaptation.fine_to_coarse_detail_ratio,
+                initial_target_scale_detail_correlation: initial_adaptation
+                    .target_scale_detail_correlation,
+                target_scale_detail_correlation: adaptation.target_scale_detail_correlation,
+                static_target_scale_detail_correlation: static_adaptation
+                    .target_scale_detail_correlation,
+                target_scale_detail_correlation_gain_vs_static: adaptation
+                    .target_scale_detail_correlation
+                    - static_adaptation.target_scale_detail_correlation,
+                fine_to_coarse_target_detail_ratio: adaptation.fine_to_coarse_target_detail_ratio,
+                static_fine_to_coarse_target_detail_ratio: static_adaptation
+                    .fine_to_coarse_target_detail_ratio,
+                coarse_constant_region_fraction: adaptation.coarse_constant_region_fraction,
+                static_coarse_constant_region_fraction: static_adaptation
+                    .coarse_constant_region_fraction,
                 material_scale_ratio: adaptation.material_scale_ratio,
                 occupied_material_scale_bins: adaptation.occupied_material_scale_bins,
                 fractional_material_scale_fraction: adaptation.fractional_material_scale_fraction,
@@ -1161,6 +1229,31 @@ fn summarize_validation(
             .iter()
             .map(|row| row.scale_detail_correlation_gain_vs_static)
             .fold(f32::INFINITY, f32::min),
+        mean_target_scale_detail_correlation_gain_vs_static: adaptive_resolution_rows
+            .iter()
+            .map(|row| row.target_scale_detail_correlation_gain_vs_static)
+            .sum::<f32>()
+            / adaptive_resolution_count.max(1) as f32,
+        worst_target_scale_detail_correlation_gain_vs_static: adaptive_resolution_rows
+            .iter()
+            .map(|row| row.target_scale_detail_correlation_gain_vs_static)
+            .fold(f32::INFINITY, f32::min),
+        mean_coarse_constant_region_fraction: adaptive_resolution_rows
+            .iter()
+            .map(|row| row.coarse_constant_region_fraction)
+            .sum::<f32>()
+            / adaptive_resolution_count.max(1) as f32,
+        worst_coarse_constant_region_fraction: adaptive_resolution_rows
+            .iter()
+            .map(|row| row.coarse_constant_region_fraction)
+            .fold(f32::INFINITY, f32::min),
+        mean_coarse_constant_region_fraction_gain_vs_static: adaptive_resolution_rows
+            .iter()
+            .map(|row| {
+                row.coarse_constant_region_fraction - row.static_coarse_constant_region_fraction
+            })
+            .sum::<f32>()
+            / adaptive_resolution_count.max(1) as f32,
         mean_static_graded_psnr_gain_db: adaptive_resolution_rows
             .iter()
             .map(|row| row.adaptive_static_graded_gap_db)
@@ -1190,6 +1283,14 @@ fn summarize_validation(
             row.scale_detail_correlation_gain_vs_static,
             row.fine_to_coarse_detail_ratio,
             row.static_fine_to_coarse_detail_ratio,
+            row.initial_target_scale_detail_correlation,
+            row.target_scale_detail_correlation,
+            row.static_target_scale_detail_correlation,
+            row.target_scale_detail_correlation_gain_vs_static,
+            row.fine_to_coarse_target_detail_ratio,
+            row.static_fine_to_coarse_target_detail_ratio,
+            row.coarse_constant_region_fraction,
+            row.static_coarse_constant_region_fraction,
             row.material_scale_ratio,
             row.fractional_material_scale_fraction,
             row.material_relative_error,
@@ -1474,6 +1575,42 @@ fn summarize_validation(
                 config.min_worst_scale_detail_correlation_gain_vs_static,
             ));
         }
+        if adaptive_resolution.mean_target_scale_detail_correlation_gain_vs_static
+            < config.min_mean_target_scale_detail_correlation_gain_vs_static
+        {
+            failures.push(format!(
+                "mean target-space scale/detail correlation gain {:.3} < {:.3}",
+                adaptive_resolution.mean_target_scale_detail_correlation_gain_vs_static,
+                config.min_mean_target_scale_detail_correlation_gain_vs_static,
+            ));
+        }
+        if adaptive_resolution.worst_target_scale_detail_correlation_gain_vs_static
+            < config.min_worst_target_scale_detail_correlation_gain_vs_static
+        {
+            failures.push(format!(
+                "worst target-space scale/detail correlation gain {:.3} < {:.3}",
+                adaptive_resolution.worst_target_scale_detail_correlation_gain_vs_static,
+                config.min_worst_target_scale_detail_correlation_gain_vs_static,
+            ));
+        }
+        if adaptive_resolution.mean_coarse_constant_region_fraction
+            < config.min_mean_coarse_constant_region_fraction
+        {
+            failures.push(format!(
+                "mean coarse constant-region fraction {:.3} < {:.3}",
+                adaptive_resolution.mean_coarse_constant_region_fraction,
+                config.min_mean_coarse_constant_region_fraction,
+            ));
+        }
+        if adaptive_resolution.worst_coarse_constant_region_fraction
+            < config.min_worst_coarse_constant_region_fraction
+        {
+            failures.push(format!(
+                "worst coarse constant-region fraction {:.3} < {:.3}",
+                adaptive_resolution.worst_coarse_constant_region_fraction,
+                config.min_worst_coarse_constant_region_fraction,
+            ));
+        }
         if adaptive_resolution.mean_static_graded_psnr_gain_db
             < config.min_mean_static_graded_psnr_gain_db
         {
@@ -1537,10 +1674,118 @@ fn summarize_validation(
 }
 
 #[cfg(feature = "gpu_wgpu")]
+#[derive(Clone, Debug)]
+struct TargetDetailField {
+    width: usize,
+    height: usize,
+    foreground: Vec<bool>,
+    detail: Vec<f32>,
+    aabb: [f32; 4],
+}
+
+#[cfg(feature = "gpu_wgpu")]
+impl TargetDetailField {
+    fn from_target(target: &crate::TargetImage2d) -> crate::AutomataResult<Self> {
+        let width = target.source_width;
+        let height = target.source_height;
+        if width == 0 || height == 0 || target.positions.len() != target.colors.len() {
+            return Err(crate::AutomataError::InvalidArgument(
+                "adaptive target-detail validation requires a shaped TargetImage2d".to_owned(),
+            ));
+        }
+        let mut foreground = vec![false; width * height];
+        let mut rgba = vec![[0.0_f32; 4]; width * height];
+        let mut field = Self {
+            width,
+            height,
+            foreground: Vec::new(),
+            detail: Vec::new(),
+            aabb: target.aabb,
+        };
+        for (position, color) in target.positions.iter().zip(&target.colors) {
+            let Some(index) = field.pixel_index(*position) else {
+                return Err(crate::AutomataError::InvalidArgument(
+                    "adaptive target point lies outside its source raster".to_owned(),
+                ));
+            };
+            foreground[index] = true;
+            rgba[index] = [color[0], color[1], color[2], 1.0];
+        }
+
+        let mut detail = vec![0.0_f32; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let center = rgba[y * width + x];
+                let mut maximum = 0.0_f32;
+                for offset_y in -1_isize..=1 {
+                    for offset_x in -1_isize..=1 {
+                        if offset_x == 0 && offset_y == 0 {
+                            continue;
+                        }
+                        let neighbor_x = x.checked_add_signed(offset_x);
+                        let neighbor_y = y.checked_add_signed(offset_y);
+                        let neighbor = match (neighbor_x, neighbor_y) {
+                            (Some(nx), Some(ny)) if nx < width && ny < height => {
+                                rgba[ny * width + nx]
+                            }
+                            _ => [0.0; 4],
+                        };
+                        let difference = center
+                            .iter()
+                            .zip(neighbor)
+                            .map(|(lhs, rhs)| (lhs - rhs).powi(2))
+                            .sum::<f32>()
+                            .sqrt();
+                        maximum = maximum.max(difference);
+                    }
+                }
+                detail[y * width + x] = maximum;
+            }
+        }
+        let maximum = detail.iter().copied().fold(0.0_f32, f32::max);
+        if maximum > 0.0 {
+            detail.iter_mut().for_each(|value| *value /= maximum);
+        }
+        field.foreground = foreground;
+        field.detail = detail;
+        Ok(field)
+    }
+
+    fn pixel_index(&self, position: [f32; 2]) -> Option<usize> {
+        let [min_x, max_x, min_y, max_y] = self.aabb;
+        if position[0] < min_x || position[0] > max_x || position[1] < min_y || position[1] > max_y
+        {
+            return None;
+        }
+        let x = (((position[0] - min_x) / (max_x - min_x)) * self.width as f32)
+            .floor()
+            .clamp(0.0, self.width.saturating_sub(1) as f32) as usize;
+        let y = (((max_y - position[1]) / (max_y - min_y)) * self.height as f32)
+            .floor()
+            .clamp(0.0, self.height.saturating_sub(1) as f32) as usize;
+        Some(y * self.width + x)
+    }
+
+    fn sample_risk(&self, position: [f32; 2]) -> (f32, bool) {
+        let Some(index) = self.pixel_index(position) else {
+            return (1.0, false);
+        };
+        if !self.foreground[index] {
+            return (1.0, false);
+        }
+        let detail = self.detail[index];
+        (detail.max(1.0e-3), detail <= 0.08)
+    }
+}
+
+#[cfg(feature = "gpu_wgpu")]
 #[derive(Clone, Copy, Debug)]
 struct AdaptationDiagnostics {
     scale_detail_correlation: f32,
     fine_to_coarse_detail_ratio: f32,
+    target_scale_detail_correlation: f32,
+    fine_to_coarse_target_detail_ratio: f32,
+    coarse_constant_region_fraction: f32,
     material_scale_ratio: f32,
     occupied_material_scale_bins: usize,
     fractional_material_scale_fraction: f32,
@@ -1551,6 +1796,7 @@ fn adaptation_diagnostics(
     model: &super::AdaptiveNpaModel,
     particles: &super::AdaptiveParticleSet,
     fine_measure: f32,
+    target_detail: &TargetDetailField,
 ) -> crate::AutomataResult<AdaptationDiagnostics> {
     use std::collections::BTreeSet;
 
@@ -1569,12 +1815,25 @@ fn adaptation_diagnostics(
         .map(|value| value.max(f32::MIN_POSITIVE).ln())
         .collect::<Vec<_>>();
     let scale_detail_correlation = pearson_correlation(&log_fineness, &log_detail);
+    let target_risk = particles
+        .positions
+        .iter()
+        .map(|position| target_detail.sample_risk([position[0], position[1]]))
+        .collect::<Vec<_>>();
+    let log_target_risk = target_risk
+        .iter()
+        .map(|(risk, _)| risk.max(f32::MIN_POSITIVE).ln())
+        .collect::<Vec<_>>();
+    let target_scale_detail_correlation = pearson_correlation(&log_fineness, &log_target_risk);
 
     let tolerance = 2.0e-4 * mean_measure;
     let mut fine_detail = 0.0_f64;
     let mut fine_count = 0usize;
     let mut coarse_detail = 0.0_f64;
     let mut coarse_count = 0usize;
+    let mut fine_target_detail = 0.0_f64;
+    let mut coarse_target_detail = 0.0_f64;
+    let mut coarse_constant_count = 0usize;
     let mut min_footprint = f32::INFINITY;
     let mut max_footprint = 0.0_f32;
     let fine_footprint = super::material_footprint_radius(fine_measure.max(f32::MIN_POSITIVE), 2);
@@ -1583,9 +1842,12 @@ fn adaptation_diagnostics(
     for (row, measure) in particles.represented_measure.iter().copied().enumerate() {
         if measure + tolerance < mean_measure {
             fine_detail += f64::from(detail[row]);
+            fine_target_detail += f64::from(target_risk[row].0);
             fine_count += 1;
         } else if measure > mean_measure + tolerance {
             coarse_detail += f64::from(detail[row]);
+            coarse_target_detail += f64::from(target_risk[row].0);
+            coarse_constant_count += usize::from(target_risk[row].1);
             coarse_count += 1;
         }
         let footprint = super::material_footprint_radius(measure, 2);
@@ -1599,6 +1861,8 @@ fn adaptation_diagnostics(
     }
     let fine_mean = fine_detail / fine_count.max(1) as f64;
     let coarse_mean = coarse_detail / coarse_count.max(1) as f64;
+    let fine_target_mean = fine_target_detail / fine_count.max(1) as f64;
+    let coarse_target_mean = coarse_target_detail / coarse_count.max(1) as f64;
     Ok(AdaptationDiagnostics {
         scale_detail_correlation,
         fine_to_coarse_detail_ratio: if fine_count == 0 || coarse_count == 0 {
@@ -1606,6 +1870,13 @@ fn adaptation_diagnostics(
         } else {
             (fine_mean / coarse_mean.max(f64::MIN_POSITIVE)) as f32
         },
+        target_scale_detail_correlation,
+        fine_to_coarse_target_detail_ratio: if fine_count == 0 || coarse_count == 0 {
+            1.0
+        } else {
+            (fine_target_mean / coarse_target_mean.max(f64::MIN_POSITIVE)) as f32
+        },
+        coarse_constant_region_fraction: coarse_constant_count as f32 / coarse_count.max(1) as f32,
         material_scale_ratio: max_footprint / min_footprint.max(f32::MIN_POSITIVE),
         occupied_material_scale_bins: scale_bins.len(),
         fractional_material_scale_fraction: fractional_scales as f32
@@ -1730,6 +2001,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn target_detail_field_separates_constant_fill_from_boundaries() {
+        let rgba = (0..25)
+            .flat_map(|_| [0.25, 0.5, 0.75, 1.0])
+            .collect::<Vec<_>>();
+        let target = crate::TargetImage2d::from_rgba_pixels(
+            5,
+            5,
+            &rgba,
+            crate::TargetImage2dExtractConfig::default(),
+        )
+        .unwrap();
+        let field = TargetDetailField::from_target(&target).unwrap();
+
+        let (center_risk, center_constant) = field.sample_risk([0.0, 0.0]);
+        let (edge_risk, edge_constant) = field.sample_risk([-0.99, 0.99]);
+
+        assert!(center_constant);
+        assert!(!edge_constant);
+        assert!(edge_risk > 100.0 * center_risk);
+    }
+
+    #[test]
     fn compact_recurrent_memory_is_removed_from_oracle_seed_state_only() {
         let base = crate::NpaModel::upstream_seeded(crate::NpaConfig::growing_2d(), 7);
         let mut model = super::super::AdaptiveNpaModel::seeded(
@@ -1779,6 +2072,14 @@ mod tests {
             scale_detail_correlation_gain_vs_static: 0.1,
             fine_to_coarse_detail_ratio: 1.1,
             static_fine_to_coarse_detail_ratio: 1.0,
+            initial_target_scale_detail_correlation: 0.0,
+            target_scale_detail_correlation: 0.1,
+            static_target_scale_detail_correlation: 0.0,
+            target_scale_detail_correlation_gain_vs_static: 0.1,
+            fine_to_coarse_target_detail_ratio: 1.1,
+            static_fine_to_coarse_target_detail_ratio: 1.0,
+            coarse_constant_region_fraction: 0.5,
+            static_coarse_constant_region_fraction: 0.4,
             material_scale_ratio: 1.2,
             occupied_material_scale_bins: 8,
             fractional_material_scale_fraction: 1.0,

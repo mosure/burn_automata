@@ -83,7 +83,7 @@ fn wgpu_state_pca_is_orthonormal_and_writes_finite_varied_rgb()
     );
     let mut component_variance = [0.0; 3];
     for particle in 0..particles {
-        for component in 0..3 {
+        for (component, variance) in component_variance.iter_mut().enumerate() {
             let projection = (0..model.config.state_dims)
                 .map(|feature| {
                     let centered = states[particle * model.config.state_dims + feature]
@@ -91,7 +91,7 @@ fn wgpu_state_pca_is_orthonormal_and_writes_finite_varied_rgb()
                     centered * snapshot.components[feature * 3 + component]
                 })
                 .sum::<f32>();
-            component_variance[component] += projection * projection / particles as f32;
+            *variance += projection * projection / particles as f32;
         }
     }
     assert!(

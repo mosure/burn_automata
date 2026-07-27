@@ -1590,6 +1590,31 @@ fn output_material_opacity_logit(index: u32) -> f32 {
     return output_state_channel(index, 3u);
 }
 
+fn position_conditioned_3d_maturity_gate(index: u32) -> f32 {
+    if (spatial_dims() == 3u && has_position_features() && state_dims() > 7u) {
+        let row = index * state_dims();
+        return clamp((4.0 - states.values[row + 3u]) * 2.0, 0.0, 1.0);
+    }
+    return 1.0;
+}
+
+fn position_conditioned_3d_motion_gate(
+    index: u32,
+    _signed_distance_update: f32,
+    state_gate: f32,
+) -> f32 {
+    if (spatial_dims() == 3u && has_position_features() && state_dims() > 7u) {
+        if (positions.values[index * 4u + 3u] >= 0.5) {
+            return 0.0;
+        }
+        let row = index * state_dims();
+        let distance_gate =
+            clamp((abs(states.values[row + 7u]) - 0.01) / 0.02, 0.0, 1.0);
+        return state_gate * distance_gate;
+    }
+    return 1.0;
+}
+
 @compute @workgroup_size(128)
 fn clear_grid_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
@@ -4148,6 +4173,14 @@ fn finish_update_particle_cooperative(local_id: u32, idx: u32, mask: f32, pi: ve
     workgroupBarrier();
 
     if (local_id == 0u) {
+        let state_gate = position_conditioned_3d_maturity_gate(idx);
+        let motion_gate = position_conditioned_3d_motion_gate(
+            idx,
+            coop_update_values[dim + 7u],
+            state_gate,
+        );
+        let state_mask = mask * state_gate;
+        let motion_mask = mask * motion_gate;
         var update_norm = 0.0;
         for (var axis = 0u; axis < dim; axis = axis + 1u) {
             update_norm = update_norm + coop_update_values[axis] * coop_update_values[axis];
@@ -4157,7 +4190,7 @@ fn finish_update_particle_cooperative(local_id: u32, idx: u32, mask: f32, pi: ve
             var value = positions.values[position_base + axis];
             if (axis < dim) {
                 value = value
-                    + mask * dt() * alpha() * coop_update_values[axis] * particle_motion_eps(idx)
+                    + motion_mask * dt() * alpha() * coop_update_values[axis] * particle_motion_eps(idx)
                         / (1.0 + update_norm);
                 value = wrap_axis(value, axis);
             }
@@ -4167,7 +4200,8 @@ fn finish_update_particle_cooperative(local_id: u32, idx: u32, mask: f32, pi: ve
         let update_state_base = dim;
         for (var c = 0u; c < sd; c = c + 1u) {
             var next_state =
-                states.values[state_base + c] + mask * dt() * coop_update_values[update_state_base + c];
+                states.values[state_base + c]
+                    + state_mask * dt() * coop_update_values[update_state_base + c];
             if (dim == 3u && sd > 3u && (c == 3u || (sd > 8u && c == 8u))) {
                 next_state = clamp(
                     next_state,
@@ -4658,6 +4692,14 @@ fn finish_update_particle(
         update[o] = adaptive_combined_update_value(idx, o, sum);
     }
 
+    let state_gate = position_conditioned_3d_maturity_gate(idx);
+    let motion_gate = position_conditioned_3d_motion_gate(
+        idx,
+        update[dim + 7u],
+        state_gate,
+    );
+    let state_mask = mask * state_gate;
+    let motion_mask = mask * motion_gate;
     var update_norm = 0.0;
     for (var axis = 0u; axis < dim; axis = axis + 1u) {
         update_norm = update_norm + update[axis] * update[axis];
@@ -4667,7 +4709,7 @@ fn finish_update_particle(
         var value = positions.values[position_base + axis];
         if (axis < dim) {
             value = value
-                + mask * dt() * alpha() * update[axis] * particle_motion_eps(idx)
+                + motion_mask * dt() * alpha() * update[axis] * particle_motion_eps(idx)
                     / (1.0 + update_norm);
             value = wrap_axis(value, axis);
         }
@@ -4677,7 +4719,8 @@ fn finish_update_particle(
     let update_state_base = dim;
     for (var c = 0u; c < sd; c = c + 1u) {
         var next_state =
-            states.values[state_base + c] + mask * dt() * update[update_state_base + c];
+            states.values[state_base + c]
+                + state_mask * dt() * update[update_state_base + c];
         if (dim == 3u && sd > 3u && (c == 3u || (sd > 8u && c == 8u))) {
             next_state = clamp(
                 next_state,
@@ -4953,7 +4996,43 @@ fn write_gaussian_geometry_from_output(idx: u32) {
         vec4<f32>(1.0, 0.0, 0.0, 0.0),
         1.0,
     );
-    if (material_enabled()) {
+    if (spatial_dims() == 3u && has_position_features() && state_dims() >= 9u) {
+        let normal = vec3<f32>(
+            output_state_channel(idx, 4u),
+            output_state_channel(idx, 5u),
+            output_state_channel(idx, 6u),
+        );
+        let normal_norm = length(normal);
+        var unit_normal = vec3<f32>(0.0, 0.0, 1.0);
+        if (normal_norm > 1.0e-6 && normal_norm < 1.0e20) {
+            unit_normal = normal / normal_norm;
+        }
+        var rotation = vec4<f32>(
+            1.0 + unit_normal.z,
+            -unit_normal.y,
+            unit_normal.x,
+            0.0,
+        );
+        if (unit_normal.z <= -0.999999) {
+            rotation = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+        } else {
+            rotation = normalize(rotation);
+        }
+        let density_scale = clamp(
+            sqrt(4096.0 / max(f32(particle_count()), 1.0)),
+            0.4,
+            2.0,
+        );
+        let tangent = max(
+            clamp(eps() * 0.32 * density_scale, eps() * 0.08, eps() * 0.64),
+            0.00008,
+        );
+        material_geometry = MaterialGaussianGeometry(
+            vec3<f32>(tangent, tangent, max(tangent * 0.18, 0.00008)),
+            rotation,
+            1.0,
+        );
+    } else if (material_enabled()) {
         material_geometry = material_gaussian_geometry(idx);
     }
     gaussian_rotation.values[base4] = material_geometry.rotation.x;

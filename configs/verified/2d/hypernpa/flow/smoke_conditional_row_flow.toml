@@ -36,6 +36,7 @@ example_batch_size = 2
 credit_assignment = "full-bptt"
 task_loss_weight = 0.0
 flow_matching_weight = 1.0
+flow_match_inference_source = true
 max_full_bptt_particle_steps = 1024
 use_particle_pool = false
 target2d_loss_backend = "tiled-adjoint"

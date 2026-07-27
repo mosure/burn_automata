@@ -25,6 +25,48 @@ pub struct BpkModelManifest {
     pub config: NpaConfig,
     pub hashgrid: HashGridConfig,
     pub weights: NpaWeights,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initialization: Option<NpaParticleInitialization>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NpaParticleInitialization {
+    pub positions: Vec<[f32; 4]>,
+    pub states: Vec<f32>,
+}
+
+impl NpaParticleInitialization {
+    pub fn validate(&self, config: &NpaConfig) -> AutomataResult<()> {
+        if self.positions.is_empty() {
+            return Err(AutomataError::InvalidModel(
+                "particle initialization cannot be empty".to_string(),
+            ));
+        }
+        if self.states.len() != self.positions.len() * config.state_dims {
+            return Err(AutomataError::InvalidModel(format!(
+                "particle initialization has {} state values; expected {} positions * {} state dims",
+                self.states.len(),
+                self.positions.len(),
+                config.state_dims
+            )));
+        }
+        if self
+            .positions
+            .iter()
+            .flat_map(|position| position.iter())
+            .chain(self.states.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err(AutomataError::InvalidModel(
+                "particle initialization contains non-finite values".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn particle_count(&self) -> usize {
+        self.positions.len()
+    }
 }
 
 impl BpkModelManifest {
@@ -36,7 +78,17 @@ impl BpkModelManifest {
             config: model.config.clone(),
             hashgrid,
             weights: model.weights.clone(),
+            initialization: None,
         }
+    }
+
+    pub fn with_initialization(
+        mut self,
+        initialization: NpaParticleInitialization,
+    ) -> AutomataResult<Self> {
+        initialization.validate(&self.config)?;
+        self.initialization = Some(initialization);
+        Ok(self)
     }
 
     pub fn into_model(self) -> NpaModel {
@@ -115,7 +167,7 @@ impl BpkAdapterManifest {
             weights: base_manifest.weights.clone(),
         };
         let materialized = self.adapter.apply_to_model(&base_model)?;
-        Ok(BpkModelManifest::from_model(
+        let mut manifest = BpkModelManifest::from_model(
             &materialized,
             base_manifest.hashgrid.clone(),
             self.source.clone().or_else(|| {
@@ -124,7 +176,9 @@ impl BpkAdapterManifest {
                     .as_ref()
                     .map(|source| format!("materialized-adapter:{source}"))
             }),
-        ))
+        );
+        manifest.initialization = base_manifest.initialization.clone();
+        Ok(manifest)
     }
 
     pub fn adapter_parameter_count(&self) -> usize {
@@ -330,7 +384,9 @@ pub fn load_manifest_bytes(bytes: &[u8]) -> AutomataResult<BpkModelManifest> {
     if bytes.starts_with(&BPK_MAGIC) {
         return decode_bpk_manifest(bytes);
     }
-    Ok(serde_json::from_slice(bytes)?)
+    let manifest: BpkModelManifest = serde_json::from_slice(bytes)?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 pub fn save_manifest(
@@ -338,6 +394,7 @@ pub fn save_manifest(
     manifest: &BpkModelManifest,
 ) -> AutomataResult<Option<String>> {
     let path = path.as_ref();
+    validate_manifest(manifest)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -385,6 +442,7 @@ pub fn parameter_count(manifest: &BpkModelManifest) -> usize {
 }
 
 pub fn encode_bpk_manifest(manifest: &BpkModelManifest) -> AutomataResult<Vec<u8>> {
+    validate_manifest(manifest)?;
     let payload = serde_json::to_vec(manifest)?;
     let digest = Sha256::digest(&payload);
     let payload_len = u64::try_from(payload.len()).map_err(|_| {
@@ -435,8 +493,16 @@ pub fn decode_bpk_manifest(bytes: &[u8]) -> AutomataResult<BpkModelManifest> {
         ));
     }
     let manifest: BpkModelManifest = serde_json::from_slice(payload)?;
-    manifest.clone().into_model().validate()?;
+    validate_manifest(&manifest)?;
     Ok(manifest)
+}
+
+fn validate_manifest(manifest: &BpkModelManifest) -> AutomataResult<()> {
+    manifest.clone().into_model().validate()?;
+    if let Some(initialization) = manifest.initialization.as_ref() {
+        initialization.validate(&manifest.config)?;
+    }
+    Ok(())
 }
 
 pub fn bpk_payload_sha256(bytes: &[u8]) -> AutomataResult<String> {
@@ -449,6 +515,7 @@ pub fn bpk_payload_sha256(bytes: &[u8]) -> AutomataResult<String> {
 }
 
 fn payload_hash(manifest: &BpkModelManifest) -> AutomataResult<[u8; 32]> {
+    validate_manifest(manifest)?;
     let payload = serde_json::to_vec(manifest)?;
     Ok(Sha256::digest(payload).into())
 }

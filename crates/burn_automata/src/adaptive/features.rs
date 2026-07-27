@@ -433,7 +433,10 @@ pub(crate) fn local_detail_risk(
     particles: &AdaptiveParticleSet,
     perception: &AdaptivePerceptionOutput,
 ) -> Vec<f32> {
-    let state_detail = state_variation(particles, perception);
+    let color_start = particles.state_dims.saturating_sub(3);
+    let latent_detail = state_gradient_variation(particles, perception, 0, color_start);
+    let color_detail =
+        state_gradient_variation(particles, perception, color_start, particles.state_dims);
     let occupancy_detail = perception
         .occupancy_gradient
         .chunks_exact(particles.spatial_dims)
@@ -445,13 +448,39 @@ pub(crate) fn local_detail_risk(
                 .sqrt()
         })
         .collect::<Vec<_>>();
-    let state_mean = mean(&state_detail).max(1.0e-6);
+    let latent_mean = mean(&latent_detail).max(1.0e-6);
+    let color_mean = mean(&color_detail).max(1.0e-6);
     let occupancy_mean = mean(&occupancy_detail).max(1.0e-6);
-    state_detail
+    latent_detail
         .into_iter()
+        .zip(color_detail)
         .zip(occupancy_detail)
-        .map(|(state, occupancy)| {
-            (0.25 * state / state_mean + occupancy / occupancy_mean).max(1.0e-6)
+        .map(|((latent, color), occupancy)| {
+            (0.10 * latent / latent_mean + color / color_mean + occupancy / occupancy_mean)
+                .max(1.0e-6)
+        })
+        .collect()
+}
+
+fn state_gradient_variation(
+    particles: &AdaptiveParticleSet,
+    perception: &AdaptivePerceptionOutput,
+    channel_start: usize,
+    channel_end: usize,
+) -> Vec<f32> {
+    let channel_start = channel_start.min(particles.state_dims);
+    let channel_end = channel_end.clamp(channel_start, particles.state_dims);
+    (0..particles.len())
+        .map(|row| {
+            let gradient_base = row * particles.state_dims * particles.spatial_dims;
+            (channel_start..channel_end)
+                .flat_map(|channel| {
+                    let start = gradient_base + channel * particles.spatial_dims;
+                    perception.state_gradient[start..start + particles.spatial_dims].iter()
+                })
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt()
         })
         .collect()
 }
@@ -523,6 +552,7 @@ mod tests {
         adaptive::{AdaptiveLocalRuleSemantics, perception::rule_perception_pair},
         rollout::seed_particles_scaled,
     };
+    use burn_automata_kernels::AdaptiveGraphMetrics;
 
     #[test]
     fn local_rule_training_contract_selects_the_deployed_stream_and_gate() {
@@ -564,6 +594,43 @@ mod tests {
         assert_eq!(
             local_residual_gate(&config, &particles, selected, 0),
             config.residual_gate(particles.footprint(0)).max(0.0),
+        );
+    }
+
+    #[test]
+    fn local_detail_prioritizes_visible_color_over_latent_noise() {
+        let particles = AdaptiveParticleSet::from_equal_measure(
+            vec![[0.0; 4], [0.0; 4]],
+            vec![0.0; 8],
+            2,
+            4,
+            1.0,
+            0.1,
+        )
+        .unwrap();
+        let mut state_gradient = vec![0.0; 2 * 4 * 2];
+        state_gradient[0] = 10.0;
+        state_gradient[2 * 4 + 2] = 1.0;
+        let perception = AdaptivePerceptionOutput {
+            features: Vec::new(),
+            normalized_state: vec![0.0; 8],
+            state_gradient,
+            occupancy_gradient: vec![0.0; 4],
+            partition: vec![1.0; 2],
+            coarse_exposure: vec![0.0; 2],
+            observed_spacing: vec![0.1; 2],
+            moment_condition: vec![1.0; 2],
+            moment_fallback: vec![false; 2],
+            accepted_degree: vec![1; 2],
+            graph: AdaptiveGraphMetrics::default(),
+            feature_dims: 0,
+        };
+
+        let detail = local_detail_risk(&particles, &perception);
+
+        assert!(
+            detail[1] > 5.0 * detail[0],
+            "visible color detail should dominate unrelated latent variation: {detail:?}"
         );
     }
 }

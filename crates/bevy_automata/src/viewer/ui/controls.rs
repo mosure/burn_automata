@@ -52,7 +52,28 @@ pub(in crate::viewer) fn reset_button() -> impl Scene {
     }
 }
 
-#[cfg(feature = "hyper_dino")]
+#[cfg(all(feature = "hyper_dino", feature = "mesh_training"))]
+pub(in crate::viewer) fn train_button() -> impl Scene {
+    bsn! {
+        control_button("train", RunControlKind::Train)
+        on(|_event: On<Pointer<Press>>,
+            image_state: Res<ImageTargetTrainingState>,
+            mesh_state: Res<MeshTargetTrainingState>,
+            inference: Res<HyperNpaInferenceState>,
+            mut image_training: MessageWriter<ToggleImageTargetTraining>,
+            mut mesh_training: MessageWriter<ToggleMeshTargetTraining>| {
+            if mesh_state.has_target() {
+                if mesh_state.train_action_available() {
+                    mesh_training.write(ToggleMeshTargetTraining);
+                }
+            } else if image_state.train_action_available() && inference.pending == 0 {
+                image_training.write(ToggleImageTargetTraining);
+            }
+        })
+    }
+}
+
+#[cfg(all(feature = "hyper_dino", not(feature = "mesh_training")))]
 pub(in crate::viewer) fn train_button() -> impl Scene {
     bsn! {
         control_button("train", RunControlKind::Train)
@@ -67,7 +88,21 @@ pub(in crate::viewer) fn train_button() -> impl Scene {
     }
 }
 
-#[cfg(not(feature = "hyper_dino"))]
+#[cfg(all(not(feature = "hyper_dino"), feature = "mesh_training"))]
+pub(in crate::viewer) fn train_button() -> impl Scene {
+    bsn! {
+        control_button("train 3d", RunControlKind::Train)
+        on(|_event: On<Pointer<Press>>,
+            state: Res<MeshTargetTrainingState>,
+            mut training: MessageWriter<ToggleMeshTargetTraining>| {
+            if state.train_action_available() {
+                training.write(ToggleMeshTargetTraining);
+            }
+        })
+    }
+}
+
+#[cfg(not(any(feature = "hyper_dino", feature = "mesh_training")))]
 pub(in crate::viewer) fn train_button() -> impl Scene {
     bsn! {
         control_button("train", RunControlKind::Train)
@@ -105,7 +140,7 @@ pub(in crate::viewer) fn train_button() -> impl Scene {
     }
 }
 
-#[cfg(feature = "hyper_dino")]
+#[cfg(any(feature = "hyper_dino", feature = "mesh_training"))]
 pub(in crate::viewer) fn run_train_button() -> impl Scene {
     bsn! {
         Node {
@@ -114,7 +149,7 @@ pub(in crate::viewer) fn run_train_button() -> impl Scene {
     }
 }
 
-#[cfg(not(feature = "hyper_dino"))]
+#[cfg(not(any(feature = "hyper_dino", feature = "mesh_training")))]
 pub(in crate::viewer) fn run_train_button() -> impl Scene {
     train_button()
 }
@@ -145,6 +180,36 @@ pub(in crate::viewer) fn hyper_image_button() -> impl Scene {
             Text("open image")
             template_value(ModelCatalogTextSize(12.0))
             TextColor(Color::srgb(0.86, 0.92, 0.90))
+        )]
+    }
+}
+
+#[cfg(feature = "mesh_training")]
+pub(in crate::viewer) fn mesh_open_button() -> impl Scene {
+    bsn! {
+        Button
+        Node {
+            width: px(112),
+            flex_grow: 1.0,
+            max_width: percent(49),
+            height: px(30),
+            border: px(1),
+            padding: UiRect::horizontal(px(10)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        template_value(MeshOpenButton)
+        template_value(Hovered::default())
+        BorderColor::from(Color::srgb(0.25, 0.30, 0.34))
+        BackgroundColor(Color::srgb(0.10, 0.12, 0.14))
+        on(|mut event: On<Pointer<Press>>, mut requests: MessageWriter<OpenNpaMesh>| {
+            event.trigger_mut().propagate = false;
+            requests.write(OpenNpaMesh);
+        })
+        Children [(
+            Text("open mesh")
+            template_value(ModelCatalogTextSize(12.0))
+            TextColor(Color::srgb(0.86, 0.91, 0.94))
         )]
     }
 }
@@ -185,7 +250,44 @@ pub(in crate::viewer) fn hyper_inference_button() -> impl Scene {
     }
 }
 
-#[cfg(feature = "hyper_dino")]
+#[cfg(all(feature = "hyper_dino", feature = "mesh_training"))]
+pub(in crate::viewer) fn image_training_actions_row() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6),
+        }
+        Children [
+            (
+                Node {
+                    width: percent(100),
+                    flex_direction: FlexDirection::Row,
+                    column_gap: px(6),
+                    align_items: AlignItems::Center,
+                }
+                Children [
+                    hyper_image_button(),
+                    mesh_open_button(),
+                ]
+            ),
+            (
+                Node {
+                    width: percent(100),
+                    flex_direction: FlexDirection::Row,
+                    column_gap: px(6),
+                    align_items: AlignItems::Center,
+                }
+                Children [
+                    hyper_inference_button(),
+                    train_button(),
+                ]
+            ),
+        ]
+    }
+}
+
+#[cfg(all(feature = "hyper_dino", not(feature = "mesh_training")))]
 pub(in crate::viewer) fn image_training_actions_row() -> impl Scene {
     bsn! {
         Node {
@@ -296,7 +398,23 @@ pub(in crate::viewer) fn adaptive_training_toggle() -> impl Scene {
     }
 }
 
-#[cfg(not(feature = "hyper_dino"))]
+#[cfg(all(not(feature = "hyper_dino"), feature = "mesh_training"))]
+pub(in crate::viewer) fn image_training_actions_row() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(6),
+            align_items: AlignItems::Center,
+        }
+        Children [
+            mesh_open_button(),
+            train_button(),
+        ]
+    }
+}
+
+#[cfg(not(any(feature = "hyper_dino", feature = "mesh_training")))]
 pub(in crate::viewer) fn image_training_actions_row() -> impl Scene {
     bsn! {
         Node {
@@ -355,6 +473,45 @@ pub(in crate::viewer) fn image_target_summary() -> impl Scene {
                 ]
             ),
         ]
+    }
+}
+
+#[cfg(feature = "mesh_training")]
+pub(in crate::viewer) fn mesh_target_summary() -> impl Scene {
+    bsn! {
+        Node {
+            width: percent(100),
+            min_height: px(44),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            justify_content: JustifyContent::Center,
+            padding: UiRect::horizontal(px(4)),
+        }
+        Visibility::Hidden
+        MeshTargetSummary
+        Children [
+            (
+                Text("")
+                template_value(ModelCatalogTextSize(12.0))
+                TextColor(Color::srgb(0.86, 0.92, 0.90))
+                MeshTargetName
+            ),
+            (
+                Text("")
+                template_value(ModelCatalogTextSize(10.0))
+                TextColor(Color::srgb(0.53, 0.66, 0.64))
+                MeshTargetProgress
+            ),
+        ]
+    }
+}
+
+#[cfg(not(feature = "mesh_training"))]
+pub(in crate::viewer) fn mesh_target_summary() -> impl Scene {
+    bsn! {
+        Node {
+            display: Display::None,
+        }
     }
 }
 

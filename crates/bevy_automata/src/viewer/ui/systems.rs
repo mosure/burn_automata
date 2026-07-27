@@ -20,6 +20,73 @@ pub(in crate::viewer) fn toggle_ui_visibility(
     }
 }
 
+pub(in crate::viewer) fn sync_responsive_ui_layout(
+    ui_state: Res<AutomataUiState>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut panels: Query<&mut Node, With<AutomataUiPanel>>,
+    mut toggle_buttons: Query<&mut Node, (With<AutomataUiToggleButton>, Without<AutomataUiPanel>)>,
+    mut toggle_labels: Query<&mut Text, With<AutomataUiToggleButtonLabel>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let layout = automata_ui_layout_metrics(window.size());
+    for mut node in &mut panels {
+        node.position_type = PositionType::Absolute;
+        node.left = px(0);
+        node.right = Val::Auto;
+        if layout.mobile {
+            node.top = Val::Auto;
+            node.bottom = px(0);
+            node.width = percent(100);
+            node.height = px(layout.panel_height);
+            node.padding = UiRect::all(px(10));
+            node.row_gap = px(6);
+            node.scrollbar_width = 6.0;
+        } else {
+            node.top = px(0);
+            node.bottom = Val::Auto;
+            node.width = px(layout.panel_width);
+            node.height = percent(100);
+            node.padding = UiRect::all(px(14));
+            node.row_gap = px(8);
+            node.scrollbar_width = 8.0;
+        }
+    }
+    for mut node in &mut toggle_buttons {
+        node.display = if layout.mobile {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for mut label in &mut toggle_labels {
+        label.0 = if ui_state.visible {
+            "hide UI"
+        } else {
+            "controls"
+        }
+        .to_owned();
+    }
+}
+
+pub(in crate::viewer) fn handle_ui_toggle_button_press(
+    mut event: On<Pointer<Press>>,
+    mut ui_state: ResMut<AutomataUiState>,
+    mut roots: Query<&mut Visibility, With<AutomataUiRoot>>,
+) {
+    event.trigger_mut().propagate = false;
+    ui_state.visible = !ui_state.visible;
+    let visibility = if ui_state.visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut root in &mut roots {
+        *root = visibility;
+    }
+}
+
 pub(in crate::viewer) fn handle_model_catalog_press(
     mut event: On<Pointer<Press>>,
     time: Res<Time>,
@@ -195,6 +262,7 @@ pub(in crate::viewer) fn update_run_control_button_styles(
     settings: Res<AutomataSettings>,
     #[cfg(feature = "hyper_dino")] target_training: Res<ImageTargetTrainingState>,
     #[cfg(feature = "hyper_dino")] inference: Res<HyperNpaInferenceState>,
+    #[cfg(feature = "mesh_training")] mesh_training: Res<MeshTargetTrainingState>,
     mut buttons: Query<(
         &RunControlButton,
         &Hovered,
@@ -203,25 +271,39 @@ pub(in crate::viewer) fn update_run_control_button_styles(
     )>,
 ) {
     for (button, hovered, mut background, mut border) in &mut buttons {
+        #[cfg(any(feature = "hyper_dino", feature = "mesh_training"))]
+        let mut training_available = false;
+        #[cfg(not(any(feature = "hyper_dino", feature = "mesh_training")))]
+        let training_available = true;
         #[cfg(feature = "hyper_dino")]
-        let available = button.0 != RunControlKind::Train
-            || (target_training.train_action_available() && inference.pending == 0);
-        #[cfg(not(feature = "hyper_dino"))]
-        let available = true;
+        {
+            training_available |=
+                target_training.train_action_available() && inference.pending == 0;
+        }
+        #[cfg(feature = "mesh_training")]
+        {
+            training_available |= mesh_training.train_action_available();
+        }
+        let available = button.0 != RunControlKind::Train || training_available;
         if !available {
             background.0 = Color::srgb(0.065, 0.075, 0.085);
             *border = BorderColor::from(Color::srgb(0.16, 0.19, 0.21));
             continue;
         }
         let active = if button.0 == RunControlKind::Train {
+            #[cfg(any(feature = "hyper_dino", feature = "mesh_training"))]
+            let mut active = settings.train_live;
+            #[cfg(not(any(feature = "hyper_dino", feature = "mesh_training")))]
+            let active = settings.train_live;
             #[cfg(feature = "hyper_dino")]
             {
-                target_training.is_training()
+                active |= target_training.is_training();
             }
-            #[cfg(not(feature = "hyper_dino"))]
+            #[cfg(feature = "mesh_training")]
             {
-                settings.train_live
+                active |= mesh_training.is_training();
             }
+            active
         } else {
             run_control_is_active(button.0, &settings)
         };
@@ -594,6 +676,8 @@ pub(in crate::viewer) fn update_catalog_card_styles(
 pub(in crate::viewer) fn scroll_ui_panel(
     ui_state: Res<AutomataUiState>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    touches: Res<Touches>,
+    mut touch_scroll: ResMut<AutomataUiTouchScroll>,
     mut mouse_wheel: MessageReader<MouseWheel>,
     panels: Query<(&ComputedNode, &UiGlobalTransform), With<AutomataUiPanel>>,
     mut scroll_areas: Query<&mut ScrollPosition, With<AutomataUiScrollArea>>,
@@ -604,6 +688,30 @@ pub(in crate::viewer) fn scroll_ui_panel(
     let Ok(window) = windows.single() else {
         return;
     };
+
+    if touch_scroll.touch_id.is_none() {
+        touch_scroll.touch_id = touches
+            .iter_just_pressed()
+            .find(|touch| {
+                panels
+                    .iter()
+                    .any(|(node, transform)| node.contains_point(*transform, touch.position()))
+            })
+            .map(|touch| touch.id());
+    }
+    if let Some(touch_id) = touch_scroll.touch_id {
+        if let Some(touch) = touches.get_pressed(touch_id) {
+            let delta = touch.delta().y;
+            if delta != 0.0 {
+                for mut scroll_position in &mut scroll_areas {
+                    scroll_position.0.y = (scroll_position.0.y - delta).max(0.0);
+                }
+            }
+        } else {
+            touch_scroll.touch_id = None;
+        }
+    }
+
     let Some(cursor) = window.cursor_position() else {
         return;
     };

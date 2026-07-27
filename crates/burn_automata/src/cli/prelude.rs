@@ -7,17 +7,16 @@ pub(crate) use std::{
 
 #[cfg(feature = "gpu_wgpu")]
 pub(crate) use crate::kernels::build_hashgrid;
-#[cfg(feature = "backend_wgpu")]
-pub(crate) use crate::run_supervised_training_wgpu;
 pub(crate) use crate::{
     AutomataPreset, BpkAdapterManifest, BpkModelManifest, ConditionEncoder2d, ConditionImage2d,
     ConditionSummary2d, FeatureBatchConfig, GaussianDecodeMode, HyperAdapterExample2d,
     HyperFlowExample2d, HyperNpa2d, HyperNpa2dConfig, HyperNpa2dFlowActivation,
-    HyperNpa2dOutputActivation, NpaConfig, NpaLowRankAdapter, NpaModel, NpaWeights,
-    ParticlePrior2d, ParticlePriorConfig, ParticleSeed, RolloutConfig, RolloutSupervisionConfig,
-    SupervisedBatch, SupervisedTarget, condition_feature_dims_for_encoder,
-    condition_feature_dims_for_token_grid, feature_supervised_batch, generate_conditioned_npa_2d,
-    hyper_adapter_regression_loss, hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
+    HyperNpa2dOutputActivation, Mesh3dTrainingConfig, Mesh3dTrainingReport, NpaConfig,
+    NpaLowRankAdapter, NpaModel, NpaWeights, ParticlePrior2d, ParticlePriorConfig, ParticleSeed,
+    RolloutConfig, RolloutSupervisionConfig, SupervisedBatch, SupervisedTarget,
+    condition_feature_dims_for_encoder, condition_feature_dims_for_token_grid,
+    feature_supervised_batch, generate_conditioned_npa_2d, hyper_adapter_regression_loss,
+    hyper_adapter_regression_train_step, hyper_rectified_flow_loss,
     hyper_rectified_flow_train_step, import_model,
     kernels::perceive_adjoint_with_options,
     kernels::{PerceptionOptions, euler_step, perceive_with_options},
@@ -34,6 +33,7 @@ pub(crate) use crate::{
         ROBUST_3D_SURFACE_GAIN, ROBUST_3D_TRAJECTORY_MESH_GAIN, ROBUST_3D_TRAJECTORY_RENDER_GAIN,
         ROBUST_3D_TRAJECTORY_RENDER_SAMPLES, scale_budget_loss_for_scale,
     },
+    mesh3d_surface_initialization,
     render_loss::{
         MultiViewRenderLossReport, RenderLossConfig, RenderViewLossReport,
         mesh_multiview_render_loss_from_trace,
@@ -68,6 +68,8 @@ pub(crate) use crate::{
         run_supervised_training, run_supervised_training_with_optimizer, supervised_adapter_loss,
     },
 };
+#[cfg(feature = "backend_wgpu")]
+pub(crate) use crate::{run_supervised_training_wgpu, train_mesh3d_wgpu};
 pub(crate) use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 pub(crate) use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 pub(crate) use serde::{Deserialize, Serialize};

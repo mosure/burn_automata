@@ -115,15 +115,25 @@ pub(super) fn adaptive_displacement_magnitude_batch(
         .sqrt()
 }
 
-fn adaptive_local_detail_from_features(features: Tensor3, state_dims: usize) -> Tensor2 {
+pub(super) fn adaptive_local_detail_from_features(features: Tensor3, state_dims: usize) -> Tensor2 {
     let [batches, particles, _] = features.shape().dims::<3>();
+    let color_dims = state_dims.min(3);
+    let latent_dims = state_dims - color_dims;
     let state_gradient = features
         .clone()
         .narrow(2, 2 * state_dims, 2 * state_dims);
     let occupancy_gradient = features.narrow(2, 4 * state_dims, 2);
-    let state_detail = state_gradient
+    let latent_gradient = state_gradient.clone().narrow(2, 0, 2 * latent_dims);
+    let color_gradient = state_gradient.narrow(2, 2 * latent_dims, 2 * color_dims);
+    let latent_detail = latent_gradient
         .clone()
-        .mul(state_gradient)
+        .mul(latent_gradient)
+        .sum_dim(2)
+        .sqrt()
+        .squeeze_dim::<2>(2);
+    let color_detail = color_gradient
+        .clone()
+        .mul(color_gradient)
         .sum_dim(2)
         .sqrt()
         .squeeze_dim::<2>(2);
@@ -133,7 +143,12 @@ fn adaptive_local_detail_from_features(features: Tensor3, state_dims: usize) -> 
         .sum_dim(2)
         .sqrt()
         .squeeze_dim::<2>(2);
-    let state_mean = state_detail
+    let latent_mean = latent_detail
+        .clone()
+        .mean_dim(1)
+        .clamp_min(EPSILON)
+        .expand([batches, particles]);
+    let color_mean = color_detail
         .clone()
         .mean_dim(1)
         .clamp_min(EPSILON)
@@ -143,9 +158,10 @@ fn adaptive_local_detail_from_features(features: Tensor3, state_dims: usize) -> 
         .mean_dim(1)
         .clamp_min(EPSILON)
         .expand([batches, particles]);
-    state_detail
-        .div(state_mean)
-        .mul_scalar(0.25)
+    latent_detail
+        .div(latent_mean)
+        .mul_scalar(0.10)
+        .add(color_detail.div(color_mean))
         .add(occupancy_detail.div(occupancy_mean))
         .clamp_min(EPSILON)
 }

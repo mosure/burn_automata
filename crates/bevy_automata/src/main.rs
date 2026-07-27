@@ -206,6 +206,9 @@ struct ExportArgs {
     dino_image_size: usize,
     #[arg(long, default_value_t = 14)]
     dino_patch_size: usize,
+    /// Locally erase embedded mesh state before a 3D recovery export.
+    #[arg(long)]
+    mesh_damage_radius: Option<f32>,
     #[arg(long, default_value_t = 42)]
     seed: u64,
     #[arg(long)]
@@ -218,6 +221,9 @@ struct ExportArgs {
     render_scale: f32,
     #[arg(long, default_value_t = 2.0)]
     render_opacity: f32,
+    /// Visualize the leading particle-state principal components as RGB.
+    #[arg(long)]
+    pca: bool,
 }
 
 #[cfg(feature = "headless")]
@@ -246,12 +252,14 @@ impl ExportArgs {
             dino_model_path: self.dino_model,
             dino_image_size: self.dino_image_size,
             dino_patch_size: self.dino_patch_size,
+            mesh_damage_radius: self.mesh_damage_radius,
             seed: self.seed,
             seed_scale: self.seed_scale,
             update_prob: self.update_prob,
             dt: self.dt,
             render_scale: self.render_scale,
             render_opacity: self.render_opacity,
+            pca_visualization: self.pca,
         }
     }
 }

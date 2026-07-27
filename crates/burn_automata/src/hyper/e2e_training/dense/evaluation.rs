@@ -130,6 +130,191 @@ use super::*;
         Ok(Some(total))
     }
 
+    const VALIDATION_SEED_STRIDE: u64 = 0x9e37_79b9_7f4a_7c15;
+
+    fn validation_replicate_seed(seed: u64, replicate: usize) -> u64 {
+        seed.wrapping_add((replicate as u64).wrapping_mul(VALIDATION_SEED_STRIDE))
+    }
+
+    fn mean_report_value(
+        reports: &[BurnE2eRolloutQualityReport],
+        value: impl Fn(&BurnE2eRolloutQualityReport) -> f32,
+    ) -> f32 {
+        reports.iter().map(value).sum::<f32>() / reports.len().max(1) as f32
+    }
+
+    fn mean_optional_psnr(
+        reports: &[BurnE2eRolloutQualityReport],
+        value: impl Fn(&BurnE2eRolloutQualityReport) -> Option<f32>,
+    ) -> Option<f32> {
+        let values = reports
+            .iter()
+            .filter_map(value)
+            .map(|psnr| 10.0_f32.powf(-psnr / 10.0))
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then(|| {
+            psnr_db_from_mse(values.iter().sum::<f32>() / values.len() as f32)
+        })
+    }
+
+    fn aggregate_validation_seed_reports(
+        reports: Vec<BurnE2eRolloutQualityReport>,
+        base_seed: u64,
+    ) -> BurnE2eRolloutQualityReport {
+        debug_assert!(!reports.is_empty());
+        let representative = reports
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.p10_composited_rgb_psnr_db
+                    .total_cmp(&right.p10_composited_rgb_psnr_db)
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let representative_seed = reports[representative].seed;
+        let mut composited_psnrs = reports
+            .iter()
+            .flat_map(|report| {
+                report
+                    .entries
+                    .iter()
+                    .map(|entry| entry.composited_rgb_psnr_db)
+            })
+            .collect::<Vec<_>>();
+        composited_psnrs.sort_by(f32::total_cmp);
+        let mut teacher_psnrs = reports
+            .iter()
+            .flat_map(|report| {
+                report
+                    .entries
+                    .iter()
+                    .filter_map(|entry| entry.teacher_adapter_composited_rgb_psnr_db)
+            })
+            .collect::<Vec<_>>();
+        teacher_psnrs.sort_by(f32::total_cmp);
+        let mut combined = reports[representative].clone();
+        combined.seed = base_seed;
+        combined.representative_seed = representative_seed;
+        combined.seed_count = reports.len();
+        combined.seed_summaries = reports
+            .iter()
+            .map(|report| BurnE2eRolloutSeedSummary {
+                seed: report.seed,
+                aggregate_composited_rgb_psnr_db: report
+                    .aggregate_composited_rgb_psnr_db,
+                p10_composited_rgb_psnr_db: report.p10_composited_rgb_psnr_db,
+                min_composited_rgb_psnr_db: report.min_composited_rgb_psnr_db,
+                aggregate_density_psnr_db: report.aggregate_density_psnr_db,
+                mean_density_soft_iou: report.mean_density_soft_iou,
+            })
+            .collect();
+        combined.elapsed_ms = reports.iter().map(|report| report.elapsed_ms).sum();
+        combined.particle_steps = reports.iter().map(|report| report.particle_steps).sum();
+        combined.particle_steps_per_sec = combined.particle_steps
+            / (combined.elapsed_ms / 1000.0).max(f64::MIN_POSITIVE);
+        combined.dense_pair_interactions_per_sec =
+            combined.particle_steps_per_sec * combined.particle_count as f64;
+        combined.adapter_batches = reports.iter().map(|report| report.adapter_batches).sum();
+        combined.mean_total_loss = mean_report_value(&reports, |report| report.mean_total_loss);
+        combined.mean_splat_loss = mean_report_value(&reports, |report| report.mean_splat_loss);
+        combined.mean_color_loss = mean_report_value(&reports, |report| report.mean_color_loss);
+        combined.mean_density_loss = mean_report_value(&reports, |report| report.mean_density_loss);
+        combined.mean_render_rgb_mse =
+            mean_report_value(&reports, |report| report.mean_render_rgb_mse);
+        combined.mean_render_rgb_psnr_db =
+            mean_report_value(&reports, |report| report.mean_render_rgb_psnr_db);
+        combined.min_render_rgb_psnr_db = reports
+            .iter()
+            .map(|report| report.min_render_rgb_psnr_db)
+            .min_by(f32::total_cmp)
+            .unwrap_or_default();
+        combined.max_render_rgb_psnr_db = reports
+            .iter()
+            .map(|report| report.max_render_rgb_psnr_db)
+            .max_by(f32::total_cmp)
+            .unwrap_or_default();
+        combined.aggregate_composited_rgb_mse =
+            mean_report_value(&reports, |report| report.aggregate_composited_rgb_mse);
+        combined.aggregate_composited_rgb_psnr_db =
+            psnr_db_from_mse(combined.aggregate_composited_rgb_mse);
+        combined.mean_composited_rgb_psnr_db = composited_psnrs.iter().sum::<f32>()
+            / composited_psnrs.len().max(1) as f32;
+        combined.median_composited_rgb_psnr_db =
+            sorted_percentile(&composited_psnrs, 0.5);
+        combined.p10_composited_rgb_psnr_db =
+            sorted_percentile(&composited_psnrs, 0.1);
+        combined.worst_seed_p10_composited_rgb_psnr_db = reports
+            .iter()
+            .map(|report| report.p10_composited_rgb_psnr_db)
+            .min_by(f32::total_cmp)
+            .unwrap_or_default();
+        combined.min_composited_rgb_psnr_db =
+            composited_psnrs.first().copied().unwrap_or_default();
+        combined.max_composited_rgb_psnr_db =
+            composited_psnrs.last().copied().unwrap_or_default();
+        combined.aggregate_foreground_rgb_mse =
+            mean_report_value(&reports, |report| report.aggregate_foreground_rgb_mse);
+        combined.aggregate_foreground_rgb_psnr_db =
+            psnr_db_from_mse(combined.aggregate_foreground_rgb_mse);
+        combined.aggregate_density_mse =
+            mean_report_value(&reports, |report| report.aggregate_density_mse);
+        combined.aggregate_density_psnr_db = psnr_db_from_mse(combined.aggregate_density_mse);
+        combined.mean_density_soft_iou =
+            mean_report_value(&reports, |report| report.mean_density_soft_iou);
+        combined.teacher_adapter_aggregate_composited_rgb_psnr_db =
+            mean_optional_psnr(&reports, |report| {
+                report.teacher_adapter_aggregate_composited_rgb_psnr_db
+            });
+        combined.teacher_adapter_p10_composited_rgb_psnr_db =
+            (!teacher_psnrs.is_empty()).then(|| sorted_percentile(&teacher_psnrs, 0.1));
+        combined.p10_gap_to_teacher_adapter_db = combined
+            .teacher_adapter_p10_composited_rgb_psnr_db
+            .map(|teacher| teacher - combined.p10_composited_rgb_psnr_db);
+        combined.mean_condition_shuffle_render_rgb_psnr_db =
+            mean_optional_psnr(&reports, |report| {
+                report.mean_condition_shuffle_render_rgb_psnr_db
+            });
+        combined.condition_shuffle_composited_rgb_psnr_db =
+            mean_optional_psnr(&reports, |report| {
+                report.condition_shuffle_composited_rgb_psnr_db
+            });
+        combined.condition_shuffle_psnr_gap_db = combined
+            .mean_condition_shuffle_render_rgb_psnr_db
+            .map(|shuffle| combined.mean_render_rgb_psnr_db - shuffle);
+        combined.condition_shuffle_composited_psnr_gap_db = combined
+            .condition_shuffle_composited_rgb_psnr_db
+            .map(|shuffle| combined.aggregate_composited_rgb_psnr_db - shuffle);
+        combined.base_only_composited_rgb_psnr_db =
+            mean_optional_psnr(&reports, |report| {
+                Some(report.base_only_composited_rgb_psnr_db)
+            })
+            .unwrap_or_default();
+        combined.generated_adapter_composited_psnr_gain_db =
+            combined.aggregate_composited_rgb_psnr_db
+                - combined.base_only_composited_rgb_psnr_db;
+        combined.base_only_density_psnr_db =
+            mean_optional_psnr(&reports, |report| Some(report.base_only_density_psnr_db))
+                .unwrap_or_default();
+        combined.base_only_density_soft_iou =
+            mean_report_value(&reports, |report| report.base_only_density_soft_iou);
+        combined.selection_metric = "cross-seed-trajectory-p10-composited-rgb-psnr";
+        combined.selection_psnr_db = combined.p10_composited_rgb_psnr_db;
+        combined.selection_trajectory_count = composited_psnrs.len();
+        combined.p10_gap_to_target_point_splat_db =
+            combined.target_point_splat_p10_composited_rgb_psnr_db
+                - combined.p10_composited_rgb_psnr_db;
+        combined.mean_passed =
+            combined.aggregate_composited_rgb_psnr_db >= combined.psnr_threshold_db;
+        combined.all_examples_passed = reports.iter().all(|report| report.all_examples_passed);
+        combined.conditional_control_passed =
+            reports.iter().all(|report| report.conditional_control_passed);
+        combined.passed = combined.mean_passed
+            && combined.selection_psnr_db >= combined.psnr_threshold_db
+            && combined.all_examples_passed
+            && combined.conditional_control_passed;
+        combined
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate_e2e_rollout_quality(
         params: &BurnBaseParams,
@@ -157,32 +342,60 @@ use super::*;
         let mut total_elapsed_ms = 0.0_f64;
         let mut total_particle_steps = 0.0_f64;
         let mut total_adapter_batches = 0usize;
+        let mut selection_trajectory_psnrs = Vec::new();
         for &steps in &horizons {
             let horizon_config = BurnE2eRolloutTrainConfig {
                 validation_steps: steps,
                 validation_horizon_count: 0,
                 ..config
             };
-            let Some(report) = evaluate_e2e_rollout_quality_single(
-                params,
-                generator,
-                npa_config,
-                train_examples,
-                holdout_examples,
-                train_conditions,
-                holdout_conditions,
-                horizon_config,
-                device,
-            )? else {
-                return Ok(None);
+            let mut seed_reports = Vec::with_capacity(config.validation_seed_count);
+            for replicate in 0..config.validation_seed_count {
+                let seed_config = BurnE2eRolloutTrainConfig {
+                    validation_seed: validation_replicate_seed(
+                        config.validation_seed,
+                        replicate,
+                    ),
+                validation_seed_count: 1,
+                ..horizon_config
             };
+                let Some(report) = evaluate_e2e_rollout_quality_single(
+                    params,
+                    generator,
+                    npa_config,
+                    train_examples,
+                    holdout_examples,
+                    train_conditions,
+                    holdout_conditions,
+                    seed_config,
+                    config.validation_seed,
+                    device,
+                )? else {
+                    return Ok(None);
+                };
+                seed_reports.push(report);
+            }
+            if steps >= config.validation_selection_horizon_min_steps {
+                selection_trajectory_psnrs.extend(seed_reports.iter().flat_map(|report| {
+                    report
+                        .entries
+                        .iter()
+                        .map(|entry| entry.composited_rgb_psnr_db)
+                }));
+            }
+            let report =
+                aggregate_validation_seed_reports(seed_reports, config.validation_seed);
             total_elapsed_ms += report.elapsed_ms;
             total_particle_steps += report.particle_steps;
             total_adapter_batches = total_adapter_batches.saturating_add(report.adapter_batches);
             summaries.push(BurnE2eRolloutHorizonSummary {
                 rollout_steps: steps,
+                seed_count: report.seed_count,
+                seed_summaries: report.seed_summaries.clone(),
                 aggregate_composited_rgb_psnr_db: report.aggregate_composited_rgb_psnr_db,
                 p10_composited_rgb_psnr_db: report.p10_composited_rgb_psnr_db,
+                worst_seed_p10_composited_rgb_psnr_db: report
+                    .worst_seed_p10_composited_rgb_psnr_db,
                 min_composited_rgb_psnr_db: report.min_composited_rgb_psnr_db,
                 teacher_adapter_aggregate_composited_rgb_psnr_db: report
                     .teacher_adapter_aggregate_composited_rgb_psnr_db,
@@ -216,17 +429,17 @@ use super::*;
             })
             .collect::<Vec<_>>();
         debug_assert!(!selection_summaries.is_empty());
-        let selection_psnr_db = selection_summaries
-            .iter()
-            .map(|summary| summary.p10_composited_rgb_psnr_db)
-            .fold(f32::INFINITY, f32::min);
+        selection_trajectory_psnrs.sort_by(f32::total_cmp);
+        let selection_psnr_db = sorted_percentile(&selection_trajectory_psnrs, 0.1);
         let peak_horizon_p10_composited_rgb_psnr_db = summaries
             .iter()
             .map(|summary| summary.p10_composited_rgb_psnr_db)
             .fold(f32::NEG_INFINITY, f32::max);
         let final_horizon_p10_composited_rgb_psnr_db = report.p10_composited_rgb_psnr_db;
-        report.selection_metric = "min-horizon-p10-composited-rgb-psnr";
+        report.selection_metric =
+            "selected-horizon-cross-seed-trajectory-p10-composited-rgb-psnr";
         report.selection_psnr_db = selection_psnr_db;
+        report.selection_trajectory_count = selection_trajectory_psnrs.len();
         report.selection_horizon_min_steps = config.validation_selection_horizon_min_steps;
         report.passed = selection_summaries.iter().all(|summary| summary.passed)
             && selection_psnr_db >= config.validation_psnr_threshold_db;
@@ -266,6 +479,7 @@ use super::*;
         train_conditions: &BurnE2eConditionCache,
         holdout_conditions: &BurnE2eConditionCache,
         config: BurnE2eRolloutTrainConfig,
+        sample_selection_seed: u64,
         device: &BurnDevice,
     ) -> Result<Option<BurnE2eRolloutQualityReport>, Box<dyn std::error::Error>> {
         if config.validation_examples == 0 {
@@ -284,7 +498,7 @@ use super::*;
         let started = Instant::now();
         let mut indices = (0..examples.len()).collect::<Vec<_>>();
         if config.validation_examples < indices.len() {
-            let mut rng = StdRng::seed_from_u64(config.validation_seed);
+            let mut rng = StdRng::seed_from_u64(sample_selection_seed);
             indices.shuffle(&mut rng);
             indices.truncate(config.validation_examples);
             indices.sort_unstable();
@@ -723,11 +937,20 @@ use super::*;
         let all_examples_passed = entries.iter().all(|entry| entry.passed);
         let conditional_control_passed = generated_adapter_composited_psnr_gain_db > 0.0
             && condition_shuffle_composited_psnr_gap_db.is_none_or(|gap| gap > 0.0);
+        let adapter_parameterization = if dense_row_residual {
+            E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
+        } else if config.canonical_full_rank_lora {
+            E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+        } else {
+            E2E_HYPER_ADAPTER_FACTORIZED
+        };
         let adapter_diagnostics = adapter_diagnostics(
             &adapter_parameter_rows,
             npa_config,
             config.adapter_rank,
-            dense_row_residual,
+            config.adapter_alpha,
+            config.adapter_output_bias,
+            adapter_parameterization,
         )?;
         let passed = mean_passed
             && selection_psnr_db >= config.validation_psnr_threshold_db
@@ -746,6 +969,16 @@ use super::*;
             rollout_steps: config.validation_steps,
             update_prob: config.validation_update_prob,
             seed: config.validation_seed,
+            representative_seed: config.validation_seed,
+            seed_count: 1,
+            seed_summaries: vec![BurnE2eRolloutSeedSummary {
+                seed: config.validation_seed,
+                aggregate_composited_rgb_psnr_db,
+                p10_composited_rgb_psnr_db,
+                min_composited_rgb_psnr_db,
+                aggregate_density_psnr_db,
+                mean_density_soft_iou,
+            }],
             psnr_threshold_db: config.validation_psnr_threshold_db,
             passed,
             mean_passed,
@@ -765,6 +998,7 @@ use super::*;
             max_render_rgb_psnr_db,
             selection_metric: "p10-composited-rgb-psnr",
             selection_psnr_db,
+            selection_trajectory_count: examples_count,
             selection_horizon_min_steps: config.validation_steps,
             horizon_summaries: Vec::new(),
             peak_horizon_p10_composited_rgb_psnr_db: p10_composited_rgb_psnr_db,
@@ -778,6 +1012,7 @@ use super::*;
             mean_composited_rgb_psnr_db,
             median_composited_rgb_psnr_db,
             p10_composited_rgb_psnr_db,
+            worst_seed_p10_composited_rgb_psnr_db: p10_composited_rgb_psnr_db,
             min_composited_rgb_psnr_db,
             max_composited_rgb_psnr_db,
             teacher_adapter_aggregate_composited_rgb_psnr_db,
@@ -1441,6 +1676,39 @@ use super::*;
         config
     }
 
+    pub(super) fn e2e_trajectory_tail_weight(
+        config: BurnE2eRolloutTrainConfig,
+        step: usize,
+    ) -> f32 {
+        e2e_tail_weight_at_step(
+            config.trajectory_tail_weight,
+            config.trajectory_tail_warmup_steps,
+            step,
+        )
+    }
+
+    pub(super) fn e2e_identity_tail_weight(
+        config: BurnE2eRolloutTrainConfig,
+        step: usize,
+    ) -> f32 {
+        e2e_tail_weight_at_step(
+            config.identity_tail_weight,
+            config.trajectory_tail_warmup_steps,
+            step,
+        )
+    }
+
+    fn e2e_tail_weight_at_step(weight: f32, warmup_steps: usize, step: usize) -> f32 {
+        if weight <= 0.0 {
+            return 0.0;
+        }
+        if warmup_steps == 0 {
+            return weight;
+        }
+        let scale = (step as f32 / warmup_steps as f32).clamp(0.0, 1.0);
+        weight * scale
+    }
+
     pub(super) fn e2e_amortization_residual_scale(
         config: BurnE2eRolloutTrainConfig,
         step: usize,
@@ -1471,6 +1739,21 @@ use super::*;
         let mut speeds = history
             .iter()
             .map(|entry| entry.particle_steps_per_sec)
+            .filter(|speed| speed.is_finite())
+            .collect::<Vec<_>>();
+        speeds.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+        let min = speeds.first().copied().unwrap_or_default();
+        let median = speeds.get(speeds.len() / 2).copied().unwrap_or_default();
+        let max = speeds.last().copied().unwrap_or_default();
+        (min, median, max)
+    }
+
+    pub(super) fn reported_optimizer_example_speed_summary(
+        history: &[BurnE2eRolloutHistoryEntry],
+    ) -> (f64, f64, f64) {
+        let mut speeds = history
+            .iter()
+            .map(|entry| entry.optimizer_examples_per_sec)
             .filter(|speed| speed.is_finite())
             .collect::<Vec<_>>();
         speeds.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
@@ -1524,22 +1807,72 @@ use super::*;
         rows: &[Vec<f32>],
         npa_config: &NpaConfig,
         rank: usize,
-        dense_row_residual: bool,
+        alpha: f32,
+        output_bias: bool,
+        parameterization: &'static str,
     ) -> AutomataResult<BurnE2eAdapterDiagnostics> {
         let transport_parameter_count =
             NpaLowRankAdapter::parameter_count_for_config(npa_config, rank);
-        let dense_controller_dims = dense_row_residual
-            .then(|| NpaParameterRowLayout2d::new(npa_config).parameter_count());
-        let parameter_count = dense_controller_dims.unwrap_or(transport_parameter_count);
+        let dense_row_residual = parameterization == E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL;
+        let canonical_full_rank =
+            parameterization == E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK;
+        let expected_row_parameter_count = if dense_row_residual {
+            NpaParameterRowLayout2d::new(npa_config).parameter_count()
+        } else {
+            transport_parameter_count
+        };
         if rows.is_empty()
             || rows.iter().any(|row| {
-                row.len() != parameter_count || !row.iter().all(|value| value.is_finite())
+                row.len() != expected_row_parameter_count
+                    || !row.iter().all(|value| value.is_finite())
             })
         {
             return Err(AutomataError::InvalidArgument(
                 "adapter diagnostics require non-empty, finite, shape-consistent rows".to_string(),
             ));
         }
+        let effective_rows = if canonical_full_rank {
+            let zero = NpaWeights::zeros(npa_config);
+            Some(
+                rows.iter()
+                    .map(|row| {
+                        let adapter = NpaLowRankAdapter::from_parameter_vector(
+                            npa_config,
+                            rank,
+                            alpha,
+                            row.clone(),
+                        )?;
+                        let weights = adapter.apply_to_weights(npa_config, &zero)?;
+                        let mut values = Vec::with_capacity(
+                            weights.w1.len()
+                                + weights.b1.len()
+                                + weights.w2.len()
+                                + if output_bias { weights.b2.len() } else { 0 },
+                        );
+                        values.extend(weights.w1);
+                        values.extend(weights.b1);
+                        values.extend(weights.w2);
+                        if output_bias {
+                            values.extend(weights.b2);
+                        }
+                        Ok(values)
+                    })
+                    .collect::<AutomataResult<Vec<_>>>()?,
+            )
+        } else if dense_row_residual && !output_bias {
+            let output_dims = npa_config.update_dims();
+            Some(
+                rows.iter()
+                    .map(|row| row[..row.len() - output_dims].to_vec())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let rows = effective_rows.as_deref().unwrap_or(rows);
+        let parameter_count = rows[0].len();
+        let dense_controller_dims =
+            (dense_row_residual || canonical_full_rank).then_some(parameter_count);
         let norms = rows
             .iter()
             .map(|row| row.iter().map(|value| value * value).sum::<f32>().sqrt())
@@ -1576,7 +1909,7 @@ use super::*;
             (sum / (rows.len() * len).max(1) as f32).sqrt()
         };
         let (w1_dense_rms, w2_dense_rms, factor_rms, b1_rms, b2_rms) =
-            if dense_row_residual {
+            if dense_row_residual || canonical_full_rank {
                 let p = npa_config.perception_dims();
                 let h = npa_config.hidden_dims;
                 let u = npa_config.update_dims();
@@ -1590,7 +1923,11 @@ use super::*;
                     Some(range_rms(w2_offset, w2_len)),
                     None,
                     range_rms(b1_offset, h),
-                    range_rms(b2_offset, u),
+                    if output_bias {
+                        range_rms(b2_offset, u)
+                    } else {
+                        0.0
+                    },
                 )
             } else {
                 let layout = crate::hyper::adapter_layout::AdapterParameterLayout2d::new(
@@ -1619,11 +1956,7 @@ use super::*;
                 )
             };
         Ok(BurnE2eAdapterDiagnostics {
-            parameterization: if dense_row_residual {
-                E2E_HYPER_ADAPTER_DENSE_ROW_RESIDUAL
-            } else {
-                E2E_HYPER_ADAPTER_FACTORIZED
-            },
+            parameterization,
             parameter_count,
             transport_parameter_count,
             dense_controller_dims,

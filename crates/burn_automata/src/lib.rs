@@ -14,6 +14,7 @@ pub mod error;
 pub mod gpu;
 pub mod hyper;
 pub mod import;
+pub mod mesh3d;
 pub mod mesh_objective;
 pub mod model;
 pub mod pipeline;
@@ -121,9 +122,19 @@ pub use hyper::{
 pub use hyper::{generate_e2e_conditioned_npa_2d_wgpu, generate_e2e_conditioned_npa_2d_wgpu_async};
 pub use import::{
     BpkAdapterManifest, BpkModelManifest, ExportedCheckpoint, ImportReport,
-    import_exported_checkpoint, import_model, load_adapter_manifest, save_adapter_manifest,
+    NpaParticleInitialization, import_exported_checkpoint, import_model, load_adapter_manifest,
+    save_adapter_manifest,
 };
 pub use mesh_objective::{GaussianVolumeStats, MeshRolloutObjectiveConfig};
+pub use mesh3d::{
+    Mesh3dEvaluationConfig, Mesh3dGaussianGeometry, Mesh3dInitializationMode, Mesh3dQualityReport,
+    Mesh3dRolloutReport, Mesh3dTrainingConfig, Mesh3dTrainingProgress, Mesh3dTrainingReport,
+    Mesh3dTrainingStageReport, evaluate_mesh3d_model, mesh3d_damaged_initialization,
+    mesh3d_gaussian_geometry, mesh3d_model_config, mesh3d_supervised_batch,
+    mesh3d_surface_initialization,
+};
+#[cfg(feature = "backend_wgpu")]
+pub use mesh3d::{Mesh3dTrainingObserver, train_mesh3d_wgpu, train_mesh3d_wgpu_with_observer};
 pub use model::{NpaLowRankAdapter, NpaModel, NpaWeights, StepOutput};
 pub use pipeline::{
     AutomataPipeline, FeatureBatchConfig, RolloutBatchConfig, RolloutSupervisionConfig,
@@ -138,7 +149,7 @@ pub use render_loss::{
 };
 pub use rollout::{
     MorphogenSeedEnvelope, ParticleSeed, RolloutConfig, RolloutTrace,
-    morphogen_seed_envelope_position, run_rollout,
+    morphogen_seed_envelope_position, run_rollout, run_rollout_from_particles,
 };
 pub use target_geometry::{
     OvoxelTarget, TargetProjection, TargetSurfaceSample, TriangleMeshTarget,
@@ -166,7 +177,10 @@ pub use training::{
     supervised_adapter_train_step, supervised_backward, supervised_loss, supervised_train_step,
 };
 #[cfg(feature = "backend_wgpu")]
-pub use training_wgpu::run_supervised_training_wgpu;
+pub use training_wgpu::{
+    WgpuSupervisedTrainingObserver, run_supervised_training_wgpu,
+    run_weighted_supervised_training_wgpu, run_weighted_supervised_training_wgpu_with_observer,
+};
 #[cfg(all(target_arch = "wasm32", feature = "backend_wgpu"))]
 pub use webgpu::initialize_webgpu_backend;
 

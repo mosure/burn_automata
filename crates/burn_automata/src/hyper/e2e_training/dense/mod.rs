@@ -72,9 +72,9 @@ macro_rules! dense_backend_impl {
             AdaptiveTarget2dBurnConfig, BurnDenseOracleBatchOutput, BurnE2eAdapterDiagnostics,
             BurnE2eAmortizationQualityReport, BurnE2eNearestTeacherEntry, BurnE2eRolloutExample,
             BurnE2eRolloutHistoryEntry, BurnE2eRolloutHorizonSummary, BurnE2eRolloutOutput,
-            BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport, BurnE2eRolloutStabilityEntry,
-            BurnE2eRolloutStabilityReport, BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput,
-            DirectBasisStepStats, DirectBasisTrainConfig,
+            BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport, BurnE2eRolloutSeedSummary,
+            BurnE2eRolloutStabilityEntry, BurnE2eRolloutStabilityReport, BurnE2eRolloutTrainConfig,
+            BurnWgpuDirectBasisOutput, DirectBasisStepStats, DirectBasisTrainConfig,
             DirectBasisTrainingExample as DirectBasisExample, E2E_TRAINING_CHECKPOINT_VERSION,
             E2eAdapterTeacherObjective, E2eCreditAssignment, E2eIdentitySampler, E2eLrSchedule,
             E2eParticlePoolSnapshot, E2eTbpttLossMode, E2eTensorSnapshot, E2eTrainingCheckpoint,
@@ -368,6 +368,7 @@ macro_rules! dense_backend_impl {
         struct BurnE2ePreparedCpuBatch {
             indices: Vec<usize>,
             targets: Vec<BurnE2ePreparedTargetExample>,
+            target_expansion: Vec<usize>,
             prepared_dino: Option<BurnE2ePreparedDinoBatch>,
         }
 
@@ -599,6 +600,7 @@ macro_rules! dense_backend_impl {
         struct BurnE2eValidationContract {
             examples: usize,
             particles: usize,
+            seed_count: usize,
             horizons: Vec<usize>,
             selection_horizon_min_steps: usize,
         }

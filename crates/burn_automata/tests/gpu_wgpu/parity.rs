@@ -59,6 +59,50 @@ fn wgpu_step_matches_cpu_oracle_with_position_features() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn wgpu_mesh_surface_anchor_matches_cpu_and_blocks_position_updates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _wgpu_guard = wgpu_test_guard();
+    let particles = 2;
+    let mut config = burn_automata::mesh3d_model_config(64);
+    config.alpha = 1.0;
+    let grid = burn_automata::kernels::HashGridConfig::growing_3dgs();
+    let mut weights = NpaWeights::zeros(&config);
+    weights.b2[0] = 1.0;
+    let model = NpaModel { config, weights };
+    let positions = vec![[0.0, 0.0, 0.0, 1.0], [0.3, 0.0, 0.0, 0.0]];
+    let mut states = vec![0.0; particles * model.config.state_dims];
+    for state in states.chunks_exact_mut(model.config.state_dims) {
+        state[burn_automata::rollout::UV_TORUS_SIGNED_DISTANCE_STATE_OFFSET] = 0.04;
+    }
+
+    let cpu = model.step_cpu(&positions, &states, 1, particles, &grid, 1.0, None)?;
+    let gpu = match burn_automata::gpu::step_wgpu_blocking(
+        &model, &positions, &states, 1, particles, &grid, 1.0,
+    ) {
+        Ok(output) => output,
+        Err(AutomataError::InvalidArgument(message)) if is_missing_wgpu(&message) => {
+            eprintln!("skipping WGPU mesh-anchor parity test: {message}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    assert_eq!(cpu.next_positions[0], positions[0]);
+    assert_eq!(gpu.next_positions[0], positions[0]);
+    assert!(cpu.next_positions[1][0] > positions[1][0]);
+    assert!(gpu.next_positions[1][0] > positions[1][0]);
+    assert!(
+        max_position_abs_error(&cpu.next_positions, &gpu.next_positions) <= 2.5e-3,
+        "mesh-anchor CPU/WGPU position mismatch"
+    );
+    assert!(
+        max_abs_error(&cpu.next_states, &gpu.next_states) <= 2.5e-3,
+        "mesh-anchor CPU/WGPU state mismatch"
+    );
+    Ok(())
+}
+
+#[test]
 fn wgpu_step_matches_cpu_oracle_for_teapot_morphogen_seed() -> Result<(), Box<dyn std::error::Error>>
 {
     let _wgpu_guard = wgpu_test_guard();

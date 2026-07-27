@@ -86,6 +86,31 @@ fn adaptive_trajectory_tail_count_is_bounded_and_ceil_rounded() {
 }
 
 #[test]
+fn adaptive_local_detail_preserves_batch_shape_and_prioritizes_visible_color() {
+    let device = BurnDevice::default();
+    let state_dims = 4;
+    let feature_dims = 4 * state_dims + 2;
+    let mut values = vec![0.0; 2 * feature_dims];
+
+    // Particle 0 has only a large latent-state gradient. Particle 1 has only
+    // a visible RGB gradient, which should dominate despite its lower value.
+    values[2 * state_dims] = 10.0;
+    values[feature_dims + 2 * state_dims + 2] = 1.0;
+
+    let detail = rollout::adaptive_local_detail_from_features(
+        tensor3(values, [1, 2, feature_dims], &device),
+        state_dims,
+    );
+    assert_eq!(detail.shape().dims::<2>(), [1, 2]);
+
+    let detail = detail.into_data().to_vec::<f32>().unwrap();
+    assert!(
+        detail[1] > detail[0] * 5.0,
+        "visible detail should dominate latent noise: {detail:?}"
+    );
+}
+
+#[test]
 fn target2d_oracle_schedule_matches_upstream_update_boundaries() {
     let milestones = [2_000, 4_000, 6_000, 8_000];
     assert_eq!(milestone_lr_scale(1, &milestones, 0.3), 1.0);
@@ -107,7 +132,7 @@ fn target2d_oracle_schedule_matches_upstream_update_boundaries() {
 }
 
 #[test]
-fn dino_prefetch_deduplicates_rollout_replicas_and_preserves_order() {
+fn cpu_prefetch_deduplicates_rollout_replicas_and_preserves_order() {
     let (unique, expansion) = deduplicate_condition_indices(&[7, 7, 7, 2, 2, 9, 7, 9]);
     assert_eq!(unique, vec![7, 2, 9]);
     assert_eq!(expansion, vec![0, 0, 0, 1, 1, 2, 0, 2]);
@@ -1946,6 +1971,48 @@ fn dense_row_adapter_diagnostics_recover_generated_controller_values() {
         "dense diagnostics must inspect generated controller values, not canonical transport factors; max difference {difference} at {index}: actual={actual_value}, expected={expected_value}"
     );
     assert!(!actual.contains(&777.0));
+}
+
+#[test]
+fn canonical_adapter_diagnostics_report_effective_dense_controller_size() {
+    let npa = NpaConfig::growing_2d();
+    let rank = npa.perception_dims().max(npa.update_dims());
+    let alpha = rank as f32;
+    let transport_parameter_count =
+        NpaLowRankAdapter::parameter_count_for_config(&npa, rank);
+    let canonical =
+        crate::hyper::adapter_layout::CanonicalFullRankLora2d::new_with_output_bias(
+            &npa, rank, alpha, false,
+        )
+        .unwrap();
+    let diagnostics = adapter_diagnostics(
+        &[vec![0.0; transport_parameter_count]],
+        &npa,
+        rank,
+        alpha,
+        false,
+        E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK,
+    )
+    .unwrap();
+
+    assert_eq!(
+        diagnostics.parameterization,
+        E2E_HYPER_ADAPTER_CANONICAL_FULL_RANK
+    );
+    assert_eq!(diagnostics.parameter_count, canonical.trainable_parameters);
+    assert_eq!(
+        diagnostics.transport_parameter_count,
+        transport_parameter_count
+    );
+    assert_eq!(
+        diagnostics.dense_controller_dims,
+        Some(canonical.trainable_parameters)
+    );
+    assert_eq!(diagnostics.w1_dense_rms, Some(0.0));
+    assert_eq!(diagnostics.w2_dense_rms, Some(0.0));
+    assert_eq!(diagnostics.w1_down_rms, None);
+    assert_eq!(diagnostics.w2_up_rms, None);
+    assert_eq!(diagnostics.b2_rms, 0.0);
 }
 
 fn max_abs_difference(left: &[f32], right: &[f32]) -> f32 {
@@ -6434,6 +6501,123 @@ fn zero_primal_explicit_adjoint_preserves_primal_and_nonlinear_vjp() {
     );
 }
 
+#[test]
+fn e2e_tail_objective_matches_cvar_value_and_gradient() {
+    let device = BurnDevice::default();
+    let losses = tensor1(vec![1.0, 2.0, 3.0, 100.0], [4], &device).require_grad();
+    let objective =
+        e2e_tail_aware_objective(losses.clone(), false, 0.25, 1.0, None, 0.0, 0.0);
+    let value = tensor1_vec(objective.clone().inner()).unwrap()[0];
+    assert!((value - 63.25).abs() < 1.0e-6);
+
+    let mut gradients = objective.backward();
+    let gradient = losses
+        .grad_remove(&mut gradients)
+        .unwrap_or_else(|| losses.clone().inner().zeros_like())
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(max_abs_difference(&gradient, &[0.125, 0.125, 0.125, 0.625]) < 1.0e-6);
+}
+
+#[test]
+fn e2e_log1p_tail_objective_limits_outlier_leverage() {
+    let device = BurnDevice::default();
+    let losses = tensor1(vec![1.0, 2.0, 3.0, 100.0], [4], &device);
+    let raw = tensor1_vec(
+        e2e_tail_aware_objective(losses.clone(), false, 0.25, 1.0, None, 0.0, 0.0)
+            .inner(),
+    )
+    .unwrap()[0];
+    let robust =
+        tensor1_vec(
+            e2e_tail_aware_objective(losses, true, 0.25, 1.0, None, 0.0, 0.0)
+                .inner(),
+        )
+        .unwrap()[0];
+    assert!(robust.is_finite());
+    assert!(robust < raw * 0.1, "log1p objective did not limit outlier leverage");
+    assert_eq!(e2e_trajectory_tail_count(32, 0.25), 8);
+    assert_eq!(e2e_trajectory_tail_count(0, 0.25), 0);
+}
+
+#[test]
+fn e2e_tail_objective_balances_hard_trajectories_per_identity() {
+    let device = BurnDevice::default();
+    let losses = tensor1(
+        vec![100.0, 99.0, 98.0, 97.0, 10.0, 9.0, 8.0, 7.0],
+        [8],
+        &device,
+    )
+    .require_grad();
+    let objective = e2e_tail_aware_objective(
+        losses.clone(),
+        false,
+        0.5,
+        1.0,
+        Some(4),
+        0.0,
+        0.0,
+    );
+    let value = tensor1_vec(objective.clone().inner()).unwrap()[0];
+    // Global CVaR would select only identity zero (98.5). Per-identity CVaR
+    // averages each identity's top two trajectories: (99.5 + 9.5) / 2.
+    assert!((value - 54.0).abs() < 1.0e-6);
+
+    let mut gradients = objective.backward();
+    let gradient = losses
+        .grad_remove(&mut gradients)
+        .unwrap_or_else(|| losses.clone().inner().zeros_like())
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(
+        max_abs_difference(
+            &gradient,
+            &[0.1875, 0.1875, 0.0625, 0.0625, 0.1875, 0.1875, 0.0625, 0.0625],
+        ) < 1.0e-6
+    );
+}
+
+#[test]
+fn e2e_hierarchical_tail_objective_prioritizes_hard_identities() {
+    let device = BurnDevice::default();
+    let losses = tensor1(
+        vec![100.0, 99.0, 98.0, 97.0, 10.0, 9.0, 8.0, 7.0],
+        [8],
+        &device,
+    )
+    .require_grad();
+    let objective = e2e_tail_aware_objective(
+        losses.clone(),
+        false,
+        0.5,
+        1.0,
+        Some(4),
+        0.5,
+        1.0,
+    );
+    let value = tensor1_vec(objective.clone().inner()).unwrap()[0];
+    assert!((value - 76.5).abs() < 1.0e-6);
+
+    let mut gradients = objective.backward();
+    let gradient = losses
+        .grad_remove(&mut gradients)
+        .unwrap_or_else(|| losses.clone().inner().zeros_like())
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(
+        max_abs_difference(
+            &gradient,
+            &[
+                0.28125, 0.28125, 0.09375, 0.09375, 0.09375, 0.09375, 0.03125,
+                0.03125,
+            ],
+        ) < 1.0e-6
+    );
+}
+
 #[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
 #[test]
 fn target2d_cube_batched_tail_matches_dense_primal_and_vjp() {
@@ -6561,6 +6745,170 @@ fn target2d_cube_batched_tail_matches_dense_primal_and_vjp() {
         max_abs_difference(&dense.3, &tiled.3) < 2.0e-3,
         "batched Target2D state VJP diverged"
     );
+}
+
+#[cfg(any(feature = "backend_wgpu", feature = "backend_cuda"))]
+#[test]
+fn target2d_cube_quality_scale_batch_matches_independent_rows() {
+    const BATCHES: usize = 8;
+    const PARTICLES: usize = 1_024;
+    const IMAGE_SIZE: usize = 128;
+
+    let device = BurnDevice::default();
+    let state_dims = NpaConfig::growing_2d().state_dims;
+    let target_cpu = crate::TargetImage2d {
+        source_width: IMAGE_SIZE,
+        source_height: IMAGE_SIZE,
+        positions: vec![[-0.35, 0.25], [0.2, 0.05], [0.45, -0.3]],
+        colors: vec![[0.1, 0.8, 0.2], [0.7, 0.3, 0.1], [0.2, 0.4, 0.9]],
+        pixel_size: 2.0 / IMAGE_SIZE as f32,
+        threshold: 0.05,
+        aabb: [-1.0, 1.0, -1.0, 1.0],
+    };
+    let mut config = test_direct_config(PARTICLES);
+    config.example_batch_size = BATCHES;
+    config.loss_config.image_size = IMAGE_SIZE;
+    config.loss_config.center = false;
+    config.loss_config.shape_chamfer_loss_weight = 0.0;
+    config.loss_config.displacement_regularizer_weight = 0.0;
+    config.loss_config.overflow_regularizer_weight = 0.0;
+    config.loss_config.bound_regularizer_weight = 0.0;
+    let pixels = IMAGE_SIZE * IMAGE_SIZE;
+    let render = render_target_2d_splat(&target_cpu, config.loss_config).unwrap();
+    let foreground = target_2d_foreground_mask(&target_cpu, config.loss_config).unwrap();
+    let foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
+    let target_mean = target_cpu.mean_position();
+    let target = BurnTargetExample {
+        target_rgb: tensor(render.rgb, [pixels, 3], &device),
+        target_density: tensor(render.density, [pixels, 1], &device),
+        target_foreground: tensor(foreground, [pixels, 1], &device),
+        target_foreground_scale: foreground_scale,
+        target_mean: tensor(
+            [target_mean[0], target_mean[1]].to_vec(),
+            [1, 2],
+            &device,
+        ),
+        target_positions: tensor(
+            target_cpu
+                .positions
+                .iter()
+                .flat_map(|position| [position[0], position[1]])
+                .collect(),
+            [target_cpu.positions.len(), 2],
+            &device,
+        ),
+        pixel_xy: tensor(pixel_xy_values(IMAGE_SIZE), [pixels, 2], &device),
+        pixel_size: target_cpu.pixel_size,
+        target_points: target_cpu.point_count(),
+        particle_count: PARTICLES,
+        update_prob: 1.0,
+        seed_scale: 0.2,
+        target_cpu,
+    };
+    let row_positions = (0..PARTICLES)
+        .flat_map(|particle| {
+            let angle = particle as f32 * std::f32::consts::TAU / PARTICLES as f32;
+            let radius = 0.05 + 0.25 * (particle % 29) as f32 / 29.0;
+            [radius * angle.cos(), radius * angle.sin()]
+        })
+        .collect::<Vec<_>>();
+    let mut row_states = vec![0.0; PARTICLES * state_dims];
+    for particle in 0..PARTICLES {
+        let color = particle * state_dims + state_dims - 3;
+        row_states[color] = -0.2 + 0.4 * (particle % 11) as f32 / 11.0;
+        row_states[color + 1] = 0.1;
+        row_states[color + 2] = -0.05;
+    }
+
+    let mut batched_positions = Vec::with_capacity(BATCHES * PARTICLES * 2);
+    let mut batched_states = Vec::with_capacity(BATCHES * PARTICLES * state_dims);
+    for batch in 0..BATCHES {
+        let x_offset = 0.002 * batch as f32;
+        let y_offset = -0.001 * batch as f32;
+        for particle in 0..PARTICLES {
+            batched_positions.push(row_positions[particle * 2] + x_offset);
+            batched_positions.push(row_positions[particle * 2 + 1] + y_offset);
+            let state_start = particle * state_dims;
+            batched_states.extend_from_slice(
+                &row_states[state_start..state_start + state_dims],
+            );
+            let color = batched_states.len() - 3;
+            batched_states[color] += 0.005 * batch as f32;
+        }
+    }
+
+    let evaluate = |position_values: &[f32], state_values: &[f32], batches: usize| {
+        let x = tensor3(
+            position_values.to_vec(),
+            [batches, PARTICLES, 2],
+            &device,
+        )
+        .require_grad();
+        let s = tensor3(
+            state_values.to_vec(),
+            [batches, PARTICLES, state_dims],
+            &device,
+        )
+        .require_grad();
+        let loss = target_splat_loss_batch_vector_tiled_adjoint(
+            &x,
+            &s,
+            std::slice::from_ref(&target),
+            &vec![0; batches],
+            DirectBasisTrainConfig {
+                example_batch_size: batches,
+                target2d_loss_backend: Target2dLossBackend::TiledAdjoint,
+                ..config
+            },
+            None,
+            Tensor::<BurnBackend, 1>::zeros([batches], &device),
+        )
+        .unwrap();
+        let total = tensor1_vec(loss.total.clone().inner()).unwrap();
+        let mut gradients = loss.total.sum().backward();
+        let x_grad = tensor3_vec(
+            x.grad_remove(&mut gradients)
+                .unwrap_or_else(|| x.clone().inner().zeros_like()),
+        )
+        .unwrap();
+        let s_grad = tensor3_vec(
+            s.grad_remove(&mut gradients)
+                .unwrap_or_else(|| s.clone().inner().zeros_like()),
+        )
+        .unwrap();
+        (total, x_grad, s_grad)
+    };
+
+    let batched = evaluate(&batched_positions, &batched_states, BATCHES);
+    for batch in 0..BATCHES {
+        let x_start = batch * PARTICLES * 2;
+        let s_start = batch * PARTICLES * state_dims;
+        let independent = evaluate(
+            &batched_positions[x_start..x_start + PARTICLES * 2],
+            &batched_states[s_start..s_start + PARTICLES * state_dims],
+            1,
+        );
+        assert!(
+            (batched.0[batch] - independent.0[0]).abs() < 2.0e-4,
+            "quality-scale Target2D primal row {batch} diverged: batched={} independent={}",
+            batched.0[batch],
+            independent.0[0],
+        );
+        assert!(
+            max_abs_difference(
+                &batched.1[x_start..x_start + PARTICLES * 2],
+                &independent.1,
+            ) < 2.0e-3,
+            "quality-scale Target2D position VJP row {batch} diverged"
+        );
+        assert!(
+            max_abs_difference(
+                &batched.2[s_start..s_start + PARTICLES * state_dims],
+                &independent.2,
+            ) < 2.0e-3,
+            "quality-scale Target2D state VJP row {batch} diverged"
+        );
+    }
 }
 
 #[test]
@@ -7398,12 +7746,14 @@ fn checkpoint_selection_does_not_compare_different_validation_contracts() {
     let frequent = BurnE2eValidationContract {
         examples: 16,
         particles: 2_048,
+        seed_count: 1,
         horizons: vec![512],
         selection_horizon_min_steps: 512,
     };
     let final_contract = BurnE2eValidationContract {
         examples: 16,
         particles: 4_096,
+        seed_count: 4,
         horizons: vec![96, 256, 512, 1_024],
         selection_horizon_min_steps: 256,
     };

@@ -11,6 +11,17 @@ GPU kernels and a native/web Bevy Gaussian Splatting viewer. Try the
 
 ![Matched adaptive and fixed lizard rollouts](docs/papers/adaptive/figures/lizard_rollout_seed42.png)
 
+![Mesh-conditioned Utah teapot state recovery](docs/papers/hypernpa/figures/mesh3d/teapot_recovery.png)
+
+![GPU-resident particle-state PCA for 2D and 3D NPA rollouts](docs/papers/hypernpa/figures/pca/npa_state_pca_2d_3d.png)
+
+The PCA view projects all recurrent particle-state channels onto a rolling
+three-component basis and maps those coordinates to RGB. The top row shows
+the released 4,096-particle 2D lizard; the bottom row shows the
+16,384-particle mesh-conditioned 3D teapot after localized state erasure.
+These colors expose state organization and recovery rather than decoded
+material color.
+
 ## features
 
 - [x] upstream NPA checkpoint import and strict CPU/WGPU parity validation
@@ -21,16 +32,20 @@ GPU kernels and a native/web Bevy Gaussian Splatting viewer. Try the
 - [x] fixed and adaptive image-target training from the Bevy viewer
 - [x] native and WebGPU viewer with an isolated browser training worker
 - [x] headless PNG rollout capture for paper and benchmark automation
+- [x] normalized OBJ import, Burn/WGPU mesh-conditioned 3D training, oriented
+      3D Gaussian inference, and PanOrbit inspection
 - [x] versioned `.bpk` models with checksums and timed training checkpoints
 - [x] verified TOML smoke, quality, and throughput configurations
 - [ ] from-scratch Burn 2D oracle quality parity with the official trainer
 - [ ] broad held-out HyperNPA quality parity with per-image oracle NPAs
 - [ ] adaptive long-horizon quality parity with the fixed 2D path
-- [ ] quality-scale 3D training and generalization
+- [ ] neutral-seed 3D morphogenesis and multi-object 3D generalization
 
 The hardened fixed 2D inference path and imported upstream catalog are the
-reference baseline. Local oracle training, generalized HyperNPA, adaptive NPA,
-and 3D training remain research paths until their checked-in parity gates pass.
+reference baseline. Local 2D oracle training, generalized HyperNPA, adaptive
+NPA, and neutral-seed 3D morphogenesis remain research paths until their
+checked-in parity gates pass. The separate mesh-conditioned 3D path has a
+passing teapot quality gate.
 
 ## viewer
 
@@ -67,6 +82,44 @@ update the viewer without reseeding it, while `reset` only resets the visible
 rollout. The reset-period and learning-rate controls are configurable in the
 training panel.
 
+The native 3D workflow is:
+
+1. `open mesh` selects a Wavefront OBJ and isotropically normalizes its longest
+   axis to the viewer domain.
+2. The normalized 16,384-particle surface preview switches the renderer to
+   oriented 3D Gaussians and enables the PanOrbit camera.
+3. `train 3d` runs the canonical Burn/WGPU mesh-state trainer on a background
+   thread and publishes bounded live model snapshots.
+4. The completed model is reloaded with its embedded surface initialization;
+   orbit, pan, zoom, reset, PCA color, and rollout controls remain available.
+
+Train and validate the canonical Utah teapot from the CLI:
+
+```bash
+cargo run --release -p burn_automata --features gpu_wgpu -- \
+  train-mesh3d \
+  --config configs/verified/3d/mesh/teapot_quality.toml
+
+cargo run --release -p burn_automata --features gpu_wgpu -- \
+  evaluate-mesh3d \
+  --config configs/verified/3d/mesh/teapot_quality.toml \
+  --model artifacts/mesh3d/utah_teapot/model.bpk \
+  --report artifacts/mesh3d/utah_teapot/evaluation.json
+
+cargo run --release -p bevy_automata -- view \
+  --model artifacts/mesh3d/utah_teapot/model.bpk \
+  --preset growing3d-gs \
+  --particles 16384
+```
+
+The verified teapot run trains 16.38M rows in 9.01s (`1.82M rows/s`) and
+passes three-seed 16,384-particle checks through 256 steps: density PSNR
+`25.91-26.29 dB`, color PSNR `43.04-43.41 dB`, depth PSNR
+`41.17-41.82 dB`, `100%` target coverage, and `52.48 dB` worst localized
+color recovery at step 32. This is a mesh-conditioned fixed surface-support
+NPA with recurrent state repair. It is not evidence of target-independent
+growth from a compact neutral seed; see [3D status](docs/research/3d_status.md).
+
 ## headless export
 
 Render selected rollout steps to PNG without opening the interactive viewer:
@@ -79,6 +132,10 @@ cargo run --release -p bevy_automata -- export \
   --capture-steps 32,96,256,512 \
   --output-dir target/lizard_rollout
 ```
+
+Add `--pca` to export the same rollout with GPU-resident particle-state PCA
+colors. PCA fitting, projection, display normalization, and Gaussian-buffer
+writes remain on the GPU; only the requested screenshots are read back.
 
 Use `--hyper-image`, `--hyper-base`, `--hyper-model`, and `--dino-model` for
 image-conditioned exports. Adaptive exports accept `--adaptive-model`.
@@ -142,6 +199,9 @@ under the gitignored `configs/sandbox/`. The CUDA quality configuration is
 The deployed viewer supports the same image dialog, HyperNPA inference, fixed
 training, and adaptive training controls as native. Browser optimization runs
 in a dedicated Web Worker so training does not block the Bevy render loop.
+It also imports and normalizes browser-local OBJ meshes for oriented-Gaussian
+preview and PanOrbit inspection. Mesh-target training is currently native-only
+until the synchronous WGPU evaluator is moved into the browser worker.
 
 Build the viewer and worker:
 

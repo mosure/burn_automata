@@ -32,6 +32,78 @@ The source tree now defaults to the v3 four-head module-token decoder. The
 paper reports v3 only for the current CUDA throughput benchmark; it does not
 attribute v3 to the older v2 quality checkpoint.
 
+## Mesh-Conditioned 3D Extension
+
+The paper also evaluates a separate, deterministic mesh-to-NPA path:
+
+```text
+Wavefront OBJ
+  -> z-up to y-up conversion, centering, and isotropic scale normalization
+  -> deterministic area-weighted surface support
+  -> 3D / 24-state / 320-hidden-unit recurrent NPA
+  -> normal, opacity, RGB, and latent-state repair
+  -> oriented anisotropic 3D Gaussians
+  -> WGPU rollout and Bevy PanOrbit rendering
+```
+
+The position support is embedded in the BPK and remains anchored during
+rollout. This is a mesh-conditioned recurrent state-field result, not a claim
+of target-independent object growth from a compact neutral seed.
+
+The promoted Utah teapot contract is
+`configs/verified/3d/mesh/teapot_quality.toml`. Its immutable numerical report
+is `artifacts/mesh3d/utah_teapot/report.json`; the checked paper evidence is
+`figures/mesh3d/teapot_recovery.png`. The run trains 16.38M particle rows in
+9.006 seconds (1.819M rows/s), then passes three-seed 16,384-particle checks
+through step 256 with 25.91--26.29 dB density PSNR, 43.04--43.41 dB color
+PSNR, 41.17--41.82 dB depth PSNR, complete target coverage, and 52.48 dB
+worst localized-damage color PSNR at step 32.
+
+### Particle-State PCA Evidence
+
+`figures/pca/npa_state_pca_2d_3d.png` is a labeled composite of actual
+768 x 768 Bevy/WGPU captures. The top row uses the released 4,096-particle
+lizard at steps 32, 96, 256, and 512. The bottom row uses the trained
+16,384-particle teapot with a localized state erasure at steps 0, 8, 32, and
+256.
+
+PCA fitting and projection use the same resident GPU path as the interactive
+checkbox. A bounded reduction computes the state mean; rolling Oja updates
+refresh three orthonormal components every eight rendered frames; per-frame
+projection and display statistics map coordinates to RGB with a 2.5-standard-
+deviation clip. There is no particle-state or covariance readback. PCA colors
+are diagnostic coordinates, not decoded RGB, and component orientation is not
+semantically fixed.
+
+The raw sequences can be reproduced with:
+
+```bash
+target/release/bevy_automata export \
+  --model models/catalog/growing/lizard.bpk \
+  --preset growing2d \
+  --particles 4096 \
+  --steps 512 \
+  --capture-steps 32,96,256,512 \
+  --width 768 --height 768 \
+  --render-scale 0.5 --render-opacity 2.0 \
+  --pca \
+  --output-prefix lizard_pca \
+  --output-dir target/paper_pca/lizard
+
+target/release/bevy_automata export \
+  --model artifacts/mesh3d/utah_teapot/model.bpk \
+  --preset growing3d-gs \
+  --particles 16384 \
+  --steps 256 \
+  --capture-steps 0,8,32,256 \
+  --mesh-damage-radius 0.22 \
+  --width 768 --height 768 \
+  --render-scale 1.0 --render-opacity 1.0 \
+  --pca \
+  --output-prefix teapot_pca \
+  --output-dir target/paper_pca/teapot
+```
+
 ## Canonical Conditional Row-Flow Experiment
 
 The maintained trainer implements the next architecture; it is not yet part of
@@ -152,6 +224,7 @@ tiny-`log1p` lowering previously observed on WGPU.
 | Corrected zero-bias table is active but not converged | 11.63 dB aggregate, 10.52 dB p10 at 1,024 steps, and 3.77 dB correct-vs-shuffled gap | Four train identities, 4,096 particles, 2,000 updates, and 16,000 trajectories/ID: 6.67% of released exposure, not a capacity ceiling |
 | Current trainer has a high-throughput path | 17.66M measured and 18.36M median particle-steps/s | v3, CUDA, batch 64, 1,024 particles, 96 full-BPTT steps; quality disabled |
 | Quality-scale row-flow training avoids repeated flow solves | 2.053M median, 2.288M maximum particle-steps/s | CUDA, 16 conditions, 4,096 particles, 32--95 rollout steps, detached-TBPTT-16, teacher/flow/task objectives |
+| Mesh-conditioned 3D teapot state-field passes | 25.91--26.29 dB density, 43.04--43.41 dB color, and 41.17--41.82 dB depth PSNR | Anchored 16,384-particle surface support, three seeds, steps 0--256; not neutral-seed morphogenesis |
 
 The paper intentionally does **not** claim:
 
@@ -174,6 +247,7 @@ artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json
 artifacts/hyper2d_omnisvg4_zero_b2_seeded_table_upstream_lr_cuda/report.json
 artifacts/hyper2d_row_flow_omnisvg16_functional_tbptt_trust_p4096_cuda/report.json
 artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json
+artifacts/mesh3d/utah_teapot/report.json
 ```
 
 Each renderer directory in `docs/papers/hypernpa/figures` also contains its
@@ -183,8 +257,9 @@ capture steps, dimensions, and nonblank-pixel bounds.
 
 ## Rollout Contract
 
-Every paper screenshot is an unmodified 512 x 512 capture from the same
-Bevy/WGPU simulation and `bevy_gaussian_splatting` renderer used by the viewer:
+Every 2D HyperNPA quality screenshot is an unmodified 512 x 512 capture from
+the same Bevy/WGPU simulation and `bevy_gaussian_splatting` renderer used by
+the viewer:
 
 ```text
 particles:          4,096
@@ -203,6 +278,10 @@ released lizard checkpoint as a renderer sanity check. Numerical PSNR comes
 from the differentiable Target2D renderer, not screenshot pixels. The 1k
 metrics use 2,048 particles; the screenshots deliberately use 4,096 particles
 and are labeled accordingly.
+
+The separate PCA figure uses 768 x 768 renderer captures and only crops
+constant background while composing its labeled grid. It does not alter the
+renderer-produced PCA colors.
 
 An equivalent HyperNPA export has this shape:
 

@@ -231,6 +231,13 @@ struct RolloutTrainingConfig {
     tbptt_loss_mode: Option<String>,
     tbptt_intermediate_loss_weight: Option<f32>,
     tbptt_final_loss_weight: Option<f32>,
+    log1p_trajectory_loss: Option<bool>,
+    trajectory_tail_fraction: Option<f32>,
+    trajectory_tail_weight: Option<f32>,
+    trajectory_tail_warmup_steps: Option<usize>,
+    trajectory_tail_per_identity: Option<bool>,
+    identity_tail_fraction: Option<f32>,
+    identity_tail_weight: Option<f32>,
     credit_assignment: Option<String>,
     max_full_bptt_particle_steps: Option<usize>,
     use_particle_pool: Option<bool>,
@@ -334,7 +341,10 @@ struct RolloutTargetConfig {
     splat_loss_weight: Option<f32>,
     color_loss_weight: Option<f32>,
     density_loss_weight: Option<f32>,
+    background_density_loss_weight: Option<f32>,
+    foreground_density_loss_weight: Option<f32>,
     composited_rgb_loss_weight: Option<f32>,
+    render_rgb_loss_weight: Option<f32>,
     displacement_regularizer_weight: Option<f32>,
     overflow_regularizer_weight: Option<f32>,
     bound_regularizer_weight: Option<f32>,
@@ -378,6 +388,7 @@ struct RolloutValidationConfig {
     selection_horizon_min_steps: Option<usize>,
     update_prob: Option<f32>,
     seed: Option<u64>,
+    seed_count: Option<usize>,
     oracle_report: Option<PathBuf>,
     psnr_threshold_db: Option<f32>,
     final_examples: Option<usize>,
@@ -385,6 +396,7 @@ struct RolloutValidationConfig {
     final_steps: Option<usize>,
     final_horizons: Option<Vec<usize>>,
     final_selection_horizon_min_steps: Option<usize>,
+    final_seed_count: Option<usize>,
     stability_examples: Option<usize>,
     stability_particles: Option<usize>,
     stability_reference_steps: Option<usize>,
@@ -541,6 +553,13 @@ struct E2eRolloutTrainingReport {
     tbptt_loss_mode: String,
     tbptt_intermediate_loss_weight: f32,
     tbptt_final_loss_weight: f32,
+    log1p_trajectory_loss: bool,
+    trajectory_tail_fraction: f32,
+    trajectory_tail_weight: f32,
+    trajectory_tail_warmup_steps: usize,
+    trajectory_tail_per_identity: bool,
+    identity_tail_fraction: f32,
+    identity_tail_weight: f32,
     credit_assignment: String,
     max_full_bptt_particle_steps: usize,
     use_particle_pool: bool,
@@ -647,7 +666,10 @@ struct E2eRolloutTargetReport {
     splat_loss_weight: f32,
     color_loss_weight: f32,
     density_loss_weight: f32,
+    background_density_loss_weight: f32,
+    foreground_density_loss_weight: f32,
     composited_rgb_loss_weight: f32,
+    render_rgb_loss_weight: f32,
     displacement_regularizer_weight: f32,
     overflow_regularizer_weight: f32,
     bound_regularizer_weight: f32,
@@ -691,6 +713,7 @@ struct E2eRolloutValidationReport {
     training_backward_safe: bool,
     update_prob: f32,
     seed: u64,
+    seed_count: usize,
     oracle_report: Option<String>,
     psnr_threshold_db: f32,
     final_examples: usize,
@@ -698,6 +721,7 @@ struct E2eRolloutValidationReport {
     final_steps: usize,
     final_horizons: Vec<usize>,
     final_selection_horizon_min_steps: usize,
+    final_seed_count: usize,
     stability_examples: usize,
     stability_particles: usize,
     stability_reference_steps: usize,
@@ -1173,6 +1197,33 @@ fn build_e2e_rollout_report(
         .tbptt_final_loss_weight
         .unwrap_or(1.0)
         .max(0.0);
+    let log1p_trajectory_loss = config.training.log1p_trajectory_loss.unwrap_or(false);
+    let trajectory_tail_fraction = config.training.trajectory_tail_fraction.unwrap_or(0.0);
+    let trajectory_tail_weight = config.training.trajectory_tail_weight.unwrap_or(0.0);
+    let trajectory_tail_warmup_steps = config.training.trajectory_tail_warmup_steps.unwrap_or(0);
+    let trajectory_tail_per_identity = config
+        .training
+        .trajectory_tail_per_identity
+        .unwrap_or(false);
+    let identity_tail_fraction = config.training.identity_tail_fraction.unwrap_or(0.0);
+    let identity_tail_weight = config.training.identity_tail_weight.unwrap_or(0.0);
+    if !trajectory_tail_fraction.is_finite()
+        || !(0.0..=1.0).contains(&trajectory_tail_fraction)
+        || !trajectory_tail_weight.is_finite()
+        || trajectory_tail_weight < 0.0
+        || (trajectory_tail_weight > 0.0 && trajectory_tail_fraction == 0.0)
+        || !identity_tail_fraction.is_finite()
+        || !(0.0..=1.0).contains(&identity_tail_fraction)
+        || !identity_tail_weight.is_finite()
+        || identity_tail_weight < 0.0
+        || (identity_tail_weight > 0.0
+            && (identity_tail_fraction == 0.0 || !trajectory_tail_per_identity))
+    {
+        return Err(std::io::Error::other(
+            "training trajectory/identity tail fractions must be in 0..=1, weights must be finite and non-negative, positive weights require positive fractions, and identity tails require per-identity trajectory grouping",
+        )
+        .into());
+    }
     let credit_assignment =
         parse_e2e_credit_assignment(config.training.credit_assignment.as_deref())?;
     let adapter_teacher_weight = config.training.adapter_teacher_weight.unwrap_or(0.0);
@@ -1594,7 +1645,19 @@ fn build_e2e_rollout_report(
         splat_loss_weight: config.target.splat_loss_weight.unwrap_or(2.0),
         color_loss_weight: config.target.color_loss_weight.unwrap_or(5.0),
         density_loss_weight: config.target.density_loss_weight.unwrap_or(1.0),
+        background_density_loss_weight: config
+            .target
+            .background_density_loss_weight
+            .unwrap_or(Target2dLossConfig::default().background_density_loss_weight),
+        foreground_density_loss_weight: config
+            .target
+            .foreground_density_loss_weight
+            .unwrap_or(Target2dLossConfig::default().foreground_density_loss_weight),
         composited_rgb_loss_weight: config.target.composited_rgb_loss_weight.unwrap_or(0.0),
+        render_rgb_loss_weight: config
+            .target
+            .render_rgb_loss_weight
+            .unwrap_or(Target2dLossConfig::default().render_rgb_loss_weight),
         displacement_regularizer_weight: config
             .target
             .displacement_regularizer_weight
@@ -1653,6 +1716,19 @@ fn build_e2e_rollout_report(
         .into());
     }
     let validation_interval = config.validation.interval.unwrap_or(report_interval).max(1);
+    let validation_seed_count = config.validation.seed_count.unwrap_or(1);
+    let final_validation_seed_count = config
+        .validation
+        .final_seed_count
+        .unwrap_or(validation_seed_count);
+    if !(1..=16).contains(&validation_seed_count)
+        || !(1..=16).contains(&final_validation_seed_count)
+    {
+        return Err(std::io::Error::other(
+            "validation seed_count and final_seed_count must be in 1..=16",
+        )
+        .into());
+    }
     let checkpoint_interval_steps = config
         .output
         .checkpoint_interval_steps
@@ -1830,6 +1906,20 @@ fn build_e2e_rollout_report(
                 .to_string(),
         ),
         _ => {}
+    }
+    if adapter_generator_kind == E2eHyperGeneratorKind::ConditionalRowFlow
+        && flow_matching_weight > 0.0
+        && !flow_match_inference_source
+    {
+        warnings.push(
+            "conditional row-flow matching samples random sources but feed-forward inference uses the deterministic artifact source; set training.flow_match_inference_source=true for deterministic feed-forward endpoint parity"
+                .to_string(),
+        );
+    }
+    if final_validation_steps >= 512 && final_validation_selection_horizon_min_steps < 512 {
+        warnings.push(format!(
+            "final validation reaches {final_validation_steps} rollout steps but checkpoint selection begins at {final_validation_selection_horizon_min_steps}; long-horizon drift may be hidden by an early-horizon checkpoint"
+        ));
     }
     let attention_normalization = match config.adapter.attention_normalization.as_deref() {
         None if adapter_generator_kind == E2eHyperGeneratorKind::ModuleTokenDecoder => {
@@ -2216,6 +2306,13 @@ fn build_e2e_rollout_report(
             tbptt_loss_mode: tbptt_loss_mode.as_str().to_string(),
             tbptt_intermediate_loss_weight,
             tbptt_final_loss_weight,
+            log1p_trajectory_loss,
+            trajectory_tail_fraction,
+            trajectory_tail_weight,
+            trajectory_tail_warmup_steps,
+            trajectory_tail_per_identity,
+            identity_tail_fraction,
+            identity_tail_weight,
             credit_assignment: credit_assignment.as_str().to_string(),
             max_full_bptt_particle_steps,
             use_particle_pool,
@@ -2376,6 +2473,7 @@ fn build_e2e_rollout_report(
             training_backward_safe: validation_training_backward_safe,
             update_prob: config.validation.update_prob.unwrap_or(0.5),
             seed: config.validation.seed.unwrap_or(42),
+            seed_count: validation_seed_count,
             oracle_report: config
                 .validation
                 .oracle_report
@@ -2387,6 +2485,7 @@ fn build_e2e_rollout_report(
             final_steps: final_validation_steps,
             final_horizons: final_validation_horizons,
             final_selection_horizon_min_steps: final_validation_selection_horizon_min_steps,
+            final_seed_count: final_validation_seed_count,
             stability_examples,
             stability_particles,
             stability_reference_steps,
@@ -2500,9 +2599,10 @@ fn run_burn_e2e_rollout_training(
         report.target.splat_loss_weight,
         report.target.color_loss_weight,
         report.target.density_loss_weight,
-        Target2dLossConfig::default().background_density_loss_weight,
-        Target2dLossConfig::default().foreground_density_loss_weight,
+        report.target.background_density_loss_weight,
+        report.target.foreground_density_loss_weight,
         report.target.composited_rgb_loss_weight,
+        report.target.render_rgb_loss_weight,
         report.target.displacement_regularizer_weight,
         report.target.overflow_regularizer_weight,
         report.target.bound_regularizer_weight,
@@ -2532,6 +2632,13 @@ fn run_burn_e2e_rollout_training(
         )?,
         tbptt_intermediate_loss_weight: report.training.tbptt_intermediate_loss_weight,
         tbptt_final_loss_weight: report.training.tbptt_final_loss_weight,
+        log1p_trajectory_loss: report.training.log1p_trajectory_loss,
+        trajectory_tail_fraction: report.training.trajectory_tail_fraction,
+        trajectory_tail_weight: report.training.trajectory_tail_weight,
+        trajectory_tail_warmup_steps: report.training.trajectory_tail_warmup_steps,
+        trajectory_tail_per_identity: report.training.trajectory_tail_per_identity,
+        identity_tail_fraction: report.training.identity_tail_fraction,
+        identity_tail_weight: report.training.identity_tail_weight,
         credit_assignment: parse_e2e_credit_assignment(Some(&report.training.credit_assignment))?,
         max_full_bptt_particle_steps: report.training.max_full_bptt_particle_steps,
         use_particle_pool: report.training.use_particle_pool,
@@ -2675,6 +2782,7 @@ fn run_burn_e2e_rollout_training(
         validation_selection_horizon_min_steps: report.validation.selection_horizon_min_steps,
         validation_update_prob: report.validation.update_prob,
         validation_seed: report.validation.seed,
+        validation_seed_count: report.validation.seed_count,
         validation_psnr_threshold_db: report.validation.psnr_threshold_db,
         final_validation_examples: report.validation.final_examples,
         final_validation_particles: report.validation.final_particles,
@@ -2684,6 +2792,7 @@ fn run_burn_e2e_rollout_training(
         final_validation_selection_horizon_min_steps: report
             .validation
             .final_selection_horizon_min_steps,
+        final_validation_seed_count: report.validation.final_seed_count,
         stability_examples: report.validation.stability_examples,
         stability_particles: report.validation.stability_particles,
         stability_reference_steps: report.validation.stability_reference_steps,
@@ -4206,6 +4315,7 @@ fn target2d_loss_config(
     background_density_loss_weight: f32,
     foreground_density_loss_weight: f32,
     composited_rgb_loss_weight: f32,
+    render_rgb_loss_weight: f32,
     displacement_regularizer_weight: f32,
     overflow_regularizer_weight: f32,
     bound_regularizer_weight: f32,
@@ -4229,6 +4339,7 @@ fn target2d_loss_config(
             foreground_density_loss_weight,
         ),
         ("composited_rgb_loss_weight", composited_rgb_loss_weight),
+        ("render_rgb_loss_weight", render_rgb_loss_weight),
         (
             "displacement_regularizer_weight",
             displacement_regularizer_weight,
@@ -4252,6 +4363,7 @@ fn target2d_loss_config(
         background_density_loss_weight,
         foreground_density_loss_weight,
         composited_rgb_loss_weight,
+        render_rgb_loss_weight,
         displacement_regularizer_weight,
         overflow_regularizer_weight,
         bound_regularizer_weight,
@@ -4746,6 +4858,12 @@ mod tests {
             assert_eq!(config.training.task_loss_weight, Some(1.0));
             assert_eq!(config.training.flow_matching_weight, Some(0.0));
             assert_eq!(config.training.flow_self_rectification_weight, Some(0.05));
+            assert_eq!(config.training.log1p_trajectory_loss, Some(true));
+            assert_eq!(config.training.trajectory_tail_fraction, Some(0.25));
+            assert_eq!(config.training.trajectory_tail_weight, Some(0.25));
+            assert_eq!(config.training.trajectory_tail_per_identity, Some(true));
+            assert_eq!(config.training.identity_tail_fraction, Some(0.25));
+            assert_eq!(config.training.identity_tail_weight, Some(0.5));
             assert_eq!(config.model.shared_base_trainable, Some(trainable));
             assert!(config.model.oracle_model_dir.is_none());
             assert_eq!(
@@ -4764,6 +4882,13 @@ mod tests {
             );
             assert_eq!(config.adapter.flow_source_scale, Some(1.0e-3));
             assert_eq!(config.validation.final_particles, final_particles);
+            assert_eq!(config.validation.seed_count, Some(2));
+            assert_eq!(
+                config.validation.final_seed_count,
+                Some(if final_particles.is_some() { 4 } else { 2 })
+            );
+            assert_eq!(config.target.background_density_loss_weight, Some(0.1));
+            assert_eq!(config.target.foreground_density_loss_weight, Some(0.5));
             if final_particles.is_some() {
                 assert_eq!(config.training.example_batch_size, Some(8));
                 assert_eq!(config.training.rollouts_per_example, Some(4));
@@ -4926,9 +5051,33 @@ mod tests {
         assert_eq!(config.rollout.steps, Some(96));
         assert_eq!(
             config.gates.min_median_particle_steps_per_sec,
-            Some(15_000_000.0)
+            Some(28_000_000.0)
         );
         assert_eq!(config.gates.fail_on_violation, Some(true));
+    }
+
+    #[test]
+    fn verified_row_flow_pretrain_matches_deterministic_feed_forward_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/verified/2d/hypernpa/flow")
+            .join("production_contract_growing_catalog_row_flow_pretrain.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+
+        assert_eq!(
+            config.condition.encoder.as_deref(),
+            Some("dino-vits-full-tokens")
+        );
+        assert_eq!(config.condition.patch_pixels, Some(true));
+        assert_eq!(config.training.flow_matching_weight, Some(1.0));
+        assert_eq!(config.training.flow_match_inference_source, Some(true));
+        assert_eq!(config.training.rollouts_per_example, Some(4));
+        assert_eq!(
+            config.adapter.generator.as_deref(),
+            Some("conditional-row-flow")
+        );
+        assert_eq!(config.adapter.flow_source_scale, Some(1.0e-3));
     }
 
     #[test]
@@ -4997,6 +5146,13 @@ mod tests {
             tbptt_loss_mode = "endpoint-weighted"
             tbptt_intermediate_loss_weight = 0.25
             tbptt_final_loss_weight = 1.0
+            log1p_trajectory_loss = true
+            trajectory_tail_fraction = 0.25
+            trajectory_tail_weight = 1.5
+            trajectory_tail_warmup_steps = 20
+            trajectory_tail_per_identity = true
+            identity_tail_fraction = 0.5
+            identity_tail_weight = 0.75
             credit_assignment = "detached-tbptt"
             use_particle_pool = true
             pool_slots_per_example = 2
@@ -5018,11 +5174,18 @@ mod tests {
             step_min = 8
             steps = 16
 
+            [target]
+            background_density_loss_weight = 0.25
+            foreground_density_loss_weight = 1.0
+            render_rgb_loss_weight = 0.5
+
             [validation]
             examples = 1
             interval = 10
             particles = 512
             steps = 16
+            seed_count = 3
+            final_seed_count = 5
             "#,
         )
         .unwrap();
@@ -5035,11 +5198,20 @@ mod tests {
         assert_eq!(report.training.tbptt_loss_mode, "endpoint-weighted");
         assert_eq!(report.training.tbptt_intermediate_loss_weight, 0.25);
         assert_eq!(report.training.tbptt_final_loss_weight, 1.0);
+        assert!(report.training.log1p_trajectory_loss);
+        assert_eq!(report.training.trajectory_tail_fraction, 0.25);
+        assert_eq!(report.training.trajectory_tail_weight, 1.5);
+        assert_eq!(report.training.trajectory_tail_warmup_steps, 20);
+        assert!(report.training.trajectory_tail_per_identity);
+        assert_eq!(report.training.identity_tail_fraction, 0.5);
+        assert_eq!(report.training.identity_tail_weight, 0.75);
         assert_eq!(report.training.credit_assignment, "detached-tbptt");
         assert!(report.training.tbptt_state_detach_active);
         assert_eq!(report.training.effective_tbptt_chunk_steps, Some(4));
         assert_eq!(report.training.rollout_gradient_horizon_max_steps, Some(4));
         assert_eq!(report.optimizer.warmup_steps, 100);
+        assert_eq!(report.validation.seed_count, 3);
+        assert_eq!(report.validation.final_seed_count, 5);
         assert!(report.training.use_particle_pool);
         assert_eq!(report.training.pool_slots_per_example, 2);
         assert_eq!(report.training.planned_rollout_trajectories, 10);
@@ -5068,6 +5240,9 @@ mod tests {
         assert_eq!(report.output.checkpoint_interval_steps, 3);
         assert_eq!(report.training.target2d_loss_backend, "tiled-adjoint");
         assert_eq!(report.training.perception_backend, "tiled-adjoint");
+        assert_eq!(report.target.background_density_loss_weight, 0.25);
+        assert_eq!(report.target.foreground_density_loss_weight, 1.0);
+        assert_eq!(report.target.render_rgb_loss_weight, 0.5);
     }
 
     #[test]

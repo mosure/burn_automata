@@ -25,63 +25,81 @@ use super::*;
     }
 
     pub(super) fn loss_scalars(loss: &BurnLossTensors) -> AutomataResult<BurnLossScalars> {
-        Ok(BurnLossScalars {
-            total: finite_scalar(
-                "Burn direct total loss",
-                loss.total.clone().inner().into_scalar(),
-            )?,
-            splat: finite_scalar(
-                "Burn direct splat loss",
-                loss.splat.clone().inner().into_scalar(),
-            )?,
-            color: finite_scalar(
-                "Burn direct color loss",
-                loss.color.clone().inner().into_scalar(),
-            )?,
-            density: finite_scalar(
-                "Burn direct density loss",
-                loss.density.clone().inner().into_scalar(),
-            )?,
-        })
+        let values = tensor1_vec(Tensor::cat(
+            vec![
+                loss.total.clone().inner(),
+                loss.splat.clone().inner(),
+                loss.color.clone().inner(),
+                loss.density.clone().inner(),
+            ],
+            0,
+        ))?;
+        loss_scalars_from_packed(&values)
     }
 
     pub(super) fn loss_vector_scalars(loss: BurnLossBatchTensors) -> AutomataResult<Vec<BurnLossScalars>> {
-        let total = tensor1_vec(loss.total.inner())?;
-        let splat = tensor1_vec(loss.splat.inner())?;
-        let color = tensor1_vec(loss.color.inner())?;
-        let density = tensor1_vec(loss.density.inner())?;
-        loss_vector_scalars_from_parts(total, splat, color, density)
+        let rows = loss.total.shape().dims::<1>()[0];
+        let packed = Tensor::cat(
+            vec![
+                loss.total.inner(),
+                loss.splat.inner(),
+                loss.color.inner(),
+                loss.density.inner(),
+            ],
+            0,
+        );
+        loss_vector_scalars_from_packed(tensor1_vec(packed)?, rows)
     }
 
     pub(super) async fn loss_vector_scalars_async(
         loss: BurnLossBatchTensors,
     ) -> AutomataResult<Vec<BurnLossScalars>> {
-        let (total, splat, color, density) = (
-            tensor1_vec_async(loss.total.inner()).await?,
-            tensor1_vec_async(loss.splat.inner()).await?,
-            tensor1_vec_async(loss.color.inner()).await?,
-            tensor1_vec_async(loss.density.inner()).await?,
+        let rows = loss.total.shape().dims::<1>()[0];
+        let packed = Tensor::cat(
+            vec![
+                loss.total.inner(),
+                loss.splat.inner(),
+                loss.color.inner(),
+                loss.density.inner(),
+            ],
+            0,
         );
-        loss_vector_scalars_from_parts(total, splat, color, density)
+        loss_vector_scalars_from_packed(tensor1_vec_async(packed).await?, rows)
     }
 
-    fn loss_vector_scalars_from_parts(
-        total: Vec<f32>,
-        splat: Vec<f32>,
-        color: Vec<f32>,
-        density: Vec<f32>,
+    fn loss_scalars_from_packed(values: &[f32]) -> AutomataResult<BurnLossScalars> {
+        if values.len() != 4 {
+            return Err(AutomataError::InvalidArgument(format!(
+                "Burn direct scalar loss readback length {} != 4",
+                values.len()
+            )));
+        }
+        Ok(BurnLossScalars {
+            total: finite_scalar("Burn direct total loss", values[0])?,
+            splat: finite_scalar("Burn direct splat loss", values[1])?,
+            color: finite_scalar("Burn direct color loss", values[2])?,
+            density: finite_scalar("Burn direct density loss", values[3])?,
+        })
+    }
+
+    fn loss_vector_scalars_from_packed(
+        values: Vec<f32>,
+        rows: usize,
     ) -> AutomataResult<Vec<BurnLossScalars>> {
-        if total.len() != splat.len() || total.len() != color.len() || total.len() != density.len()
-        {
+        if values.len() != rows.saturating_mul(4) {
             return Err(AutomataError::InvalidArgument(
                 "Burn direct vector loss readback length mismatch".to_string(),
             ));
         }
+        let (total, rest) = values.split_at(rows);
+        let (splat, rest) = rest.split_at(rows);
+        let (color, density) = rest.split_at(rows);
         total
-            .into_iter()
-            .zip(splat)
-            .zip(color)
-            .zip(density)
+            .iter()
+            .copied()
+            .zip(splat.iter().copied())
+            .zip(color.iter().copied())
+            .zip(density.iter().copied())
             .enumerate()
             .map(|(idx, (((total, splat), color), density))| {
                 if !total.is_finite()
@@ -111,14 +129,6 @@ use super::*;
     ) -> AutomataResult<(f32, f32, Tensor1Inner)> {
         sanitize_nonfinite_gradients(tensors);
         let original_norm_tensor = group_norm_tensor(tensors);
-        let original_norm = if collect_metrics {
-            finite_scalar(
-                "Burn direct grad norm",
-                original_norm_tensor.clone().into_scalar(),
-            )?
-        } else {
-            0.0
-        };
         if normalize {
             for tensor in tensors.iter_mut() {
                 let dims = tensor.shape().dims::<2>();
@@ -129,7 +139,7 @@ use super::*;
         let clip_norm_source = if normalize {
             group_norm_tensor(tensors)
         } else {
-            original_norm_tensor
+            original_norm_tensor.clone()
         };
         let scale_tensor = if clip_norm > 0.0 {
             clip_norm_source
@@ -140,10 +150,22 @@ use super::*;
         } else {
             clip_norm_source.zeros_like().add_scalar(1.0)
         };
-        let scale = if collect_metrics {
-            finite_scalar("Burn direct grad scale", scale_tensor.clone().into_scalar())?
+        let (original_norm, scale) = if collect_metrics {
+            let values = tensor1_vec(Tensor::cat(
+                vec![original_norm_tensor, scale_tensor.clone()],
+                0,
+            ))?;
+            if values.len() != 2 {
+                return Err(AutomataError::InvalidArgument(
+                    "Burn direct gradient metric readback length mismatch".to_string(),
+                ));
+            }
+            (
+                finite_scalar("Burn direct grad norm", values[0])?,
+                finite_scalar("Burn direct grad scale", values[1])?,
+            )
         } else {
-            1.0
+            (0.0, 1.0)
         };
         Ok((original_norm, scale, scale_tensor))
     }
@@ -200,17 +222,6 @@ use super::*;
             .map(|tensor| tensor.shape().dims::<3>()[0])
             .unwrap_or(0);
         let original_norm_tensor = model_batch_group_norm_tensor(tensors);
-        let original_norms = if collect_metrics {
-            tensor1_vec(original_norm_tensor.clone())?
-                .into_iter()
-                .enumerate()
-                .map(|(model, value)| {
-                    finite_scalar(&format!("Burn oracle model batch grad norm[{model}]"), value)
-                })
-                .collect::<AutomataResult<Vec<_>>>()?
-        } else {
-            vec![0.0; model_count]
-        };
         if normalize {
             for tensor in tensors.iter_mut() {
                 *tensor = normalize_model_batch_tensor(tensor);
@@ -219,7 +230,7 @@ use super::*;
         let clip_norm_source = if normalize {
             model_batch_group_norm_tensor(tensors)
         } else {
-            original_norm_tensor
+            original_norm_tensor.clone()
         };
         let scale_tensor = if clip_norm > 0.0 {
             clip_norm_source
@@ -230,16 +241,36 @@ use super::*;
         } else {
             clip_norm_source.zeros_like().add_scalar(1.0)
         };
-        let scales = if collect_metrics {
-            tensor1_vec(scale_tensor.clone())?
-                .into_iter()
+        let (original_norms, scales) = if collect_metrics {
+            let values = tensor1_vec(Tensor::cat(
+                vec![original_norm_tensor, scale_tensor.clone()],
+                0,
+            ))?;
+            if values.len() != model_count.saturating_mul(2) {
+                return Err(AutomataError::InvalidArgument(
+                    "Burn oracle model batch gradient metric readback length mismatch".to_string(),
+                ));
+            }
+            let (norms, scales) = values.split_at(model_count);
+            let norms = norms
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(model, value)| {
+                    finite_scalar(&format!("Burn oracle model batch grad norm[{model}]"), value)
+                })
+                .collect::<AutomataResult<Vec<_>>>()?;
+            let scales = scales
+                .iter()
+                .copied()
                 .enumerate()
                 .map(|(model, value)| {
                     finite_scalar(&format!("Burn oracle model batch grad scale[{model}]"), value)
                 })
-                .collect::<AutomataResult<Vec<_>>>()?
+                .collect::<AutomataResult<Vec<_>>>()?;
+            (norms, scales)
         } else {
-            vec![1.0; model_count]
+            (vec![0.0; model_count], vec![1.0; model_count])
         };
         Ok((original_norms, scales, scale_tensor))
     }
@@ -256,18 +287,6 @@ use super::*;
             .map(|tensor| tensor.shape().dims::<3>()[0])
             .unwrap_or(0);
         let original_norm_tensor = model_batch_group_norm_tensor(tensors);
-        let original_norms = if collect_metrics {
-            tensor1_vec_async(original_norm_tensor.clone())
-                .await?
-                .into_iter()
-                .enumerate()
-                .map(|(model, value)| {
-                    finite_scalar(&format!("Burn oracle model batch grad norm[{model}]"), value)
-                })
-                .collect::<AutomataResult<Vec<_>>>()?
-        } else {
-            vec![0.0; model_count]
-        };
         if normalize {
             for tensor in tensors.iter_mut() {
                 *tensor = normalize_model_batch_tensor(tensor);
@@ -276,7 +295,7 @@ use super::*;
         let clip_norm_source = if normalize {
             model_batch_group_norm_tensor(tensors)
         } else {
-            original_norm_tensor
+            original_norm_tensor.clone()
         };
         let scale_tensor = if clip_norm > 0.0 {
             clip_norm_source
@@ -287,17 +306,37 @@ use super::*;
         } else {
             clip_norm_source.zeros_like().add_scalar(1.0)
         };
-        let scales = if collect_metrics {
-            tensor1_vec_async(scale_tensor.clone())
-                .await?
-                .into_iter()
+        let (original_norms, scales) = if collect_metrics {
+            let values = tensor1_vec_async(Tensor::cat(
+                vec![original_norm_tensor, scale_tensor.clone()],
+                0,
+            ))
+            .await?;
+            if values.len() != model_count.saturating_mul(2) {
+                return Err(AutomataError::InvalidArgument(
+                    "Burn oracle model batch gradient metric readback length mismatch".to_string(),
+                ));
+            }
+            let (norms, scales) = values.split_at(model_count);
+            let norms = norms
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(model, value)| {
+                    finite_scalar(&format!("Burn oracle model batch grad norm[{model}]"), value)
+                })
+                .collect::<AutomataResult<Vec<_>>>()?;
+            let scales = scales
+                .iter()
+                .copied()
                 .enumerate()
                 .map(|(model, value)| {
                     finite_scalar(&format!("Burn oracle model batch grad scale[{model}]"), value)
                 })
-                .collect::<AutomataResult<Vec<_>>>()?
+                .collect::<AutomataResult<Vec<_>>>()?;
+            (norms, scales)
         } else {
-            vec![1.0; model_count]
+            (vec![0.0; model_count], vec![1.0; model_count])
         };
         Ok((original_norms, scales, scale_tensor))
     }

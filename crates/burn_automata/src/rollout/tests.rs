@@ -1,5 +1,42 @@
 use super::*;
 
+#[test]
+fn position_conditioned_3d_maturity_gate_only_freezes_completed_surface_state() {
+    assert_eq!(position_conditioned_3d_maturity_gate(4.0, 0.0), 0.0);
+    assert_eq!(position_conditioned_3d_maturity_gate(3.5, 0.0), 1.0);
+    assert_eq!(position_conditioned_3d_maturity_gate(4.0, 0.01), 0.0);
+    assert_eq!(position_conditioned_3d_maturity_gate(4.0, -0.01), 0.0);
+    assert!((position_conditioned_3d_maturity_gate(3.75, 0.0) - 0.5).abs() <= f32::EPSILON);
+}
+
+#[test]
+fn position_conditioned_3d_motion_gate_freezes_surface_geometry_but_not_state_recovery() {
+    assert_eq!(
+        position_conditioned_3d_motion_gate(0.0, 0.0, 0.0, 1.0, false),
+        0.0
+    );
+    assert_eq!(
+        position_conditioned_3d_motion_gate(0.0, 0.03, 0.0, 1.0, false),
+        1.0
+    );
+    assert_eq!(
+        position_conditioned_3d_motion_gate(4.0, 0.02, 0.0, 1.0, false),
+        0.0
+    );
+    assert_eq!(
+        position_conditioned_3d_motion_gate(0.0, 0.005, 0.0, 1.0, false),
+        0.0
+    );
+    assert!(
+        (position_conditioned_3d_motion_gate(0.0, 0.02, 0.0, 1.0, false) - 0.5).abs()
+            <= f32::EPSILON
+    );
+    assert_eq!(
+        position_conditioned_3d_motion_gate(0.0, 0.1, 0.0, 1.0, true),
+        0.0
+    );
+}
+
 fn active_seed_count(states: &[f32], state_dims: usize) -> usize {
     states
         .chunks_exact(state_dims)

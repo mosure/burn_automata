@@ -7,7 +7,36 @@ pub(in crate::viewer) fn scene() -> impl SceneList {
             order: 1,
             clear_color: ClearColorConfig::None
         }
-    ), controls_panel(), catalog_preview_modal()]
+    ), controls_panel(), mobile_ui_toggle_button(), catalog_preview_modal()]
+}
+
+pub(in crate::viewer) fn mobile_ui_toggle_button() -> impl Scene {
+    bsn! {
+        Button
+        Node {
+            display: Display::None,
+            position_type: PositionType::Absolute,
+            right: px(10),
+            top: px(10),
+            width: px(76),
+            height: px(32),
+            border: px(1),
+            padding: UiRect::horizontal(px(8)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+        }
+        AutomataUiToggleButton
+        Hovered::default()
+        BorderColor::from(Color::srgb(0.30, 0.38, 0.40))
+        BackgroundColor(Color::srgba(0.045, 0.055, 0.06, 0.92))
+        on(handle_ui_toggle_button_press)
+        Children [(
+            Text("hide UI")
+            template_value(ModelCatalogTextSize(11.0))
+            TextColor(Color::srgb(0.86, 0.91, 0.93))
+            AutomataUiToggleButtonLabel
+        )]
+    }
 }
 
 pub(in crate::viewer) fn controls_panel() -> impl Scene {
@@ -301,6 +330,7 @@ pub(in crate::viewer) fn training_controls_row() -> impl Scene {
         Children [
             image_training_actions_row(),
             image_target_summary(),
+            mesh_target_summary(),
             adaptive_training_toggle(),
             slider_row("train lr", "0.0005", AutomataSliderKind::TrainingLearningRateLog2, log2_slider_value(5.0e-4), -16.0, -10.0, 0.125),
             slider_row("rollout reset", "100 steps", AutomataSliderKind::TrainingRolloutResetInterval, 100.0, 0.0, 1000.0, 25.0),

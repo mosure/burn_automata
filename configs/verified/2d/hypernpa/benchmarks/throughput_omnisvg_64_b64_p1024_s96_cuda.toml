@@ -60,7 +60,7 @@ target2d_loss_backend = "tiled-adjoint"
 perception_backend = "auto"
 max_dense_train_particles = 1024
 system_memory_budget_gb = 24.0
-gpu_memory_budget_gb = 40.0
+gpu_memory_budget_gb = 64.0
 seed = 42
 
 [gpu]
@@ -138,7 +138,7 @@ seed = 42
 psnr_threshold_db = 26.0
 
 [gates]
-min_median_particle_steps_per_sec = 15000000.0
+min_median_particle_steps_per_sec = 28000000.0
 max_quality_validation_evaluations = 0
 max_quality_validation_elapsed_fraction = 0.5
 require_validation_interval_at_least_report_interval = true

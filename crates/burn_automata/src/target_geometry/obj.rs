@@ -5,11 +5,21 @@ const UTAH_TEAPOT_OBJ: &str = include_str!("../../../../assets/meshes/utah_teapo
 
 impl TriangleMeshTarget {
     pub fn utah_teapot(scale: f32) -> AutomataResult<Self> {
-        Self::from_obj_str_with_transform(UTAH_TEAPOT_OBJ, scale, |[x, y, z]| [x, z, y])
+        Self::from_obj_str(UTAH_TEAPOT_OBJ, scale)
     }
 
     pub fn from_obj_str(obj: &str, scale: f32) -> AutomataResult<Self> {
-        Self::from_obj_str_with_transform(obj, scale, |position| position)
+        let z_up = obj.lines().take(32).any(|line| {
+            let line = line.trim().to_ascii_lowercase();
+            line.starts_with('#') && (line.contains("z-up") || line.contains("z up"))
+        });
+        Self::from_obj_str_with_transform(
+            obj,
+            scale,
+            move |[x, y, z]| {
+                if z_up { [x, z, y] } else { [x, y, z] }
+            },
+        )
     }
 
     fn from_obj_str_with_transform<F>(
@@ -147,4 +157,27 @@ fn normalized_position_color(
 
 fn normalize_bound(value: f32, min: f32, max: f32) -> f32 {
     ((value - min) / (max - min).max(EPS)).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TRIANGLE: &str = "v 0 0 0\nv 2 0 0\nv 0 0 1\nf 1 2 3\n";
+
+    #[test]
+    fn obj_z_up_metadata_is_converted_to_bevy_y_up() {
+        let z_up = TriangleMeshTarget::from_obj_str(
+            &format!("# coordinate system: z-up\n{TRIANGLE}"),
+            0.72,
+        )
+        .unwrap();
+        let y_up = TriangleMeshTarget::from_obj_str(TRIANGLE, 0.72).unwrap();
+        let (z_min, z_max) = z_up.bounds();
+        let (y_min, y_max) = y_up.bounds();
+        assert!(z_max[1] - z_min[1] > 0.5);
+        assert!((z_max[2] - z_min[2]).abs() <= EPS);
+        assert!(y_max[2] - y_min[2] > 0.5);
+        assert!((y_max[1] - y_min[1]).abs() <= EPS);
+    }
 }

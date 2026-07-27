@@ -19,9 +19,10 @@ use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
 use crate::{KernelError, KernelResult};
 
-const TARGET2D_ADJOINT_OP: &str = "burn_automata.target2d.adjoint.v2";
+const TARGET2D_ADJOINT_OP: &str = "burn_automata.target2d.adjoint.v3";
 const IMAGE_EPSILON: f32 = 1.0e-6;
 const SPLAT_DENOMINATOR_EPSILON: f32 = 1.0e-8;
+const MAX_BATCHED_TARGET2D_WORKSPACE_BYTES: usize = 12 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Target2dCubeLossConfig {
@@ -279,28 +280,65 @@ where
         );
     }
 
-    // The Cube/Fusion custom-op path corrupts interior rows at quality-scale
-    // image and particle counts even when every input row is identical. Keep
-    // each custom op sample-local, then concatenate its outputs. This preserves
-    // true batched rollout upstream while making the loss/adjoint boundary
-    // equivalent to independent per-sample evaluation.
-    let mut outputs = Vec::with_capacity(batches);
-    for batch in 0..batches {
-        outputs.push(target2d_cube_adjoint_fusion_inner::<R, F, I, BT>(
-            x.clone().narrow(0, batch, 1),
-            centered_x.clone().narrow(0, batch, 1),
-            s.clone().narrow(0, batch, 1),
-            target_rgb.clone().narrow(0, batch, 1),
-            target_density.clone().narrow(0, batch, 1),
-            target_foreground.clone().narrow(0, batch, 1),
-            target_foreground_scale.clone().narrow(0, batch, 1),
-            particle_pixel_size.clone().narrow(0, batch, 1),
-            particle_output_scale.clone().narrow(0, batch, 1),
+    let dims = x.shape().dims::<3>();
+    // Cube/Fusion can overwrite the final row of a custom-op output. Keep one
+    // duplicate guard row when batching, and cap the full temporary workspace
+    // so larger image losses retain the proven sample-local behavior.
+    let workspace_rows =
+        target2d_rows_per_launch(dims[1], s.shape().dims::<3>()[2], cfg.image_size);
+    let rows_per_launch = workspace_rows.saturating_sub(1).max(1).min(batches);
+    let mut outputs = Vec::with_capacity(batches.div_ceil(rows_per_launch));
+    let mut start = 0;
+    while start < batches {
+        let rows = rows_per_launch.min(batches - start);
+        let slice3 = |value: &BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 3>| {
+            value.clone().narrow(0, start, rows)
+        };
+        let slice2 = |value: &BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 2>| {
+            value.clone().narrow(0, start, rows)
+        };
+        let pad3 = |value: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 3>| {
+            if rows > 1 {
+                BurnTensor::cat(vec![value.clone(), value.narrow(0, rows - 1, 1)], 0)
+            } else {
+                value
+            }
+        };
+        let pad2 = |value: BurnTensor<Fusion<CubeBackend<R, F, I, BT>>, 2>| {
+            if rows > 1 {
+                BurnTensor::cat(vec![value.clone(), value.narrow(0, rows - 1, 1)], 0)
+            } else {
+                value
+            }
+        };
+        let output = target2d_cube_adjoint_fusion_inner::<R, F, I, BT>(
+            pad3(slice3(&x)),
+            pad3(slice3(&centered_x)),
+            pad3(slice3(&s)),
+            pad3(slice3(&target_rgb)),
+            pad3(slice3(&target_density)),
+            pad3(slice3(&target_foreground)),
+            pad3(slice3(&target_foreground_scale)),
+            pad2(slice2(&particle_pixel_size)),
+            pad2(slice2(&particle_output_scale)),
             particle_center_weight
                 .as_ref()
-                .map(|weight| weight.clone().narrow(0, batch, 1)),
+                .map(|weight| pad2(slice2(weight))),
             cfg,
-        )?);
+        )?;
+        outputs.push(if rows > 1 {
+            Target2dCubeLossOutput {
+                position_grad: output.position_grad.narrow(0, 0, rows),
+                state_grad: output.state_grad.narrow(0, 0, rows),
+                constant: output.constant.narrow(0, 0, rows),
+                splat: output.splat.narrow(0, 0, rows),
+                color: output.color.narrow(0, 0, rows),
+                density: output.density.narrow(0, 0, rows),
+            }
+        } else {
+            output
+        });
+        start += rows;
     }
 
     Ok(Target2dCubeLossOutput {
@@ -338,6 +376,18 @@ where
             0,
         ),
     })
+}
+
+fn target2d_rows_per_launch(particle_count: usize, state_dims: usize, image_size: usize) -> usize {
+    let pixels = image_size.saturating_mul(image_size);
+    let workspace_floats = pixels
+        .saturating_mul(14)
+        .saturating_add(particle_count.saturating_mul(state_dims.saturating_add(3)))
+        .saturating_add(4);
+    MAX_BATCHED_TARGET2D_WORKSPACE_BYTES
+        .checked_div(workspace_floats.saturating_mul(size_of::<f32>()))
+        .unwrap_or(0)
+        .max(1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -415,9 +465,11 @@ where
         Shape::new([batches, particle_count, state_dims]),
         dtype,
     );
-    let splat_ir = TensorIr::uninit(client.create_empty_handle(), Shape::new([batches]), dtype);
-    let color_ir = TensorIr::uninit(client.create_empty_handle(), Shape::new([batches]), dtype);
-    let density_ir = TensorIr::uninit(client.create_empty_handle(), Shape::new([batches]), dtype);
+    let losses_ir = TensorIr::uninit(
+        client.create_empty_handle(),
+        Shape::new([batches, 4]),
+        dtype,
+    );
 
     let inputs = [
         centered_x_fusion.clone().into_ir(),
@@ -432,9 +484,7 @@ where
     let outputs = [
         position_grad_ir.clone(),
         state_grad_ir.clone(),
-        splat_ir.clone(),
-        color_ir.clone(),
-        density_ir.clone(),
+        losses_ir.clone(),
     ];
     let streams = OperationStreams::with_inputs([
         &centered_x_fusion,
@@ -458,26 +508,18 @@ where
             particle_output_scale: inputs[7].clone(),
             position_grad: position_grad_ir,
             state_grad: state_grad_ir,
-            splat: splat_ir,
-            color: color_ir,
-            density: density_ir,
+            losses: losses_ir,
         },
         cfg,
         _marker: PhantomData,
     };
-    let [
-        position_grad_fusion,
-        state_grad_fusion,
-        splat_fusion,
-        color_fusion,
-        density_fusion,
-    ] = client
+    let [position_grad_fusion, state_grad_fusion, losses_fusion] = client
         .register(
             streams,
             OperationIr::Custom(CustomOpIr::new(TARGET2D_ADJOINT_OP, &inputs, &outputs)),
             op,
         )
-        .outputs::<5>();
+        .outputs::<3>();
 
     let mut position_grad = BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 3>::from_primitive(
         TensorPrimitive::Float(position_grad_fusion),
@@ -505,15 +547,12 @@ where
     let state_grad = BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 3>::from_primitive(
         TensorPrimitive::Float(state_grad_fusion),
     );
-    let splat = BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 1>::from_primitive(
-        TensorPrimitive::Float(splat_fusion),
+    let losses = BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 2>::from_primitive(
+        TensorPrimitive::Float(losses_fusion),
     );
-    let color = BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 1>::from_primitive(
-        TensorPrimitive::Float(color_fusion),
-    );
-    let density = BurnTensor::<Fusion<CubeBackend<R, F, I, BT>>, 1>::from_primitive(
-        TensorPrimitive::Float(density_fusion),
-    );
+    let splat = losses.clone().narrow(1, 0, 1).squeeze_dim::<1>(1);
+    let color = losses.clone().narrow(1, 1, 1).squeeze_dim::<1>(1);
+    let density = losses.narrow(1, 2, 1).squeeze_dim::<1>(1);
     let dot = x
         .mul(position_grad.clone())
         .reshape([batches, particle_count * 2])
@@ -547,9 +586,7 @@ struct Target2dAdjointDesc {
     particle_output_scale: TensorIr,
     position_grad: TensorIr,
     state_grad: TensorIr,
-    splat: TensorIr,
-    color: TensorIr,
-    density: TensorIr,
+    losses: TensorIr,
 }
 
 #[derive(Debug)]
@@ -610,18 +647,14 @@ where
         );
         handles
             .register_float_tensor::<Raw<R, F, I, BT>>(&self.desc.state_grad.id, output.state_grad);
-        handles.register_float_tensor::<Raw<R, F, I, BT>>(&self.desc.splat.id, output.splat);
-        handles.register_float_tensor::<Raw<R, F, I, BT>>(&self.desc.color.id, output.color);
-        handles.register_float_tensor::<Raw<R, F, I, BT>>(&self.desc.density.id, output.density);
+        handles.register_float_tensor::<Raw<R, F, I, BT>>(&self.desc.losses.id, output.losses);
     }
 }
 
 struct Target2dAdjointRawOutput<R: CubeRuntime> {
     position_grad: CubeTensor<R>,
     state_grad: CubeTensor<R>,
-    splat: CubeTensor<R>,
-    color: CubeTensor<R>,
-    density: CubeTensor<R>,
+    losses: CubeTensor<R>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -674,9 +707,15 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
         Shape::new([batches, particle_count, state_dims]),
         dtype,
     );
-    let splat = empty_device_dtype(client.clone(), device.clone(), Shape::new([batches]), dtype);
-    let color = empty_device_dtype(client.clone(), device.clone(), Shape::new([batches]), dtype);
-    let density = empty_device_dtype(client.clone(), device.clone(), Shape::new([batches]), dtype);
+    // One aligned loss output reduces custom-op registration and slicing
+    // overhead. The guarded, workspace-bounded batching above handles the
+    // separate Cube/Fusion tail-row correctness constraint.
+    let losses = empty_device_dtype(
+        client.clone(),
+        device.clone(),
+        Shape::new([batches, 4]),
+        dtype,
+    );
 
     let particle_units = batches * particle_count;
     let particle_cube_dim = CubeDim::new_1d(256);
@@ -783,9 +822,7 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
         CubeDim::new_1d(256),
         AddressType::U32,
         pixel_loss.clone().into_tensor_arg(),
-        splat.clone().into_tensor_arg(),
-        color.clone().into_tensor_arg(),
-        density.clone().into_tensor_arg(),
+        losses.clone().into_tensor_arg(),
         InputScalar::new(cfg.color_loss_weight, dtype),
         InputScalar::new(cfg.density_loss_weight, dtype),
         InputScalar::new(cfg.background_density_loss_weight, dtype),
@@ -817,9 +854,7 @@ fn launch_target2d_adjoint<R: CubeRuntime>(
     Target2dAdjointRawOutput {
         position_grad,
         state_grad,
-        splat,
-        color,
-        density,
+        losses,
     }
 }
 
@@ -1318,9 +1353,7 @@ fn write_pixel_loss<F: Float>(
 #[cube(launch, address_type = "dynamic")]
 fn reduce_loss_tiled_v2_kernel<F: Float>(
     pixel_loss: &Tensor<F>,
-    splat: &mut Tensor<F>,
-    color: &mut Tensor<F>,
-    density: &mut Tensor<F>,
+    losses: &mut Tensor<F>,
     color_loss_weight: InputScalar,
     density_loss_weight: InputScalar,
     background_density_loss_weight: InputScalar,
@@ -1378,9 +1411,10 @@ fn reduce_loss_tiled_v2_kernel<F: Float>(
         stride /= 2usize;
     }
     if unit == 0usize {
-        color[batch] = color_shared[0];
-        density[batch] = density_shared[0];
-        splat[batch] = splat_shared[0];
+        let base = batch * losses.stride(0);
+        losses[base] = splat_shared[0];
+        losses[base + losses.stride(1)] = color_shared[0];
+        losses[base + 2 * losses.stride(1)] = density_shared[0];
     }
 }
 

@@ -25,6 +25,7 @@ online = true
 token_attention_heads = 12
 rgb_channels = true
 alpha_channel = true
+patch_pixels = true
 
 [model]
 shared_base = "models/catalog/growing/lizard.bpk"
@@ -42,9 +43,12 @@ example_batch_size = 10
 credit_assignment = "full-bptt"
 task_loss_weight = 0.0
 flow_matching_weight = 1.0
+flow_match_inference_source = true
 max_full_bptt_particle_steps = 10240
 use_particle_pool = false
-rollouts_per_example = 1
+# Four independent time draws per condition produce an effective batch of 40
+# while reusing the ten resident DINO condition rows.
+rollouts_per_example = 4
 target2d_loss_backend = "tiled-adjoint"
 perception_backend = "auto"
 max_dense_train_particles = 32
@@ -69,7 +73,7 @@ flow_layers = 12
 flow_ffn_dims = 3072
 flow_sample_steps = 8
 flow_source_seed = 42
-flow_source_scale = 1.0
+flow_source_scale = 1.0e-3
 
 [rollout]
 particles = 32

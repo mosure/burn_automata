@@ -18,7 +18,8 @@ var<workgroup> paired_reduce_rows: array<u32, 256>;
 var<workgroup> paired_selected_rows: array<u32, 4>;
 var<workgroup> paired_invalid: atomic<u32>;
 var<workgroup> paired_fine_measure: f32;
-var<workgroup> paired_mean_state_detail: f32;
+var<workgroup> paired_mean_latent_detail: f32;
+var<workgroup> paired_mean_color_detail: f32;
 var<workgroup> paired_mean_occupancy_detail: f32;
 var<workgroup> paired_coarse_row: u32;
 var<workgroup> paired_coarse_detail: f32;
@@ -92,24 +93,32 @@ fn paired_reduce_max(local_id: u32) {
 
 fn paired_topology_detail(
     row: u32,
-    mean_state_detail: f32,
+    mean_latent_detail: f32,
+    mean_color_detail: f32,
     mean_occupancy_detail: f32,
 ) -> f32 {
     let sd = state_dims();
     let feature_base = diagnostics_normalized_feature_offset() + row * feature_dims();
     let state_gradient_base = feature_base + 2u * sd;
-    var state_squared = 0.0;
+    let color_start = sd - min(sd, 3u);
+    var latent_squared = 0.0;
+    var color_squared = 0.0;
     for (var channel = 0u; channel < sd; channel = channel + 1u) {
         for (var axis = 0u; axis < 2u; axis = axis + 1u) {
             let value = density.values[state_gradient_base + channel * 2u + axis];
-            state_squared = state_squared + value * value;
+            if (channel < color_start) {
+                latent_squared = latent_squared + value * value;
+            } else {
+                color_squared = color_squared + value * value;
+            }
         }
     }
     let occupancy_base = feature_base + 4u * sd;
     let occupancy_x = density.values[occupancy_base];
     let occupancy_y = density.values[occupancy_base + 1u];
     return max(
-        0.25 * sqrt(state_squared) / mean_state_detail
+        0.10 * sqrt(latent_squared) / mean_latent_detail
+            + sqrt(color_squared) / mean_color_detail
             + sqrt(occupancy_x * occupancy_x + occupancy_y * occupancy_y)
                 / mean_occupancy_detail,
         1.0e-6,
@@ -353,31 +362,40 @@ fn paired_local_detail_topology_main(
     if (local_id.x == 0u) {
         atomicStore(&paired_invalid, 0u);
         var fine_measure = 3.402823466e+38;
-        var state_detail_sum = 0.0;
+        var latent_detail_sum = 0.0;
+        var color_detail_sum = 0.0;
         var occupancy_detail_sum = 0.0;
         for (var index = 0u; index < total; index = index + 1u) {
             fine_measure = min(fine_measure, particle_measure(index));
             let feature_base =
                 diagnostics_normalized_feature_offset() + index * feature_dims();
             let state_gradient_base = feature_base + 2u * sd;
-            var state_squared = 0.0;
+            let color_start = sd - min(sd, 3u);
+            var latent_squared = 0.0;
+            var color_squared = 0.0;
             for (var channel = 0u; channel < sd; channel = channel + 1u) {
                 for (var axis = 0u; axis < 2u; axis = axis + 1u) {
                     let value = density.values[
                         state_gradient_base + channel * 2u + axis
                     ];
-                    state_squared = state_squared + value * value;
+                    if (channel < color_start) {
+                        latent_squared = latent_squared + value * value;
+                    } else {
+                        color_squared = color_squared + value * value;
+                    }
                 }
             }
             let occupancy_base = feature_base + 4u * sd;
             let occupancy_x = density.values[occupancy_base];
             let occupancy_y = density.values[occupancy_base + 1u];
-            state_detail_sum = state_detail_sum + sqrt(state_squared);
+            latent_detail_sum = latent_detail_sum + sqrt(latent_squared);
+            color_detail_sum = color_detail_sum + sqrt(color_squared);
             occupancy_detail_sum = occupancy_detail_sum
                 + sqrt(occupancy_x * occupancy_x + occupancy_y * occupancy_y);
         }
         paired_fine_measure = fine_measure;
-        paired_mean_state_detail = max(state_detail_sum / f32(total), 1.0e-6);
+        paired_mean_latent_detail = max(latent_detail_sum / f32(total), 1.0e-6);
+        paired_mean_color_detail = max(color_detail_sum / f32(total), 1.0e-6);
         paired_mean_occupancy_detail =
             max(occupancy_detail_sum / f32(total), 1.0e-6);
     }
@@ -391,7 +409,8 @@ fn paired_local_detail_topology_main(
         let detail =
             paired_topology_detail(
                 index,
-                paired_mean_state_detail,
+                paired_mean_latent_detail,
+                paired_mean_color_detail,
                 paired_mean_occupancy_detail,
             );
         if (paired_topology_is_units(measure, paired_fine_measure, 4.0)) {
@@ -426,7 +445,8 @@ fn paired_local_detail_topology_main(
         )) {
             let detail = paired_topology_detail(
                 index,
-                paired_mean_state_detail,
+                paired_mean_latent_detail,
+                paired_mean_color_detail,
                 paired_mean_occupancy_detail,
             );
             if (detail < local_anchor_detail
@@ -488,7 +508,8 @@ fn paired_local_detail_topology_main(
                 + merge_detail_scale
                     * paired_topology_detail(
                         index,
-                        paired_mean_state_detail,
+                        paired_mean_latent_detail,
+                        paired_mean_color_detail,
                         paired_mean_occupancy_detail,
                     );
             if (score < local_best_score
@@ -525,7 +546,8 @@ fn paired_local_detail_topology_main(
         merge_detail = merge_detail
             + paired_topology_detail(
                 selected_rows[slot],
-                paired_mean_state_detail,
+                paired_mean_latent_detail,
+                paired_mean_color_detail,
                 paired_mean_occupancy_detail,
             );
     }
@@ -632,7 +654,8 @@ fn continuous_local_detail_topology_main(
 
     if (local_id.x == 0u) {
         var total_measure = 0.0;
-        var state_detail_sum = 0.0;
+        var latent_detail_sum = 0.0;
+        var color_detail_sum = 0.0;
         var occupancy_detail_sum = 0.0;
         var position_first_x = 0.0;
         var position_first_y = 0.0;
@@ -653,19 +676,26 @@ fn continuous_local_detail_topology_main(
             let feature_base =
                 diagnostics_normalized_feature_offset() + index * feature_dims();
             let state_gradient_base = feature_base + 2u * sd;
-            var state_squared = 0.0;
+            let color_start = sd - min(sd, 3u);
+            var latent_squared = 0.0;
+            var color_squared = 0.0;
             for (var channel = 0u; channel < sd; channel = channel + 1u) {
                 for (var axis = 0u; axis < 2u; axis = axis + 1u) {
                     let value = density.values[
                         state_gradient_base + channel * 2u + axis
                     ];
-                    state_squared = state_squared + value * value;
+                    if (channel < color_start) {
+                        latent_squared = latent_squared + value * value;
+                    } else {
+                        color_squared = color_squared + value * value;
+                    }
                 }
             }
             let occupancy_base = feature_base + 4u * sd;
             let occupancy_x = density.values[occupancy_base];
             let occupancy_y = density.values[occupancy_base + 1u];
-            state_detail_sum = state_detail_sum + sqrt(state_squared);
+            latent_detail_sum = latent_detail_sum + sqrt(latent_squared);
+            color_detail_sum = color_detail_sum + sqrt(color_squared);
             occupancy_detail_sum = occupancy_detail_sum
                 + sqrt(occupancy_x * occupancy_x + occupancy_y * occupancy_y);
         }
@@ -683,7 +713,8 @@ fn continuous_local_detail_topology_main(
         continuous_affine_01 = 0.0;
         continuous_affine_10 = 0.0;
         continuous_affine_11 = 1.0;
-        paired_mean_state_detail = max(state_detail_sum / f32(total), 1.0e-6);
+        paired_mean_latent_detail = max(latent_detail_sum / f32(total), 1.0e-6);
+        paired_mean_color_detail = max(color_detail_sum / f32(total), 1.0e-6);
         paired_mean_occupancy_detail =
             max(occupancy_detail_sum / f32(total), 1.0e-6);
         continuous_accept = 0u;
@@ -710,7 +741,8 @@ fn continuous_local_detail_topology_main(
                 || measure + measure_tolerance < continuous_mean_measure) {
                 let detail = stable_local_detail_rank(paired_topology_detail(
                     index,
-                    paired_mean_state_detail,
+                    paired_mean_latent_detail,
+                    paired_mean_color_detail,
                     paired_mean_occupancy_detail,
                 ));
                 if (measure > continuous_mean_measure + measure_tolerance) {

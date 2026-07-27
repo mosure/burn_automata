@@ -24,6 +24,7 @@ pub(crate) struct BurnE2eRolloutHistoryEntry {
     pub(crate) generator_grad_norm: f32,
     pub(crate) generator_grad_scale: f32,
     pub(crate) examples_seen: usize,
+    pub(crate) optimizer_examples_per_sec: f64,
     pub(crate) pool_seed_replacements: usize,
     pub(crate) particle_steps_per_sec: f64,
     pub(crate) dense_pair_interactions_per_sec: f64,
@@ -64,8 +65,11 @@ pub(crate) struct BurnE2eRolloutQualityEntry {
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct BurnE2eRolloutHorizonSummary {
     pub(crate) rollout_steps: usize,
+    pub(crate) seed_count: usize,
+    pub(crate) seed_summaries: Vec<BurnE2eRolloutSeedSummary>,
     pub(crate) aggregate_composited_rgb_psnr_db: f32,
     pub(crate) p10_composited_rgb_psnr_db: f32,
+    pub(crate) worst_seed_p10_composited_rgb_psnr_db: f32,
     pub(crate) min_composited_rgb_psnr_db: f32,
     pub(crate) teacher_adapter_aggregate_composited_rgb_psnr_db: Option<f32>,
     pub(crate) teacher_adapter_p10_composited_rgb_psnr_db: Option<f32>,
@@ -80,6 +84,16 @@ pub(crate) struct BurnE2eRolloutHorizonSummary {
     pub(crate) all_examples_passed: bool,
     pub(crate) conditional_control_passed: bool,
     pub(crate) passed: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct BurnE2eRolloutSeedSummary {
+    pub(crate) seed: u64,
+    pub(crate) aggregate_composited_rgb_psnr_db: f32,
+    pub(crate) p10_composited_rgb_psnr_db: f32,
+    pub(crate) min_composited_rgb_psnr_db: f32,
+    pub(crate) aggregate_density_psnr_db: f32,
+    pub(crate) mean_density_soft_iou: f32,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -121,6 +135,9 @@ pub(crate) struct BurnE2eRolloutQualityReport {
     pub(crate) rollout_steps: usize,
     pub(crate) update_prob: f32,
     pub(crate) seed: u64,
+    pub(crate) representative_seed: u64,
+    pub(crate) seed_count: usize,
+    pub(crate) seed_summaries: Vec<BurnE2eRolloutSeedSummary>,
     pub(crate) psnr_threshold_db: f32,
     pub(crate) passed: bool,
     pub(crate) mean_passed: bool,
@@ -140,6 +157,7 @@ pub(crate) struct BurnE2eRolloutQualityReport {
     pub(crate) max_render_rgb_psnr_db: f32,
     pub(crate) selection_metric: &'static str,
     pub(crate) selection_psnr_db: f32,
+    pub(crate) selection_trajectory_count: usize,
     pub(crate) selection_horizon_min_steps: usize,
     pub(crate) horizon_summaries: Vec<BurnE2eRolloutHorizonSummary>,
     pub(crate) peak_horizon_p10_composited_rgb_psnr_db: f32,
@@ -153,6 +171,7 @@ pub(crate) struct BurnE2eRolloutQualityReport {
     pub(crate) mean_composited_rgb_psnr_db: f32,
     pub(crate) median_composited_rgb_psnr_db: f32,
     pub(crate) p10_composited_rgb_psnr_db: f32,
+    pub(crate) worst_seed_p10_composited_rgb_psnr_db: f32,
     pub(crate) min_composited_rgb_psnr_db: f32,
     pub(crate) max_composited_rgb_psnr_db: f32,
     pub(crate) teacher_adapter_aggregate_composited_rgb_psnr_db: Option<f32>,

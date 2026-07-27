@@ -11,13 +11,14 @@ homepage.workspace = true
 readme = "../../README.md"
 
 [features]
-default = ["viewer", "splatting", "gpu_wgpu", "hyper_dino_wgpu", "headless"]
+default = ["viewer", "splatting", "gpu_wgpu", "hyper_dino_wgpu", "mesh_training", "headless"]
 viewer = ["burn_automata/import", "dep:crossbeam-channel"]
 splatting = ["dep:bevy_gaussian_splatting"]
 gpu_wgpu = ["burn_automata/gpu_wgpu"]
 hyper_dino = ["burn_automata/dino", "dep:image", "dep:rfd", "dep:serde_json"]
 hyper_dino_wgpu = ["hyper_dino", "burn_automata/backend_wgpu"]
 hyper_dino_cuda = ["hyper_dino", "burn_automata/backend_cuda"]
+mesh_training = ["viewer", "dep:rfd", "burn_automata/backend_wgpu"]
 headless = ["viewer", "splatting", "gpu_wgpu", "dep:clap", "dep:image", "dep:serde_json"]
 
 [dependencies]

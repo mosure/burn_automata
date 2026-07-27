@@ -62,6 +62,22 @@ pub(in crate::viewer) struct RunControlButtonLabel(pub(in crate::viewer) RunCont
 #[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct HyperImageButton;
 
+#[cfg(feature = "mesh_training")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct MeshOpenButton;
+
+#[cfg(feature = "mesh_training")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct MeshTargetSummary;
+
+#[cfg(feature = "mesh_training")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct MeshTargetName;
+
+#[cfg(feature = "mesh_training")]
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct MeshTargetProgress;
+
 #[cfg(feature = "hyper_dino")]
 #[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct HyperInferenceButton;
@@ -108,6 +124,17 @@ pub(in crate::viewer) struct AutomataUiRoot;
 
 #[derive(Component, Clone, Debug, Default)]
 pub(in crate::viewer) struct AutomataUiScrollArea;
+
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct AutomataUiToggleButton;
+
+#[derive(Component, Clone, Debug, Default)]
+pub(in crate::viewer) struct AutomataUiToggleButtonLabel;
+
+#[derive(Resource, Clone, Debug, Default)]
+pub(in crate::viewer) struct AutomataUiTouchScroll {
+    pub(in crate::viewer) touch_id: Option<u64>,
+}
 
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::viewer) struct ModelCatalogCard(pub(in crate::viewer) ModelCatalogKey);

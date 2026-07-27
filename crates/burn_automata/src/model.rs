@@ -801,7 +801,40 @@ impl NpaModel {
                 position_features: self.config.position_features,
             },
         )?;
-        let (dx, ds) = self.forward_from_features_with_eps(&perception.features, grid.eps)?;
+        let (mut dx, mut ds) =
+            self.forward_from_features_with_eps(&perception.features, grid.eps)?;
+        if self.config.spatial_dims == 3
+            && self.config.position_features
+            && self.config.state_dims > crate::rollout::GROWTH_3D_LIVENESS_CHANNEL
+        {
+            for row in 0..positions.len() {
+                let state_base = row * self.config.state_dims;
+                let liveness = states[state_base + crate::rollout::GROWTH_3D_LIVENESS_CHANNEL];
+                let signed_distance =
+                    states[state_base + crate::rollout::UV_TORUS_SIGNED_DISTANCE_STATE_OFFSET];
+                let signed_distance_update =
+                    ds[state_base + crate::rollout::UV_TORUS_SIGNED_DISTANCE_STATE_OFFSET];
+                let state_gate = crate::rollout::position_conditioned_3d_maturity_gate(
+                    liveness,
+                    signed_distance,
+                );
+                let motion_gate = crate::rollout::position_conditioned_3d_motion_gate(
+                    liveness,
+                    signed_distance,
+                    signed_distance_update,
+                    dt,
+                    positions[row][3] >= 0.5,
+                );
+                for value in dx[row].iter_mut().take(self.config.spatial_dims) {
+                    *value *= motion_gate;
+                }
+                for value in
+                    &mut ds[row * self.config.state_dims..(row + 1) * self.config.state_dims]
+                {
+                    *value *= state_gate;
+                }
+            }
+        }
         let (next_positions, next_states) = euler_step(
             positions,
             states,

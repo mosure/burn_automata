@@ -1,5 +1,41 @@
-#[cfg(feature = "splatting")]
 use super::*;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct AutomataUiLayoutMetrics {
+    pub mobile: bool,
+    pub panel_width: f32,
+    pub panel_height: f32,
+    pub render_size: Vec2,
+}
+
+pub(super) fn automata_ui_layout_metrics(logical_size: Vec2) -> AutomataUiLayoutMetrics {
+    let width = logical_size.x.max(1.0);
+    let height = logical_size.y.max(1.0);
+    if width >= AUTOMATA_UI_DESKTOP_MIN_WIDTH
+        && width - AUTOMATA_UI_PANEL_WIDTH >= AUTOMATA_MIN_VIEWPORT_WIDTH as f32
+    {
+        return AutomataUiLayoutMetrics {
+            mobile: false,
+            panel_width: AUTOMATA_UI_PANEL_WIDTH,
+            panel_height: height,
+            render_size: Vec2::new(width - AUTOMATA_UI_PANEL_WIDTH, height),
+        };
+    }
+
+    let maximum_panel_height = (height - AUTOMATA_UI_MOBILE_MIN_VIEW_HEIGHT).max(height * 0.36);
+    let panel_height = (height * AUTOMATA_UI_MOBILE_PANEL_HEIGHT_RATIO)
+        .clamp(
+            AUTOMATA_UI_MOBILE_PANEL_MIN_HEIGHT.min(maximum_panel_height),
+            AUTOMATA_UI_MOBILE_PANEL_MAX_HEIGHT.min(maximum_panel_height),
+        )
+        .min(height - 1.0);
+    AutomataUiLayoutMetrics {
+        mobile: true,
+        panel_width: width,
+        panel_height,
+        render_size: Vec2::new(width, (height - panel_height).max(1.0)),
+    }
+}
 
 #[cfg(feature = "splatting")]
 #[allow(clippy::type_complexity)]
@@ -56,7 +92,21 @@ pub(super) fn automata_camera_viewport(
         return None;
     }
 
-    let panel_physical_width = (AUTOMATA_UI_PANEL_WIDTH * scale_factor.max(1.0e-4)).round() as u32;
+    let scale_factor = scale_factor.max(1.0e-4);
+    let logical_size = physical_size.as_vec2() / scale_factor;
+    let layout = automata_ui_layout_metrics(logical_size);
+    if layout.mobile {
+        let render_height = (layout.render_size.y * scale_factor)
+            .round()
+            .clamp(1.0, physical_size.y as f32) as u32;
+        return Some(Viewport {
+            physical_position: UVec2::ZERO,
+            physical_size: UVec2::new(physical_size.x.max(1), render_height),
+            depth: 0.0..1.0,
+        });
+    }
+
+    let panel_physical_width = (layout.panel_width * scale_factor).round() as u32;
     let right_width = physical_size.x.saturating_sub(panel_physical_width);
     if right_width < AUTOMATA_MIN_VIEWPORT_WIDTH {
         return None;

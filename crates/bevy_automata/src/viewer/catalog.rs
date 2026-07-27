@@ -3,7 +3,10 @@ use std::path::Path;
 
 use burn_automata::{AutomataPreset, ParticleSeed, RolloutConfig};
 
-use super::{AutomataRuntime, AutomataSettings, apply_preset, reset_training_stats};
+use super::{
+    AutomataRuntime, AutomataSettings, apply_preset, reset_training_stats,
+    set_particle_initialization,
+};
 
 pub(super) const DEFAULT_LIZARD_MODEL: &str = "models/catalog/growing/lizard.bpk";
 const LEGACY_LIZARD_MODEL: &str = "/tmp/burn_automata_lizard.bpk";
@@ -16,7 +19,11 @@ pub(super) const LIVE_TRAINING_TARGET: &str = "rollout teacher";
 pub(super) const CATALOG_DOUBLE_CLICK_SECONDS: f64 = 0.35;
 pub(super) const CATALOG_3D_GROWTH_SEED: u64 = 0x0051_a73d;
 pub(super) const AUTOMATA_UI_PANEL_WIDTH: f32 = 540.0;
-#[cfg(feature = "splatting")]
+pub(super) const AUTOMATA_UI_DESKTOP_MIN_WIDTH: f32 = 900.0;
+pub(super) const AUTOMATA_UI_MOBILE_PANEL_HEIGHT_RATIO: f32 = 0.46;
+pub(super) const AUTOMATA_UI_MOBILE_PANEL_MIN_HEIGHT: f32 = 176.0;
+pub(super) const AUTOMATA_UI_MOBILE_PANEL_MAX_HEIGHT: f32 = 420.0;
+pub(super) const AUTOMATA_UI_MOBILE_MIN_VIEW_HEIGHT: f32 = 176.0;
 pub(super) const AUTOMATA_MIN_VIEWPORT_WIDTH: u32 = 256;
 #[cfg(all(
     feature = "splatting",
@@ -602,6 +609,7 @@ pub(super) fn select_catalog_entry(
     runtime.loaded_model_path = None;
     runtime.loaded_adaptive_model_path = None;
     runtime.adaptive = None;
+    set_particle_initialization(runtime, None);
     runtime.trace = None;
     runtime.frame = 0;
     runtime.backward_loss = None;

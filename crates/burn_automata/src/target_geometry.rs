@@ -33,7 +33,23 @@ pub struct TriangleMeshTarget {
     pub face_normals: Vec<[f32; 3]>,
     pub face_areas: Vec<f32>,
     face_area_prefix: Vec<f32>,
+    projection_bvh: MeshProjectionBvh,
     pub colors: Option<Vec<[f32; 3]>>,
+}
+
+#[derive(Clone, Debug)]
+struct MeshProjectionBvh {
+    nodes: Vec<MeshProjectionBvhNode>,
+    face_indices: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MeshProjectionBvhNode {
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+    children: Option<[usize; 2]>,
+    face_start: usize,
+    face_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -82,9 +98,14 @@ impl TriangleMeshTarget {
             face_normals: Vec::new(),
             face_areas: Vec::new(),
             face_area_prefix: Vec::new(),
+            projection_bvh: MeshProjectionBvh {
+                nodes: Vec::new(),
+                face_indices: Vec::new(),
+            },
             colors: None,
         };
         target.recompute_normals();
+        target.projection_bvh = MeshProjectionBvh::build(&target.vertices, &target.faces);
         Ok(target)
     }
 
@@ -105,25 +126,9 @@ impl TriangleMeshTarget {
     }
 
     pub fn project(&self, query: [f32; 3]) -> TargetProjection {
-        let mut best = ClosestPoint {
-            point: self.vertices[0],
-            barycentric: [1.0, 0.0, 0.0],
-            face_index: 0,
-            distance2: f32::MAX,
-        };
-
-        for (face_index, face) in self.faces.iter().enumerate() {
-            let a = self.vertices[face[0] as usize];
-            let b = self.vertices[face[1] as usize];
-            let c = self.vertices[face[2] as usize];
-            let candidate = closest_point_on_triangle(query, a, b, c);
-            if candidate.distance2 < best.distance2 {
-                best = ClosestPoint {
-                    face_index,
-                    ..candidate
-                };
-            }
-        }
+        let best = self
+            .projection_bvh
+            .closest_point(query, &self.vertices, &self.faces);
 
         let face = self.faces[best.face_index];
         let normal = self.interpolated_normal(face, best.barycentric);
@@ -372,6 +377,182 @@ struct ClosestPoint {
     distance2: f32,
 }
 
+impl MeshProjectionBvh {
+    const LEAF_FACES: usize = 8;
+
+    fn build(vertices: &[[f32; 3]], faces: &[[u32; 3]]) -> Self {
+        let mut face_indices = (0..faces.len()).collect::<Vec<_>>();
+        let mut nodes = Vec::with_capacity(faces.len().saturating_mul(2));
+        Self::build_node(vertices, faces, &mut face_indices, 0, &mut nodes);
+        Self {
+            nodes,
+            face_indices,
+        }
+    }
+
+    fn build_node(
+        vertices: &[[f32; 3]],
+        faces: &[[u32; 3]],
+        face_indices: &mut [usize],
+        face_start: usize,
+        nodes: &mut Vec<MeshProjectionBvhNode>,
+    ) -> usize {
+        let (bounds_min, bounds_max, centroid_min, centroid_max) =
+            bvh_bounds(vertices, faces, face_indices);
+        let node_index = nodes.len();
+        nodes.push(MeshProjectionBvhNode {
+            bounds_min,
+            bounds_max,
+            children: None,
+            face_start,
+            face_count: face_indices.len(),
+        });
+        if face_indices.len() <= Self::LEAF_FACES {
+            return node_index;
+        }
+
+        let extents = [
+            centroid_max[0] - centroid_min[0],
+            centroid_max[1] - centroid_min[1],
+            centroid_max[2] - centroid_min[2],
+        ];
+        let axis = if extents[1] > extents[0] && extents[1] >= extents[2] {
+            1
+        } else if extents[2] > extents[0] {
+            2
+        } else {
+            0
+        };
+        face_indices.sort_unstable_by(|left, right| {
+            triangle_centroid(vertices, faces[*left])[axis]
+                .total_cmp(&triangle_centroid(vertices, faces[*right])[axis])
+                .then_with(|| left.cmp(right))
+        });
+        let midpoint = face_indices.len() / 2;
+        let (left_faces, right_faces) = face_indices.split_at_mut(midpoint);
+        let left = Self::build_node(vertices, faces, left_faces, face_start, nodes);
+        let right = Self::build_node(vertices, faces, right_faces, face_start + midpoint, nodes);
+        nodes[node_index].children = Some([left, right]);
+        nodes[node_index].face_count = 0;
+        node_index
+    }
+
+    fn closest_point(
+        &self,
+        query: [f32; 3],
+        vertices: &[[f32; 3]],
+        faces: &[[u32; 3]],
+    ) -> ClosestPoint {
+        let mut best = ClosestPoint {
+            point: vertices[0],
+            barycentric: [1.0, 0.0, 0.0],
+            face_index: 0,
+            distance2: f32::MAX,
+        };
+        let mut stack = Vec::with_capacity(64);
+        stack.push(0usize);
+        while let Some(node_index) = stack.pop() {
+            let node = self.nodes[node_index];
+            if point_aabb_distance2(query, node.bounds_min, node.bounds_max) > best.distance2 {
+                continue;
+            }
+            if let Some([left, right]) = node.children {
+                let left_node = self.nodes[left];
+                let right_node = self.nodes[right];
+                let left_distance =
+                    point_aabb_distance2(query, left_node.bounds_min, left_node.bounds_max);
+                let right_distance =
+                    point_aabb_distance2(query, right_node.bounds_min, right_node.bounds_max);
+                if left_distance <= right_distance {
+                    if right_distance <= best.distance2 {
+                        stack.push(right);
+                    }
+                    if left_distance <= best.distance2 {
+                        stack.push(left);
+                    }
+                } else {
+                    if left_distance <= best.distance2 {
+                        stack.push(left);
+                    }
+                    if right_distance <= best.distance2 {
+                        stack.push(right);
+                    }
+                }
+                continue;
+            }
+
+            for slot in node.face_start..node.face_start + node.face_count {
+                let face_index = self.face_indices[slot];
+                let face = faces[face_index];
+                let candidate = closest_point_on_triangle(
+                    query,
+                    vertices[face[0] as usize],
+                    vertices[face[1] as usize],
+                    vertices[face[2] as usize],
+                );
+                if candidate.distance2 < best.distance2 {
+                    best = ClosestPoint {
+                        face_index,
+                        ..candidate
+                    };
+                }
+            }
+        }
+        best
+    }
+}
+
+fn bvh_bounds(
+    vertices: &[[f32; 3]],
+    faces: &[[u32; 3]],
+    face_indices: &[usize],
+) -> ([f32; 3], [f32; 3], [f32; 3], [f32; 3]) {
+    let mut bounds_min = [f32::MAX; 3];
+    let mut bounds_max = [f32::MIN; 3];
+    let mut centroid_min = [f32::MAX; 3];
+    let mut centroid_max = [f32::MIN; 3];
+    for &face_index in face_indices {
+        let face = faces[face_index];
+        let centroid = triangle_centroid(vertices, face);
+        for axis in 0..3 {
+            centroid_min[axis] = centroid_min[axis].min(centroid[axis]);
+            centroid_max[axis] = centroid_max[axis].max(centroid[axis]);
+            for vertex in face {
+                let value = vertices[vertex as usize][axis];
+                bounds_min[axis] = bounds_min[axis].min(value);
+                bounds_max[axis] = bounds_max[axis].max(value);
+            }
+        }
+    }
+    (bounds_min, bounds_max, centroid_min, centroid_max)
+}
+
+fn triangle_centroid(vertices: &[[f32; 3]], face: [u32; 3]) -> [f32; 3] {
+    let a = vertices[face[0] as usize];
+    let b = vertices[face[1] as usize];
+    let c = vertices[face[2] as usize];
+    [
+        (a[0] + b[0] + c[0]) / 3.0,
+        (a[1] + b[1] + c[1]) / 3.0,
+        (a[2] + b[2] + c[2]) / 3.0,
+    ]
+}
+
+fn point_aabb_distance2(point: [f32; 3], min: [f32; 3], max: [f32; 3]) -> f32 {
+    let mut distance2 = 0.0;
+    for axis in 0..3 {
+        let delta = if point[axis] < min[axis] {
+            min[axis] - point[axis]
+        } else if point[axis] > max[axis] {
+            point[axis] - max[axis]
+        } else {
+            0.0
+        };
+        distance2 += delta * delta;
+    }
+    distance2
+}
+
 fn closest_point_on_triangle(
     point: [f32; 3],
     a: [f32; 3],
@@ -493,5 +674,56 @@ pub fn normalize_or(v: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
         scale3(v, 1.0 / length)
     } else {
         fallback
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teapot_projection_bvh_matches_exhaustive_triangle_search() {
+        let target = TriangleMeshTarget::utah_teapot(0.72).unwrap();
+        for query_index in 0..48 {
+            let query = [
+                radical_inverse(query_index + 1, 2) * 2.0 - 1.0,
+                radical_inverse(query_index + 1, 3) * 2.0 - 1.0,
+                radical_inverse(query_index + 1, 5) * 2.0 - 1.0,
+            ];
+            let accelerated =
+                target
+                    .projection_bvh
+                    .closest_point(query, &target.vertices, &target.faces);
+            let exhaustive = target
+                .faces
+                .iter()
+                .enumerate()
+                .map(|(face_index, face)| {
+                    let candidate = closest_point_on_triangle(
+                        query,
+                        target.vertices[face[0] as usize],
+                        target.vertices[face[1] as usize],
+                        target.vertices[face[2] as usize],
+                    );
+                    ClosestPoint {
+                        face_index,
+                        ..candidate
+                    }
+                })
+                .min_by(|left, right| left.distance2.total_cmp(&right.distance2))
+                .unwrap();
+            assert!(
+                (accelerated.distance2 - exhaustive.distance2).abs() <= 1.0e-6,
+                "query {query_index}: accelerated={} exhaustive={}",
+                accelerated.distance2,
+                exhaustive.distance2
+            );
+            assert!(
+                length3(sub3(accelerated.point, exhaustive.point)) <= 1.0e-4,
+                "query {query_index}: accelerated={:?} exhaustive={:?}",
+                accelerated.point,
+                exhaustive.point
+            );
+        }
     }
 }

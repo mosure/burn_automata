@@ -1,8 +1,9 @@
 # Bounded direct-active continuous-scale lizard regression.
 #
 # This smoke rebuilds the broad candidate from the trained scale-conditioned
-# rule and exercises the same 3,070-row, 4x-measure, eight-exchange path on four
-# seeds. Full 32-seed quality evidence remains a nonpromoted sandbox experiment.
+# rule and exercises the settled 3,070-row, 4x-measure path on four seeds.
+# Ten strongly gated exchanges are batched into each 64-step topology pass,
+# and reallocation ends at step 512 so long-horizon dynamics can settle.
 backend = "wgpu"
 
 [source]
@@ -56,9 +57,9 @@ start_step = 64
 end_step = 512
 split_radius_scale = 1.0
 merge_detail_scale = 0.01
-min_relative_gain = 0.0
+min_relative_gain = 0.75
 interval_steps = 64
-events_per_interval = 8
+events_per_interval = 10
 
 [loss]
 image_size = 256
@@ -87,6 +88,10 @@ min_occupied_material_scale_bins = 32
 min_accepted_local_detail_exchanges = 1
 min_mean_scale_detail_correlation_gain_vs_static = 0.05
 min_worst_scale_detail_correlation_gain_vs_static = 0.0
+min_mean_target_scale_detail_correlation_gain_vs_static = 0.06
+min_worst_target_scale_detail_correlation_gain_vs_static = 0.02
+min_mean_coarse_constant_region_fraction = 0.44
+min_worst_coarse_constant_region_fraction = 0.42
 min_mean_static_graded_psnr_gain_db = 0.0
 min_worst_static_graded_psnr_gain_db = -1.0
 seeds = [42, 43, 44, 45]
@@ -99,7 +104,7 @@ topology_enabled = true
 min_adaptive_psnr_db = 23.0
 max_oracle_psnr_gap_db = 4.0
 max_same_rule_fine_psnr_gap_db = 4.0
-max_psnr_drift_db = 2.0
+max_psnr_drift_db = 2.25
 quality_horizon_min_steps = 256
 min_quality_mean_adaptive_psnr_db = 25.0
 min_quality_worst_adaptive_psnr_db = 23.5

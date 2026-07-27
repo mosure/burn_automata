@@ -19,59 +19,59 @@ pub fn run_supervised_training_wgpu(
     cfg: TrainingRunConfig,
     optimizer: SupervisedOptimizerConfig,
 ) -> AutomataResult<TrainingRunReport> {
-    validate_gpu_optimizer(optimizer)?;
-    validate_gpu_sgd_config(cfg.sgd)?;
-    let mut trainer = WgpuSupervisedTrainer::new(model, batch)?;
-    let rows = trainer.rows;
-    let initial_loss = trainer.loss()?;
-    let mut final_loss = initial_loss;
-    let mut best_loss = initial_loss;
-    let mut best_weights = model.weights.clone();
-    let report_interval = cfg.report_interval.max(1);
-    let mut history = Vec::new();
-
-    for step in 1..=cfg.steps {
-        if step == cfg.steps || step.is_multiple_of(report_interval) {
-            let step_report = trainer
-                .train_step(optimizer, true)?
-                .expect("captured metrics");
-            final_loss = step_report.loss;
-            if final_loss < best_loss {
-                best_loss = final_loss;
-                best_weights = trainer.to_weights()?;
-            }
-            history.push(TrainingHistoryEntry {
-                step,
-                loss: final_loss,
-                grad_norm: step_report.grad_norm,
-                grad_scale: step_report.grad_scale,
-            });
-        } else {
-            trainer.train_step(optimizer, false)?;
-        }
-    }
-
-    model.weights = if best_loss < final_loss {
-        final_loss = best_loss;
-        best_weights
-    } else {
-        trainer.to_weights()?
-    };
-
-    Ok(TrainingRunReport {
-        steps: cfg.steps,
-        rows,
-        initial_loss,
-        final_loss,
-        best_loss,
-        history,
-    })
+    run_weighted_supervised_training_wgpu(model, batch, cfg, optimizer, None)
 }
 
-struct WgpuSupervisedTrainer {
+pub fn run_weighted_supervised_training_wgpu(
+    model: &mut NpaModel,
+    batch: &SupervisedBatch,
+    cfg: TrainingRunConfig,
+    optimizer: SupervisedOptimizerConfig,
+    output_weights: Option<&[f32]>,
+) -> AutomataResult<TrainingRunReport> {
+    run_weighted_supervised_training_wgpu_with_observer(
+        model,
+        batch,
+        cfg,
+        optimizer,
+        output_weights,
+        None,
+    )
+}
+
+pub trait WgpuSupervisedTrainingObserver {
+    fn should_stop(&self) -> bool {
+        false
+    }
+
+    fn on_progress(
+        &mut self,
+        step: usize,
+        total_steps: usize,
+        entry: &TrainingHistoryEntry,
+        model: &NpaModel,
+    );
+}
+
+pub fn run_weighted_supervised_training_wgpu_with_observer(
+    model: &mut NpaModel,
+    batch: &SupervisedBatch,
+    cfg: TrainingRunConfig,
+    optimizer: SupervisedOptimizerConfig,
+    output_weights: Option<&[f32]>,
+    observer: Option<&mut dyn WgpuSupervisedTrainingObserver>,
+) -> AutomataResult<TrainingRunReport> {
+    validate_gpu_optimizer(optimizer)?;
+    validate_gpu_sgd_config(cfg.sgd)?;
+    let mut trainer = WgpuSupervisedTrainingSession::new(model, batch, output_weights)?;
+    trainer.train_into_model(model, cfg, optimizer, true, observer)
+}
+
+pub(crate) struct WgpuSupervisedTrainingSession {
     features: Tensor2,
     target: Tensor2,
     ones_rows: Tensor2,
+    output_weights: Tensor2,
     w1: Tensor2,
     b1: Tensor2,
     w2: Tensor2,
@@ -91,8 +91,12 @@ struct WgpuSupervisedTrainer {
     step: usize,
 }
 
-impl WgpuSupervisedTrainer {
-    fn new(model: &NpaModel, batch: &SupervisedBatch) -> AutomataResult<Self> {
+impl WgpuSupervisedTrainingSession {
+    pub(crate) fn new(
+        model: &NpaModel,
+        batch: &SupervisedBatch,
+        output_weights: Option<&[f32]>,
+    ) -> AutomataResult<Self> {
         model.validate()?;
         let input_dims = model.config.perception_dims();
         let output_dims = model.config.update_dims();
@@ -111,11 +115,24 @@ impl WgpuSupervisedTrainer {
         }
         ensure_finite("features", &batch.features)?;
         ensure_finite("target_update", &batch.target_update)?;
+        let output_weights =
+            output_weights.map_or_else(|| vec![1.0; output_dims], |weights| weights.to_vec());
+        if output_weights.len() != output_dims
+            || output_weights
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            || output_weights.iter().all(|value| *value == 0.0)
+        {
+            return Err(AutomataError::InvalidArgument(format!(
+                "output weights must contain {output_dims} finite non-negative values with at least one positive entry"
+            )));
+        }
 
         let device = Default::default();
         let hidden_dims = model.config.hidden_dims;
         let features = tensor2(batch.features.clone(), [rows, input_dims], &device);
         let target = tensor2(batch.target_update.clone(), [rows, output_dims], &device);
+        let output_weights = tensor2(output_weights, [1, output_dims], &device);
         let ones_rows = Tensor::<WgpuBackend, 2>::ones([rows, 1], &device);
         let w1 = tensor2(model.weights.w1.clone(), [hidden_dims, input_dims], &device);
         let b1 = tensor2(model.weights.b1.clone(), [1, hidden_dims], &device);
@@ -137,6 +154,7 @@ impl WgpuSupervisedTrainer {
             features,
             target,
             ones_rows,
+            output_weights,
             w1,
             b1,
             w2,
@@ -149,10 +167,106 @@ impl WgpuSupervisedTrainer {
         })
     }
 
+    pub(crate) fn replace_batch(&mut self, batch: &SupervisedBatch) -> AutomataResult<()> {
+        let rows = validate_batch(batch, self.input_dims, self.output_dims)?;
+        let device = Default::default();
+        self.features = tensor2(batch.features.clone(), [rows, self.input_dims], &device);
+        self.target = tensor2(
+            batch.target_update.clone(),
+            [rows, self.output_dims],
+            &device,
+        );
+        self.ones_rows = Tensor::<WgpuBackend, 2>::ones([rows, 1], &device);
+        self.rows = rows;
+        Ok(())
+    }
+
+    pub(crate) fn train_into_model(
+        &mut self,
+        model: &mut NpaModel,
+        cfg: TrainingRunConfig,
+        optimizer: SupervisedOptimizerConfig,
+        restore_best: bool,
+        mut observer: Option<&mut dyn WgpuSupervisedTrainingObserver>,
+    ) -> AutomataResult<TrainingRunReport> {
+        validate_gpu_optimizer(optimizer)?;
+        validate_gpu_sgd_config(cfg.sgd)?;
+        let rows = self.rows;
+        let initial_loss = self.loss()?;
+        let mut final_loss = initial_loss;
+        let mut best_loss = initial_loss;
+        let mut best_weights = restore_best.then(|| model.weights.clone());
+        let report_interval = cfg.report_interval.max(1);
+        let mut history = Vec::new();
+        let mut completed_steps = 0;
+
+        for step in 1..=cfg.steps {
+            if observer
+                .as_deref()
+                .is_some_and(WgpuSupervisedTrainingObserver::should_stop)
+            {
+                break;
+            }
+            let capture_metrics = step == cfg.steps || step.is_multiple_of(report_interval);
+            let report = self.train_step(optimizer, capture_metrics)?;
+            completed_steps = step;
+            let Some(step_report) = report else {
+                continue;
+            };
+            final_loss = step_report.loss;
+            let current_weights = if restore_best || observer.is_some() {
+                Some(self.to_weights()?)
+            } else {
+                None
+            };
+            if final_loss < best_loss {
+                best_loss = final_loss;
+                if restore_best {
+                    best_weights = current_weights.clone();
+                }
+            }
+            let entry = TrainingHistoryEntry {
+                step,
+                loss: final_loss,
+                grad_norm: step_report.grad_norm,
+                grad_scale: step_report.grad_scale,
+            };
+            history.push(entry);
+            if let Some(observer) = observer.as_deref_mut() {
+                model.weights = current_weights
+                    .clone()
+                    .expect("observer progress captures weights");
+                observer.on_progress(step, cfg.steps, &entry, model);
+            }
+        }
+
+        let current_weights = self.to_weights()?;
+        model.weights = if restore_best && best_loss < final_loss {
+            final_loss = best_loss;
+            best_weights.expect("restored best weights")
+        } else {
+            current_weights
+        };
+
+        Ok(TrainingRunReport {
+            steps: completed_steps,
+            rows,
+            initial_loss,
+            final_loss,
+            best_loss,
+            history,
+        })
+    }
+
     fn loss(&self) -> AutomataResult<f32> {
         let output = self.forward().2;
         let diff = output - self.target.clone();
-        let loss = diff.clone().mul(diff).sum().div_scalar(self.rows as f32);
+        let loss = diff
+            .clone()
+            .mul(diff)
+            .mul(self.output_weights.clone())
+            .sum()
+            .div_scalar(self.rows as f32);
         finite_scalar("gpu supervised loss", loss.into_scalar())
     }
 
@@ -163,7 +277,9 @@ impl WgpuSupervisedTrainer {
     ) -> AutomataResult<Option<SupervisedStepReport>> {
         let (pre_hidden, hidden, output) = self.forward();
         let diff = output - self.target.clone();
-        let d_out = diff.mul_scalar(2.0 / self.rows as f32);
+        let d_out = diff
+            .mul(self.output_weights.clone())
+            .mul_scalar(2.0 / self.rows as f32);
         let gb2 = d_out.clone().sum_dim(0);
         let gw2 = d_out.clone().transpose().matmul(hidden.clone());
         let d_hidden = d_out.matmul(self.w2.clone());
@@ -288,6 +404,29 @@ impl WgpuSupervisedTrainer {
         }
         Ok(weights)
     }
+}
+
+fn validate_batch(
+    batch: &SupervisedBatch,
+    input_dims: usize,
+    output_dims: usize,
+) -> AutomataResult<usize> {
+    let rows = batch.features.len() / input_dims;
+    if rows == 0 || batch.features.len() != rows * input_dims {
+        return Err(AutomataError::InvalidArgument(
+            "features do not form whole perception rows".to_string(),
+        ));
+    }
+    if batch.target_update.len() != rows * output_dims {
+        return Err(AutomataError::InvalidArgument(format!(
+            "target_update len {} != {}",
+            batch.target_update.len(),
+            rows * output_dims
+        )));
+    }
+    ensure_finite("features", &batch.features)?;
+    ensure_finite("target_update", &batch.target_update)?;
+    Ok(rows)
 }
 
 fn tensor2(values: Vec<f32>, shape: [usize; 2], device: &WgpuDevice) -> Tensor2 {
@@ -511,5 +650,64 @@ mod tests {
             cpu_report.final_loss,
             gpu_report.final_loss
         );
+    }
+
+    #[test]
+    fn wgpu_supervised_session_reuses_optimizer_across_batch_replacement() {
+        let config = NpaConfig {
+            hidden_dims: 8,
+            ..NpaConfig::growing_2d()
+        };
+        let mut model = NpaModel {
+            config: config.clone(),
+            weights: NpaWeights::seeded(&config, 19),
+        };
+        let batch = |offset: f32| SupervisedBatch {
+            features: (0..32 * config.perception_dims())
+                .map(|idx| (idx as f32 * 0.011).sin() * 0.2 + offset)
+                .collect(),
+            target_update: vec![0.0; 32 * config.update_dims()],
+        };
+        let first = batch(0.0);
+        let second = batch(0.03);
+        let mut session = WgpuSupervisedTrainingSession::new(&model, &first, None).unwrap();
+        let optimizer = SupervisedOptimizerConfig::AdamW(AdamWConfig {
+            learning_rate: 1.0e-3,
+            grad_clip_norm: 1.0,
+            ..AdamWConfig::default()
+        });
+        let first_report = session
+            .train_into_model(
+                &mut model,
+                TrainingRunConfig {
+                    steps: 4,
+                    report_interval: 4,
+                    ..TrainingRunConfig::default()
+                },
+                optimizer,
+                false,
+                None,
+            )
+            .unwrap();
+        let optimizer_step = session.step;
+        session.replace_batch(&second).unwrap();
+        let second_report = session
+            .train_into_model(
+                &mut model,
+                TrainingRunConfig {
+                    steps: 4,
+                    report_interval: 4,
+                    ..TrainingRunConfig::default()
+                },
+                optimizer,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(optimizer_step, 4);
+        assert_eq!(session.step, 8);
+        assert_eq!(first_report.rows, 32);
+        assert_eq!(second_report.rows, 32);
+        assert!(second_report.final_loss.is_finite());
     }
 }

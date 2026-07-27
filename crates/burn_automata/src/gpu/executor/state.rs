@@ -268,6 +268,11 @@ impl WgpuAutomataExecutor {
 
         let (bucket_capacity, resolved_neighbor_mode) =
             resolve_neighbor_mode_for_state(grid, particle_count, positions, neighbor_mode)?;
+        let resolved_neighbor_mode = promote_auto_subgroup_mode(
+            neighbor_mode,
+            resolved_neighbor_mode,
+            self.subgroup_cooperative_supported,
+        );
         if batch_size > 1 && is_bvh_neighbor_mode(resolved_neighbor_mode) {
             return Err(AutomataError::InvalidArgument(
                 "batched WGPU trajectories require a hash-grid neighbor mode".to_owned(),

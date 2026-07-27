@@ -144,6 +144,13 @@ pub(in crate::viewer) fn handle_hyper_npa_image_drop(
         let FileDragAndDrop::DroppedFile { path_buf, .. } = event else {
             continue;
         };
+        if path_buf
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("obj"))
+        {
+            continue;
+        }
         let sender = channel.sender.clone();
         let path = path_buf.clone();
         runtime.status = format!(
@@ -175,11 +182,14 @@ pub(in crate::viewer) fn poll_hyper_npa_image_sources(
     source_channel: Res<HyperNpaImageDialogChannel>,
     mut inference_state: ResMut<HyperNpaInferenceState>,
     mut target_training: ResMut<ImageTargetTrainingState>,
+    #[cfg(feature = "mesh_training")] mut mesh_training: ResMut<MeshTargetTrainingState>,
     mut runtime: ResMut<AutomataRuntime>,
 ) {
     for source in source_channel.receiver.try_iter() {
         match source {
             Ok(source) => {
+                #[cfg(feature = "mesh_training")]
+                mesh_training.clear_target();
                 inference_state.cancel_current();
                 target_training.set_source(&source);
                 let origin = source
@@ -267,6 +277,7 @@ pub(in crate::viewer) fn poll_hyper_npa_inference_results(
 
                 runtime.model = generated.model;
                 runtime.hashgrid = generated.hashgrid;
+                set_particle_initialization(&mut runtime, None);
                 runtime.loaded_model_path = None;
                 runtime.loaded_preset = None;
                 runtime.trace = None;
@@ -677,8 +688,10 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(channel)
             .init_resource::<HyperNpaInferenceState>()
-            .init_resource::<ImageTargetTrainingState>()
-            .init_resource::<AutomataRuntime>()
+            .init_resource::<ImageTargetTrainingState>();
+        #[cfg(feature = "mesh_training")]
+        app.init_resource::<MeshTargetTrainingState>();
+        app.init_resource::<AutomataRuntime>()
             .add_systems(Update, poll_hyper_npa_image_sources);
 
         sender.send(Ok(source)).unwrap();

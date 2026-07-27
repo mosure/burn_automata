@@ -30,7 +30,7 @@ struct BrowserModelLoadResult {
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn load_selected_model(
     mut runtime: ResMut<AutomataRuntime>,
-    settings: Res<AutomataSettings>,
+    mut settings: ResMut<AutomataSettings>,
 ) {
     if settings.adaptive_model_path.is_some() {
         return;
@@ -40,7 +40,10 @@ pub(super) fn load_selected_model(
             return;
         }
         match burn_automata::import::load_manifest(model_path) {
-            Ok(manifest) => apply_loaded_manifest(&mut runtime, model_path, manifest),
+            Ok(manifest) => {
+                let model_path = model_path.clone();
+                apply_loaded_manifest(&mut runtime, &mut settings, &model_path, manifest);
+            }
             Err(err) => {
                 runtime.status = format!("model load failed: {err}");
             }
@@ -61,7 +64,7 @@ pub(super) fn load_selected_model(
 #[cfg(target_arch = "wasm32")]
 pub(super) fn load_selected_model(
     mut runtime: ResMut<AutomataRuntime>,
-    settings: Res<AutomataSettings>,
+    mut settings: ResMut<AutomataSettings>,
     channel: Res<BrowserModelLoadChannel>,
     mut state: ResMut<BrowserModelLoadState>,
 ) {
@@ -70,7 +73,9 @@ pub(super) fn load_selected_model(
             continue;
         }
         match loaded.result {
-            Ok(manifest) => apply_loaded_manifest(&mut runtime, &loaded.path, manifest),
+            Ok(manifest) => {
+                apply_loaded_manifest(&mut runtime, &mut settings, &loaded.path, manifest)
+            }
             Err(error) => runtime.status = format!("model load failed: {error}"),
         }
     }
@@ -112,11 +117,18 @@ pub(super) fn load_selected_model(
 
 fn apply_loaded_manifest(
     runtime: &mut AutomataRuntime,
+    settings: &mut AutomataSettings,
     model_path: &str,
     manifest: burn_automata::import::BpkModelManifest,
 ) {
+    let initialization = manifest.initialization.clone().map(Arc::new);
     runtime.hashgrid = manifest.hashgrid.clone();
     runtime.model = manifest.into_model();
+    set_particle_initialization(runtime, initialization);
+    if let Some(initialization) = runtime.particle_initialization.as_ref() {
+        settings.particle_count = initialization.particle_count();
+        settings.mark_changed();
+    }
     runtime.loaded_model_path = Some(model_path.to_string());
     runtime.loaded_preset = None;
     runtime.trace = None;
@@ -133,6 +145,7 @@ fn apply_seeded_preset(runtime: &mut AutomataRuntime, preset: AutomataPreset) {
     runtime.model = NpaModel::seeded(config, 42);
     runtime.hashgrid = hashgrid;
     runtime.loaded_model_path = None;
+    set_particle_initialization(runtime, None);
     runtime.loaded_preset = Some(preset);
     runtime.trace = None;
     runtime.frame = 0;
@@ -237,8 +250,14 @@ pub(super) fn crossed_interval(previous: usize, current: usize, interval: usize)
 
 #[cfg(not(all(feature = "splatting", feature = "gpu_wgpu")))]
 pub(super) fn initialize_cpu_rollout(runtime: &mut AutomataRuntime, settings: &AutomataSettings) {
+    let particle_count = runtime
+        .particle_initialization
+        .as_ref()
+        .map_or(settings.particle_count, |initialization| {
+            initialization.particle_count()
+        });
     let cfg = RolloutConfig {
-        particle_count: settings.particle_count,
+        particle_count,
         steps: settings.steps_per_frame.max(1),
         update_prob: settings.update_prob,
         dt: settings.dt,
@@ -247,7 +266,18 @@ pub(super) fn initialize_cpu_rollout(runtime: &mut AutomataRuntime, settings: &A
         ..RolloutConfig::default()
     };
     let hashgrid = effective_hashgrid(runtime, settings);
-    match run_rollout(&runtime.model, &hashgrid, &cfg, settings.seed_mode) {
+    let rollout = if let Some(initialization) = runtime.particle_initialization.as_ref() {
+        burn_automata::run_rollout_from_particles(
+            &runtime.model,
+            &hashgrid,
+            &cfg,
+            initialization.positions.clone(),
+            initialization.states.clone(),
+        )
+    } else {
+        run_rollout(&runtime.model, &hashgrid, &cfg, settings.seed_mode)
+    };
+    match rollout {
         Ok(trace) => {
             update_backward_probe(runtime, &trace, &hashgrid);
             runtime.trace = Some(trace);
@@ -302,13 +332,29 @@ pub(super) fn trace_gaussian(
         1.0
     };
 
-    particle_gaussian(
+    let mut gaussian = particle_gaussian(
         position,
         state,
         runtime.model.config.spatial_dims,
         scale,
         opacity,
-    )
+    );
+    if runtime.model.config.spatial_dims == 3 && runtime.model.config.position_features {
+        let geometry = burn_automata::mesh3d_gaussian_geometry(
+            state,
+            runtime.hashgrid.eps,
+            trace.particle_count,
+        );
+        gaussian.rotation = geometry.rotation.into();
+        gaussian.scale_opacity = [
+            geometry.scale[0],
+            geometry.scale[1],
+            geometry.scale[2],
+            opacity,
+        ]
+        .into();
+    }
+    gaussian
 }
 
 pub(super) fn update_status_label(
@@ -776,6 +822,7 @@ pub(super) fn apply_preset(runtime: &mut AutomataRuntime, preset: AutomataPreset
     runtime.loaded_model_path = None;
     runtime.loaded_adaptive_model_path = None;
     runtime.adaptive = None;
+    set_particle_initialization(runtime, None);
     runtime.loaded_preset = Some(preset);
     runtime.trace = None;
     runtime.frame = 0;
@@ -784,6 +831,15 @@ pub(super) fn apply_preset(runtime: &mut AutomataRuntime, preset: AutomataPreset
     runtime.backward_grad_norm = None;
     reset_training_stats(runtime);
     runtime.model_revision = runtime.model_revision.wrapping_add(1);
+}
+
+pub(super) fn set_particle_initialization(
+    runtime: &mut AutomataRuntime,
+    initialization: Option<Arc<burn_automata::NpaParticleInitialization>>,
+) {
+    runtime.particle_initialization = initialization;
+    runtime.particle_initialization_revision =
+        runtime.particle_initialization_revision.wrapping_add(1);
 }
 
 pub(super) fn reset_training_stats(runtime: &mut AutomataRuntime) {

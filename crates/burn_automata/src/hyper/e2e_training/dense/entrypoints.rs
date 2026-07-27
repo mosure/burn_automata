@@ -570,12 +570,15 @@ use super::*;
         }
         if let Some(quality) = &initial_quality_validation {
             eprintln!(
-                "hyper2d e2e rollout initial {} quality composited_psnr={:.3}dB p10={:.3}dB density_psnr={:.3}dB soft_iou={:.3} mean_loss={:.6e}",
+                "hyper2d e2e rollout initial {} quality composited_psnr={:.3}dB final_p10={:.3}dB selection_p10={:.3}dB density_psnr={:.3}dB soft_iou={:.3} seeds={} selection_trajectories={} mean_loss={:.6e}",
                 quality.split,
                 quality.aggregate_composited_rgb_psnr_db,
                 quality.p10_composited_rgb_psnr_db,
+                quality.selection_psnr_db,
                 quality.aggregate_density_psnr_db,
                 quality.mean_density_soft_iou,
+                quality.seed_count,
+                quality.selection_trajectory_count,
                 quality.mean_total_loss,
             );
         }
@@ -815,7 +818,10 @@ use super::*;
         let mut last_checkpoint_at = Instant::now();
         let mut throughput_interval_started = Instant::now();
         let mut throughput_interval_particle_steps = 0u128;
+        let mut throughput_interval_optimizer_examples = 0u128;
         let mut total_optimizer_particle_steps = 0u128;
+        let mut total_optimizer_examples = 0u128;
+        let mut total_host_staged_target_rows = 0u128;
         let mut measured_optimizer_training_ms = 0.0_f64;
         for step in completed_step.saturating_add(1)..=config.steps {
             let prepared_batch =
@@ -827,6 +833,7 @@ use super::*;
             let BurnE2ePreparedCpuBatch {
                 indices,
                 targets: prepared_targets,
+                target_expansion,
                 prepared_dino,
             } = prepared_batch;
             while next_prefetch_step <= config.steps && prefetch_queue.len() < prefetch_depth {
@@ -900,6 +907,8 @@ use super::*;
                 optimizer_lr_scale
             };
             let mut step_config = e2e_config_with_lr_scale(config, optimizer_lr_scale);
+            step_config.trajectory_tail_weight = e2e_trajectory_tail_weight(config, step);
+            step_config.identity_tail_weight = e2e_identity_tail_weight(config, step);
             step_config.amortization_substrate_only =
                 step <= config.amortization_substrate_steps;
             step_config.amortization_residual_scale =
@@ -956,13 +965,14 @@ use super::*;
             let (step_targets, target_indices) = if let Some(cache) = train_target_cache.as_ref() {
                 (cache.as_slice(), indices.clone())
             } else {
+                total_host_staged_target_rows = total_host_staged_target_rows
+                    .saturating_add(prepared_targets.len() as u128);
                 uncached_targets = burn_e2e_prepared_targets_to_burn(
                     prepared_targets,
                     &train_pixel_xy,
                     &device,
                 )?;
-                let indices = (0..uncached_targets.len()).collect::<Vec<_>>();
-                (uncached_targets.as_slice(), indices)
+                (uncached_targets.as_slice(), target_expansion)
             };
             let step_output = train_e2e_homogeneous_step_tbptt(
                 &mut params,
@@ -991,10 +1001,15 @@ use super::*;
                 ))
             })?;
             let step_particle_steps = step_output.particle_steps as u128;
+            let step_optimizer_examples = step_output.history.examples_seen as u128;
             throughput_interval_particle_steps = throughput_interval_particle_steps
                 .saturating_add(step_particle_steps);
+            throughput_interval_optimizer_examples = throughput_interval_optimizer_examples
+                .saturating_add(step_optimizer_examples);
             total_optimizer_particle_steps =
                 total_optimizer_particle_steps.saturating_add(step_particle_steps);
+            total_optimizer_examples =
+                total_optimizer_examples.saturating_add(step_optimizer_examples);
             let condition_identities = indices
                 .chunks(rollout_replicas)
                 .filter_map(|replicas| replicas.first().copied())
@@ -1016,6 +1031,9 @@ use super::*;
                 measured_optimizer_training_ms += interval_elapsed_ms;
                 stats.particle_steps_per_sec = throughput_interval_particle_steps as f64
                     / interval_elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+                stats.optimizer_examples_per_sec =
+                    throughput_interval_optimizer_examples as f64
+                        / interval_elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
                 stats.dense_pair_interactions_per_sec =
                     stats.particle_steps_per_sec * config.rollout_particles as f64;
                 stats.elapsed_ms = interval_elapsed_ms;
@@ -1115,10 +1133,12 @@ use super::*;
                 if report_due || validation_due {
                     let exposure = identity_sampler.exposure_stats();
                     eprintln!(
-                        "hyper2d e2e rollout step {step}/{} loss={:.6e} task={:.6e} teacher={:.6e} flow={:.6e} self_rect={:.6e} amort_distill={:.6e} amort_mix={:.3} amort_rms={:.3e} amort_grad={:.3e} amort_psnr={} amort_p10={} lr_scale={:.3e} exposure_min={} exposure_mean={:.1} exposure_p90={} final_horizon_psnr={} worst_horizon_p10={} validation_due={} base_grad={:.6e} generator_grad={:.6e} particle_steps/s={:.3e} condition_ms={:.2} rollout_loss_ms={:.2} backward_ms={:.2}",
+                        "hyper2d e2e rollout step {step}/{} loss={:.6e} task={:.6e} trajectory_tail_weight={:.3} identity_tail_weight={:.3} teacher={:.6e} flow={:.6e} self_rect={:.6e} amort_distill={:.6e} amort_mix={:.3} amort_rms={:.3e} amort_grad={:.3e} amort_psnr={} amort_p10={} lr_scale={:.3e} exposure_min={} exposure_mean={:.1} exposure_p90={} final_horizon_psnr={} selection_p10={} validation_due={} base_grad={:.6e} generator_grad={:.6e} optimizer_examples/s={:.3e} particle_steps/s={:.3e} condition_ms={:.2} rollout_loss_ms={:.2} backward_ms={:.2}",
                         config.steps,
                         stats.loss,
                         stats.task_loss,
+                        step_config.trajectory_tail_weight,
+                        step_config.identity_tail_weight,
                         stats.adapter_teacher_loss,
                         stats.flow_matching_loss,
                         stats.flow_self_rectification_loss,
@@ -1140,6 +1160,7 @@ use super::*;
                         validation_due,
                         stats.base_grad_norm,
                         stats.generator_grad_norm,
+                        stats.optimizer_examples_per_sec,
                         stats.particle_steps_per_sec,
                         stats.condition_adapter_ms,
                         stats.rollout_loss_ms,
@@ -1226,6 +1247,7 @@ use super::*;
                 }
                 history.push(stats);
                 throughput_interval_particle_steps = 0;
+                throughput_interval_optimizer_examples = 0;
                 throughput_interval_started = Instant::now();
                 if step == config.steps
                     && let Some(quality) = &checkpoint_quality
@@ -1360,16 +1382,16 @@ use super::*;
                 checkpoint.validation_contract.as_ref() == Some(&final_validation_contract)
             })
             .and_then(|checkpoint| checkpoint.amortization_quality_validation.clone());
-        let selected_checkpoint_source = if selected_checkpoint_step == Some(0) {
-            "initial_p10_composited_rgb_psnr"
+        let selected_checkpoint_source = if selected_checkpoint_quality_validation.is_some()
+            && selected_checkpoint_step == Some(config.steps)
+        {
+            "final_generated_rollout_selection_metric"
+        } else if selected_checkpoint_quality_validation.is_some() {
+            "best_generated_rollout_selection_metric"
         } else if selected_checkpoint_step == Some(config.steps)
             && selected_checkpoint_amortization_quality_validation.is_some()
         {
             "final_endpoint_p10_composited_rgb_psnr"
-        } else if selected_checkpoint_step == Some(config.steps)
-            && selected_checkpoint_quality_validation.is_some()
-        {
-            "final_common_contract_p10_composited_rgb_psnr"
         } else if selected_checkpoint_amortization_quality_validation.is_some() {
             "best_endpoint_p10_composited_rgb_psnr"
         } else if selected_checkpoint_holdout_psnr_db.is_some() {
@@ -1437,6 +1459,11 @@ use super::*;
         let generator_hyper = generator.to_hyper(config)?;
         let (min_reported_particle_steps_per_sec, median_reported_particle_steps_per_sec, max_reported_particle_steps_per_sec) =
             reported_particle_step_speed_summary(&history);
+        let (
+            min_reported_optimizer_examples_per_sec,
+            median_reported_optimizer_examples_per_sec,
+            max_reported_optimizer_examples_per_sec,
+        ) = reported_optimizer_example_speed_summary(&history);
         let (first_reported_loss, best_reported_loss, best_reported_step, final_reported_loss) =
             reported_loss_summary(&history);
         let reported_loss_delta =
@@ -1744,6 +1771,34 @@ use super::*;
             json!(config.tbptt_final_loss_weight),
         );
         metrics.insert(
+            "log1p_trajectory_loss".to_string(),
+            json!(config.log1p_trajectory_loss),
+        );
+        metrics.insert(
+            "trajectory_tail_fraction".to_string(),
+            json!(config.trajectory_tail_fraction),
+        );
+        metrics.insert(
+            "trajectory_tail_weight".to_string(),
+            json!(config.trajectory_tail_weight),
+        );
+        metrics.insert(
+            "trajectory_tail_warmup_steps".to_string(),
+            json!(config.trajectory_tail_warmup_steps),
+        );
+        metrics.insert(
+            "trajectory_tail_per_identity".to_string(),
+            json!(config.trajectory_tail_per_identity),
+        );
+        metrics.insert(
+            "identity_tail_fraction".to_string(),
+            json!(config.identity_tail_fraction),
+        );
+        metrics.insert(
+            "identity_tail_weight".to_string(),
+            json!(config.identity_tail_weight),
+        );
+        metrics.insert(
             "credit_assignment".to_string(),
             json!(config.credit_assignment.as_str()),
         );
@@ -1964,14 +2019,28 @@ use super::*;
             }),
         );
         let measured_optimizer_seconds = measured_optimizer_training_ms / 1_000.0;
-        let flow_examples = exposure.total;
+        let flow_examples = total_optimizer_examples;
         if config.flow_matching_weight > 0.0 && measured_optimizer_seconds > 0.0 {
             let flow_examples_per_sec = flow_examples as f64 / measured_optimizer_seconds;
             metrics.insert("flow_examples".to_string(), json!(flow_examples));
             metrics.insert(
+                "flow_draws_per_identity_per_step".to_string(),
+                json!(rollout_replicas),
+            );
+            metrics.insert(
+                "flow_effective_optimizer_batch_size".to_string(),
+                json!(batch_size),
+            );
+            metrics.insert(
                 "flow_examples_per_sec".to_string(),
                 json!(flow_examples_per_sec),
             );
+            if let Some(flow) = generator.row_flow.as_ref() {
+                metrics.insert(
+                    "flow_condition_tokens_per_sec".to_string(),
+                    json!(flow_examples_per_sec * flow.config.condition_tokens as f64),
+                );
+            }
             metrics.insert(
                 "flow_valid_row_values_per_sec".to_string(),
                 json!(flow_examples_per_sec
@@ -2058,6 +2127,27 @@ use super::*;
             json!(max_reported_particle_steps_per_sec),
         );
         metrics.insert(
+            "min_reported_optimizer_examples_per_sec".to_string(),
+            json!(min_reported_optimizer_examples_per_sec),
+        );
+        metrics.insert(
+            "median_reported_optimizer_examples_per_sec".to_string(),
+            json!(median_reported_optimizer_examples_per_sec),
+        );
+        metrics.insert(
+            "max_reported_optimizer_examples_per_sec".to_string(),
+            json!(max_reported_optimizer_examples_per_sec),
+        );
+        metrics.insert(
+            "total_optimizer_examples".to_string(),
+            json!(total_optimizer_examples),
+        );
+        metrics.insert(
+            "measured_optimizer_examples_per_sec".to_string(),
+            json!(total_optimizer_examples as f64
+                / (measured_optimizer_training_ms / 1_000.0).max(f64::MIN_POSITIVE)),
+        );
+        metrics.insert(
             "total_optimizer_particle_steps".to_string(),
             json!(total_optimizer_particle_steps),
         );
@@ -2069,6 +2159,18 @@ use super::*;
             "measured_optimizer_particle_steps_per_sec".to_string(),
             json!(total_optimizer_particle_steps as f64
                 / (measured_optimizer_training_ms / 1_000.0).max(f64::MIN_POSITIVE)),
+        );
+        metrics.insert(
+            "host_staged_target_rows".to_string(),
+            json!(total_host_staged_target_rows),
+        );
+        metrics.insert(
+            "host_target_staging_dedup_ratio".to_string(),
+            json!(if total_host_staged_target_rows > 0 {
+                total_optimizer_examples as f64 / total_host_staged_target_rows as f64
+            } else {
+                1.0
+            }),
         );
         metrics.insert("first_reported_loss".to_string(), json!(first_reported_loss));
         metrics.insert("best_reported_loss".to_string(), json!(best_reported_loss));
@@ -2175,6 +2277,7 @@ use super::*;
         BurnE2eValidationContract {
             examples: config.validation_examples,
             particles: config.validation_particles,
+            seed_count: config.validation_seed_count,
             horizons,
             selection_horizon_min_steps: config.validation_selection_horizon_min_steps,
         }
@@ -2208,6 +2311,7 @@ use super::*;
         config.validation_horizon_count = config.final_validation_horizon_count;
         config.validation_selection_horizon_min_steps =
             config.final_validation_selection_horizon_min_steps;
+        config.validation_seed_count = config.final_validation_seed_count;
         config
     }
 
@@ -2660,6 +2764,22 @@ use super::*;
                 config.spatial_condition_control_sigma,
                 config.spatial_condition_state_control,
                 config.curriculum_resume,
+            )
+            .as_bytes(),
+        );
+        hasher.update(
+            format!(
+                "trajectory_objective={}:{:.9}:{:.9}:{}:{}:{:.9}:{:.9};density_balance={:.9}:{:.9};render_rgb={:.9}",
+                config.log1p_trajectory_loss,
+                config.trajectory_tail_fraction,
+                config.trajectory_tail_weight,
+                config.trajectory_tail_warmup_steps,
+                config.trajectory_tail_per_identity,
+                config.identity_tail_fraction,
+                config.identity_tail_weight,
+                config.loss_config.background_density_loss_weight,
+                config.loss_config.foreground_density_loss_weight,
+                config.loss_config.render_rgb_loss_weight,
             )
             .as_bytes(),
         );

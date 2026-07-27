@@ -116,7 +116,7 @@ seed = 42
 psnr_threshold_db = 26.0
 
 [gates]
-min_median_particle_steps_per_sec = 10000.0
+min_median_particle_steps_per_sec = 100000.0
 max_quality_validation_evaluations = 3
 max_quality_validation_elapsed_fraction = 0.25
 require_validation_interval_at_least_report_interval = true

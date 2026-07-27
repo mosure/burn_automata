@@ -1114,12 +1114,9 @@ use super::*;
             if let Some(loss_weight_sum) = loss_weight_sum.as_mut() {
                 *loss_weight_sum += loss_weight;
             }
-            let mut grads = loss
-                .total
-                .sum()
+            let mut grads = e2e_task_objective(loss.total.clone(), config)
                 .mul_scalar(loss_weight)
                 .mul_scalar(config.task_loss_weight.max(0.0))
-                .div_scalar(batch_len as f32)
                 .backward();
             if config.shared_base_trainable {
                 accumulate_gradient_group(
@@ -1305,6 +1302,8 @@ use super::*;
                 generator_grad_norm: generator_grad_norm_sum / grad_metric_chunks as f32,
                 generator_grad_scale: generator_grad_scale_sum / grad_metric_chunks as f32,
                 examples_seen: batch_len,
+                optimizer_examples_per_sec: batch_len as f64
+                    / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
                 pool_seed_replacements: 0,
                 particle_steps_per_sec,
                 dense_pair_interactions_per_sec: particle_steps_per_sec * particle_count as f64,
@@ -1389,25 +1388,38 @@ use super::*;
                 config.adapter_alpha,
             )
         });
-        let flow_loss = if collect_metrics {
-            flow_objective
-                .as_ref()
-                .map(|loss| loss.clone().inner().into_scalar())
-                .unwrap_or_default()
+        let (flow_loss, teacher_loss) = if collect_metrics {
+            let mut metrics = Vec::with_capacity(2);
+            if let Some(loss) = flow_objective.as_ref() {
+                metrics.push(loss.clone().inner());
+            }
+            if let Some(loss) = teacher_objective.as_ref() {
+                metrics.push(loss.clone().inner());
+            }
+            if metrics.is_empty() {
+                return Err(AutomataError::InvalidArgument(
+                    "flow supervision requires a positive flow or endpoint weight".to_string(),
+                )
+                .into());
+            }
+            let values = tensor1_vec(Tensor::cat(metrics, 0))?;
+            let mut cursor = 0usize;
+            let flow = if flow_objective.is_some() {
+                let value = values[cursor];
+                cursor += 1;
+                value
+            } else {
+                0.0
+            };
+            let teacher = if teacher_objective.is_some() {
+                values[cursor]
+            } else {
+                0.0
+            };
+            (flow, teacher)
         } else {
-            0.0
+            (0.0, 0.0)
         };
-        let teacher_loss = if collect_metrics {
-            teacher_objective
-                .as_ref()
-                .map(|loss| loss.clone().inner().into_scalar())
-                .unwrap_or_default()
-        } else {
-            0.0
-        };
-        if collect_metrics {
-            sync_training_device(device)?;
-        }
         let forward_ms = if collect_metrics {
             started.elapsed().as_secs_f64() * 1000.0
         } else {
@@ -1476,6 +1488,8 @@ use super::*;
                 generator_grad_norm,
                 generator_grad_scale,
                 examples_seen: condition_indices.len(),
+                optimizer_examples_per_sec: condition_indices.len() as f64
+                    / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
                 pool_seed_replacements: 0,
                 particle_steps_per_sec: 0.0,
                 dense_pair_interactions_per_sec: 0.0,
@@ -1951,7 +1965,7 @@ use super::*;
             &adapter,
             displacement.clone(),
         )?;
-        let task_objective = loss.total.clone().sum().div_scalar(batch_len.max(1) as f32);
+        let task_objective = e2e_task_objective(loss.total.clone(), config);
         let teacher_objective = if config.adapter_teacher_weight > 0.0 {
             teacher_vector.map(|teacher| {
                 let generated_vector = generated_adapter.to_parameter_vector();
@@ -2174,6 +2188,8 @@ use super::*;
                 generator_grad_norm,
                 generator_grad_scale,
                 examples_seen: batch_len,
+                optimizer_examples_per_sec: batch_len as f64
+                    / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
                 pool_seed_replacements: 0,
                 particle_steps_per_sec,
                 dense_pair_interactions_per_sec: particle_steps_per_sec * particle_count as f64,
@@ -2245,6 +2261,100 @@ use super::*;
                 }
             }
         }
+    }
+
+    pub(super) fn e2e_trajectory_tail_count(batch_size: usize, fraction: f32) -> usize {
+        if batch_size == 0 || !fraction.is_finite() || fraction <= 0.0 {
+            0
+        } else {
+            ((batch_size as f32 * fraction.clamp(0.0, 1.0)).ceil() as usize)
+                .clamp(1, batch_size)
+        }
+    }
+
+    /// Optimize the mean trajectory loss together with a CVaR-style hard tail.
+    ///
+    /// The optional `log1p` transform limits the leverage of transient
+    /// recurrent outliers without detaching their gradients. Top-k selection
+    /// is discrete, while gradients still flow through every selected loss.
+    pub(super) fn e2e_task_objective(
+        trajectory_loss: Tensor1,
+        config: BurnE2eRolloutTrainConfig,
+    ) -> Tensor1 {
+        e2e_tail_aware_objective(
+            trajectory_loss,
+            config.log1p_trajectory_loss,
+            config.trajectory_tail_fraction,
+            config.trajectory_tail_weight,
+            config
+                .trajectory_tail_per_identity
+                .then_some(config.rollouts_per_example.max(1)),
+            config.identity_tail_fraction,
+            config.identity_tail_weight,
+        )
+    }
+
+    pub(super) fn e2e_tail_aware_objective(
+        trajectory_loss: Tensor1,
+        log1p: bool,
+        tail_fraction: f32,
+        tail_weight: f32,
+        trajectories_per_identity: Option<usize>,
+        identity_tail_fraction: f32,
+        identity_tail_weight: f32,
+    ) -> Tensor1 {
+        let batch_size = trajectory_loss.shape().dims::<1>()[0];
+        let transformed = if log1p {
+            trajectory_loss.clamp_min(0.0).log1p()
+        } else {
+            trajectory_loss
+        };
+        if let Some(trajectories) = trajectories_per_identity
+            .filter(|&trajectories| trajectories > 1 && batch_size.is_multiple_of(trajectories))
+        {
+            let identities = batch_size / trajectories;
+            let grouped = transformed.reshape([identities, trajectories]);
+            let identity_means = grouped.clone().mean_dim(1).reshape([identities]);
+            let trajectory_tail_count =
+                e2e_trajectory_tail_count(trajectories, tail_fraction);
+            let identity_losses = if trajectory_tail_count > 0 && tail_weight > 0.0 {
+                let tail_indices =
+                    device_topk_indices(grouped.clone(), trajectory_tail_count);
+                let tail_means = grouped
+                    .gather(1, tail_indices)
+                    .mean_dim(1)
+                    .reshape([identities]);
+                (identity_means + tail_means.mul_scalar(tail_weight))
+                    .div_scalar(1.0 + tail_weight)
+            } else {
+                identity_means
+            };
+            let mean = identity_losses.clone().mean();
+            let identity_tail_count =
+                e2e_trajectory_tail_count(identities, identity_tail_fraction);
+            if identity_tail_count == 0 || identity_tail_weight <= 0.0 {
+                return mean;
+            }
+            let tail_indices = device_topk_indices(
+                identity_losses.clone().reshape([1, identities]),
+                identity_tail_count,
+            )
+            .reshape([identity_tail_count]);
+            let tail_mean = identity_losses.select(0, tail_indices).mean();
+            return (mean + tail_mean.mul_scalar(identity_tail_weight))
+                .div_scalar(1.0 + identity_tail_weight);
+        }
+
+        let mean = transformed.clone().mean();
+        let tail_count = e2e_trajectory_tail_count(batch_size, tail_fraction);
+        if tail_count == 0 || tail_weight <= 0.0 {
+            return mean;
+        }
+        let tail_indices =
+            device_topk_indices(transformed.clone().reshape([1, batch_size]), tail_count)
+                .reshape([tail_count]);
+        let tail_mean = transformed.select(0, tail_indices).mean();
+        (mean + tail_mean.mul_scalar(tail_weight)).div_scalar(1.0 + tail_weight)
     }
 
     #[allow(clippy::too_many_arguments)]

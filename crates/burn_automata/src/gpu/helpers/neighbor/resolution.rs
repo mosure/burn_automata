@@ -14,6 +14,7 @@ use crate::gpu::helpers::util::u32_checked;
 
 const MAX_AUTO_EXACT_CELL_OCCUPANCY: usize = 512;
 const MAX_AUTO_TILED_CELL_OCCUPANCY: usize = 2048;
+const MIN_AUTO_COOPERATIVE_2D_PARTICLES: usize = 128;
 const MIN_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 512;
 const MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY: usize = 8192;
 const MIN_AUTO_SUPPORT_BIN_ESTIMATED_OCCUPANCY: f32 = 64.0;
@@ -140,6 +141,21 @@ pub(in crate::gpu) fn resolve_neighbor_mode_for_state(
     Ok((capacity, resolved_neighbor_mode(requested, capacity)))
 }
 
+pub(in crate::gpu) fn promote_auto_subgroup_mode(
+    requested: WgpuNeighborMode,
+    resolved: WgpuNeighborMode,
+    subgroup_cooperative_supported: bool,
+) -> WgpuNeighborMode {
+    if requested == WgpuNeighborMode::Auto
+        && resolved == WgpuNeighborMode::CooperativeSortedCells
+        && subgroup_cooperative_supported
+    {
+        WgpuNeighborMode::SubgroupCooperativeSortedCells
+    } else {
+        resolved
+    }
+}
+
 fn ensure_auto_tiled_scan_is_bounded(
     grid: &HashGridConfig,
     particle_count: usize,
@@ -162,7 +178,10 @@ fn should_use_cooperative_sorted_cells(
     nonempty_cells: usize,
     max_occupancy: usize,
 ) -> bool {
-    if grid.dim == 2 && (1024..=MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY).contains(&particle_count) {
+    if grid.dim == 2
+        && (MIN_AUTO_COOPERATIVE_2D_PARTICLES..=MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY)
+            .contains(&particle_count)
+    {
         return max_occupancy > 0;
     }
     if grid.dim == 3 && (1024..=MAX_AUTO_COOPERATIVE_CELL_OCCUPANCY).contains(&particle_count) {

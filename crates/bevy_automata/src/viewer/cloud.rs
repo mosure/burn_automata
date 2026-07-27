@@ -158,6 +158,12 @@ pub(super) fn sync_gaussian_cloud_asset(
                 .max_leaves
                 .max(adaptive.particles.len())
         });
+    let desired_count = runtime
+        .particle_initialization
+        .as_ref()
+        .map_or(desired_count, |initialization| {
+            initialization.particle_count()
+        });
     if cloud_state.handle.is_some() && cloud_state.particle_count == desired_count {
         return;
     }

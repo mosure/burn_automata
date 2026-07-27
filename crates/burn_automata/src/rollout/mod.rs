@@ -2,7 +2,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
 use crate::target_geometry::TriangleMeshTarget;
-use crate::{AutomataResult, NpaModel};
+use crate::{AutomataError, AutomataResult, NpaModel};
 use burn_automata_kernels::HashGridConfig;
 
 mod geometry;
@@ -51,6 +51,43 @@ pub fn growth_3d_phase_channel(state_dims: usize) -> Option<usize> {
 pub fn growth_3d_velocity_channels(state_dims: usize) -> Option<std::ops::Range<usize>> {
     (state_dims >= GROWTH_3D_VELOCITY_STATE_OFFSET + 3)
         .then_some(GROWTH_3D_VELOCITY_STATE_OFFSET..GROWTH_3D_VELOCITY_STATE_OFFSET + 3)
+}
+
+/// Residual update gate for the position-conditioned 3D surface-state contract.
+///
+/// A liveness value of four denotes fully materialized geometry. Values below
+/// 3.5 retain the full recurrent update so damaged and growing particles can
+/// recover; the narrow transition prevents accumulated numerical motion from
+/// eroding a completed surface over long rollouts.
+///
+/// Signed distance remains part of the learned state and training objective,
+/// but it is deliberately excluded from this deployment gate. A small
+/// signed-distance prediction bias otherwise keeps a recovered particle active
+/// forever and turns a bounded one-step error into unbounded rollout drift.
+pub fn position_conditioned_3d_maturity_gate(liveness: f32, _signed_distance: f32) -> f32 {
+    ((4.0 - liveness) * 2.0).clamp(0.0, 1.0)
+}
+
+/// Position update gate for the mesh-conditioned 3D state-field contract.
+///
+/// State can continue to regenerate at an already-correct surface location,
+/// while position updates decay to zero as the signed-distance state approaches
+/// the surface. Mesh-conditioned initializers populate signed distance before
+/// rollout, keeping this gate deterministic rather than coupling it to the
+/// model's current update error.
+pub fn position_conditioned_3d_motion_gate(
+    liveness: f32,
+    signed_distance: f32,
+    _signed_distance_update: f32,
+    _dt: f32,
+    anchored: bool,
+) -> f32 {
+    if anchored {
+        return 0.0;
+    }
+    let state_gate = position_conditioned_3d_maturity_gate(liveness, signed_distance);
+    let distance_gate = ((signed_distance.abs() - 0.01) / 0.02).clamp(0.0, 1.0);
+    state_gate * distance_gate
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -163,7 +200,7 @@ fn run_rollout_with_mask_schedule(
     seed_mode: ParticleSeed,
     mut update_mask: impl FnMut(usize, usize) -> Vec<f32>,
 ) -> AutomataResult<RolloutTrace> {
-    let (mut positions, mut states) = seed_particles_scaled(
+    let (positions, states) = seed_particles_scaled(
         cfg.batch_size,
         cfg.particle_count,
         model.config.state_dims,
@@ -172,6 +209,58 @@ fn run_rollout_with_mask_schedule(
         seed_mode,
         cfg.seed_scale,
     );
+    run_rollout_from_particles_with_mask_schedule(
+        model,
+        grid,
+        cfg,
+        positions,
+        states,
+        &mut update_mask,
+    )
+}
+
+pub fn run_rollout_from_particles(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    cfg: &RolloutConfig,
+    positions: Vec<[f32; 4]>,
+    states: Vec<f32>,
+) -> AutomataResult<RolloutTrace> {
+    let mut rng = StdRng::seed_from_u64(cfg.seed ^ 0x5eed);
+    run_rollout_from_particles_with_mask_schedule(
+        model,
+        grid,
+        cfg,
+        positions,
+        states,
+        &mut |_, count| stochastic_mask(count, cfg.update_prob, &mut rng),
+    )
+}
+
+fn run_rollout_from_particles_with_mask_schedule(
+    model: &NpaModel,
+    grid: &HashGridConfig,
+    cfg: &RolloutConfig,
+    mut positions: Vec<[f32; 4]>,
+    mut states: Vec<f32>,
+    update_mask: &mut impl FnMut(usize, usize) -> Vec<f32>,
+) -> AutomataResult<RolloutTrace> {
+    let expected_particles = cfg
+        .batch_size
+        .checked_mul(cfg.particle_count)
+        .ok_or_else(|| {
+            AutomataError::InvalidArgument("rollout particle count overflow".to_string())
+        })?;
+    if positions.len() != expected_particles
+        || states.len() != expected_particles * model.config.state_dims
+    {
+        return Err(AutomataError::InvalidArgument(format!(
+            "rollout initialization has {} positions and {} state values; expected {expected_particles} and {}",
+            positions.len(),
+            states.len(),
+            expected_particles * model.config.state_dims
+        )));
+    }
     let mut mean_dx = Vec::with_capacity(cfg.steps);
 
     for step in 1..=cfg.steps {

@@ -156,8 +156,10 @@ use super::*;
         targets_cached: bool,
     ) -> AutomataResult<BurnE2eCpuBatchPrefetch> {
         let mut target_inputs = Vec::with_capacity(indices.len());
+        let (unique_target_indices, target_expansion) = deduplicate_condition_indices(&indices);
         if !targets_cached {
-            for &idx in &indices {
+            target_inputs.reserve(unique_target_indices.len());
+            for &idx in &unique_target_indices {
                 let example = examples.get(idx).ok_or_else(|| {
                     AutomataError::InvalidArgument(
                         "HyperNPA e2e prefetch target index out of bounds".to_string(),
@@ -184,7 +186,13 @@ use super::*;
         Ok(BurnE2eCpuBatchPrefetch {
             indices: pending_indices,
             handle: thread::spawn(move || {
-                prepare_e2e_cpu_batch(indices, target_inputs, condition_paths, config)
+                prepare_e2e_cpu_batch(
+                    indices,
+                    target_inputs,
+                    target_expansion,
+                    condition_paths,
+                    config,
+                )
             }),
         })
     }
@@ -204,6 +212,7 @@ use super::*;
     pub(super) fn prepare_e2e_cpu_batch(
         indices: Vec<usize>,
         target_inputs: Vec<BurnE2eCpuTargetInput>,
+        target_expansion: Vec<usize>,
         condition_paths: Option<(Vec<PathBuf>, Vec<usize>)>,
         config: BurnE2eRolloutTrainConfig,
     ) -> Result<BurnE2ePreparedCpuBatch, String> {
@@ -234,6 +243,7 @@ use super::*;
         Ok(BurnE2ePreparedCpuBatch {
             indices,
             targets,
+            target_expansion,
             prepared_dino,
         })
     }

@@ -31,7 +31,7 @@ cargo build \
   --target "${TARGET}" \
   -p bevy_automata \
   --no-default-features \
-  --features viewer,splatting,gpu_wgpu,hyper_dino_wgpu
+  --features viewer,splatting,gpu_wgpu,hyper_dino_wgpu,mesh_training
 wasm-bindgen \
   --target web \
   --out-dir "${OUT_DIR}/pkg" \

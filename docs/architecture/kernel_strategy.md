@@ -132,56 +132,36 @@ Benchmark matrix:
 
 Measured impact after the cooperative kernel pass:
 
-- 2D `auto` now routes validated 1024-8192 particle workloads to cooperative sorted cells. This avoids fixed-bucket overflow/rejection on collapsed point and micro-cluster starts and removes the largest dense 2D tiled-kernel spikes in the local WGPU benchmark matrix.
-- 3D `auto` now also routes validated 1024-8192 particle workloads to cooperative sorted cells. The cooperative update path reduces neighbor features across a 32-lane workgroup, then evaluates the MLP hidden/output layers across those lanes instead of serializing the model on lane 0.
+- 2D `auto` routes validated 128-8192 particle workloads to cooperative sorted cells. This avoids fixed-bucket overflow/rejection on collapsed point and micro-cluster starts and removes the largest dense 2D tiled-kernel spikes in the local WGPU benchmark matrix.
+- 3D `auto` routes validated 1024-8192 particle workloads to cooperative sorted cells. The cooperative update path reduces neighbor features across a 32-lane workgroup, then evaluates the MLP hidden/output layers across those lanes instead of serializing the model on lane 0.
+- When the adapter exposes fixed 32-wide subgroups, capability-aware state creation promotes only an `Auto` cooperative result to `SubgroupCooperativeSortedCells`. Explicit `CooperativeSortedCells` remains portable and deterministic; adaptive long-horizon parity uses it intentionally because different floating reduction orders can alter event-sensitive topology.
 - Larger 3D and 2D workloads remain deliberately bounded until their distributions are swept; the resolver keeps sparse sub-1024 particle 3D starts on linked lists and retains explicit overflow/rejection checks for fixed buckets.
 - Auto now rejects concentrated distributions before dispatch only when they exceed the validated exact cooperative/tiled fallback range: cooperative sorted cells are capped at 8192 particles per cell, exact sorted/linked fallback is capped at 512 particles per cell, and full-cell tiled scans are capped at 2,048 particles per cell when the distribution occupies at most four cells. This prevents known larger point and micro-cluster stalls from entering the default GPU path.
 - Sorted cells remain exact and memory-stable but slower in current measurements because count/scan/scatter overhead is not yet recovered by scalar contiguous range traversal. Cooperative sorted cells reuse the same compact layout but let one workgroup cooperatively reduce a target particle's neighbor range and MLP update, which is faster for validated 2D/3D 1k-8k cases.
-- `SubgroupCooperativeSortedCells` is available as an explicit opt-in when the WGPU adapter exposes fixed 32-wide subgroups. Its shader is isolated in a separate module and is only compiled after `Features::SUBGROUP` is requested, so unsupported devices keep the portable cooperative path. The mode passed 2D and shifted 3D parity, but the local 4k/8k dense/point/micro sweep did not meet the promotion gate, so `auto` still resolves to `CooperativeSortedCells`.
+- `SubgroupCooperativeSortedCells` remains available explicitly. Its shader is isolated in a separate module and is only compiled after `Features::SUBGROUP` is requested, so unsupported devices retain the portable cooperative path.
 - BVH now exists in five forms: a CPU structural oracle in `burn_automata_kernels::spatial`, an executable `WgpuNeighborMode::Bvh { leaf_size }` path, an executable `WgpuNeighborMode::GpuBvh { leaf_size }` fixed-order baseline, an executable `WgpuNeighborMode::GpuLbvh { leaf_size }` sorted-cell GPU baseline, and an executable `WgpuNeighborMode::GpuMortonLbvh { leaf_size }` Morton-key GPU baseline. `Bvh` rebuilds a median-split BVH from current GPU positions on the CPU, uploads packed nodes/leaf indices into the existing grid buffer, then runs density/update traversal in WGSL. `GpuBvh` initializes a complete fixed-order binary tree and reduces AABBs entirely on GPU, avoiding readback but not spatially ordering particles. `GpuLbvh` reuses the GPU sorted-cell count/scan/scatter order, builds BVH leaves over that spatially coherent order, and reduces the tree on GPU. `GpuMortonLbvh` generates Morton keys from clamped grid coordinates, bitonic-sorts `(key, particle)` pairs on GPU, and builds the same tree over Morton order. All executable BVH modes are exact for clamped grids and useful for ablation; the Morton path is intentionally simple and not yet a production radix LBVH.
 
 ## Latest Local Measurements
 
-Representative post-change release WGPU `auto` timings on the current ARM/NVIDIA workstation:
+Release WGPU `auto` timings on the current ARM/NVIDIA workstation:
 
-| preset | particles | path | ms/step |
+| preset/geometry | particles | selected path | median ms/step |
 | --- | ---: | --- | ---: |
-| `growing-2d` dense | 4,096 | cooperative sorted cells | 3.18 |
-| `growing-2d` point | 4,096 | cooperative sorted cells | 3.38 |
-| `growing-2d` micro-cluster | 4,096 | cooperative sorted cells | 5.61 |
-| `texture-2d` dense | 4,096 | cooperative sorted cells | 1.31 |
-| `texture-2d` point | 4,096 | cooperative sorted cells | 2.26 |
-| `texture-2d` micro-cluster | 4,096 | cooperative sorted cells | 5.41 |
-| `growing-3d-gs` dense | 4,096 | cooperative sorted cells | 1.63 |
-| `growing-3d-gs` point | 4,096 | cooperative sorted cells | 3.82 |
-| `growing-3d-gs` micro-cluster | 4,096 | cooperative sorted cells | 13.80 |
-| `growing-2d` dense | 8,192 | cooperative sorted cells | 10.49 |
-| `growing-2d` point | 8,192 | cooperative sorted cells | 7.43 |
-| `growing-2d` micro-cluster | 8,192 | cooperative sorted cells | 23.78 |
-| `texture-2d` dense | 8,192 | cooperative sorted cells | 3.15 |
-| `texture-2d` point | 8,192 | cooperative sorted cells | 7.19 |
-| `texture-2d` micro-cluster | 8,192 | cooperative sorted cells | 23.65 |
-| `growing-3d-gs` dense | 8,192 | cooperative sorted cells | 3.38 |
-| `growing-3d-gs` point | 8,192 | cooperative sorted cells | 11.90 |
-| `growing-3d-gs` micro-cluster | 8,192 | cooperative sorted cells | 37.06 |
+| `growing-2d` seed | 128 | subgroup cooperative | 0.236 |
+| `growing-2d` seed | 512 | subgroup cooperative | 0.237 |
+| `growing-2d` seed | 4,096 | subgroup cooperative | 0.957 |
+| `growing-2d` seed | 8,192 | subgroup cooperative | 3.255 |
 
-Subgroup cooperative probe from
-`target/bench_gpu_subgroup_cooperative_8k.json`:
+Matched portable-versus-subgroup probes:
 
 | preset/geometry | particles | cooperative ms/step | subgroup ms/step | subgroup delta |
 | --- | ---: | ---: | ---: | ---: |
-| `growing-2d` point | 4,096 | 2.59 | 2.37 | -8.5% |
-| `growing-2d` point | 8,192 | 8.90 | 8.30 | -6.8% |
-| `growing-2d` dense | 8,192 | 11.04 | 13.03 | +18.0% |
-| `texture-2d` point | 4,096 | 2.07 | 2.67 | +29.0% |
-| `texture-2d` micro-cluster | 8,192 | 25.24 | 28.46 | +12.8% |
-| `growing-3d-gs` point | 8,192 | 13.16 | 14.44 | +9.7% |
-| `growing-3d-gs` micro-cluster | 8,192 | 44.72 | 48.69 | +8.9% |
-
-The subgroup path improves only the two `growing-2d` point rows in this sweep
-and regresses dense or clustered rows, including p99 regressions on several
-cases. It remains useful as an opt-in probe for future subgroup-specific
-kernel work, but it is not promoted into `auto`.
+| `growing-2d` dense | 4,096 | 2.676 | 1.243 | -53.5% |
+| `growing-2d` micro-cluster | 4,096 | 4.371 | 1.913 | -56.2% |
+| `growing-2d` dense | 8,192 | 7.782 | 3.385 | -56.5% |
+| `growing-2d` micro-cluster | 8,192 | 16.332 | 6.537 | -60.0% |
+| `growing-3d-gs` dense | 4,096 | 1.967 | 0.740 | -62.4% |
+| `growing-3d-gs` micro-cluster | 4,096 | 5.935 | 2.508 | -57.7% |
 
 Representative executable BVH ablation rows:
 

@@ -436,7 +436,10 @@ fn automata_camera_viewport_centers_right_pane_when_ui_visible() {
     assert_eq!(viewport.physical_position, UVec2::new(540, 0));
     assert_eq!(viewport.physical_size, UVec2::new(1060, 900));
     assert!(automata_camera_viewport(UVec2::new(1600, 900), 1.0, false).is_none());
-    assert!(automata_camera_viewport(UVec2::new(700, 900), 1.0, true).is_none());
+    let mobile = automata_camera_viewport(UVec2::new(700, 900), 1.0, true)
+        .expect("narrow windows should retain a viewport above the control sheet");
+    assert_eq!(mobile.physical_position, UVec2::ZERO);
+    assert_eq!(mobile.physical_size, UVec2::new(700, 486));
 }
 
 #[cfg(feature = "splatting")]
@@ -447,6 +450,21 @@ fn automata_camera_viewport_uses_physical_scale_factor() {
 
     assert_eq!(viewport.physical_position, UVec2::new(1080, 0));
     assert_eq!(viewport.physical_size, UVec2::new(2120, 1800));
+}
+
+#[cfg(feature = "splatting")]
+#[test]
+fn mobile_layout_preserves_render_area_in_portrait_and_landscape() {
+    let portrait = automata_ui_layout_metrics(Vec2::new(390.0, 844.0));
+    assert!(portrait.mobile);
+    assert_eq!(portrait.panel_width, 390.0);
+    assert!(portrait.render_size.y >= AUTOMATA_UI_MOBILE_MIN_VIEW_HEIGHT);
+    assert!((portrait.panel_height - 388.24).abs() < 0.01);
+
+    let landscape = automata_ui_layout_metrics(Vec2::new(844.0, 390.0));
+    assert!(landscape.mobile);
+    assert_eq!(landscape.render_size.x, 844.0);
+    assert!(landscape.render_size.y >= AUTOMATA_UI_MOBILE_MIN_VIEW_HEIGHT);
 }
 
 #[cfg(all(feature = "splatting", not(feature = "gpu_wgpu")))]
@@ -849,10 +867,22 @@ fn live_weight_snapshots_do_not_reseed_the_gpu_rollout() {
     let mut model_after = model_before.clone();
     model_after.weights.w1[0] += 0.25;
 
-    let before =
-        automata_render_reinit_key(&model_before, &hashgrid, &settings, WgpuNeighborMode::Auto);
-    let after =
-        automata_render_reinit_key(&model_after, &hashgrid, &settings, WgpuNeighborMode::Auto);
+    let before = automata_render_reinit_key(
+        &model_before,
+        &hashgrid,
+        &settings,
+        WgpuNeighborMode::Auto,
+        settings.particle_count,
+        0,
+    );
+    let after = automata_render_reinit_key(
+        &model_after,
+        &hashgrid,
+        &settings,
+        WgpuNeighborMode::Auto,
+        settings.particle_count,
+        0,
+    );
 
     assert_eq!(before, after);
 }
@@ -863,10 +893,50 @@ fn pca_visualization_toggle_does_not_reseed_the_gpu_rollout() {
     let mut settings = AutomataSettings::default();
     let (config, hashgrid) = NpaConfig::for_preset(AutomataPreset::Growing2d);
     let model = NpaModel::upstream_seeded(config, 1);
-    let before = automata_render_reinit_key(&model, &hashgrid, &settings, WgpuNeighborMode::Auto);
+    let before = automata_render_reinit_key(
+        &model,
+        &hashgrid,
+        &settings,
+        WgpuNeighborMode::Auto,
+        settings.particle_count,
+        0,
+    );
 
     settings.pca_visualization = true;
-    let after = automata_render_reinit_key(&model, &hashgrid, &settings, WgpuNeighborMode::Auto);
+    let after = automata_render_reinit_key(
+        &model,
+        &hashgrid,
+        &settings,
+        WgpuNeighborMode::Auto,
+        settings.particle_count,
+        0,
+    );
 
     assert_eq!(before, after);
+}
+
+#[cfg(all(feature = "splatting", feature = "gpu_wgpu"))]
+#[test]
+fn particle_initialization_revision_reseeds_the_gpu_rollout() {
+    let settings = AutomataSettings::default();
+    let (config, hashgrid) = NpaConfig::for_preset(AutomataPreset::Growing3dGs);
+    let model = NpaModel::upstream_seeded(config, 1);
+    let before = automata_render_reinit_key(
+        &model,
+        &hashgrid,
+        &settings,
+        WgpuNeighborMode::Auto,
+        4096,
+        3,
+    );
+    let after = automata_render_reinit_key(
+        &model,
+        &hashgrid,
+        &settings,
+        WgpuNeighborMode::Auto,
+        16_384,
+        4,
+    );
+
+    assert_ne!(before, after);
 }

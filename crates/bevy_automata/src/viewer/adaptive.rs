@@ -59,6 +59,7 @@ pub(super) fn apply_adaptive_model_snapshot(
         )?
     };
     runtime.model = model.rule.clone();
+    set_particle_initialization(runtime, None);
     runtime.adaptive = Some(AdaptiveViewerState {
         model,
         training_stage: AdaptiveTrainingStage::FreshTaskTrainedMultiscale,
@@ -125,6 +126,7 @@ pub(super) fn load_selected_adaptive_model(
         Ok((model, training_stage, particles)) => {
             settings.particle_count = settings.particle_count.max(model.config.target_leaves);
             runtime.model = model.rule.clone();
+            set_particle_initialization(&mut runtime, None);
             runtime.adaptive = Some(AdaptiveViewerState {
                 model,
                 training_stage,

@@ -1266,6 +1266,20 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 512)]
         steps: usize,
     },
+    #[command(name = "train-mesh3d", alias = "train-mesh-3d")]
+    TrainMesh3d {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    #[command(name = "evaluate-mesh3d", alias = "eval-mesh3d")]
+    EvaluateMesh3d {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+    },
     TrainTorusMorphogen3d {
         #[arg(long, default_value = "artifacts/legacy_uv_torus_morphogen_3d.bpk")]
         model_output: PathBuf,

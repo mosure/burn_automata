@@ -71,6 +71,11 @@ results establish an auditable end-to-end baseline and conditional
 controllability, but not oracle-quality generalization. The maintained trainer
 now includes a conditional row-flow generator; no row-flow quality is
 retroactively attributed to the deterministic checkpoint evaluated here.
+As a systems extension, we also validate normalized mesh import and a
+mesh-conditioned 3D NPA state-field on the Utah teapot: a 16,384-particle
+three-seed gate reaches 25.91--26.29 dB density PSNR and stable localized
+state recovery. This fixed surface-support result is reported separately from,
+and is not claimed as, neutral-seed 3D morphogenesis.
 \end{abstract}
 
 \keywords{neural particle automata, hypernetworks, self-organization,
@@ -733,6 +738,104 @@ does establish that the current trainer can sustain tens of millions of
 particle updates per second without host perception fallback. Quality-scale
 4,096-particle backward remains the expensive regime.
 
+\section{Mesh-Conditioned 3D Extension}
+\label{sec:mesh3d}
+
+The repository also exposes a separate mesh-to-NPA path for interactive 3D
+assets. A Wavefront OBJ is centered and isotropically normalized so its
+longest extent is 1.44. Deterministic area-weighted sampling initializes
+surface support; a 3D NPA with 24 state channels, 320 hidden units, absolute
+position features, and particle-density/scale equivariance updates normal,
+signed-distance, opacity, color, and latent state. The support coordinate is
+anchored, while material state remains recurrent and can recover from
+localized erasure.
+
+Training uses eight independent 4,096-particle trajectories. Six match the
+deployment distribution: pristine surface support and localized state-erasure
+lanes spanning recovery ages 0--32. Two retain near-surface and volume-field
+supervision. A structured 16-unit subspace initializes the best affine
+position-to-color residual and exact liveness/opacity residuals; 304 hidden
+units remain available for learned corrections. This material subspace is
+re-projected after optimization to prevent small one-step errors from
+accumulating over long rollouts. Surface normals decode to a 3D Gaussian
+quaternion; tangent radii scale with inverse square root particle count and
+normal thickness is 18\% of the tangent radius.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{\figroot/mesh3d/teapot_recovery.png}
+\caption{Actual Bevy/WGPU oriented-Gaussian captures from the canonical
+16,384-particle Utah teapot model. A localized material-state erasure is
+visible at step 0, largely repaired by step 8, clean by step 32, and stable
+through step 256. Camera, particle support, renderer settings, and seed are
+fixed across columns.}
+\Description{Four Gaussian-splat renderings of a rainbow-colored Utah teapot.
+The first contains a dark damaged patch, which disappears in the second and
+remains repaired in the third and fourth long-horizon frames.}
+\label{fig:mesh3d-recovery}
+\end{figure*}
+
+\begin{table}[t]
+\caption{Canonical mesh-conditioned Utah teapot result. Ranges cover three
+seeds and required rollout horizons through step 256 at 16,384 particles.}
+\label{tab:mesh3d}
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+Metric & Result \\
+\midrule
+Dataset generation & 0.216 s \\
+Burn/WGPU training & 9.006 s \\
+Training rows / throughput & 16.38 M / 1.819 M rows/s \\
+Density PSNR & 25.91--26.29 dB \\
+Color PSNR & 43.04--43.41 dB \\
+Depth PSNR & 41.17--41.82 dB \\
+Worst damaged-region color, $T=32$ & 52.48 dB \\
+Mean / p95 surface distance & $\leq$0.000469 / $\leq$0.002869 \\
+Target coverage / position drift & 100\% / 0 \\
+4,096-particle resident step & 1.089 ms \\
+16,384-particle resident step & 9.295 ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Particle-state PCA}
+The viewer can replace decoded Gaussian color with the leading three
+principal coordinates of the full recurrent particle state. A resident WGPU
+pipeline computes a bounded partial mean reduction, updates an orthonormal
+basis with rolling Oja iterations every eight rendered frames, projects every
+particle each frame, and normalizes display coordinates with a
+$2.5\sigma$ clip. No state or covariance matrix is read back to the host.
+Figure~\ref{fig:state-pca} applies this identical path to the released 2D
+lizard and the mesh-conditioned 3D teapot.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{\figroot/pca/npa_state_pca_2d_3d.png}
+\caption{GPU-resident particle-state PCA across 2D and 3D NPA rollouts.
+Top: the released 4,096-particle lizard organizes from step 32 through 512.
+Bottom: the 16,384-particle teapot after localized state erasure at step 0
+and recovery through step 256. PCA RGB encodes rolling principal coordinates
+of all state channels, not decoded material color; component signs and basis
+orientation have no fixed semantic meaning. The persistent localized
+variation in the final teapot panel is consistent with incomplete latent-state
+restoration despite high decoded-color PSNR.}
+\Description{Two rows of four Gaussian-splat images colored by particle-state
+principal components. The top row forms a lizard over four rollout steps.
+The bottom row shows a teapot with a localized state perturbation whose
+principal-component colors remain distinct while decoded material recovers.}
+\label{fig:state-pca}
+\end{figure*}
+
+The result proves the OBJ normalization, recurrent state rule, oriented
+Gaussian decoder, WGPU inference, and PanOrbit viewer contract. It does not
+prove the stronger NPA task studied by Kim et al.: target-independent local
+growth from a compact neutral seed. In particular, exact surface support is
+part of the condition and position features expose world coordinates. The
+repository therefore keeps strict neutral-seed 3D training behind a separate
+experimental promotion gate.
+
 \section{Discussion}
 
 \subsection{What Has Been Demonstrated}
@@ -803,6 +906,10 @@ target-specific controllers exceed 27 dB on paired targets. The direct-adapter
 control shows a plausible route upward, but also establishes a hard ordering:
 first validate and optimize the shared recurrent substrate, then amortize it,
 and only then add a stochastic adapter generator.
+The mesh-conditioned 3D extension demonstrates that the same runtime can
+support normalized imported surfaces, recurrent material repair, oriented
+Gaussians, and interactive camera control. Its anchored support is an explicit
+conditioning boundary and does not close the neutral-seed 3D problem.
 
 \section*{Reproducibility Statement}
 
@@ -812,13 +919,17 @@ paper's central evidence comes from:
 \begin{itemize}
   \item OmniSVG-1k: \path{artifacts/hyper2d_omnisvg_1k_dino_canonical_quality_refine/report.json};
   \item catalog holdout: \path{artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/report.json};
-  \item historical non-parity table diagnostic: \path{artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json}; and
-  \item throughput: \path{artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json}.
+  \item historical non-parity table diagnostic: \path{artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json};
+  \item throughput: \path{artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json}; and
+  \item mesh-conditioned 3D:
+  \path{artifacts/mesh3d/utah_teapot/report.json}.
 \end{itemize}
-All paper rollouts were regenerated with the headless export command, 4,096
+All 2D paper rollouts were regenerated with the headless export command, 4,096
 particles, seed 42, update probability 0.5, and captures
 at steps 0, 32, 96, 256, 512, and 1,024. Appendix~\ref{app:metrics} lists the
-eight visualized holdout metrics.
+eight visualized holdout metrics. The 3D figure uses the same exporter with
+16,384 particles, localized state erasure, and captures at steps 0, 8, 32,
+and 256.
 
 \appendix
 

@@ -6,10 +6,13 @@ pub(super) fn automata_render_reinit_key(
     hashgrid: &HashGridConfig,
     settings: &AutomataSettings,
     neighbor_mode: WgpuNeighborMode,
+    particle_count: usize,
+    initialization_revision: u64,
 ) -> AutomataRenderReinitKey {
     AutomataRenderReinitKey {
         settings_revision: settings.revision,
-        particle_count: settings.particle_count,
+        particle_count,
+        initialization_revision,
         seed: settings.seed,
         seed_scale_bits: settings.seed_scale.to_bits(),
         reference_seed_scale_bits: settings.reference_seed_scale.to_bits(),
@@ -48,6 +51,7 @@ pub(super) struct AutomataRenderConfig {
     reinit_key: AutomataRenderReinitKey,
     param_key: AutomataRenderParamKey,
     particle_count: usize,
+    initialization: Option<Arc<burn_automata::NpaParticleInitialization>>,
     steps_per_frame: usize,
     update_prob: f32,
     dt: f32,
@@ -91,6 +95,7 @@ pub(super) struct AutomataRenderParamKey {
 pub(super) struct AutomataRenderReinitKey {
     settings_revision: u64,
     particle_count: usize,
+    initialization_revision: u64,
     seed: u64,
     seed_scale_bits: u32,
     reference_seed_scale_bits: u32,
@@ -327,8 +332,20 @@ pub(super) fn extract_automata_render_config(
     commands.remove_resource::<AdaptiveAutomataRenderConfig>();
     let hashgrid = effective_hashgrid(runtime, &settings);
     let neighbor_mode = effective_gpu_neighbor_mode(runtime, &settings);
-    let reinit_key =
-        automata_render_reinit_key(&runtime.model, &hashgrid, &settings, neighbor_mode);
+    let particle_count = runtime
+        .particle_initialization
+        .as_ref()
+        .map_or(settings.particle_count, |initialization| {
+            initialization.particle_count()
+        });
+    let reinit_key = automata_render_reinit_key(
+        &runtime.model,
+        &hashgrid,
+        &settings,
+        neighbor_mode,
+        particle_count,
+        runtime.particle_initialization_revision,
+    );
     let param_key = AutomataRenderParamKey {
         model_revision: runtime.model_revision,
         dt_bits: settings.dt.to_bits(),
@@ -339,7 +356,8 @@ pub(super) fn extract_automata_render_config(
         hashgrid,
         reinit_key,
         param_key,
-        particle_count: settings.particle_count,
+        particle_count,
+        initialization: runtime.particle_initialization.clone(),
         steps_per_frame: settings.steps_per_frame,
         update_prob: settings.update_prob,
         dt: settings.dt,
@@ -420,14 +438,24 @@ pub(super) fn step_automata_into_gaussians(
                 }
             }
         }
-        let (positions, states) = burn_automata::rollout::seed_particles_scaled(
-            1,
-            config.particle_count,
-            config.model.config.state_dims,
-            config.model.config.spatial_dims,
-            config.seed,
-            config.seed_mode,
-            config.seed_scale,
+        let (positions, states) = config.initialization.as_ref().map_or_else(
+            || {
+                burn_automata::rollout::seed_particles_scaled(
+                    1,
+                    config.particle_count,
+                    config.model.config.state_dims,
+                    config.model.config.spatial_dims,
+                    config.seed,
+                    config.seed_mode,
+                    config.seed_scale,
+                )
+            },
+            |initialization| {
+                (
+                    initialization.positions.clone(),
+                    initialization.states.clone(),
+                )
+            },
         );
         let Some(executor) = render_state.executor.as_ref() else {
             return;
