@@ -984,16 +984,20 @@ The current trainer preserves all 257 DINOv2 tokens and appends the aligned
 $14\times14$ RGBA patch payload to each of the 256 patch tokens. Deterministic
 seeded source rows for the two NPA affine layers are transported by a
 timestep-conditioned self/cross-attention velocity network. An eight-step
-Heun solve produces 10,898 identifiable controller residuals. End-to-end image
+Heun solve produces 10,880 identifiable controller residuals: the released
+Growing contract keeps the final update bias fixed at zero. End-to-end image
 and rollout loss updates both the generated residual and shared NPA trunk.
 Detached TBPTT accumulates controller-endpoint VJPs on device and contracts
 them through the flow graph once per optimizer step.
 
 This architecture is stored as version 5 inside the versioned BPK artifact
 container and remains load-compatible with legacy version-4 row-flow
-artifacts. Its bounded four-condition control shows active conditioning, but
-its p10 quality remains far below the 26 dB target. Consequently, broad
-generalized row-flow quality is an open result, not a paper conclusion.
+artifacts. A strict ten-condition released-catalog control reaches 23.38 dB
+aggregate composited PSNR at 4,096 particles and step 1,024, versus 23.62 dB
+for the exact released controllers. Correct conditions beat a cyclic shuffle
+by 13.49 dB. This closes the seen-condition capacity and solver-fidelity
+control, but broad identity-disjoint row-flow quality remains open and is not
+a paper conclusion.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{hyper_npa}

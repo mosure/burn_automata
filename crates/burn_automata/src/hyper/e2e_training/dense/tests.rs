@@ -3294,6 +3294,26 @@ fn production_rollout_step_sampler_covers_32_through_95() {
 }
 
 #[test]
+fn resumed_pending_batches_require_current_rollout_shape_and_identity_groups() {
+    assert!(pending_rollout_batches_compatible(
+        &[vec![1, 1, 1, 1, 7, 7, 7, 7]],
+        8,
+        4,
+    ));
+    assert!(pending_rollout_batches_compatible(&[], 8, 4));
+    assert!(!pending_rollout_batches_compatible(
+        &[vec![1, 1, 7, 7]],
+        8,
+        4,
+    ));
+    assert!(!pending_rollout_batches_compatible(
+        &[vec![1, 1, 7, 1, 7, 7, 7, 7]],
+        8,
+        4,
+    ));
+}
+
+#[test]
 fn pre_rollout_sampler_covers_early_and_late_burn_in_states() {
     let samples = (0..8192)
         .map(|seed| sampled_pre_rollout_steps(0, 448, seed))

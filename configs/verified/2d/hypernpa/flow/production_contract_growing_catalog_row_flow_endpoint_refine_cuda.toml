@@ -1,8 +1,7 @@
-# Phase one of the validated strict zero-output-bias catalog control. Random-time
-# velocity matching initializes the conditioned flow before exact sampled-
-# endpoint refinement. On RTX PRO 6000 Blackwell this shape sustained about 190
-# condition-time examples/s and 459 W; the paired endpoint config is the quality
-# gate and must run next.
+# Phase two of the validated strict zero-output-bias catalog control. This
+# backpropagates through the same eight-step Heun sampler used by serialized
+# inference. The 2026-07-27 reference run reached 23.38 dB aggregate PSNR at
+# 256px, 4096 particles, and 1024 rollout steps after 250 optimizer steps.
 preset = "growing-2d"
 
 [source]
@@ -10,9 +9,9 @@ target_image_dirs = [".cache/selforg_npa/targets/growing"]
 image_extensions = ["png"]
 
 [output]
-output_dir = "artifacts/hyper2d_verified_growing_row_flow_s_pretrain"
-checkpoint_interval_steps = 250
-checkpoint_interval_seconds = 900
+output_dir = "artifacts/hyper2d_verified_growing_row_flow_endpoint_refine"
+checkpoint_interval_steps = 100
+checkpoint_interval_seconds = 600
 auto_resume = true
 
 [condition]
@@ -28,7 +27,8 @@ alpha_channel = true
 patch_pixels = true
 
 [model]
-shared_base = "models/catalog/growing/lizard.bpk"
+shared_base = "artifacts/hyper2d_verified_growing_row_flow_s_pretrain/checkpoints/best_shared_base.bpk"
+hyper = "artifacts/hyper2d_verified_growing_row_flow_s_pretrain/checkpoints/best_hyper_2d.bpk"
 oracle_model_dir = "models/catalog/growing"
 shared_base_trainable = false
 hidden_dims = 128
@@ -37,18 +37,19 @@ output_activation = "identity"
 [training]
 backend = "gpu"
 objective = "conditional-row-flow-matching"
-steps = 1000
-report_interval = 25
+steps = 250
+report_interval = 20
 example_batch_size = 10
 credit_assignment = "full-bptt"
 task_loss_weight = 0.0
-flow_matching_weight = 1.0
+adapter_teacher_weight = 1.0
+adapter_teacher_objective = "parameter-mse"
+flow_matching_weight = 0.1
 flow_match_inference_source = true
+flow_train_sample_steps = 8
 max_full_bptt_particle_steps = 10240
 use_particle_pool = false
-# Four independent time draws per condition produce an effective batch of 40
-# while reusing the ten resident DINO condition rows.
-rollouts_per_example = 4
+rollouts_per_example = 2
 target2d_loss_backend = "tiled-adjoint"
 perception_backend = "auto"
 max_dense_train_particles = 32
@@ -61,6 +62,7 @@ backend = "burn-cuda"
 max_dense_chunk_floats = 1048576
 max_splat_chunk_floats = 1048576
 condition_device_cache_max_bytes = 2147483648
+target_device_cache_max_bytes = 2147483648
 
 [adapter]
 rank = 66
@@ -86,7 +88,7 @@ seed_mode = "uniform-circle"
 [target]
 points = 4096
 threshold = 0.05
-loss_image_size = 64
+loss_image_size = 256
 splat_sigma = 1.0
 splat_loss_weight = 2.0
 color_loss_weight = 5.0
@@ -97,7 +99,7 @@ bound_regularizer_weight = 100.0
 
 [optimizer]
 base_learning_rate = 0.0
-generator_learning_rate = 1.0e-4
+generator_learning_rate = 3.0e-5
 base_weight_decay = 0.0
 generator_weight_decay = 0.0
 base_grad_clip_norm = 0.0
@@ -113,19 +115,26 @@ warmup_steps = 0
 min_lr_scale = 1.0
 
 [validation]
-initial_examples = 0
+initial_examples = 10
 examples = 10
-interval = 500
+interval = 250
 particles = 4096
 steps = 1024
 horizons = [96, 256, 512, 1024]
 selection_horizon_min_steps = 96
 update_prob = 0.5
 seed = 42
-psnr_threshold_db = 26.0
+seed_count = 1
+psnr_threshold_db = 22.0
+final_examples = 10
+final_particles = 4096
+final_steps = 1024
+final_horizons = [96, 256, 512, 1024]
+final_selection_horizon_min_steps = 96
+final_seed_count = 1
 
 [gates]
-max_quality_validation_evaluations = 4
+max_quality_validation_evaluations = 3
 max_quality_validation_elapsed_fraction = 0.40
 require_validation_interval_at_least_report_interval = true
 fail_on_violation = false

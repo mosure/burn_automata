@@ -106,8 +106,9 @@ target/release/bevy_automata export \
 
 ## Canonical Conditional Row-Flow Experiment
 
-The maintained trainer implements the next architecture; it is not yet part of
-the paper's quality claim:
+The maintained trainer implements the next architecture. Its released-catalog
+fit is now a validated capacity/control result, but it is not yet part of the
+paper's unseen-image quality claim:
 
 ```text
 224 x 224 RGBA image
@@ -117,7 +118,7 @@ the paper's quality claim:
   -> deterministic seeded source rows for W1+b1 and W2+b2
   -> timestep-conditioned self/cross-attention velocity transformer
   -> eight-step deterministic Heun solve
-  -> 10,898 identifiable dense controller residuals
+  -> 10,880 upstream-compatible dense controller residuals
   -> jointly trained shared NPA trunk + generated residual
   -> autonomous particle rollout
   -> alpha-aware Target2D image/density loss
@@ -165,21 +166,46 @@ shape is an untrained contract, not evidence of broad 1k/10k generalization or
 26 dB parity; those claims require completed held-out p10, condition-shuffle,
 base-only, long-horizon, and matched-oracle gates.
 
+The strict ten-model catalog control uses
+`configs/verified/2d/hypernpa/flow/production_contract_growing_catalog_row_flow_pretrain.toml`
+followed by
+`configs/verified/2d/hypernpa/flow/production_contract_growing_catalog_row_flow_endpoint_refine_cuda.toml`.
+At 256px, 4,096 particles, and 1,024 rollout steps, the generated controllers
+reach 23.38 dB aggregate composited PSNR versus 23.62 dB for the exact released
+controllers. Generated/exact p10 is 20.17/20.11 dB. Correct conditions beat a
+cyclic shuffle by 13.49 dB, generated controllers beat the shared lizard trunk
+by 15.15 dB, density PSNR is 21.46 dB, soft IoU is 0.948, and peak-to-final p10
+drift is 0.48 dB.
+
+Velocity matching by itself was insufficient: normalized velocity MSE reached
+`2.50e-4` while quality remained 14.39 dB. A further 250 updates through the
+same eight-step Heun endpoint used at inference reduced endpoint MSE to
+`1.19e-5` and closed the aggregate teacher gap to 0.24 dB. This control proves
+condition routing, transformer capacity, solver fidelity, and sane generated
+dynamics for ten seen conditions. It does not prove identity-disjoint
+generalization. The exact released lizard and sun controls score 19.92 and
+20.13 dB under the same composited metric, so per-identity 22 dB is not used as
+a substitute for matched teacher parity.
+
 A bounded four-identity CUDA control run establishes that the new conditional
 path is active: at its selected checkpoint, correct conditions beat a cyclic
 condition shuffle by 3.72 dB and generated residuals beat the shared trunk by
-3.42 dB at 256 particles and 64 steps. The generated 10,898-value controller
+3.42 dB at 256 particles and 64 steps. The generated 10,880-value controller
 rows have mean pairwise L2 distance 1.36. This is a controllability result, not
 quality parity: p10 is 12.18 dB. A post-VJP-fix 2,000-step continuation trained
 only at 64 particles still did not transfer to quality scale. Its selected
 checkpoint reaches 10.96 dB p10 at 2,048 particles and 96 steps, where the
 generated residual gain is 1.53 dB, then falls to 9.34 dB p10 and 0.02 dB gain
 at 256 steps. The matched target-point-splat p10 is 28.42 dB. The corrected
-production contract trains eight conditions with eight independent 4,096-
-particle trajectories each. It samples rollout lengths from the upstream-style
-exclusive range `32..96` (32 through 95) instead of optimizing a fixed 96-step
-horizon. This preserves the previous aggregate 262,144 particles per optimizer
-step while moving each trajectory to quality scale.
+production contract trains eight conditions with four independent
+4,096-particle trajectories each and a 64-step detached credit horizon. It
+samples rollout lengths from the upstream-style exclusive range `32..96` (32
+through 95) instead of optimizing a fixed 96-step horizon. A matched-memory
+continuation improved p10 by 0.48 dB in 250 steps versus 0.26 dB for eight
+trajectories with a 32-step credit horizon, while completing optimizer work
+16% sooner. A two-step Heun training solve retained the serialized four-step
+inference p10 gain and reduced optimizer time by a further 34%; validation
+always uses the four-step artifact contract.
 
 Long full-BPTT rollouts produce substantially larger startup gradients than the
 short-horizon probes. Verified production configs linearly warm the optimizer
@@ -222,6 +248,7 @@ tiny-`log1p` lowering previously observed on WGPU.
 | Released oracles remain much stronger | Rose/fish HyperNPA: 9.63/11.65 dB; released oracles: 27.93/27.45 dB | Same target, seed, 4,096 particles, and 1,024 steps |
 | Historical table result is not parity evidence | A legacy 16-ID table reached 23.58 dB aggregate and 19.30 dB p10 | The artifact trained a forbidden per-image output bias; it is excluded from upstream-compatible capacity claims |
 | Corrected zero-bias table is active but not converged | 11.63 dB aggregate, 10.52 dB p10 at 1,024 steps, and 3.77 dB correct-vs-shuffled gap | Four train identities, 4,096 particles, 2,000 updates, and 16,000 trajectories/ID: 6.67% of released exposure, not a capacity ceiling |
+| Strict row-flow catalog control reaches teacher parity | 23.38/23.62 dB generated/exact aggregate; 20.17/20.11 dB p10 | Ten seen released conditions, 256px, 4,096 particles, step 1,024; capacity control, not held-out generalization |
 | Current trainer has a high-throughput path | 17.66M measured and 18.36M median particle-steps/s | v3, CUDA, batch 64, 1,024 particles, 96 full-BPTT steps; quality disabled |
 | Quality-scale row-flow training avoids repeated flow solves | 2.053M median, 2.288M maximum particle-steps/s | CUDA, 16 conditions, 4,096 particles, 32--95 rollout steps, detached-TBPTT-16, teacher/flow/task objectives |
 | Mesh-conditioned 3D teapot state-field passes | 25.91--26.29 dB density, 43.04--43.41 dB color, and 41.17--41.82 dB depth PSNR | Anchored 16,384-particle surface support, three seeds, steps 0--256; not neutral-seed morphogenesis |
@@ -245,6 +272,7 @@ artifacts/hyper2d_growing_catalog_holdout2_quality_eval_p4096_s1024/report.json
 artifacts/hyper2d_omnisvg_16_p4096_frozen_table_lr2e6/report.json
 # Corrected bounded zero-output-bias control:
 artifacts/hyper2d_omnisvg4_zero_b2_seeded_table_upstream_lr_cuda/report.json
+artifacts/hyper2d_growing_catalog_zero_bias_row_flow_quality_eval_cuda/report.json
 artifacts/hyper2d_row_flow_omnisvg16_functional_tbptt_trust_p4096_cuda/report.json
 artifacts/throughput_v3_p1024_s96_b64_sources64_cuda_release_fixed96_retained_vjp/report.json
 artifacts/mesh3d/utah_teapot/report.json

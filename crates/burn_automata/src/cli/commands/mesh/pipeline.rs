@@ -45,6 +45,7 @@ impl Default for Mesh3dOutput {
     }
 }
 
+#[cfg(feature = "backend_wgpu")]
 #[derive(Serialize)]
 struct Mesh3dExperimentReport {
     target: Mesh3dTargetReport,

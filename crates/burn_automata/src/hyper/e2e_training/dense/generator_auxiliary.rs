@@ -197,7 +197,8 @@ pub(super) fn e2e_generator_auxiliary_objective(
     } else {
         None
     };
-    let amortization_probe_steps = if config.amortization_distillation_weight > 0.0
+    let amortization_probe_steps = if config.amortization_enabled
+        && config.amortization_distillation_weight > 0.0
         && config.amortization_distillation_objective
             != E2eAdapterTeacherObjective::ParameterMse
         && config.amortization_distillation_probe_rollout_steps > 0
@@ -206,7 +207,9 @@ pub(super) fn e2e_generator_auxiliary_objective(
     } else {
         0
     };
-    let amortization_distillation_objective = if config.amortization_distillation_weight > 0.0 {
+    let amortization_distillation_objective = if config.amortization_enabled
+        && config.amortization_distillation_weight > 0.0
+    {
         let parameter_mse = flow
             .ok_or_else(|| {
                 AutomataError::InvalidArgument(

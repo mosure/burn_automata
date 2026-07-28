@@ -1252,10 +1252,15 @@ fn build_e2e_rollout_report(
         .training
         .amortization_hyper_only_fraction
         .unwrap_or(0.25);
-    let amortization_distillation_weight = config
+    let configured_amortization_distillation_weight = config
         .training
         .amortization_distillation_weight
         .unwrap_or(0.1);
+    let amortization_distillation_weight = if amortization_enabled {
+        configured_amortization_distillation_weight
+    } else {
+        0.0
+    };
     let amortization_distillation_objective = parse_e2e_adapter_teacher_objective(
         config
             .training
@@ -4770,7 +4775,7 @@ mod tests {
             ("smoke_conditional_row_flow.toml", 1, 2, 64, 2, 4, 128, 2),
             (
                 "production_contract_growing_catalog_row_flow_pretrain.toml",
-                100_000,
+                1_000,
                 10,
                 768,
                 12,
@@ -4816,6 +4821,41 @@ mod tests {
             assert_eq!(config.adapter.flow_ffn_dims, Some(ffn_dims));
             assert_eq!(config.adapter.flow_sample_steps, Some(sample_steps));
         }
+    }
+
+    #[test]
+    fn verified_conditional_row_flow_endpoint_refine_matches_inference_solver() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(
+                "configs/verified/2d/hypernpa/flow/production_contract_growing_catalog_row_flow_endpoint_refine_cuda.toml",
+            );
+        let text = std::fs::read_to_string(path).unwrap();
+        let config: RolloutExperimentConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            config.training.objective.as_deref(),
+            Some("conditional-row-flow-matching")
+        );
+        assert_eq!(config.training.steps, Some(250));
+        assert_eq!(config.training.task_loss_weight, Some(0.0));
+        assert_eq!(config.training.adapter_teacher_weight, Some(1.0));
+        assert_eq!(
+            config.training.adapter_teacher_objective.as_deref(),
+            Some("parameter-mse")
+        );
+        assert_eq!(config.training.flow_matching_weight, Some(0.1));
+        assert_eq!(config.training.flow_match_inference_source, Some(true));
+        assert_eq!(config.training.flow_train_sample_steps, Some(8));
+        assert_eq!(config.adapter.flow_sample_steps, Some(8));
+        assert_eq!(config.model.shared_base_trainable, Some(false));
+        assert_eq!(config.gpu.backend.as_deref(), Some("burn-cuda"));
+        assert_eq!(config.validation.particles, Some(4096));
+        assert_eq!(config.validation.steps, Some(1024));
+        assert_eq!(
+            config.validation.horizons.as_deref(),
+            Some([96, 256, 512, 1024].as_slice())
+        );
+        assert_eq!(config.validation.psnr_threshold_db, Some(22.0));
     }
 
     #[test]
@@ -4896,14 +4936,20 @@ mod tests {
                 assert_eq!(config.training.pool_capacity, Some(8_000));
                 assert_eq!(
                     config.training.credit_assignment.as_deref(),
-                    Some("full-bptt")
+                    Some("detached-tbptt")
+                );
+                assert_eq!(config.training.tbptt_chunk_steps, Some(64));
+                assert_eq!(
+                    config.training.tbptt_loss_mode.as_deref(),
+                    Some("endpoint-weighted")
                 );
                 assert_eq!(
                     config.training.max_full_bptt_particle_steps,
-                    Some(33_554_432)
+                    Some(8_388_608)
                 );
                 assert_eq!(config.training.gpu_memory_budget_gb, Some(90.0));
                 assert_eq!(config.adapter.flow_sample_steps, Some(4));
+                assert_eq!(config.training.flow_train_sample_steps, Some(2));
                 assert_eq!(config.training.inject_seed_interval, Some(4));
                 assert_eq!(config.training.seed_replacements_per_interval, Some(2));
                 assert_eq!(config.training.seed_trajectory_interval, Some(16));
@@ -4923,6 +4969,13 @@ mod tests {
                         * config.training.rollouts_per_example.unwrap()
                         * config.rollout.particles.unwrap(),
                     8 * 4 * 4096,
+                );
+                assert_eq!(
+                    config.training.example_batch_size.unwrap()
+                        * config.training.rollouts_per_example.unwrap()
+                        * config.rollout.particles.unwrap()
+                        * config.training.tbptt_chunk_steps.unwrap(),
+                    config.training.max_full_bptt_particle_steps.unwrap(),
                 );
                 assert_eq!(config.target.composited_rgb_loss_weight, Some(5.0));
                 assert_eq!(config.optimizer.base_learning_rate, Some(1.0e-5));
@@ -5209,6 +5262,8 @@ mod tests {
         assert!(report.training.tbptt_state_detach_active);
         assert_eq!(report.training.effective_tbptt_chunk_steps, Some(4));
         assert_eq!(report.training.rollout_gradient_horizon_max_steps, Some(4));
+        assert!(!report.training.amortization_enabled);
+        assert_eq!(report.training.amortization_distillation_weight, 0.0);
         assert_eq!(report.optimizer.warmup_steps, 100);
         assert_eq!(report.validation.seed_count, 3);
         assert_eq!(report.validation.final_seed_count, 5);

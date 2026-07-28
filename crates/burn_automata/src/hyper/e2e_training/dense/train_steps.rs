@@ -841,6 +841,7 @@ use super::*;
         });
         let mut rng = StdRng::seed_from_u64(step_seed ^ 0x005e_ed2d);
         let mut particle_steps = 0.0_f64;
+        let condition_started = Instant::now();
         let (condition, expansion) = select_rollout_conditions(
             conditions,
             condition_indices,
@@ -916,6 +917,15 @@ use super::*;
                 }
             })
         };
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let condition_adapter_ms = if collect_metrics {
+            condition_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+        let rollout_started = Instant::now();
         let pre_rollout_steps = sampled_pre_rollout_steps(
             config.pre_rollout_step_min,
             config.pre_rollout_steps,
@@ -1197,6 +1207,15 @@ use super::*;
                 None => auxiliary.objective,
             });
         }
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let rollout_loss_ms = if collect_metrics {
+            rollout_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+        let backward_started = Instant::now();
         let mut amortization_gradients = None;
         if let Some(objective) = generator_objective {
             let mut generator_grads = objective.backward();
@@ -1254,6 +1273,14 @@ use super::*;
             amortization_grad_norm = table_grad_norm;
             grad_metric_chunks = 1;
         }
+        if collect_metrics {
+            sync_training_device(device)?;
+        }
+        let backward_update_ms = if collect_metrics {
+            backward_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
         let elapsed = started.elapsed();
         let grad_metric_chunks = grad_metric_chunks.max(1);
         let loss_weight_count = loss_weight_sum.unwrap_or(1.0).max(f32::MIN_POSITIVE);
@@ -1308,9 +1335,9 @@ use super::*;
                 particle_steps_per_sec,
                 dense_pair_interactions_per_sec: particle_steps_per_sec * particle_count as f64,
                 elapsed_ms: elapsed.as_secs_f64() * 1000.0,
-                condition_adapter_ms: 0.0,
-                rollout_loss_ms: 0.0,
-                backward_update_ms: 0.0,
+                condition_adapter_ms,
+                rollout_loss_ms,
+                backward_update_ms,
             },
             particle_steps: particle_steps.round().max(0.0) as u64,
             final_x: x,

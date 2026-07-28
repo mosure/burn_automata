@@ -2,6 +2,23 @@
 
 use super::*;
 
+pub(super) fn pending_rollout_batches_compatible(
+    pending_batches: &[Vec<usize>],
+    effective_batch_size: usize,
+    rollouts_per_example: usize,
+) -> bool {
+    let rollouts_per_example = rollouts_per_example.max(1);
+    pending_batches.iter().all(|batch| {
+        batch.len() == effective_batch_size
+            && batch.len().is_multiple_of(rollouts_per_example)
+            && batch.chunks_exact(rollouts_per_example).all(|rollouts| {
+                rollouts
+                    .first()
+                    .is_some_and(|identity| rollouts.iter().all(|candidate| candidate == identity))
+            })
+    })
+}
+
     pub(crate) fn predict_conditional_row_flow_adapter(
         hyper: &E2eHyperNpa2d,
         config: &NpaConfig,
@@ -607,6 +624,13 @@ use super::*;
                 config.sampling_priority_max_weight,
             ) && checkpoint.seed_trajectory_counts.len() == train_examples.len()
         });
+        let pending_batch_resume_checkpoint = sampler_resume_checkpoint.filter(|checkpoint| {
+            pending_rollout_batches_compatible(
+                &checkpoint.pending_batches,
+                batch_size,
+                rollout_replicas,
+            )
+        });
         if resume_checkpoint.is_some() && sampler_resume_checkpoint.is_none() {
             if !config.curriculum_resume {
                 return Err(AutomataError::InvalidArgument(
@@ -620,6 +644,11 @@ use super::*;
             );
         } else if sampler_resume_checkpoint.is_some() {
             eprintln!("hyper2d restored compatible sampler state from checkpoint");
+        }
+        if sampler_resume_checkpoint.is_some() && pending_batch_resume_checkpoint.is_none() {
+            eprintln!(
+                "hyper2d dropped prefetched checkpoint batches incompatible with effective_batch_size={batch_size} rollouts_per_example={rollout_replicas}"
+            );
         }
         let mut identity_sampler = sampler_resume_checkpoint.map_or_else(
             || {
@@ -673,7 +702,7 @@ use super::*;
             } else {
                 "exact"
             };
-            let restored_pending_batches = sampler_resume_checkpoint
+            let restored_pending_batches = pending_batch_resume_checkpoint
                 .map_or(0, |checkpoint| checkpoint.pending_batches.len());
             eprintln!(
                 "hyper2d resumed {resume_mode} training state at completed_step={completed_step} optimizer_steps={}/{} pending_batches={restored_pending_batches}",
@@ -709,7 +738,7 @@ use super::*;
         check_gpu_memory_budget("e2e_rollout:after_target_cache", direct_config_view(config))?;
         let prefetch_depth = e2e_cpu_prefetch_depth(batch_size, config.steps);
         let mut prefetch_queue = VecDeque::with_capacity(prefetch_depth);
-        for (offset, indices) in sampler_resume_checkpoint
+        for (offset, indices) in pending_batch_resume_checkpoint
             .map(|checkpoint| checkpoint.pending_batches.as_slice())
             .unwrap_or_default()
             .iter()
