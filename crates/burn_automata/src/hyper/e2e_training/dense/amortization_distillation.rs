@@ -10,31 +10,13 @@ pub(super) fn train_e2e_amortization_distillation_step(
     conditions: &BurnE2eConditionCache,
     condition_indices: &[usize],
     prepared_dino: Option<&BurnE2ePreparedDinoBatch>,
-    targets: &[BurnTargetExample],
-    target_indices: &[usize],
-    particle_count: usize,
     config: BurnE2eRolloutTrainConfig,
     step_seed: u64,
     collect_metrics: bool,
     initial_state: Option<(Tensor3, Tensor3)>,
 ) -> Result<BurnE2eStepOutput, Box<dyn std::error::Error>> {
     let started = Instant::now();
-    let device = &targets[target_indices[0]].target_rgb.device();
-    let direct_config = direct_config_view(config);
-    let (x, s) = initial_state.unwrap_or_else(|| {
-        seed_batch_tensors(
-            targets,
-            target_indices,
-            particle_count,
-            direct_config,
-            step_seed,
-            device,
-        )
-    });
 
-    if collect_metrics {
-        sync_training_device(device)?;
-    }
     let condition_started = Instant::now();
     let (condition, expansion) = select_rollout_conditions(
         conditions,
@@ -42,6 +24,16 @@ pub(super) fn train_e2e_amortization_distillation_step(
         prepared_dino,
         config.rollouts_per_example,
     )?;
+    let device = condition.device();
+    let (x, s) = initial_state.unwrap_or_else(|| {
+        (
+            Tensor::<BurnBackend, 3>::zeros([1, 1, 2], &device),
+            Tensor::<BurnBackend, 3>::zeros([1, 1, npa_config.state_dims], &device),
+        )
+    });
+    if collect_metrics {
+        sync_training_device(&device)?;
+    }
     let generator_indices = generator_condition_indices(
         condition_indices,
         expansion.as_deref(),
@@ -62,7 +54,7 @@ pub(super) fn train_e2e_amortization_distillation_step(
     let condition_batches = condition.shape().dims::<3>()[0];
     let prepared_flow_condition = flow.prepare_condition(condition);
     if collect_metrics {
-        sync_training_device(device)?;
+        sync_training_device(&device)?;
     }
     let condition_adapter_ms = if collect_metrics {
         condition_started.elapsed().as_secs_f64() * 1_000.0
@@ -75,7 +67,7 @@ pub(super) fn train_e2e_amortization_distillation_step(
         let generated_rows = flow.sample_rows_prepared_steps(
             &prepared_flow_condition,
             condition_batches,
-            device,
+            &device,
             config.generator_train_sample_steps,
         );
         flow.amortization_distillation_loss(
@@ -116,7 +108,7 @@ pub(super) fn train_e2e_amortization_distillation_step(
         0.0
     };
     if collect_metrics {
-        sync_training_device(device)?;
+        sync_training_device(&device)?;
     }
     let rollout_loss_ms = if collect_metrics {
         loss_started.elapsed().as_secs_f64() * 1_000.0
@@ -146,7 +138,7 @@ pub(super) fn train_e2e_amortization_distillation_step(
         collect_metrics,
     )?;
     if collect_metrics {
-        sync_training_device(device)?;
+        sync_training_device(&device)?;
     }
     let backward_update_ms = if collect_metrics {
         backward_started.elapsed().as_secs_f64() * 1_000.0

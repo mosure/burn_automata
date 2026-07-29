@@ -1,4 +1,4 @@
-#[cfg(any(feature = "dino", test))]
+#[cfg(test)]
 use crate::TargetImage2d;
 use crate::hyper::NpaParameterRowLayout2d;
 use crate::hyper::condition::DINO_VITS_EMBED_DIMS;
@@ -13,7 +13,7 @@ use crate::hyper::e2e::{
 };
 use crate::hyper::e2e_training::dense::{train_e2e_rollout_burn_cuda, train_e2e_rollout_burn_wgpu};
 use crate::hyper::e2e_training::{
-    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutQualityEntry,
+    BurnE2eRolloutExample, BurnE2eRolloutOutput, BurnE2eRolloutQualityEntry, BurnE2eRolloutTarget,
     BurnE2eRolloutTrainConfig, E2eAdapterTeacherObjective, E2eCreditAssignment, E2eLrSchedule,
     E2eTbpttLossMode, MAX_VALIDATION_HORIZONS,
 };
@@ -24,8 +24,6 @@ use crate::{
 #[cfg(feature = "dino")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "dino")]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -249,6 +247,8 @@ struct RolloutTrainingConfig {
     sampling_priority_min_weight: Option<f32>,
     sampling_priority_max_weight: Option<f32>,
     sampling_priority_update_interval: Option<usize>,
+    sampling_active_window_size: Option<usize>,
+    sampling_active_window_steps: Option<usize>,
     pool_capacity: Option<usize>,
     inject_seed_interval: Option<usize>,
     seed_replacements_per_interval: Option<usize>,
@@ -271,6 +271,7 @@ struct RolloutTrainingConfig {
     flow_train_sample_steps: Option<usize>,
     flow_self_rectification_weight: Option<f32>,
     curriculum_resume: Option<bool>,
+    curriculum_reset_endpoint_optimizer: Option<bool>,
     amortization_enabled: Option<bool>,
     amortization_substrate_steps: Option<usize>,
     amortization_residual_scale: Option<f32>,
@@ -298,6 +299,7 @@ struct RolloutGpuConfig {
 struct RolloutAdapterConfig {
     rank: Option<usize>,
     alpha: Option<f32>,
+    conditional_output_drive: Option<bool>,
     generator: Option<String>,
     flow_hidden: Option<usize>,
     flow_layers: Option<usize>,
@@ -306,6 +308,7 @@ struct RolloutAdapterConfig {
     flow_source_seed: Option<u64>,
     flow_source_scale: Option<f32>,
     flow_default_endpoint_rms: Option<f32>,
+    flow_cross_gate_init: Option<f32>,
     init_scale: Option<f32>,
     condition_init_scale: Option<f32>,
     output_init_scale: Option<f32>,
@@ -467,6 +470,9 @@ struct E2eRolloutSourceReport {
     selected_sources: usize,
     train_examples: usize,
     holdout_examples: usize,
+    target_materialization: &'static str,
+    target_point_storage_bytes: usize,
+    target_point_storage_gib: f64,
     omnisvg: Option<E2eOmniSvgSourceReport>,
 }
 
@@ -571,6 +577,8 @@ struct E2eRolloutTrainingReport {
     sampling_priority_min_weight: f32,
     sampling_priority_max_weight: f32,
     sampling_priority_update_interval: usize,
+    sampling_active_window_size: usize,
+    sampling_active_window_steps: usize,
     planned_rollout_trajectories: usize,
     planned_mean_trajectories_per_train_example: f64,
     upstream_growing_reference_trajectories_per_target: usize,
@@ -601,6 +609,7 @@ struct E2eRolloutTrainingReport {
     flow_train_sample_steps: usize,
     flow_self_rectification_weight: f32,
     curriculum_resume: bool,
+    curriculum_reset_endpoint_optimizer: bool,
     amortization_enabled: bool,
     amortization_substrate_steps: usize,
     amortization_residual_scale: f32,
@@ -622,6 +631,8 @@ struct E2eRolloutAdapterReport {
     rank: usize,
     alpha: f32,
     output_bias: bool,
+    conditional_output_drive: bool,
+    strict_upstream_output_contract: bool,
     generator: String,
     flow_hidden: usize,
     flow_layers: usize,
@@ -630,6 +641,7 @@ struct E2eRolloutAdapterReport {
     flow_source_seed: u64,
     flow_source_scale: f32,
     flow_default_endpoint_rms: f32,
+    flow_cross_gate_init: f32,
     init_scale: f32,
     condition_init_scale: f32,
     output_init_scale: f32,
@@ -1237,6 +1249,16 @@ fn build_e2e_rollout_report(
         .flow_self_rectification_weight
         .unwrap_or(0.0);
     let curriculum_resume = config.training.curriculum_resume.unwrap_or(false);
+    let curriculum_reset_endpoint_optimizer = config
+        .training
+        .curriculum_reset_endpoint_optimizer
+        .unwrap_or(false);
+    if curriculum_reset_endpoint_optimizer && !curriculum_resume {
+        return Err(std::io::Error::other(
+            "training.curriculum_reset_endpoint_optimizer=true requires training.curriculum_resume=true",
+        )
+        .into());
+    }
     let amortization_enabled = config.training.amortization_enabled.unwrap_or(false);
     let amortization_substrate_steps = config
         .training
@@ -1452,6 +1474,43 @@ fn build_e2e_rollout_report(
         .unwrap_or(32)
         .max(1);
     let pool_capacity = config.training.pool_capacity.unwrap_or(2048).max(1);
+    let requested_active_window_size = config.training.sampling_active_window_size.unwrap_or(0);
+    let requested_active_window_steps = config.training.sampling_active_window_steps.unwrap_or(0);
+    if (requested_active_window_size == 0) != (requested_active_window_steps == 0) {
+        return Err(std::io::Error::other(
+            "training.sampling_active_window_size and sampling_active_window_steps must both be zero or both be positive",
+        )
+        .into());
+    }
+    if requested_active_window_size > 0 && requested_active_window_size < example_batch_size {
+        return Err(std::io::Error::other(format!(
+            "training.sampling_active_window_size={} must be at least example_batch_size={example_batch_size}",
+            requested_active_window_size,
+        ))
+        .into());
+    }
+    let active_window_enabled =
+        requested_active_window_size > 0 && requested_active_window_size < train_examples;
+    let sampling_active_window_size = if active_window_enabled {
+        requested_active_window_size
+    } else {
+        0
+    };
+    let sampling_active_window_steps = if active_window_enabled {
+        requested_active_window_steps
+    } else {
+        0
+    };
+    if use_particle_pool
+        && active_window_enabled
+        && pool_capacity < sampling_active_window_size.saturating_mul(pool_slots_per_example)
+    {
+        return Err(std::io::Error::other(format!(
+            "particle-pool capacity {pool_capacity} cannot retain sampling active window {} x {} slots; increase training.pool_capacity or reduce sampling_active_window_size/pool_slots_per_example",
+            sampling_active_window_size, pool_slots_per_example,
+        ))
+        .into());
+    }
     let rollout_replicas = rollouts_per_example;
     let effective_rollout_batch_size = example_batch_size.saturating_mul(rollout_replicas);
     let target_mean_trajectories_per_example = config.training.target_mean_trajectories_per_example;
@@ -1851,6 +1910,10 @@ fn build_e2e_rollout_report(
         ));
     }
 
+    let target_point_storage_bytes = sources
+        .len()
+        .saturating_mul(target_report.points)
+        .saturating_mul(std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<[f32; 3]>());
     let dino_batch_size = config.condition.dino_batch_size.unwrap_or(1).max(1);
     let selected_feature_cache_bytes_f32 = sources
         .len()
@@ -1966,6 +2029,13 @@ fn build_e2e_rollout_report(
         )
         .into());
     }
+    let conditional_output_drive = config.adapter.conditional_output_drive.unwrap_or(false);
+    if conditional_output_drive {
+        warnings.push(
+            "adapter.conditional_output_drive enables an image-conditioned affine update drive; this is a HyperNPA architecture extension and is excluded from strict upstream zero-output-bias parity claims"
+                .to_string(),
+        );
+    }
     if flow_matching_weight > 0.0
         && adapter_generator_kind != E2eHyperGeneratorKind::ConditionalRowFlow
     {
@@ -1997,7 +2067,7 @@ fn build_e2e_rollout_report(
             &adapter_npa_config,
             adapter_rank,
             adapter_alpha,
-            false,
+            conditional_output_drive,
         )?;
     }
     let amortization_parameter_count = if amortization_enabled {
@@ -2039,6 +2109,13 @@ fn build_e2e_rollout_report(
     if !flow_default_endpoint_rms.is_finite() || flow_default_endpoint_rms <= 0.0 {
         return Err(std::io::Error::other(
             "adapter.flow_default_endpoint_rms must be positive and finite",
+        )
+        .into());
+    }
+    let flow_cross_gate_init = config.adapter.flow_cross_gate_init.unwrap_or(0.0);
+    if !flow_cross_gate_init.is_finite() || !(0.0..=1.0).contains(&flow_cross_gate_init) {
+        return Err(std::io::Error::other(
+            "adapter.flow_cross_gate_init must be finite and in 0..=1",
         )
         .into());
     }
@@ -2196,6 +2273,9 @@ fn build_e2e_rollout_report(
             selected_sources: sources.len(),
             train_examples,
             holdout_examples,
+            target_materialization: "lazy-on-first-use-shared-per-identity",
+            target_point_storage_bytes,
+            target_point_storage_gib: bytes_to_gib(target_point_storage_bytes),
             omnisvg: omnisvg_source_report(omnisvg),
         },
         split: E2eRolloutSplitReport {
@@ -2250,6 +2330,8 @@ fn build_e2e_rollout_report(
             device_cache_max_gib: bytes_to_gib(condition_device_cache_max_bytes),
             device_cache_plan: if cache_complete_condition_set_on_device {
                 "complete-set-device-resident"
+            } else if uses_on_demand_dino && condition_device_cache_max_bytes > 0 {
+                "bounded-device-lru-plus-on-demand"
             } else if uses_on_demand_dino {
                 "on-demand-device-encode"
             } else {
@@ -2329,6 +2411,8 @@ fn build_e2e_rollout_report(
             sampling_priority_min_weight,
             sampling_priority_max_weight,
             sampling_priority_update_interval,
+            sampling_active_window_size,
+            sampling_active_window_steps,
             planned_rollout_trajectories,
             planned_mean_trajectories_per_train_example,
             upstream_growing_reference_trajectories_per_target:
@@ -2363,6 +2447,7 @@ fn build_e2e_rollout_report(
             flow_train_sample_steps: generator_train_sample_steps,
             flow_self_rectification_weight,
             curriculum_resume,
+            curriculum_reset_endpoint_optimizer,
             amortization_enabled,
             amortization_substrate_steps,
             amortization_residual_scale,
@@ -2384,7 +2469,9 @@ fn build_e2e_rollout_report(
         adapter: E2eRolloutAdapterReport {
             rank: adapter_rank,
             alpha: adapter_alpha,
-            output_bias: false,
+            output_bias: conditional_output_drive,
+            conditional_output_drive,
+            strict_upstream_output_contract: !conditional_output_drive,
             generator: adapter_generator,
             flow_hidden: generator_hidden_dims,
             flow_layers: generator_layers,
@@ -2393,6 +2480,7 @@ fn build_e2e_rollout_report(
             flow_source_seed: generator_source_seed,
             flow_source_scale: config.adapter.flow_source_scale.unwrap_or(1.0),
             flow_default_endpoint_rms,
+            flow_cross_gate_init,
             init_scale: adapter_init_scale,
             condition_init_scale: adapter_condition_init_scale,
             output_init_scale: adapter_output_init_scale,
@@ -2654,6 +2742,8 @@ fn run_burn_e2e_rollout_training(
         sampling_priority_min_weight: report.training.sampling_priority_min_weight,
         sampling_priority_max_weight: report.training.sampling_priority_max_weight,
         sampling_priority_update_interval: report.training.sampling_priority_update_interval,
+        sampling_active_window_size: report.training.sampling_active_window_size,
+        sampling_active_window_steps: report.training.sampling_active_window_steps,
         pool_capacity: report.training.pool_capacity,
         inject_seed_interval: report.training.inject_seed_interval,
         seed_replacements_per_interval: report.training.seed_replacements_per_interval,
@@ -2715,6 +2805,7 @@ fn run_burn_e2e_rollout_training(
         generator_train_sample_steps: report.training.flow_train_sample_steps,
         generator_source_seed: report.adapter.flow_source_seed,
         generator_default_endpoint_rms: report.adapter.flow_default_endpoint_rms,
+        generator_cross_gate_init: report.adapter.flow_cross_gate_init,
         flow_matching_weight: report.training.flow_matching_weight,
         flow_match_inference_source: report.training.flow_match_inference_source,
         flow_self_rectification_weight: report.training.flow_self_rectification_weight,
@@ -2769,6 +2860,7 @@ fn run_burn_e2e_rollout_training(
         checkpoint_interval_seconds: report.output.checkpoint_interval_seconds,
         resume_checkpoint,
         curriculum_resume: report.training.curriculum_resume,
+        curriculum_reset_endpoint_optimizer: report.training.curriculum_reset_endpoint_optimizer,
         checkpoint_condition_encoder: Some(report.condition.encoder),
         validation_split: if report.validation.split == "train" {
             "train"
@@ -2922,7 +3014,7 @@ fn attach_adapter_bank(
         ))
         .into());
     }
-    validate_upstream_adapter_bank_contract(&bank)?;
+    validate_adapter_bank_output_contract(&bank, report.adapter.output_bias)?;
     if let Some(expected) = bank.shared_base_sha256.as_deref() {
         let shared_base_path = report.model.shared_base.as_deref().ok_or_else(|| {
             std::io::Error::other(
@@ -2960,10 +3052,13 @@ fn attach_adapter_bank(
     Ok(())
 }
 
-fn validate_upstream_adapter_bank_contract(bank: &E2eHyperNpa2d) -> crate::AutomataResult<()> {
-    if bank.adapter_output_bias_enabled() {
+fn validate_adapter_bank_output_contract(
+    bank: &E2eHyperNpa2d,
+    configured_output_bias: bool,
+) -> crate::AutomataResult<()> {
+    if bank.adapter_output_bias_enabled() && !configured_output_bias {
         return Err(crate::AutomataError::InvalidModel(
-            "model.adapter_bank enables the per-image NPA output bias, which is incompatible with the official Growing 2D zero-output-bias contract; regenerate the adapter bank with adapter.output_bias=false"
+            "model.adapter_bank enables the per-image NPA output bias but the configured trainer uses the strict Growing 2D zero-output-bias contract; enable adapter.conditional_output_drive or regenerate the adapter bank without output bias"
                 .to_string(),
         ));
     }
@@ -3157,13 +3252,15 @@ fn check_condition_preload_memory_budget(
         let projected_bytes = report
             .condition
             .projected_condition_load_peak_bytes_f32
+            .saturating_add(report.source.target_point_storage_bytes)
             .saturating_add(table_parameter_bytes)
             .saturating_add(particle_pool_bytes)
             .saturating_add(1024 * 1024 * 1024);
         if projected_bytes > budget_bytes {
             return Err(std::io::Error::other(format!(
-                "projected HyperNPA e2e host peak is {:.2} GiB including condition staging, adapter-table weights, {:.2} GiB particle-pool checkpoint readback, and 1.00 GiB overhead, above system_memory_budget_gb={budget_gb:.2}",
+                "projected HyperNPA e2e host peak is {:.2} GiB including condition staging, {:.2} GiB target-point storage, adapter-table weights, {:.2} GiB particle-pool checkpoint readback, and 1.00 GiB overhead, above system_memory_budget_gb={budget_gb:.2}",
                 bytes_to_gib(projected_bytes),
+                report.source.target_point_storage_gib,
                 bytes_to_gib(particle_pool_bytes),
             ))
             .into());
@@ -3266,8 +3363,8 @@ fn projected_active_training_gpu_memory(report: &E2eRolloutReport) -> E2eGpuMemo
         let condition_tokens = report.condition.token_count;
         let ffn_dims = report.adapter.flow_ffn_dims;
         let velocity_evaluations = report
-            .adapter
-            .flow_sample_steps
+            .training
+            .flow_train_sample_steps
             .saturating_mul(2)
             .saturating_add(usize::from(report.training.flow_matching_weight > 0.0))
             .saturating_add(usize::from(
@@ -3334,12 +3431,17 @@ fn projected_active_training_gpu_memory(report: &E2eRolloutReport) -> E2eGpuMemo
     } else {
         0
     };
-    let condition_cache_bytes =
-        if report.condition.device_cache_plan == "complete-set-device-resident" {
-            report.condition.selected_feature_cache_bytes_f32
-        } else {
-            report.condition.dino_batch_input_bytes_f32
-        };
+    let condition_cache_bytes = if report.condition.online_dino {
+        report
+            .condition
+            .selected_feature_cache_bytes_f32
+            .min(report.condition.device_cache_max_bytes)
+            .saturating_add(report.condition.dino_batch_input_bytes_f32)
+    } else if report.condition.device_cache_plan == "complete-set-device-resident" {
+        report.condition.selected_feature_cache_bytes_f32
+    } else {
+        0
+    };
     let target_values_per_example = report
         .target
         .loss_image_size
@@ -3353,10 +3455,8 @@ fn projected_active_training_gpu_memory(report: &E2eRolloutReport) -> E2eGpuMemo
         .source
         .train_examples
         .saturating_mul(target_bytes_per_example);
-    let target_cache_bytes = if report.training.target_device_cache_max_bytes > 0
-        && complete_target_cache_bytes <= report.training.target_device_cache_max_bytes
-    {
-        complete_target_cache_bytes
+    let target_cache_bytes = if report.training.target_device_cache_max_bytes > 0 {
+        complete_target_cache_bytes.min(report.training.target_device_cache_max_bytes)
     } else {
         report
             .training
@@ -3443,16 +3543,17 @@ fn load_burn_e2e_rollout_examples_with_sample_ids(
             ))
         })?;
         *value = 1.0;
-        let target = load_target_image_2d_adaptive(
-            Path::new(&entry.condition_path),
+        let condition_path = PathBuf::from(&entry.condition_path);
+        let target = BurnE2eRolloutTarget::image(
+            condition_path.clone(),
             report.target.threshold,
             report.target.points,
             report.target.image_size,
-        )?;
+        );
         examples.push(BurnE2eRolloutExample {
             slug: entry.slug.clone(),
             target,
-            condition_path: Some(PathBuf::from(&entry.condition_path)),
+            condition_path: Some(condition_path),
             dino_model_path: None,
             condition_features,
             token_count: report.condition.token_count,
@@ -3498,6 +3599,14 @@ fn load_burn_e2e_rollout_examples_with_online_dino(
             report.selected_sources.len(),
             report.condition.selected_feature_cache_gib_f32,
         );
+    } else if report.condition.device_cache_plan == "bounded-device-lru-plus-on-demand" {
+        eprintln!(
+            "deferring {} DINO conditions to on-demand GPU batches with a bounded {:.2} GiB device-token LRU (encoded set {:.2} GiB; input batch {:.2} GiB)",
+            report.selected_sources.len(),
+            report.condition.device_cache_max_gib,
+            report.condition.selected_feature_cache_gib_f32,
+            report.condition.dino_batch_input_gib_f32,
+        );
     } else {
         eprintln!(
             "deferring {} DINO conditions to on-demand GPU batches (encoded set {:.2} GiB exceeds the bounded cache plan; input batch {:.2} GiB)",
@@ -3509,9 +3618,6 @@ fn load_burn_e2e_rollout_examples_with_online_dino(
     if expected_feature_dims == 0 {
         return Err(std::io::Error::other("DINO feature dimensions must be non-zero").into());
     }
-    let total = report.selected_sources.len();
-    let progress_interval = (total / 100).clamp(1, 1_000);
-    let completed = AtomicUsize::new(0);
     let default_seed_scale = report
         .rollout
         .seed_scale
@@ -3521,27 +3627,17 @@ fn load_burn_e2e_rollout_examples_with_online_dino(
         .selected_sources
         .par_iter()
         .map(|entry| -> Result<BurnE2eRolloutExample, String> {
-            let path = Path::new(&entry.condition_path);
-            let target = load_target_image_2d_adaptive(
-                path,
+            let path = PathBuf::from(&entry.condition_path);
+            let target = BurnE2eRolloutTarget::image(
+                path.clone(),
                 report.target.threshold,
                 report.target.points,
                 report.target.image_size,
-            )
-            .map_err(|err| {
-                format!(
-                    "failed to extract target image {} for online DINO HyperNPA: {err}",
-                    path.display()
-                )
-            })?;
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if done == total || done.is_multiple_of(progress_interval) {
-                eprintln!("loaded online DINO target {done}/{total}");
-            }
+            );
             Ok(BurnE2eRolloutExample {
                 slug: entry.slug.clone(),
                 target,
-                condition_path: Some(PathBuf::from(&entry.condition_path)),
+                condition_path: Some(path),
                 dino_model_path: dino_model.as_ref().map(PathBuf::from),
                 condition_features: Vec::new(),
                 token_count: report.condition.token_count,
@@ -4376,21 +4472,6 @@ fn target2d_loss_config(
     })
 }
 
-#[cfg(feature = "dino")]
-fn load_target_image_2d_adaptive(
-    path: &Path,
-    threshold: f32,
-    target_points: usize,
-    image_size: Option<usize>,
-) -> Result<TargetImage2d, Box<dyn std::error::Error>> {
-    Ok(crate::load_target_image_2d_upstream(
-        path,
-        threshold,
-        target_points,
-        image_size,
-    )?)
-}
-
 fn write_pretty_json<T: Serialize>(
     path: &Path,
     value: &T,
@@ -4508,7 +4589,7 @@ mod tests {
     ) -> BurnE2eRolloutExample {
         BurnE2eRolloutExample {
             slug: slug.to_string(),
-            target: TargetImage2d {
+            target: BurnE2eRolloutTarget::materialized(TargetImage2d {
                 source_width: 1,
                 source_height: 1,
                 positions: vec![[0.0, 0.0]],
@@ -4516,7 +4597,7 @@ mod tests {
                 pixel_size: 1.0,
                 threshold: 0.05,
                 aabb: [-1.0, -1.0, 1.0, 1.0],
-            },
+            }),
             condition_path: None,
             dino_model_path: None,
             condition_features: vec![1.0],
@@ -4557,16 +4638,18 @@ mod tests {
     }
 
     #[test]
-    fn upstream_adapter_bank_rejects_legacy_output_bias() {
+    fn adapter_bank_output_contract_is_asymmetric() {
         let mut bank = tiny_test_hyper();
-        let err = validate_upstream_adapter_bank_contract(&bank).unwrap_err();
+        let err = validate_adapter_bank_output_contract(&bank, false).unwrap_err();
         assert!(
             err.to_string().contains("zero-output-bias contract"),
             "unexpected error: {err}"
         );
+        validate_adapter_bank_output_contract(&bank, true).unwrap();
 
         bank.adapter_output_bias = Some(false);
-        validate_upstream_adapter_bank_contract(&bank).unwrap();
+        validate_adapter_bank_output_contract(&bank, false).unwrap();
+        validate_adapter_bank_output_contract(&bank, true).unwrap();
     }
 
     #[test]
@@ -4576,6 +4659,21 @@ mod tests {
         let token_count = 1 + grid * grid;
         assert_eq!(token_count, 257);
         assert_eq!(token_count * DINO_VITS_EMBED_DIMS, 98_688);
+    }
+
+    #[test]
+    fn conditional_output_drive_requires_an_explicit_adapter_contract() {
+        let default: RolloutExperimentConfig = toml::from_str("").unwrap();
+        assert_eq!(default.adapter.conditional_output_drive, None);
+
+        let enabled: RolloutExperimentConfig = toml::from_str(
+            r#"
+            [adapter]
+            conditional_output_drive = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(enabled.adapter.conditional_output_drive, Some(true));
     }
 
     #[test]
@@ -4652,6 +4750,33 @@ mod tests {
         };
         assert!(
             err.to_string().contains("training.objective"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn endpoint_optimizer_reset_is_curriculum_only() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = ["target.png"]
+
+            [training]
+            objective = "conditional-row-flow-e2e"
+            curriculum_reset_endpoint_optimizer = true
+            "#,
+        )
+        .unwrap();
+
+        let err = match build_e2e_rollout_report(Path::new("inline.toml"), &config) {
+            Ok(_) => panic!("fresh runs must not request a curriculum optimizer reset"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("curriculum_reset_endpoint_optimizer=true requires"),
             "unexpected error: {err}"
         );
     }
@@ -5664,6 +5789,16 @@ mod tests {
         report.source.selected_sources = 2;
         report.training.gpu_memory_budget_gb = None;
         report.training.system_memory_budget_gb = Some(1.0);
+        report.training.use_particle_pool = false;
+        report.source.target_point_storage_bytes = 2 * 1024 * 1024 * 1024;
+        report.source.target_point_storage_gib = 2.0;
+        let err = check_condition_preload_memory_budget(&report)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("target-point storage"));
+
+        report.source.target_point_storage_bytes = 0;
+        report.source.target_point_storage_gib = 0.0;
         report.training.use_particle_pool = true;
         report.training.pool_capacity = 1_024;
         report.rollout.particles = 1_024;
@@ -5680,6 +5815,52 @@ mod tests {
             .to_string();
         assert!(err.contains("must stay below 2.00 GiB"));
         assert!(err.contains("sharded pool storage"));
+    }
+
+    #[test]
+    fn active_sampling_window_must_fit_the_particle_pool() {
+        let config: RolloutExperimentConfig = toml::from_str(
+            r#"
+            preset = "growing-2d"
+
+            [source]
+            target_images = [
+                "assets/reference_targets/lizard_upstream_120.png",
+                "assets/catalog_thumbnails/turtle.png",
+            ]
+
+            [condition]
+            encoder = "sample-id-onehot"
+            online = false
+
+            [adapter]
+            generator = "sample-id-table"
+
+            [training]
+            backend = "gpu"
+            objective = "target2d-rollout-image-loss"
+            steps = 0
+            example_batch_size = 1
+            use_particle_pool = true
+            pool_slots_per_example = 2
+            pool_capacity = 1
+            sampling_active_window_size = 1
+            sampling_active_window_steps = 10
+
+            [gpu]
+            backend = "burn-wgpu"
+            "#,
+        )
+        .unwrap();
+
+        let err = match build_e2e_rollout_report(Path::new("inline.toml"), &config) {
+            Ok(_) => panic!("active identity window must fit its persistent pool slots"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("cannot retain sampling active window"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -5715,6 +5896,7 @@ mod tests {
         report.adapter.flow_layers = 12;
         report.adapter.flow_ffn_dims = 3072;
         report.adapter.flow_sample_steps = 4;
+        report.training.flow_train_sample_steps = 4;
         report.condition.embed_dims = 1168;
         report.condition.token_count = 257;
         report.condition.token_attention_heads = 12;
@@ -5726,6 +5908,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("projected active HyperNPA GPU peak"));
+
+        report.training.flow_train_sample_steps = 1;
+        let one_step = projected_active_training_gpu_memory(&report);
+        assert!(one_step.row_flow_graph_bytes < oversized.row_flow_graph_bytes);
+        report.training.flow_train_sample_steps = 4;
 
         report.training.rollouts_per_example = 4;
         let bounded = projected_active_training_gpu_memory(&report);

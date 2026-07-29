@@ -1,14 +1,99 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use super::super::e2e::{E2eHyperGeneratorKind, PerceptionRolloutBackend, Target2dLossBackend};
-use crate::{AdamWConfig, ParticleSeed, Target2dLossConfig, TargetImage2d};
+use crate::{
+    AdamWConfig, AutomataResult, ParticleSeed, Target2dLossConfig, TargetImage2d,
+    load_target_image_2d_upstream,
+};
 
 pub(crate) const MAX_VALIDATION_HORIZONS: usize = 8;
+
+#[derive(Clone)]
+pub(crate) enum BurnE2eRolloutTarget {
+    #[allow(dead_code)]
+    Materialized(TargetImage2d),
+    Image {
+        path: PathBuf,
+        threshold: f32,
+        target_points: usize,
+        image_size: Option<usize>,
+        cache: Arc<OnceLock<TargetImage2d>>,
+    },
+}
+
+impl BurnE2eRolloutTarget {
+    #[allow(dead_code)]
+    pub(crate) fn materialized(target: TargetImage2d) -> Self {
+        Self::Materialized(target)
+    }
+
+    pub(crate) fn image(
+        path: PathBuf,
+        threshold: f32,
+        target_points: usize,
+        image_size: Option<usize>,
+    ) -> Self {
+        Self::Image {
+            path,
+            threshold,
+            target_points,
+            image_size,
+            cache: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn load(&self) -> AutomataResult<TargetImage2d> {
+        match self {
+            Self::Materialized(target) => Ok(target.clone()),
+            Self::Image {
+                path,
+                threshold,
+                target_points,
+                image_size,
+                cache,
+            } => {
+                if let Some(target) = cache.get() {
+                    return Ok(target.clone());
+                }
+                let target =
+                    load_target_image_2d_upstream(path, *threshold, *target_points, *image_size)?;
+                let _ = cache.set(target);
+                Ok(cache
+                    .get()
+                    .expect("target cache is initialized before access")
+                    .clone())
+            }
+        }
+    }
+
+    pub(crate) fn point_count_hint(&self) -> usize {
+        match self {
+            Self::Materialized(target) => target.point_count(),
+            Self::Image {
+                target_points,
+                cache,
+                ..
+            } => cache
+                .get()
+                .map_or(*target_points, TargetImage2d::point_count),
+        }
+    }
+
+    pub(crate) fn is_loaded(&self) -> bool {
+        match self {
+            Self::Materialized(_) => true,
+            Self::Image { cache, .. } => cache.get().is_some(),
+        }
+    }
+}
 
 #[allow(dead_code)]
 pub(crate) struct BurnE2eRolloutExample {
     pub(crate) slug: String,
-    pub(crate) target: TargetImage2d,
+    pub(crate) target: BurnE2eRolloutTarget,
     pub(crate) condition_path: Option<PathBuf>,
     pub(crate) dino_model_path: Option<PathBuf>,
     pub(crate) condition_features: Vec<f32>,
@@ -18,6 +103,38 @@ pub(crate) struct BurnE2eRolloutExample {
     pub(crate) update_prob: f32,
     pub(crate) seed_scale: f32,
     pub(crate) teacher_adapter: Option<Vec<f32>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn lazy_rollout_target_materializes_once_and_shares_the_cache() {
+        let path = std::env::temp_dir().join(format!(
+            "burn-automata-lazy-target-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = std::fs::remove_file(&path);
+        RgbaImage::from_pixel(8, 8, Rgba([32, 64, 128, 255]))
+            .save(&path)
+            .unwrap();
+
+        let target = BurnE2eRolloutTarget::image(path.clone(), 0.05, 64, Some(8));
+        let shared = target.clone();
+        assert!(!target.is_loaded());
+        let first = target.load().unwrap();
+        assert!(target.is_loaded());
+        assert_eq!(first.point_count(), 64);
+        assert_eq!(target.point_count_hint(), 64);
+
+        std::fs::remove_file(&path).unwrap();
+        let second = shared.load().unwrap();
+        assert_eq!(first.positions, second.positions);
+        assert_eq!(first.colors, second.colors);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -153,6 +270,8 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) sampling_priority_min_weight: f32,
     pub(crate) sampling_priority_max_weight: f32,
     pub(crate) sampling_priority_update_interval: usize,
+    pub(crate) sampling_active_window_size: usize,
+    pub(crate) sampling_active_window_steps: usize,
     pub(crate) pool_capacity: usize,
     pub(crate) inject_seed_interval: usize,
     pub(crate) seed_replacements_per_interval: usize,
@@ -201,6 +320,7 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) generator_train_sample_steps: usize,
     pub(crate) generator_source_seed: u64,
     pub(crate) generator_default_endpoint_rms: f32,
+    pub(crate) generator_cross_gate_init: f32,
     pub(crate) flow_matching_weight: f32,
     pub(crate) flow_match_inference_source: bool,
     pub(crate) flow_self_rectification_weight: f32,
@@ -249,6 +369,7 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) checkpoint_interval_seconds: usize,
     pub(crate) resume_checkpoint: Option<&'static str>,
     pub(crate) curriculum_resume: bool,
+    pub(crate) curriculum_reset_endpoint_optimizer: bool,
     pub(crate) checkpoint_condition_encoder: Option<&'static str>,
     pub(crate) validation_split: &'static str,
     pub(crate) initial_validation_examples: usize,
@@ -275,4 +396,15 @@ pub(crate) struct BurnE2eRolloutTrainConfig {
     pub(crate) stability_reference_steps: usize,
     pub(crate) stability_steps: usize,
     pub(crate) stability_tail_steps: usize,
+}
+
+impl BurnE2eRolloutTrainConfig {
+    pub(crate) fn rollout_free_amortization(self) -> bool {
+        self.task_loss_weight == 0.0
+            && self.adapter_teacher_weight == 0.0
+            && self.flow_matching_weight == 0.0
+            && self.amortization_enabled
+            && (self.amortization_distillation_weight > 0.0
+                || self.flow_self_rectification_weight > 0.0)
+    }
 }

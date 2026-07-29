@@ -446,15 +446,30 @@ use super::*;
     }
 
     pub(super) fn group_norm_tensor(tensors: &[Tensor2Inner]) -> Tensor1Inner {
+        let mut maximum = None::<Tensor1Inner>;
+        for tensor in tensors {
+            let value = tensor2_max_abs_tensor(tensor);
+            maximum = Some(match maximum {
+                Some(maximum) => maximum.max_pair(value),
+                None => value,
+            });
+        }
+        let maximum = maximum
+            .expect("gradient group has tensors")
+            .clamp_min(1.0e-30);
         let mut total = None::<Tensor1Inner>;
         for tensor in tensors {
-            let value = tensor.clone().mul(tensor.clone()).sum();
+            let value = tensor2_scaled_squared_norm_tensor(tensor, maximum.clone());
             total = Some(match total {
                 Some(total) => total + value,
                 None => value,
             });
         }
-        total.expect("gradient group has tensors").sqrt()
+        total
+            .expect("gradient group has tensors")
+            .sqrt()
+            .mul(maximum)
+            .clamp_max(f32::MAX)
     }
 
     pub(super) fn normalize_sample_id_table_gradient(
@@ -471,13 +486,7 @@ use super::*;
                 .iter()
                 .map(|&(offset, len)| {
                     let segment = gradient.clone().narrow(0, offset, len);
-                    let per_identity_norm = segment
-                        .clone()
-                        .mul(segment.clone())
-                        .sum_dim(0)
-                        .sqrt()
-                        .add_scalar(1.0e-8);
-                    segment.div(per_identity_norm.expand([len, dims[1]]))
+                    normalize_tensor2_columns(segment)
                 })
                 .collect(),
             0,
@@ -515,27 +524,9 @@ use super::*;
         let w1_rows = rows.clone().narrow(0, 0, layout.hidden_dims);
         let w1 = w1_rows.clone().narrow(1, 0, layout.perception_dims);
         let b1 = w1_rows.clone().narrow(1, layout.perception_dims, 1);
-        let w1_norm = w1
-            .clone()
-            .mul(w1.clone())
-            .sum_dim(0)
-            .sum_dim(1)
-            .sqrt()
-            .add_scalar(1.0e-8);
-        let b1_norm = b1
-            .clone()
-            .mul(b1.clone())
-            .sum_dim(0)
-            .sum_dim(1)
-            .sqrt()
-            .add_scalar(1.0e-8);
         let mut normalized_w1 = vec![
-            w1.div(w1_norm.expand([
-                layout.hidden_dims,
-                layout.perception_dims,
-                identities,
-            ])),
-            b1.div(b1_norm.expand([layout.hidden_dims, 1, identities])),
+            normalize_tensor3_last_axis(w1),
+            normalize_tensor3_last_axis(b1),
         ];
         let w1_padding = layout
             .max_row_dims
@@ -552,31 +543,13 @@ use super::*;
         let w2_rows = rows.narrow(0, layout.hidden_dims, layout.update_dims);
         let w2 = w2_rows.clone().narrow(1, 0, layout.hidden_dims);
         let b2 = w2_rows.clone().narrow(1, layout.hidden_dims, 1);
-        let w2_norm = w2
-            .clone()
-            .mul(w2.clone())
-            .sum_dim(0)
-            .sum_dim(1)
-            .sqrt()
-            .add_scalar(1.0e-8);
         let normalized_b2 = if layout.output_bias {
-            let b2_norm = b2
-                .clone()
-                .mul(b2.clone())
-                .sum_dim(0)
-                .sum_dim(1)
-                .sqrt()
-                .add_scalar(1.0e-8);
-            b2.div(b2_norm.expand([layout.update_dims, 1, identities]))
+            normalize_tensor3_last_axis(b2)
         } else {
             b2.zeros_like()
         };
         let mut normalized_w2 = vec![
-            w2.div(w2_norm.expand([
-                layout.update_dims,
-                layout.hidden_dims,
-                identities,
-            ])),
+            normalize_tensor3_last_axis(w2),
             normalized_b2,
         ];
         let w2_padding = layout
@@ -593,8 +566,86 @@ use super::*;
             .reshape([packed_values, identities])
     }
 
+    pub(super) fn normalize_packed_npa_endpoint_gradient(
+        gradient: Tensor3Inner,
+        layout: PackedNpaGradientLayout,
+    ) -> Tensor3Inner {
+        let [identities, rows, max_row_dims] = gradient.shape().dims::<3>();
+        debug_assert_eq!(rows, layout.hidden_dims + layout.update_dims);
+        debug_assert_eq!(max_row_dims, layout.max_row_dims);
+        normalize_packed_npa_table_gradient(
+            gradient
+                .swap_dims(0, 1)
+                .swap_dims(1, 2)
+                .reshape([layout.packed_values(), identities]),
+            layout,
+        )
+        .reshape([rows, max_row_dims, identities])
+        .swap_dims(1, 2)
+        .swap_dims(0, 1)
+    }
+
     pub(super) fn tensor_l2_norm_tensor(tensor: &Tensor2Inner) -> Tensor1Inner {
-        tensor.clone().mul(tensor.clone()).sum().sqrt()
+        let maximum = tensor2_max_abs_tensor(tensor).clamp_min(1.0e-30);
+        tensor2_scaled_squared_norm_tensor(tensor, maximum.clone())
+            .sqrt()
+            .mul(maximum)
+            .clamp_max(f32::MAX)
+    }
+
+    fn tensor2_scaled_squared_norm_tensor(
+        tensor: &Tensor2Inner,
+        scale: Tensor1Inner,
+    ) -> Tensor1Inner {
+        let dims = tensor.shape().dims::<2>();
+        let scaled = tensor.clone().div(scale.expand(dims));
+        scaled.clone().mul(scaled).sum()
+    }
+
+    fn tensor2_max_abs_tensor(tensor: &Tensor2Inner) -> Tensor1Inner {
+        let [rows, columns] = tensor.shape().dims::<2>();
+        tensor
+            .clone()
+            .abs()
+            .reshape([1, rows * columns])
+            .max_dim(1)
+            .squeeze_dim::<1>(1)
+    }
+
+    fn normalize_tensor2_columns(tensor: Tensor2Inner) -> Tensor2Inner {
+        let [rows, columns] = tensor.shape().dims::<2>();
+        let maximum = tensor
+            .clone()
+            .abs()
+            .max_dim(0)
+            .clamp_min(1.0e-30);
+        let scaled = tensor.div(maximum.expand([rows, columns]));
+        let norm = scaled
+            .clone()
+            .mul(scaled.clone())
+            .sum_dim(0)
+            .sqrt()
+            .add_scalar(1.0e-8);
+        scaled.div(norm.expand([rows, columns]))
+    }
+
+    fn normalize_tensor3_last_axis(tensor: Tensor3Inner) -> Tensor3Inner {
+        let dims = tensor.shape().dims::<3>();
+        let maximum = tensor
+            .clone()
+            .abs()
+            .max_dim(0)
+            .max_dim(1)
+            .clamp_min(1.0e-30);
+        let scaled = tensor.div(maximum.expand(dims));
+        let norm = scaled
+            .clone()
+            .mul(scaled.clone())
+            .sum_dim(0)
+            .sum_dim(1)
+            .sqrt()
+            .add_scalar(1.0e-8);
+        scaled.div(norm.expand(dims))
     }
 
     pub(super) fn tensor_l2_norm(tensor: &Tensor2Inner) -> AutomataResult<f32> {
@@ -701,23 +752,26 @@ use super::*;
                 identity_steps.len()
             )));
         }
-        let mut active = vec![0.0_f32; identities];
-        for &identity in active_identities {
-            let Some(active) = active.get_mut(identity) else {
+        let mut active_identities = active_identities.to_vec();
+        active_identities.sort_unstable();
+        active_identities.dedup();
+        for &identity in &active_identities {
+            if identity >= identities {
                 return Err(AutomataError::InvalidArgument(format!(
                     "sparse AdamW identity {identity} exceeds {identities} parameter columns"
                 )));
-            };
-            *active = 1.0;
-        }
-        let mut beta1_bias = vec![1.0_f32; identities];
-        let mut beta2_bias = vec![1.0_f32; identities];
-        let mut learning_rate_scale = vec![1.0_f32; identities];
-        let mut reset_moments = vec![0.0_f32; identities];
-        for (identity, is_active) in active.iter().enumerate() {
-            if *is_active == 0.0 {
-                continue;
             }
+        }
+        if active_identities.is_empty() {
+            return Ok(param);
+        }
+
+        let active_count = active_identities.len();
+        let mut beta1_bias = Vec::with_capacity(active_count);
+        let mut beta2_bias = Vec::with_capacity(active_count);
+        let mut learning_rate_scale = Vec::with_capacity(active_count);
+        let mut retain_moments = Vec::with_capacity(active_count);
+        for &identity in &active_identities {
             identity_steps[identity] = identity_steps[identity].saturating_add(1);
             let (step, lr_scale, reset) = upstream_growing_min_lr_scale.map_or_else(
                 || {
@@ -735,72 +789,97 @@ use super::*;
                 },
             );
             let step = step as i32;
-            beta1_bias[identity] = (1.0 - cfg.beta1.powi(step)).max(f32::MIN_POSITIVE);
-            beta2_bias[identity] = (1.0 - cfg.beta2.powi(step)).max(f32::MIN_POSITIVE);
-            learning_rate_scale[identity] = lr_scale;
-            reset_moments[identity] = if reset { 1.0 } else { 0.0 };
+            beta1_bias.push((1.0 - cfg.beta1.powi(step)).max(f32::MIN_POSITIVE));
+            beta2_bias.push((1.0 - cfg.beta2.powi(step)).max(f32::MIN_POSITIVE));
+            learning_rate_scale.push(lr_scale);
+            retain_moments.push(if reset { 0.0 } else { 1.0 });
         }
 
         let device = param.device();
-        let active = Tensor::<InnerBackend, 2>::from_data(
-            TensorData::new(active, [1, identities]),
+        let indices = Tensor::<InnerBackend, 1, Int>::from_data(
+            TensorData::new(
+                active_identities
+                    .iter()
+                    .map(|identity| *identity as i64)
+                    .collect::<Vec<_>>(),
+                [active_count],
+            ),
             &device,
-        )
-        .expand([rows, identities]);
-        let inactive = active.clone().neg().add_scalar(1.0);
+        );
         let beta1_bias = Tensor::<InnerBackend, 2>::from_data(
-            TensorData::new(beta1_bias, [1, identities]),
+            TensorData::new(beta1_bias, [1, active_count]),
             &device,
         )
-        .expand([rows, identities]);
+        .expand([rows, active_count]);
         let beta2_bias = Tensor::<InnerBackend, 2>::from_data(
-            TensorData::new(beta2_bias, [1, identities]),
+            TensorData::new(beta2_bias, [1, active_count]),
             &device,
         )
-        .expand([rows, identities]);
+        .expand([rows, active_count]);
         let learning_rate_scale = Tensor::<InnerBackend, 2>::from_data(
-            TensorData::new(learning_rate_scale, [1, identities]),
+            TensorData::new(learning_rate_scale, [1, active_count]),
             &device,
         )
-        .expand([rows, identities]);
+        .expand([rows, active_count]);
         let retain_moments = Tensor::<InnerBackend, 2>::from_data(
-            TensorData::new(reset_moments, [1, identities]),
+            TensorData::new(retain_moments, [1, active_count]),
             &device,
         )
-        .expand([rows, identities])
-        .neg()
-        .add_scalar(1.0);
+        .expand([rows, active_count]);
         let grad = grad
-            .mul(scale.expand([rows, identities]))
-            .mul(active.clone());
-        let prior_moment = moment.clone().mul(retain_moments.clone());
-        let prior_velocity = velocity.clone().mul(retain_moments);
+            .select(1, indices.clone())
+            .mul(scale.expand([rows, active_count]));
+        let active_param = param.clone().select(1, indices.clone());
+        let active_moment = moment.clone().select(1, indices.clone());
+        let active_velocity = velocity.clone().select(1, indices.clone());
+        let prior_moment = active_moment.clone().mul(retain_moments.clone());
+        let prior_velocity = active_velocity.clone().mul(retain_moments);
         let next_moment = prior_moment.mul_scalar(cfg.beta1)
             + grad.clone().mul_scalar(1.0 - cfg.beta1);
         let next_velocity = prior_velocity.mul_scalar(cfg.beta2)
             + grad.clone().mul(grad).mul_scalar(1.0 - cfg.beta2);
-        *moment = moment.clone().mul(inactive.clone()) + next_moment.mul(active.clone());
-        *velocity = velocity.clone().mul(inactive) + next_velocity.mul(active.clone());
 
-        let normalized_step = moment
+        let normalized_step = next_moment
             .clone()
             .div(beta1_bias)
-            .div(velocity.clone().div(beta2_bias).sqrt().add_scalar(cfg.epsilon));
+            .div(
+                next_velocity
+                    .clone()
+                    .div(beta2_bias)
+                    .sqrt()
+                    .add_scalar(cfg.epsilon),
+            );
         let update = normalized_step
-            .mul(active.clone())
             .mul(learning_rate_scale.clone())
             .mul_scalar(cfg.learning_rate);
-        let decayed = if cfg.weight_decay > 0.0 {
-            param.clone()
-                - param
+        let next_param = if cfg.weight_decay > 0.0 {
+            active_param.clone()
+                - active_param
                     .clone()
-                    .mul(active)
                     .mul(learning_rate_scale)
                     .mul_scalar(cfg.learning_rate * cfg.weight_decay)
         } else {
-            param
-        };
-        Ok(decayed - update)
+            active_param.clone()
+        } - update;
+
+        *moment = moment.clone().select_assign(
+            1,
+            indices.clone(),
+            next_moment - active_moment,
+            IndexingUpdateOp::Add,
+        );
+        *velocity = velocity.clone().select_assign(
+            1,
+            indices.clone(),
+            next_velocity - active_velocity,
+            IndexingUpdateOp::Add,
+        );
+        Ok(param.select_assign(
+            1,
+            indices,
+            next_param - active_param,
+            IndexingUpdateOp::Add,
+        ))
     }
 
     pub(super) fn upstream_growing_identity_schedule(
@@ -811,7 +890,7 @@ use super::*;
         let milestones_passed = phase_step.saturating_sub(1).div_euclid(2_000).min(4);
         let raw_scale = 0.3_f32.powi(milestones_passed as i32);
         let min_lr_scale = min_lr_scale.clamp(0.0, 1.0);
-        let lr_scale = min_lr_scale + (1.0 - min_lr_scale) * raw_scale;
+        let lr_scale = raw_scale.max(min_lr_scale);
         let reset_moments = identity_step > 1 && phase_step == 1;
         (phase_step, lr_scale, reset_moments)
     }

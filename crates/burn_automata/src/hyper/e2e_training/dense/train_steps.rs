@@ -794,7 +794,9 @@ use super::*;
         collect_per_example_losses: bool,
         initial_state: Option<(Tensor3, Tensor3)>,
     ) -> Result<BurnE2eStepOutput, Box<dyn std::error::Error>> {
-        if config.credit_assignment == E2eCreditAssignment::FullBptt {
+        if config.rollout_free_amortization()
+            || config.credit_assignment == E2eCreditAssignment::FullBptt
+        {
             return train_e2e_homogeneous_step_full_bptt(
                 params,
                 generator,
@@ -1175,7 +1177,18 @@ use super::*;
         };
         let mut generator_objective = endpoint_bridge
             .as_ref()
-            .and_then(|bridge| bridge.objective(inverse_gradient_weight));
+            .and_then(|bridge| {
+                bridge.objective(
+                    inverse_gradient_weight,
+                    endpoint_bridge_normalizes_gradient(
+                        config.per_parameter_grad_normalization,
+                        config.amortization_substrate_only,
+                    )
+                    .then(|| {
+                        PackedNpaGradientLayout::new(npa_config, config.adapter_output_bias)
+                    }),
+                )
+            });
         let mut adapter_teacher_loss = 0.0_f32;
         let mut flow_matching_loss = 0.0_f32;
         let mut flow_self_rectification_loss = 0.0_f32;
@@ -1550,6 +1563,26 @@ use super::*;
         collect_per_example_losses: bool,
         initial_state: Option<(Tensor3, Tensor3)>,
     ) -> Result<BurnE2eStepOutput, Box<dyn std::error::Error>> {
+        if config.rollout_free_amortization() {
+            if config.shared_base_trainable {
+                return Err(std::io::Error::other(
+                    "rollout-free amortization distillation requires a frozen shared base",
+                )
+                .into());
+            }
+            return train_e2e_amortization_distillation_step(
+                generator,
+                generator_optimizer,
+                npa_config,
+                conditions,
+                condition_indices,
+                prepared_dino,
+                config,
+                step_seed,
+                collect_metrics,
+                initial_state,
+            );
+        }
         if condition_indices.len() != target_indices.len() {
             return Err(std::io::Error::other(
                 "Burn HyperNPA full-BPTT condition/target batch length mismatch",
@@ -1578,35 +1611,6 @@ use super::*;
             }
             return train_e2e_functional_teacher_step(
                 params,
-                generator,
-                generator_optimizer,
-                npa_config,
-                conditions,
-                condition_indices,
-                prepared_dino,
-                targets,
-                target_indices,
-                particle_count,
-                config,
-                step_seed,
-                collect_metrics,
-                initial_state,
-            );
-        }
-        if config.task_loss_weight == 0.0
-            && config.adapter_teacher_weight == 0.0
-            && config.flow_matching_weight == 0.0
-            && config.amortization_enabled
-            && (config.amortization_distillation_weight > 0.0
-                || config.flow_self_rectification_weight > 0.0)
-        {
-            if config.shared_base_trainable {
-                return Err(std::io::Error::other(
-                    "rollout-free amortization distillation requires a frozen shared base",
-                )
-                .into());
-            }
-            return train_e2e_amortization_distillation_step(
                 generator,
                 generator_optimizer,
                 npa_config,
@@ -2337,7 +2341,7 @@ use super::*;
             trajectory_loss
         };
         if let Some(trajectories) = trajectories_per_identity
-            .filter(|&trajectories| trajectories > 1 && batch_size.is_multiple_of(trajectories))
+            .filter(|&trajectories| trajectories > 0 && batch_size.is_multiple_of(trajectories))
         {
             let identities = batch_size / trajectories;
             let grouped = transformed.reshape([identities, trajectories]);

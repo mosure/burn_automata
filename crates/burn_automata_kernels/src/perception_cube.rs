@@ -26,7 +26,7 @@ const PERCEPTION_TILED_NATIVE_STATE_DIMS: usize = 16;
 const PERCEPTION_TILED_MAX_STATE_DIMS: usize = 24;
 const PERCEPTION_TILED_NEIGHBOR_PARTICLES: usize = 64;
 const PERCEPTION_TILED_CUBE_UNITS: u32 = 256;
-const PERCEPTION_TILED_VJP_C4_CUBE_UNITS: u32 = 128;
+const PERCEPTION_TILED_VJP_C2_CUBE_UNITS: u32 = 128;
 
 type FusionCubeBackend<R, F, I, BT> = Fusion<CubeBackend<R, F, I, BT>>;
 type PerceptionForwardFusionOutput<R, F, I, BT> =
@@ -1794,10 +1794,10 @@ fn launch_perception_adjoint_impl<R: CubeRuntime>(
                     let cube_count =
                         CubeCount::Static((blocks.max_blocks_per_batch * batches) as u32, 1, 1);
                     if state_dims == 16 {
-                        perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel::launch(
+                        perception_state_output_sparse_block_global_q16_c2_rsqrt_v4_kernel::launch(
                             &client,
                             cube_count,
-                            CubeDim::new_1d(PERCEPTION_TILED_VJP_C4_CUBE_UNITS),
+                            CubeDim::new_1d(PERCEPTION_TILED_VJP_C2_CUBE_UNITS),
                             AddressType::U32,
                             x.clone().into_tensor_arg(),
                             s.clone().into_tensor_arg(),
@@ -4132,7 +4132,7 @@ fn perception_state_output_sparse_plane_kernel<F: Float>(
 }
 
 #[cube(launch, address_type = "dynamic")]
-fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
+fn perception_state_output_sparse_block_global_q16_c2_rsqrt_v4_kernel<F: Float>(
     x: &Tensor<F>,
     s: &Tensor<F>,
     feature_grad: &Tensor<F>,
@@ -4165,10 +4165,10 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
         terminate!();
     }
 
-    let channel_groups = 4usize;
+    let channel_groups = 8usize;
     let active_group = unit < query_count * channel_groups;
     let query = unit / channel_groups;
-    let channel = (unit - query * channel_groups) * 4usize;
+    let channel = (unit - query * channel_groups) * 2usize;
     let eps = args.eps.get::<F>();
     let eps2 = eps * eps;
     let poly6_norm = F::new(4.0_f32) / (F::new(core::f32::consts::PI) * eps.powf(F::new(8.0_f32)));
@@ -4200,23 +4200,15 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
     let mut volume_i = F::new(0.0_f32);
     let mut out0 = F::new(0.0_f32);
     let mut out1 = F::new(0.0_f32);
-    let mut out2 = F::new(0.0_f32);
-    let mut out3 = F::new(0.0_f32);
     let mut own_raw_x0 = F::new(0.0_f32);
     let mut own_raw_x1 = F::new(0.0_f32);
-    let mut own_raw_x2 = F::new(0.0_f32);
-    let mut own_raw_x3 = F::new(0.0_f32);
     let mut own_raw_y0 = F::new(0.0_f32);
     let mut own_raw_y1 = F::new(0.0_f32);
-    let mut own_raw_y2 = F::new(0.0_f32);
-    let mut own_raw_y3 = F::new(0.0_f32);
     if active_group {
         particle = query_particle[query] as usize;
         volume_i = query_volume[query];
         out0 = feature::<F>(feature_grad, batch, particle, channel);
         out1 = feature::<F>(feature_grad, batch, particle, channel + 1usize);
-        out2 = feature::<F>(feature_grad, batch, particle, channel + 2usize);
-        out3 = feature::<F>(feature_grad, batch, particle, channel + 3usize);
         if state_grad_enabled {
             own_raw_x0 =
                 raw_state_adjoint_value::<F>(raw_state_adjoint, batch, particle, channel, 0);
@@ -4227,20 +4219,6 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
                 channel + 1usize,
                 0,
             );
-            own_raw_x2 = raw_state_adjoint_value::<F>(
-                raw_state_adjoint,
-                batch,
-                particle,
-                channel + 2usize,
-                0,
-            );
-            own_raw_x3 = raw_state_adjoint_value::<F>(
-                raw_state_adjoint,
-                batch,
-                particle,
-                channel + 3usize,
-                0,
-            );
             own_raw_y0 =
                 raw_state_adjoint_value::<F>(raw_state_adjoint, batch, particle, channel, 1);
             own_raw_y1 = raw_state_adjoint_value::<F>(
@@ -4248,20 +4226,6 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
                 batch,
                 particle,
                 channel + 1usize,
-                1,
-            );
-            own_raw_y2 = raw_state_adjoint_value::<F>(
-                raw_state_adjoint,
-                batch,
-                particle,
-                channel + 2usize,
-                1,
-            );
-            own_raw_y3 = raw_state_adjoint_value::<F>(
-                raw_state_adjoint,
-                batch,
-                particle,
-                channel + 3usize,
                 1,
             );
         }
@@ -4340,8 +4304,6 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
                         let blur_weight = poly6_precomputed::<F>(r2, eps2, poly6_norm) * volume_i;
                         out0 += neighbor_feature[value] * blur_weight;
                         out1 += neighbor_feature[value + 1usize] * blur_weight;
-                        out2 += neighbor_feature[value + 2usize] * blur_weight;
-                        out3 += neighbor_feature[value + 3usize] * blur_weight;
                         if state_grad_enabled && neighbor != particle {
                             let (base_gx, base_gy) = spiky_gradient_precomputed::<F>(
                                 dx,
@@ -4361,14 +4323,8 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
                                 + neighbor_raw_y[value] * incoming_gy;
                             out1 += neighbor_raw_x[value + 1usize] * incoming_gx
                                 + neighbor_raw_y[value + 1usize] * incoming_gy;
-                            out2 += neighbor_raw_x[value + 2usize] * incoming_gx
-                                + neighbor_raw_y[value + 2usize] * incoming_gy;
-                            out3 += neighbor_raw_x[value + 3usize] * incoming_gx
-                                + neighbor_raw_y[value + 3usize] * incoming_gy;
                             out0 -= own_raw_x0 * outgoing_gx + own_raw_y0 * outgoing_gy;
                             out1 -= own_raw_x1 * outgoing_gx + own_raw_y1 * outgoing_gy;
-                            out2 -= own_raw_x2 * outgoing_gx + own_raw_y2 * outgoing_gy;
-                            out3 -= own_raw_x3 * outgoing_gx + own_raw_y3 * outgoing_gy;
                         }
                         local += 1usize;
                     }
@@ -4386,8 +4342,6 @@ fn perception_state_output_sparse_block_global_q16_c4_rsqrt_v3_kernel<F: Float>(
             + channel * state_grad.stride(2);
         state_grad[base] = out0;
         state_grad[base + state_grad.stride(2)] = out1;
-        state_grad[base + 2usize * state_grad.stride(2)] = out2;
-        state_grad[base + 3usize * state_grad.stride(2)] = out3;
     }
 }
 

@@ -36,8 +36,10 @@ macro_rules! dense_backend_impl {
         $device_label:expr,
         $log_backend:expr
     ) => {
+        #[cfg(feature = "dino")]
+        use std::sync::Mutex;
         use std::{
-            collections::{HashMap, VecDeque},
+            collections::{HashMap, HashSet, VecDeque},
             fs,
             path::{Path, PathBuf},
             process::Command,
@@ -73,11 +75,12 @@ macro_rules! dense_backend_impl {
             BurnE2eAmortizationQualityReport, BurnE2eNearestTeacherEntry, BurnE2eRolloutExample,
             BurnE2eRolloutHistoryEntry, BurnE2eRolloutHorizonSummary, BurnE2eRolloutOutput,
             BurnE2eRolloutQualityEntry, BurnE2eRolloutQualityReport, BurnE2eRolloutSeedSummary,
-            BurnE2eRolloutStabilityEntry, BurnE2eRolloutStabilityReport, BurnE2eRolloutTrainConfig,
-            BurnWgpuDirectBasisOutput, DirectBasisStepStats, DirectBasisTrainConfig,
-            DirectBasisTrainingExample as DirectBasisExample, E2E_TRAINING_CHECKPOINT_VERSION,
-            E2eAdapterTeacherObjective, E2eCreditAssignment, E2eIdentitySampler, E2eLrSchedule,
-            E2eParticlePoolSnapshot, E2eTbpttLossMode, E2eTensorSnapshot, E2eTrainingCheckpoint,
+            BurnE2eRolloutStabilityEntry, BurnE2eRolloutStabilityReport, BurnE2eRolloutTarget,
+            BurnE2eRolloutTrainConfig, BurnWgpuDirectBasisOutput, DirectBasisStepStats,
+            DirectBasisTrainConfig, DirectBasisTrainingExample as DirectBasisExample,
+            E2E_TRAINING_CHECKPOINT_VERSION, E2eAdapterTeacherObjective, E2eCreditAssignment,
+            E2eIdentitySampler, E2eLrSchedule, E2eParticlePoolSnapshot, E2eTbpttLossMode,
+            E2eTensorSnapshot, E2eTrainingCheckpoint,
             Hyper2dDirectBasisHistoryEntry as CliHyper2dDirectBasisHistoryEntry,
             Hyper2dDirectBasisLossSummary as CliHyper2dDirectBasisLossSummary,
             TARGET2D_TRAINING_CHECKPOINT_VERSION, Target2dBurnCheckpointConfig,
@@ -344,7 +347,7 @@ macro_rules! dense_backend_impl {
         }
 
         struct BurnE2eCpuTargetInput {
-            target: TargetImage2d,
+            target: BurnE2eRolloutTarget,
             particle_count: usize,
             update_prob: f32,
             seed_scale: f32,
@@ -367,6 +370,7 @@ macro_rules! dense_backend_impl {
 
         struct BurnE2ePreparedCpuBatch {
             indices: Vec<usize>,
+            target_identities: Vec<usize>,
             targets: Vec<BurnE2ePreparedTargetExample>,
             target_expansion: Vec<usize>,
             prepared_dino: Option<BurnE2ePreparedDinoBatch>,
@@ -377,10 +381,35 @@ macro_rules! dense_backend_impl {
             handle: thread::JoinHandle<Result<BurnE2ePreparedCpuBatch, String>>,
         }
 
+        #[derive(Clone)]
+        enum BurnE2eTargetPrefetchMode {
+            All,
+            Missing(HashSet<usize>),
+            Skip,
+        }
+
+        struct BurnE2eTargetDeviceCacheEntry {
+            target: BurnTargetExample,
+            bytes: usize,
+            last_access: u64,
+        }
+
+        struct BurnE2eTargetDeviceCache {
+            entries: HashMap<usize, BurnE2eTargetDeviceCacheEntry>,
+            max_bytes: usize,
+            resident_bytes: usize,
+            access_clock: u64,
+            hits: u64,
+            misses: u64,
+            inserts: u64,
+            evictions: u64,
+        }
+
         #[cfg(feature = "dino")]
         struct BurnE2ePreparedDinoBatch {
             prepared: DinoVitsPreparedConditionBatch,
             encoded_rows: usize,
+            encoded_identities: Vec<usize>,
             expansion: Vec<usize>,
         }
 
@@ -565,6 +594,19 @@ macro_rules! dense_backend_impl {
             alpha_channel: bool,
             alpha_channel_scale: f32,
             patch_pixels: bool,
+            token_cache: Mutex<BurnE2eDinoTokenCache>,
+        }
+
+        #[cfg(feature = "dino")]
+        struct BurnE2eDinoTokenCache {
+            values: Option<Tensor3Inner>,
+            slot_identities: Vec<Option<usize>>,
+            identity_slots: HashMap<usize, usize>,
+            next_evict: usize,
+            hits: u64,
+            misses: u64,
+            inserts: u64,
+            evictions: u64,
         }
 
         #[cfg(feature = "dino")]

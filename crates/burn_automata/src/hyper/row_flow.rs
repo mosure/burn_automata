@@ -180,6 +180,33 @@ impl ConditionalRowFlowConfig {
 
 impl ConditionalRowFlowWeights {
     pub fn seeded(config: &ConditionalRowFlowConfig, seed: u64) -> AutomataResult<Self> {
+        Self::seeded_with_initialization(config, seed, 0.0, 1.0e-3)
+    }
+
+    pub fn seeded_with_cross_gate(
+        config: &ConditionalRowFlowConfig,
+        seed: u64,
+        cross_gate_init: f32,
+    ) -> AutomataResult<Self> {
+        Self::seeded_with_initialization(config, seed, cross_gate_init, 1.0e-3)
+    }
+
+    pub fn seeded_with_initialization(
+        config: &ConditionalRowFlowConfig,
+        seed: u64,
+        cross_gate_init: f32,
+        output_init_scale: f32,
+    ) -> AutomataResult<Self> {
+        if !cross_gate_init.is_finite() || !(0.0..=1.0).contains(&cross_gate_init) {
+            return Err(AutomataError::InvalidArgument(format!(
+                "conditional row flow cross-gate initialization must be finite and in 0..=1, got {cross_gate_init}"
+            )));
+        }
+        if !output_init_scale.is_finite() || output_init_scale < 0.0 {
+            return Err(AutomataError::InvalidArgument(format!(
+                "conditional row flow output initialization scale must be finite and non-negative, got {output_init_scale}"
+            )));
+        }
         let specs = config.tensor_specs()?;
         let mut rng = StdRng::seed_from_u64(seed);
         let mut values = Vec::with_capacity(config.parameter_count()?);
@@ -188,16 +215,21 @@ impl ConditionalRowFlowWeights {
             let is_modulation = tensor.name.contains("modulation");
             let is_output = tensor.name == "output.weight";
             let scale = if is_output {
-                1.0e-3
+                output_init_scale
             } else {
                 (tensor.rows as f32).sqrt().recip()
             };
-            for _ in 0..tensor.rows * tensor.cols {
-                values.push(if is_bias || is_modulation {
+            for index in 0..tensor.rows * tensor.cols {
+                let value = if tensor.name.ends_with(".modulation.bias")
+                    && (5 * config.width..6 * config.width).contains(&index)
+                {
+                    cross_gate_init
+                } else if is_bias || is_modulation {
                     0.0
                 } else {
                     rng.random_range(-scale..=scale)
-                });
+                };
+                values.push(value);
             }
         }
         let result = Self { values };
@@ -214,6 +246,68 @@ impl ConditionalRowFlowWeights {
             )));
         }
         Ok(())
+    }
+
+    /// Expand an existing DINO-plus-patch-mean condition projection to consume
+    /// every native pixel in each patch without changing its initial output.
+    ///
+    /// The old channel weights are divided evenly across the pixel-major,
+    /// channel-last patch vector. Their summed contribution therefore equals
+    /// the previous per-patch mean, while subsequent optimization can learn an
+    /// independent projection for every pixel.
+    pub fn expand_mean_channels_to_patch_pixels(
+        &self,
+        config: &ConditionalRowFlowConfig,
+        semantic_dims: usize,
+        channels: usize,
+        pixels_per_patch: usize,
+    ) -> AutomataResult<(ConditionalRowFlowConfig, Self)> {
+        self.validate(config)?;
+        if semantic_dims == 0 || channels == 0 || pixels_per_patch <= 1 {
+            return Err(AutomataError::InvalidArgument(
+                "row-flow patch-pixel expansion requires semantic dims, channels, and more than one pixel per patch"
+                    .to_string(),
+            ));
+        }
+        let old_condition_dims = semantic_dims.checked_add(channels).ok_or_else(|| {
+            AutomataError::InvalidArgument(
+                "row-flow patch-pixel source dimensions overflowed".to_string(),
+            )
+        })?;
+        if config.condition_dims != old_condition_dims {
+            return Err(AutomataError::InvalidArgument(format!(
+                "row-flow patch-pixel expansion expected {old_condition_dims} source dimensions, got {}",
+                config.condition_dims
+            )));
+        }
+        let pixel_dims = channels.checked_mul(pixels_per_patch).ok_or_else(|| {
+            AutomataError::InvalidArgument("row-flow patch-pixel dimensions overflowed".to_string())
+        })?;
+        let new_condition_dims = semantic_dims.checked_add(pixel_dims).ok_or_else(|| {
+            AutomataError::InvalidArgument(
+                "row-flow expanded condition dimensions overflowed".to_string(),
+            )
+        })?;
+        let old_projection_len = old_condition_dims * config.width;
+        let mut values = vec![0.0; new_condition_dims * config.width];
+        values[..semantic_dims * config.width]
+            .copy_from_slice(&self.values[..semantic_dims * config.width]);
+        let inverse_pixels = 1.0 / pixels_per_patch as f32;
+        for pixel in 0..pixels_per_patch {
+            for channel in 0..channels {
+                let old_start = (semantic_dims + channel) * config.width;
+                let new_start = (semantic_dims + pixel * channels + channel) * config.width;
+                for dim in 0..config.width {
+                    values[new_start + dim] = self.values[old_start + dim] * inverse_pixels;
+                }
+            }
+        }
+        values.extend_from_slice(&self.values[old_projection_len..]);
+        let mut expanded_config = config.clone();
+        expanded_config.condition_dims = new_condition_dims;
+        let expanded = Self { values };
+        expanded.validate(&expanded_config)?;
+        Ok((expanded_config, expanded))
     }
 
     pub fn predict_packed(
@@ -1031,6 +1125,119 @@ mod tests {
         layout.validate_flow_config(&flow).unwrap();
         assert!(flow.parameter_count().unwrap() > 10_000_000);
         assert_eq!(flow.source_scale, 1.0e-3);
+    }
+
+    #[test]
+    fn seeded_cross_gate_opens_only_condition_residuals() {
+        let (config, _) = NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
+        let mut flow = ConditionalRowFlowConfig::flow_s(&config, 5, 8);
+        flow.layers = 2;
+        flow.width = 8;
+        flow.heads = 2;
+        flow.ffn_dims = 16;
+        flow.row_rms = vec![1.0; flow.row_count];
+        let init = 0.125;
+        let weights = ConditionalRowFlowWeights::seeded_with_cross_gate(&flow, 7, init).unwrap();
+        let specs = flow.tensor_specs().unwrap();
+        let mut offset = 0;
+        for spec in specs {
+            let len = spec.rows * spec.cols;
+            if spec.name.ends_with(".modulation.bias") {
+                let bias = &weights.values[offset..offset + len];
+                assert!(bias[..5 * flow.width].iter().all(|value| *value == 0.0));
+                assert!(
+                    bias[5 * flow.width..6 * flow.width]
+                        .iter()
+                        .all(|value| *value == init)
+                );
+                assert!(bias[6 * flow.width..].iter().all(|value| *value == 0.0));
+            }
+            offset += len;
+        }
+    }
+
+    #[test]
+    fn seeded_output_scale_controls_only_the_output_projection() {
+        let (config, _) = NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
+        let mut flow = ConditionalRowFlowConfig::flow_s(&config, 5, 8);
+        flow.layers = 1;
+        flow.width = 8;
+        flow.heads = 2;
+        flow.ffn_dims = 16;
+        flow.row_rms = vec![1.0; flow.row_count];
+        let baseline =
+            ConditionalRowFlowWeights::seeded_with_initialization(&flow, 11, 0.0, 1.0e-3).unwrap();
+        let wider =
+            ConditionalRowFlowWeights::seeded_with_initialization(&flow, 11, 0.0, 2.0e-2).unwrap();
+        let specs = flow.tensor_specs().unwrap();
+        let mut offset = 0;
+        for spec in specs {
+            let len = spec.rows * spec.cols;
+            let baseline_values = &baseline.values[offset..offset + len];
+            let wider_values = &wider.values[offset..offset + len];
+            if spec.name == "output.weight" {
+                assert!(baseline_values.iter().all(|value| value.abs() <= 1.0e-3));
+                assert!(wider_values.iter().all(|value| value.abs() <= 2.0e-2));
+                assert!(
+                    baseline_values
+                        .iter()
+                        .zip(wider_values)
+                        .any(|(left, right)| (left - right).abs() > 1.0e-3)
+                );
+            } else {
+                assert_eq!(baseline_values, wider_values);
+            }
+            offset += len;
+        }
+    }
+
+    #[test]
+    fn patch_pixel_projection_expansion_preserves_patch_mean_output() {
+        let (config, _) = NpaConfig::for_preset(crate::AutomataPreset::Growing2d);
+        let mut flow = ConditionalRowFlowConfig::flow_s(&config, 1, 4);
+        flow.layers = 1;
+        flow.width = 8;
+        flow.heads = 2;
+        flow.ffn_dims = 16;
+        flow.row_rms = vec![1.0; flow.row_count];
+        let weights = ConditionalRowFlowWeights::seeded(&flow, 19).unwrap();
+        let (expanded_flow, expanded) = weights
+            .expand_mean_channels_to_patch_pixels(&flow, 2, 2, 4)
+            .unwrap();
+
+        assert_eq!(expanded_flow.condition_dims, 10);
+        let old_projection_len = flow.condition_dims * flow.width;
+        let new_projection_len = expanded_flow.condition_dims * flow.width;
+        assert_eq!(
+            &weights.values[old_projection_len..],
+            &expanded.values[new_projection_len..]
+        );
+
+        let old_condition = [0.25, -0.5, 2.5, 4.0];
+        let patch_pixels = [1.0, 1.0, 2.0, 3.0, 3.0, 5.0, 4.0, 7.0];
+        let mut expanded_condition = vec![old_condition[0], old_condition[1]];
+        expanded_condition.extend_from_slice(&patch_pixels);
+        let old_tensors = FlowTensorViews::new(&flow, &weights.values).unwrap();
+        let new_tensors = FlowTensorViews::new(&expanded_flow, &expanded.values).unwrap();
+        let old_output = linear(
+            &old_condition,
+            1,
+            flow.condition_dims,
+            old_tensors.get("condition.weight"),
+            old_tensors.get("condition.bias"),
+            flow.width,
+        );
+        let new_output = linear(
+            &expanded_condition,
+            1,
+            expanded_flow.condition_dims,
+            new_tensors.get("condition.weight"),
+            new_tensors.get("condition.bias"),
+            expanded_flow.width,
+        );
+        for (old, new) in old_output.iter().zip(new_output) {
+            assert!((old - new).abs() < 1.0e-6, "{old} != {new}");
+        }
     }
 
     #[test]

@@ -139,6 +139,37 @@ impl DinoVitsPreparedConditionBatch {
         })
     }
 
+    pub fn select_rows(&self, rows: &[usize]) -> Result<Self, Box<dyn std::error::Error>> {
+        if rows.is_empty() {
+            return Err(std::io::Error::other(
+                "prepared DINO row selection requires at least one row",
+            )
+            .into());
+        }
+        if rows.iter().any(|row| *row >= self.batch) {
+            return Err(
+                std::io::Error::other("prepared DINO row selection is out of bounds").into(),
+            );
+        }
+        let pixels = self.image_size.saturating_mul(self.image_size);
+        let rgb_row_values = pixels.saturating_mul(self.input_channels);
+        let mut values = Vec::with_capacity(rows.len().saturating_mul(rgb_row_values));
+        let mut alpha_values = Vec::with_capacity(rows.len().saturating_mul(pixels));
+        for &row in rows {
+            let rgb_start = row.saturating_mul(rgb_row_values);
+            values.extend_from_slice(&self.values[rgb_start..rgb_start + rgb_row_values]);
+            let alpha_start = row.saturating_mul(pixels);
+            alpha_values.extend_from_slice(&self.alpha_values[alpha_start..alpha_start + pixels]);
+        }
+        Ok(Self {
+            values,
+            alpha_values,
+            batch: rows.len(),
+            image_size: self.image_size,
+            input_channels: self.input_channels,
+        })
+    }
+
     fn validate_for(
         &self,
         config: &DinoVisionTransformerConfig,
@@ -1070,5 +1101,26 @@ mod tests {
                 10.0, 0.0, 0.0, 1.0, 11.0, 0.0, 0.0, 1.0, 14.0, 0.0, 0.0, 1.0, 15.0, 0.0, 0.0, 1.0,
             ]
         );
+    }
+
+    #[test]
+    fn prepared_condition_row_selection_preserves_order() {
+        let prepared = DinoVitsPreparedConditionBatch {
+            values: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            alpha_values: vec![0.1, 0.2, 0.3],
+            batch: 3,
+            image_size: 1,
+            input_channels: 3,
+        };
+        let selected = prepared.select_rows(&[2, 0, 2]).unwrap();
+
+        assert_eq!(selected.batch, 3);
+        assert_eq!(
+            selected.values,
+            vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0, 7.0, 8.0, 9.0]
+        );
+        assert_eq!(selected.alpha_values, vec![0.3, 0.1, 0.3]);
+        assert!(prepared.select_rows(&[]).is_err());
+        assert!(prepared.select_rows(&[3]).is_err());
     }
 }

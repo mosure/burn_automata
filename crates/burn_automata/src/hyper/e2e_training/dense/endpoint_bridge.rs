@@ -95,11 +95,17 @@ impl BurnRowFlowEndpointBridge {
         });
     }
 
-    pub(super) fn objective(&self, gradient_scale: f32) -> Option<Tensor1> {
+    pub(super) fn objective(
+        &self,
+        gradient_scale: f32,
+        normalization: Option<PackedNpaGradientLayout>,
+    ) -> Option<Tensor1> {
         let gradient = self.accumulated_gradient.clone()?;
-        let gradient = Tensor::<BurnBackend, 3>::from_inner(
-            gradient.mul_scalar(gradient_scale),
-        );
+        let gradient = gradient.mul_scalar(gradient_scale);
+        let gradient = normalization.map_or(gradient.clone(), |layout| {
+            normalize_packed_npa_endpoint_gradient(gradient, layout)
+        });
+        let gradient = Tensor::<BurnBackend, 3>::from_inner(gradient);
         Some(self.endpoint_rows.clone().mul(gradient).sum())
     }
 }
@@ -111,4 +117,11 @@ pub(super) fn row_flow_endpoint_bridge_enabled(
     generator.row_flow.is_some()
         && !config.spatial_condition_control
         && !config.amortization_substrate_only
+}
+
+pub(super) const fn endpoint_bridge_normalizes_gradient(
+    per_parameter_grad_normalization: bool,
+    amortization_substrate_only: bool,
+) -> bool {
+    per_parameter_grad_normalization && !amortization_substrate_only
 }

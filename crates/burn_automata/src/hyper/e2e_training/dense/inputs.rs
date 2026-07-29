@@ -119,9 +119,25 @@ use super::*;
             let floats = pixels
                 .saturating_mul(5)
                 .saturating_add(2)
-                .saturating_add(example.target.point_count().saturating_mul(2));
+                .saturating_add(example.target.point_count_hint().saturating_mul(2));
             bytes.saturating_add(floats.saturating_mul(std::mem::size_of::<f32>()))
         })
+    }
+
+    pub(super) fn split_e2e_condition_cache_budget(
+        total_bytes: usize,
+        train_examples: usize,
+        holdout_examples: usize,
+    ) -> (usize, usize) {
+        let examples = train_examples.saturating_add(holdout_examples);
+        if examples == 0 {
+            return (0, 0);
+        }
+        let train_bytes = total_bytes
+            .saturating_mul(train_examples)
+            .checked_div(examples)
+            .unwrap_or(0);
+        (train_bytes, total_bytes.saturating_sub(train_bytes))
     }
 
     pub(super) fn burn_e2e_target_cache(
@@ -148,18 +164,165 @@ use super::*;
         burn_e2e_prepared_targets_to_burn(prepared, pixel_xy, device)
     }
 
+    impl BurnE2eTargetDeviceCache {
+        pub(super) fn new(max_bytes: usize, expected_entries: usize) -> Self {
+            Self {
+                entries: HashMap::with_capacity(expected_entries),
+                max_bytes,
+                resident_bytes: 0,
+                access_clock: 0,
+                hits: 0,
+                misses: 0,
+                inserts: 0,
+                evictions: 0,
+            }
+        }
+
+        pub(super) fn cached_identities(&self) -> HashSet<usize> {
+            self.entries.keys().copied().collect()
+        }
+
+        pub(super) fn insert_prepared(
+            &mut self,
+            identities: &[usize],
+            targets: Vec<BurnE2ePreparedTargetExample>,
+            protected_identities: &[usize],
+            pixel_xy: &Tensor2,
+            device: &BurnDevice,
+        ) -> AutomataResult<()> {
+            if identities.len() != targets.len() {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "HyperNPA target cache insert identity/target mismatch: {} identities for {} targets",
+                    identities.len(),
+                    targets.len(),
+                )));
+            }
+            let protected = protected_identities
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            for (identity, target) in identities.iter().copied().zip(targets) {
+                self.access_clock = self.access_clock.saturating_add(1);
+                if let Some(entry) = self.entries.get_mut(&identity) {
+                    entry.last_access = self.access_clock;
+                    continue;
+                }
+                let bytes = target.device_bytes();
+                if bytes > self.max_bytes {
+                    return Err(AutomataError::InvalidArgument(format!(
+                        "HyperNPA target identity {identity} requires {bytes} device bytes, exceeding the bounded target cache limit {}",
+                        self.max_bytes,
+                    )));
+                }
+                while self.resident_bytes.saturating_add(bytes) > self.max_bytes {
+                    let evict_identity = self
+                        .entries
+                        .iter()
+                        .filter(|(candidate, _)| !protected.contains(candidate))
+                        .min_by_key(|(_, entry)| entry.last_access)
+                        .map(|(candidate, _)| *candidate)
+                        .ok_or_else(|| {
+                            AutomataError::InvalidArgument(format!(
+                                "HyperNPA target cache cannot fit the active request within {} bytes; increase target_device_cache_max_bytes",
+                                self.max_bytes,
+                            ))
+                        })?;
+                    let evicted = self
+                        .entries
+                        .remove(&evict_identity)
+                        .expect("selected target cache eviction must exist");
+                    self.resident_bytes = self.resident_bytes.saturating_sub(evicted.bytes);
+                    self.evictions = self.evictions.saturating_add(1);
+                }
+                self.resident_bytes = self.resident_bytes.saturating_add(bytes);
+                self.entries.insert(
+                    identity,
+                    BurnE2eTargetDeviceCacheEntry {
+                        target: target.into_burn(pixel_xy, device),
+                        bytes,
+                        last_access: self.access_clock,
+                    },
+                );
+                self.inserts = self.inserts.saturating_add(1);
+            }
+            Ok(())
+        }
+
+        pub(super) fn select(
+            &mut self,
+            indices: &[usize],
+        ) -> AutomataResult<(Vec<BurnTargetExample>, Vec<usize>)> {
+            let (unique, expansion) = deduplicate_condition_indices(indices);
+            let mut targets = Vec::with_capacity(unique.len());
+            for identity in unique {
+                self.access_clock = self.access_clock.saturating_add(1);
+                let Some(entry) = self.entries.get_mut(&identity) else {
+                    self.misses = self.misses.saturating_add(1);
+                    return Err(AutomataError::InvalidArgument(format!(
+                        "HyperNPA target identity {identity} was not populated before device-cache selection"
+                    )));
+                };
+                entry.last_access = self.access_clock;
+                targets.push(entry.target.clone());
+                self.hits = self.hits.saturating_add(1);
+            }
+            Ok((targets, expansion))
+        }
+
+        pub(super) fn metrics(&self) -> serde_json::Value {
+            let lookups = self.hits.saturating_add(self.misses);
+            json!({
+                "mode": "bounded-device-lru",
+                "max_bytes": self.max_bytes,
+                "resident_bytes": self.resident_bytes,
+                "resident_rows": self.entries.len(),
+                "hits": self.hits,
+                "misses": self.misses,
+                "hit_rate": if lookups == 0 {
+                    0.0
+                } else {
+                    self.hits as f64 / lookups as f64
+                },
+                "inserts": self.inserts,
+                "evictions": self.evictions,
+            })
+        }
+    }
+
+    pub(super) fn e2e_target_prefetch_mode(
+        complete_cache: bool,
+        bounded_cache: Option<&BurnE2eTargetDeviceCache>,
+        skip_targets: bool,
+    ) -> BurnE2eTargetPrefetchMode {
+        if complete_cache || skip_targets {
+            BurnE2eTargetPrefetchMode::Skip
+        } else if let Some(cache) = bounded_cache {
+            BurnE2eTargetPrefetchMode::Missing(cache.cached_identities())
+        } else {
+            BurnE2eTargetPrefetchMode::All
+        }
+    }
+
     pub(super) fn spawn_e2e_cpu_batch_prefetch(
         examples: &[BurnE2eRolloutExample],
         conditions: &BurnE2eConditionCache,
         indices: Vec<usize>,
         config: BurnE2eRolloutTrainConfig,
-        targets_cached: bool,
+        target_mode: BurnE2eTargetPrefetchMode,
     ) -> AutomataResult<BurnE2eCpuBatchPrefetch> {
         let mut target_inputs = Vec::with_capacity(indices.len());
         let (unique_target_indices, target_expansion) = deduplicate_condition_indices(&indices);
-        if !targets_cached {
-            target_inputs.reserve(unique_target_indices.len());
-            for &idx in &unique_target_indices {
+        let target_identities = unique_target_indices
+            .iter()
+            .copied()
+            .filter(|identity| match &target_mode {
+                BurnE2eTargetPrefetchMode::All => true,
+                BurnE2eTargetPrefetchMode::Missing(cached) => !cached.contains(identity),
+                BurnE2eTargetPrefetchMode::Skip => false,
+            })
+            .collect::<Vec<_>>();
+        target_inputs.reserve(target_identities.len());
+        for &idx in &target_identities {
                 let example = examples.get(idx).ok_or_else(|| {
                     AutomataError::InvalidArgument(
                         "HyperNPA e2e prefetch target index out of bounds".to_string(),
@@ -171,7 +334,6 @@ use super::*;
                     update_prob: example.update_prob,
                     seed_scale: example.seed_scale,
                 });
-            }
         }
         let (unique_condition_indices, condition_expansion) =
             deduplicate_condition_indices(&indices);
@@ -180,7 +342,7 @@ use super::*;
         } else {
             conditions
                 .dynamic_dino_paths_for_indices(&unique_condition_indices)?
-                .map(|paths| (paths, condition_expansion))
+                .map(|(identities, paths)| (paths, identities, condition_expansion))
         };
         let pending_indices = indices.clone();
         Ok(BurnE2eCpuBatchPrefetch {
@@ -188,6 +350,7 @@ use super::*;
             handle: thread::spawn(move || {
                 prepare_e2e_cpu_batch(
                     indices,
+                    target_identities,
                     target_inputs,
                     target_expansion,
                     condition_paths,
@@ -211,9 +374,10 @@ use super::*;
 
     pub(super) fn prepare_e2e_cpu_batch(
         indices: Vec<usize>,
+        target_identities: Vec<usize>,
         target_inputs: Vec<BurnE2eCpuTargetInput>,
         target_expansion: Vec<usize>,
-        condition_paths: Option<(Vec<PathBuf>, Vec<usize>)>,
+        condition_paths: Option<(Vec<PathBuf>, Vec<usize>, Vec<usize>)>,
         config: BurnE2eRolloutTrainConfig,
     ) -> Result<BurnE2ePreparedCpuBatch, String> {
         let direct_config = direct_config_view(config);
@@ -227,9 +391,10 @@ use super::*;
                     .collect::<Result<Vec<_>, _>>()
             },
             move || match condition_paths {
-                Some((paths, expansion)) => {
+                Some((paths, identities, expansion)) => {
                     prepare_dino_condition_batch_for_prefetch(
                         paths,
+                        identities,
                         expansion,
                         config.dino_image_size,
                     )
@@ -242,6 +407,7 @@ use super::*;
         let prepared_dino = prepared_dino?;
         Ok(BurnE2ePreparedCpuBatch {
             indices,
+            target_identities,
             targets,
             target_expansion,
             prepared_dino,
@@ -263,17 +429,43 @@ use super::*;
         (unique, expansion)
     }
 
+    #[cfg(feature = "dino")]
+    pub(super) fn next_e2e_dino_cache_slot(
+        slot_identities: &[Option<usize>],
+        protected_identities: &HashSet<usize>,
+        next_evict: &mut usize,
+    ) -> Option<usize> {
+        let capacity = slot_identities.len();
+        if capacity == 0 {
+            return None;
+        }
+        if let Some(slot) = slot_identities.iter().position(Option::is_none) {
+            *next_evict = (slot + 1) % capacity;
+            return Some(slot);
+        }
+        for _ in 0..capacity {
+            let slot = *next_evict % capacity;
+            *next_evict = (slot + 1) % capacity;
+            let identity = slot_identities[slot]
+                .expect("a full DINO cache slot must have an identity");
+            if !protected_identities.contains(&identity) {
+                return Some(slot);
+            }
+        }
+        None
+    }
+
     pub(super) fn prepare_e2e_cpu_target(
         input: BurnE2eCpuTargetInput,
         config: DirectBasisTrainConfig,
     ) -> AutomataResult<BurnE2ePreparedTargetExample> {
+        let target = input.target.load()?;
         let pixels = config.loss_config.image_size * config.loss_config.image_size;
-        let render = render_target_2d_splat(&input.target, config.loss_config)?;
-        let foreground = target_2d_foreground_mask(&input.target, config.loss_config)?;
+        let render = render_target_2d_splat(&target, config.loss_config)?;
+        let foreground = target_2d_foreground_mask(&target, config.loss_config)?;
         let target_foreground_scale = pixels as f32 / foreground.iter().sum::<f32>().max(1.0);
-        let target_mean = input.target.mean_position();
-        let target_positions = input
-            .target
+        let target_mean = target.mean_position();
+        let target_positions = target
             .positions
             .iter()
             .flat_map(|position| [position[0], position[1]])
@@ -285,12 +477,12 @@ use super::*;
             target_foreground_scale,
             target_mean,
             target_positions,
-            pixel_size: input.target.pixel_size,
-            target_points: input.target.point_count(),
+            pixel_size: target.pixel_size,
+            target_points: target.point_count(),
             particle_count: input.particle_count.max(1),
             update_prob: input.update_prob,
             seed_scale: input.seed_scale,
-            target_cpu: input.target,
+            target_cpu: target,
         })
     }
 
@@ -306,6 +498,16 @@ use super::*;
     }
 
     impl BurnE2ePreparedTargetExample {
+        pub(super) fn device_bytes(&self) -> usize {
+            self.target_rgb
+                .len()
+                .saturating_add(self.target_density.len())
+                .saturating_add(self.target_foreground.len())
+                .saturating_add(self.target_mean.len())
+                .saturating_add(self.target_positions.len())
+                .saturating_mul(std::mem::size_of::<f32>())
+        }
+
         pub(super) fn into_burn(self, pixel_xy: &Tensor2, device: &BurnDevice) -> BurnTargetExample {
             let pixels = self.target_rgb.len() / 3;
             let target_position_count = self.target_positions.len() / 2;
@@ -342,9 +544,13 @@ use super::*;
     #[cfg(feature = "dino")]
     pub(super) fn prepare_dino_condition_batch_for_prefetch(
         paths: Vec<PathBuf>,
+        encoded_identities: Vec<usize>,
         expansion: Vec<usize>,
         image_size: usize,
     ) -> Result<BurnE2ePreparedDinoBatch, String> {
+        if paths.len() != encoded_identities.len() {
+            return Err("DINO prefetch paths and identities have different lengths".to_string());
+        }
         let encoded_rows = paths.len();
         let images = paths
             .into_par_iter()
@@ -355,6 +561,7 @@ use super::*;
         Ok(BurnE2ePreparedDinoBatch {
             prepared,
             encoded_rows,
+            encoded_identities,
             expansion,
         })
     }
@@ -362,6 +569,7 @@ use super::*;
     #[cfg(not(feature = "dino"))]
     pub(super) fn prepare_dino_condition_batch_for_prefetch(
         _paths: Vec<PathBuf>,
+        _encoded_identities: Vec<usize>,
         _expansion: Vec<usize>,
         _image_size: usize,
     ) -> Result<BurnE2ePreparedDinoBatch, String> {
@@ -418,6 +626,22 @@ use super::*;
         }
     }
 
+    const MAX_QUALITY_EVAL_PARTICLE_ROWS: usize = 32 * 1024;
+
+    pub(super) fn bounded_quality_eval_batch_size(
+        requested_examples: usize,
+        particle_count: usize,
+    ) -> usize {
+        requested_examples
+            .max(1)
+            .min(
+                MAX_QUALITY_EVAL_PARTICLE_ROWS
+                    .checked_div(particle_count.max(1))
+                    .unwrap_or(1)
+                    .max(1),
+            )
+    }
+
     pub(super) fn validation_direct_config(config: BurnE2eRolloutTrainConfig) -> DirectBasisTrainConfig {
         let mut direct = direct_config_view(config);
         direct.rollout_particles = config.validation_particles.max(1);
@@ -428,7 +652,10 @@ use super::*;
         direct.eval_batch_size = if direct.rollout_particles > config.max_dense_train_particles {
             1
         } else {
-            config.example_batch_size.max(1)
+            bounded_quality_eval_batch_size(
+                config.example_batch_size,
+                direct.rollout_particles,
+            )
         };
         direct
     }
@@ -535,6 +762,15 @@ use super::*;
                             })
                         })
                         .collect::<AutomataResult<Vec<_>>>()?;
+                    let token_cache_rows = device_cache_max_bytes
+                        .checked_div(
+                            token_count
+                                .saturating_mul(embed_dims)
+                                .saturating_mul(std::mem::size_of::<f32>())
+                                .max(1),
+                        )
+                        .unwrap_or(0)
+                        .min(examples.len());
                     let source = BurnE2eDinoConditionSource {
                         paths,
                         encoder,
@@ -547,6 +783,16 @@ use super::*;
                         alpha_channel: config.dino_alpha_channel,
                         alpha_channel_scale: config.dino_alpha_channel_scale,
                         patch_pixels: config.dino_patch_pixels,
+                        token_cache: Mutex::new(BurnE2eDinoTokenCache {
+                            values: None,
+                            slot_identities: vec![None; token_cache_rows],
+                            identity_slots: HashMap::with_capacity(token_cache_rows),
+                            next_evict: 0,
+                            hits: 0,
+                            misses: 0,
+                            inserts: 0,
+                            evictions: 0,
+                        }),
                     };
                     let values = if device_cache_max_bytes > 0
                         && feature_bytes <= device_cache_max_bytes
@@ -789,47 +1035,78 @@ use super::*;
             if let (BurnE2eConditionValues::DynamicDino(source), Some(prepared)) =
                 (&self.values, prepared_dino)
             {
-                if prepared.expansion.len() != indices.len()
-                    || prepared
-                        .expansion
-                        .iter()
-                        .any(|row| *row >= prepared.encoded_rows)
+                let (unique_indices, expected_expansion) =
+                    deduplicate_condition_indices(indices);
+                if prepared.expansion != expected_expansion
+                    || prepared.encoded_rows != unique_indices.len()
+                    || prepared.encoded_identities != unique_indices
                 {
                     return Err(AutomataError::InvalidArgument(
-                        "prepared DINO expansion does not match requested condition rows"
+                        "prepared DINO batch must contain every unique requested condition row"
                             .to_string(),
                     ));
                 }
+                if let Some(cached) = source.select_cached(indices)? {
+                    return Ok(cached);
+                }
+                let encoded_identities =
+                    if source.token_cache_capacity() >= unique_indices.len() {
+                        source.missing_identities(&unique_indices)?
+                    } else {
+                        unique_indices.clone()
+                    };
+                let prepared_rows = encoded_identities
+                    .iter()
+                    .map(|identity| {
+                        unique_indices
+                            .iter()
+                            .position(|candidate| candidate == identity)
+                            .expect("missing DINO identity must be present in the prepared batch")
+                    })
+                    .collect::<Vec<_>>();
+                let selected = prepared
+                    .prepared
+                    .select_rows(&prepared_rows)
+                    .map_err(|error| {
+                        AutomataError::InvalidArgument(format!(
+                            "failed to select prepared DINO condition rows: {error}"
+                        ))
+                    })?;
                 let encoded = source.encode_preprocessed(
-                    &prepared.prepared,
-                    prepared.encoded_rows,
+                    &selected,
+                    encoded_identities.len(),
                     self.token_count,
                     self.embed_dims,
                 )?;
-                if prepared.encoded_rows == indices.len()
-                    && prepared
-                        .expansion
-                        .iter()
-                        .copied()
-                        .eq(0..indices.len())
+                source.cache_encoded(&encoded_identities, encoded.clone(), &unique_indices)?;
+                if encoded_identities == unique_indices
+                    && unique_indices.len() == indices.len()
+                    && expected_expansion.iter().copied().eq(0..indices.len())
                 {
                     return Ok(encoded);
                 }
-                let device = encoded.device();
-                return Ok(encoded.select(
-                    0,
-                    Tensor::<BurnBackend, 1, Int>::from_data(
-                        TensorData::new(
-                            prepared
-                                .expansion
-                                .iter()
-                                .map(|row| *row as i64)
-                                .collect::<Vec<_>>(),
-                            [prepared.expansion.len()],
+                if encoded_identities == unique_indices {
+                    let device = encoded.device();
+                    return Ok(encoded.select(
+                        0,
+                        Tensor::<BurnBackend, 1, Int>::from_data(
+                            TensorData::new(
+                                expected_expansion
+                                    .iter()
+                                    .map(|row| *row as i64)
+                                    .collect::<Vec<_>>(),
+                                [expected_expansion.len()],
+                            ),
+                            &device,
                         ),
-                        &device,
-                    ),
-                ));
+                    ));
+                }
+                return source.gather_cached(indices)?.ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "partial prepared DINO batch did not populate every requested cache row"
+                            .to_string(),
+                    )
+                });
             }
             self.select(indices)
         }
@@ -837,7 +1114,7 @@ use super::*;
         pub(super) fn dynamic_dino_paths_for_indices(
             &self,
             indices: &[usize],
-        ) -> AutomataResult<Option<Vec<PathBuf>>> {
+        ) -> AutomataResult<Option<(Vec<usize>, Vec<PathBuf>)>> {
             if indices.iter().any(|idx| *idx >= self.examples) {
                 return Err(AutomataError::InvalidArgument(
                     "HyperNPA e2e condition cache index out of bounds".to_string(),
@@ -845,7 +1122,11 @@ use super::*;
             }
             #[cfg(feature = "dino")]
             if let BurnE2eConditionValues::DynamicDino(source) = &self.values {
-                return indices
+                let encoded_identities = indices.to_vec();
+                if encoded_identities.is_empty() {
+                    return Ok(None);
+                }
+                let paths = encoded_identities
                     .iter()
                     .map(|idx| {
                         source.paths.get(*idx).cloned().ok_or_else(|| {
@@ -854,16 +1135,16 @@ use super::*;
                             )
                         })
                     })
-                    .collect::<AutomataResult<Vec<_>>>()
-                    .map(Some);
+                    .collect::<AutomataResult<Vec<_>>>()?;
+                return Ok(Some((encoded_identities, paths)));
             }
             Ok(None)
         }
 
         pub(super) fn feature_bytes(&self) -> usize {
             #[cfg(feature = "dino")]
-            if matches!(self.values, BurnE2eConditionValues::DynamicDino(_)) {
-                return 0;
+            if let BurnE2eConditionValues::DynamicDino(source) = &self.values {
+                return source.token_cache_bytes(self.token_count, self.embed_dims);
             }
             self.examples
                 .saturating_mul(self.token_count)
@@ -879,7 +1160,13 @@ use super::*;
                 BurnE2eConditionValues::Device(_) => "device-resident",
                 BurnE2eConditionValues::HostRows(_) => "host-row-streamed",
                 #[cfg(feature = "dino")]
-                BurnE2eConditionValues::DynamicDino(_) => "dino-on-demand-device",
+                BurnE2eConditionValues::DynamicDino(source) => {
+                    if source.token_cache_capacity() > 0 {
+                        "dino-on-demand-device-lru"
+                    } else {
+                        "dino-on-demand-device"
+                    }
+                }
             }
         }
 
@@ -896,6 +1183,22 @@ use super::*;
                 #[cfg(feature = "dino")]
                 BurnE2eConditionValues::DynamicDino(_) => false,
             }
+        }
+
+        pub(super) fn token_cache_metrics(&self) -> serde_json::Value {
+            #[cfg(feature = "dino")]
+            if let BurnE2eConditionValues::DynamicDino(source) = &self.values {
+                return source.token_cache_metrics();
+            }
+            json!({
+                "mode": self.storage_label(),
+                "capacity_rows": self.examples,
+                "resident_rows": self.examples,
+                "hits": 0,
+                "misses": 0,
+                "inserts": 0,
+                "evictions": 0,
+            })
         }
     }
 
@@ -943,8 +1246,18 @@ use super::*;
             token_count: usize,
             embed_dims: usize,
         ) -> AutomataResult<Tensor3> {
-            let mut chunks = Vec::with_capacity(indices.len().div_ceil(self.batch_size));
-            for chunk_indices in indices.chunks(self.batch_size) {
+            if let Some(cached) = self.select_cached(indices)? {
+                return Ok(cached);
+            }
+            let (unique_indices, expansion) = deduplicate_condition_indices(indices);
+            let encoded_identities = if self.token_cache_capacity() >= unique_indices.len() {
+                self.missing_identities(&unique_indices)?
+            } else {
+                unique_indices.clone()
+            };
+            let mut chunks =
+                Vec::with_capacity(encoded_identities.len().div_ceil(self.batch_size));
+            for chunk_indices in encoded_identities.chunks(self.batch_size) {
                 let conditions = chunk_indices
                     .iter()
                     .map(|idx| {
@@ -972,16 +1285,221 @@ use super::*;
                 Tensor::cat(chunks, 0)
             };
             let dims = encoded.dims();
-            if dims != [indices.len(), token_count, embed_dims] {
+            if dims != [encoded_identities.len(), token_count, embed_dims] {
                 return Err(AutomataError::InvalidArgument(format!(
                     "on-demand DINO condition tensor shape {:?} != [{}, {}, {}]",
                     dims,
-                    indices.len(),
+                    encoded_identities.len(),
                     token_count,
                     embed_dims
                 )));
             }
-            Ok(Tensor::<BurnBackend, 3>::from_inner(encoded))
+            let encoded = Tensor::<BurnBackend, 3>::from_inner(encoded);
+            self.cache_encoded(&encoded_identities, encoded.clone(), &unique_indices)?;
+            if encoded_identities != unique_indices {
+                return self.gather_cached(indices)?.ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "partial on-demand DINO encoding did not populate every requested cache row"
+                            .to_string(),
+                    )
+                });
+            }
+            if unique_indices.len() == indices.len()
+                && expansion.iter().copied().eq(0..indices.len())
+            {
+                return Ok(encoded);
+            }
+            let device = encoded.device();
+            Ok(encoded.select(
+                0,
+                Tensor::<BurnBackend, 1, Int>::from_data(
+                    TensorData::new(
+                        expansion
+                            .into_iter()
+                            .map(|row| row as i64)
+                            .collect::<Vec<_>>(),
+                        [indices.len()],
+                    ),
+                    &device,
+                ),
+            ))
+        }
+
+        pub(super) fn token_cache_capacity(&self) -> usize {
+            self.token_cache
+                .lock()
+                .map(|cache| cache.slot_identities.len())
+                .unwrap_or(0)
+        }
+
+        pub(super) fn token_cache_bytes(&self, token_count: usize, embed_dims: usize) -> usize {
+            self.token_cache_capacity()
+                .saturating_mul(token_count)
+                .saturating_mul(embed_dims)
+                .saturating_mul(std::mem::size_of::<f32>())
+        }
+
+        pub(super) fn token_cache_metrics(&self) -> serde_json::Value {
+            match self.token_cache.lock() {
+                Ok(cache) => {
+                    let lookups = cache.hits.saturating_add(cache.misses);
+                    json!({
+                        "mode": "bounded-device-lru-plus-on-demand",
+                        "capacity_rows": cache.slot_identities.len(),
+                        "resident_rows": cache.identity_slots.len(),
+                        "hits": cache.hits,
+                        "misses": cache.misses,
+                        "hit_rate": if lookups == 0 {
+                            0.0
+                        } else {
+                            cache.hits as f64 / lookups as f64
+                        },
+                        "inserts": cache.inserts,
+                        "evictions": cache.evictions,
+                    })
+                }
+                Err(_) => json!({
+                    "mode": "bounded-device-lru-plus-on-demand",
+                    "error": "poisoned",
+                }),
+            }
+        }
+
+        pub(super) fn missing_identities(
+            &self,
+            indices: &[usize],
+        ) -> AutomataResult<Vec<usize>> {
+            let cache = self.token_cache.lock().map_err(|_| {
+                AutomataError::InvalidArgument("DINO token cache lock is poisoned".to_string())
+            })?;
+            Ok(indices
+                .iter()
+                .copied()
+                .filter(|identity| !cache.identity_slots.contains_key(identity))
+                .collect())
+        }
+
+        fn select_cached(&self, indices: &[usize]) -> AutomataResult<Option<Tensor3>> {
+            self.select_cached_impl(indices, true)
+        }
+
+        fn gather_cached(&self, indices: &[usize]) -> AutomataResult<Option<Tensor3>> {
+            self.select_cached_impl(indices, false)
+        }
+
+        fn select_cached_impl(
+            &self,
+            indices: &[usize],
+            record_lookup: bool,
+        ) -> AutomataResult<Option<Tensor3>> {
+            let mut cache = self.token_cache.lock().map_err(|_| {
+                AutomataError::InvalidArgument("DINO token cache lock is poisoned".to_string())
+            })?;
+            if indices.is_empty() {
+                return Ok(None);
+            }
+            let missing = indices
+                .iter()
+                .filter(|identity| !cache.identity_slots.contains_key(identity))
+                .count();
+            if record_lookup {
+                cache.hits = cache
+                    .hits
+                    .saturating_add(indices.len().saturating_sub(missing) as u64);
+                cache.misses = cache.misses.saturating_add(missing as u64);
+            }
+            if missing > 0 {
+                return Ok(None);
+            }
+            let Some(values) = cache.values.as_ref() else {
+                return Ok(None);
+            };
+            let slots = indices
+                .iter()
+                .map(|identity| cache.identity_slots[identity])
+                .collect::<Vec<_>>();
+            let device = values.device();
+            Ok(Some(Tensor::<BurnBackend, 3>::from_inner(
+                values
+                    .clone()
+                    .select(0, inner_index_tensor(&slots, &device)),
+            )))
+        }
+
+        fn cache_encoded(
+            &self,
+            identities: &[usize],
+            encoded: Tensor3,
+            protected_identities: &[usize],
+        ) -> AutomataResult<()> {
+            if identities.is_empty() {
+                return Ok(());
+            }
+            let dims = encoded.shape().dims::<3>();
+            if dims[0] != identities.len() {
+                return Err(AutomataError::InvalidArgument(format!(
+                    "DINO cache insert has {} identities for {} encoded rows",
+                    identities.len(),
+                    dims[0],
+                )));
+            }
+            let mut cache = self.token_cache.lock().map_err(|_| {
+                AutomataError::InvalidArgument("DINO token cache lock is poisoned".to_string())
+            })?;
+            let capacity = cache.slot_identities.len();
+            if capacity == 0 || identities.len() > capacity {
+                return Ok(());
+            }
+            let protected = protected_identities.iter().copied().collect::<HashSet<_>>();
+            if identities
+                .iter()
+                .any(|identity| !protected.contains(identity))
+            {
+                return Err(AutomataError::InvalidArgument(
+                    "DINO cache insert identities must be included in the protected request"
+                        .to_string(),
+                ));
+            }
+            let mut slots = Vec::with_capacity(identities.len());
+            for &identity in identities {
+                if let Some(&slot) = cache.identity_slots.get(&identity) {
+                    slots.push(slot);
+                    continue;
+                }
+                let slot = {
+                    let BurnE2eDinoTokenCache {
+                        slot_identities,
+                        next_evict,
+                        ..
+                    } = &mut *cache;
+                    next_e2e_dino_cache_slot(slot_identities, &protected, next_evict)
+                }
+                .ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "DINO token cache cannot insert a requested row without evicting another requested row"
+                            .to_string(),
+                    )
+                })?;
+                if let Some(evicted) = cache.slot_identities[slot].take() {
+                    cache.identity_slots.remove(&evicted);
+                    cache.evictions = cache.evictions.saturating_add(1);
+                }
+                cache.slot_identities[slot] = Some(identity);
+                cache.identity_slots.insert(identity, slot);
+                cache.inserts = cache.inserts.saturating_add(1);
+                slots.push(slot);
+            }
+
+            let device = encoded.device();
+            let mut values = cache.values.take().unwrap_or_else(|| {
+                Tensor::<InnerBackend, 3>::zeros([capacity, dims[1], dims[2]], &device)
+            });
+            let slot_indices = inner_index_tensor(&slots, &device);
+            let encoded = encoded.inner();
+            let delta = encoded - values.clone().select(0, slot_indices.clone());
+            values = values.select_assign(0, slot_indices, delta, IndexingUpdateOp::Add);
+            cache.values = Some(values);
+            Ok(())
         }
 
         pub(super) fn encode_preprocessed(

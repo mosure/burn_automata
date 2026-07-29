@@ -14,6 +14,20 @@ pub(crate) struct E2eIdentitySampler {
     trajectory_counts: Vec<u64>,
     loss_ema: Vec<f32>,
     loss_observed: Vec<bool>,
+    #[serde(default)]
+    active_window_size: usize,
+    #[serde(default)]
+    active_window_steps: usize,
+    #[serde(default)]
+    active_window_refresh_size: usize,
+    #[serde(default)]
+    active_window_batches: usize,
+    #[serde(default)]
+    active_window: Vec<usize>,
+    #[serde(default)]
+    window_order: Vec<usize>,
+    #[serde(default)]
+    window_cursor: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -28,6 +42,7 @@ pub(crate) struct E2eExposureStats {
 }
 
 impl E2eIdentitySampler {
+    #[cfg(test)]
     pub(crate) fn new<R: Rng + ?Sized>(
         len: usize,
         requested_batch_size: usize,
@@ -37,10 +52,44 @@ impl E2eIdentitySampler {
         priority_max_weight: f32,
         rng: &mut R,
     ) -> Self {
+        Self::new_with_active_window(
+            len,
+            requested_batch_size,
+            uniform_fraction,
+            priority_ema_beta,
+            priority_min_weight,
+            priority_max_weight,
+            0,
+            0,
+            rng,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_active_window<R: Rng + ?Sized>(
+        len: usize,
+        requested_batch_size: usize,
+        uniform_fraction: f32,
+        priority_ema_beta: f32,
+        priority_min_weight: f32,
+        priority_max_weight: f32,
+        requested_active_window_size: usize,
+        active_window_steps: usize,
+        rng: &mut R,
+    ) -> Self {
         let batch_size = requested_batch_size.max(1).min(len.max(1));
         let mut uniform_order = (0..len).collect::<Vec<_>>();
         uniform_order.shuffle(rng);
-        Self {
+        let active_window_size = requested_active_window_size.max(batch_size).min(len);
+        let active_window_size = if active_window_steps == 0 || active_window_size >= len {
+            0
+        } else {
+            active_window_size
+        };
+        let active_window_refresh_size = active_window_size.div_ceil(4);
+        let mut window_order = (0..len).collect::<Vec<_>>();
+        window_order.shuffle(rng);
+        let mut sampler = Self {
             len,
             batch_size,
             uniform_fraction: uniform_fraction.clamp(0.0, 1.0),
@@ -52,12 +101,26 @@ impl E2eIdentitySampler {
             trajectory_counts: vec![0; len],
             loss_ema: vec![0.0; len],
             loss_observed: vec![false; len],
+            active_window_size,
+            active_window_steps: active_window_steps * usize::from(active_window_size > 0),
+            active_window_refresh_size,
+            active_window_batches: 0,
+            active_window: Vec::new(),
+            window_order,
+            window_cursor: 0,
+        };
+        if sampler.active_window_enabled() {
+            sampler.activate_next_window(rng);
         }
+        sampler
     }
 
     pub(crate) fn next_batch<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Vec<usize> {
         if self.len == 0 {
             return Vec::new();
+        }
+        if self.active_window_enabled() {
+            return self.next_active_window_batch(rng);
         }
         if self.batch_size >= self.len {
             let mut all = (0..self.len).collect::<Vec<_>>();
@@ -175,6 +238,7 @@ impl E2eIdentitySampler {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_compatible(
         &self,
         len: usize,
@@ -184,7 +248,37 @@ impl E2eIdentitySampler {
         priority_min_weight: f32,
         priority_max_weight: f32,
     ) -> bool {
+        self.is_compatible_with_active_window(
+            len,
+            requested_batch_size,
+            uniform_fraction,
+            priority_ema_beta,
+            priority_min_weight,
+            priority_max_weight,
+            0,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn is_compatible_with_active_window(
+        &self,
+        len: usize,
+        requested_batch_size: usize,
+        uniform_fraction: f32,
+        priority_ema_beta: f32,
+        priority_min_weight: f32,
+        priority_max_weight: f32,
+        requested_active_window_size: usize,
+        active_window_steps: usize,
+    ) -> bool {
         let batch_size = requested_batch_size.max(1).min(len.max(1));
+        let active_window_size = requested_active_window_size.max(batch_size).min(len);
+        let active_window_size = if active_window_steps == 0 || active_window_size >= len {
+            0
+        } else {
+            active_window_size
+        };
         self.len == len
             && self.batch_size == batch_size
             && (self.uniform_fraction - uniform_fraction.clamp(0.0, 1.0)).abs() <= f32::EPSILON
@@ -194,6 +288,9 @@ impl E2eIdentitySampler {
                 <= f32::EPSILON
             && (self.priority_max_weight - priority_max_weight.max(priority_min_weight)).abs()
                 <= f32::EPSILON
+            && self.active_window_size == active_window_size
+            && self.active_window_steps == active_window_steps * usize::from(active_window_size > 0)
+            && self.active_window_refresh_size == active_window_size.div_ceil(4)
     }
 
     pub(crate) fn ensure_minimum_trajectory_counts(
@@ -217,6 +314,11 @@ impl E2eIdentitySampler {
         &self.trajectory_counts
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_window(&self) -> &[usize] {
+        &self.active_window
+    }
+
     fn priority_weight(&self, identity: usize, observed_mean: f32, min_exposure: u64) -> f32 {
         let loss_weight = if self.loss_observed[identity] && observed_mean > f32::MIN_POSITIVE {
             (self.loss_ema[identity] / observed_mean).max(0.0).sqrt()
@@ -228,6 +330,108 @@ impl E2eIdentitySampler {
             .sqrt()
             .max(0.5);
         (loss_weight * coverage_weight).clamp(self.priority_min_weight, self.priority_max_weight)
+    }
+
+    fn active_window_enabled(&self) -> bool {
+        self.active_window_size > 0 && self.active_window_steps > 0
+    }
+
+    fn activate_next_window<R: Rng + ?Sized>(&mut self, rng: &mut R) {
+        if !self.active_window.is_empty() {
+            let refresh = self
+                .active_window_refresh_size
+                .max(1)
+                .min(self.active_window.len());
+            self.active_window.drain(..refresh);
+        }
+        while self.active_window.len() < self.active_window_size {
+            if self.window_cursor >= self.window_order.len() {
+                self.window_order = (0..self.len).collect();
+                self.window_order.shuffle(rng);
+                self.window_cursor = 0;
+            }
+            let identity = self.window_order[self.window_cursor];
+            self.window_cursor += 1;
+            if !self.active_window.contains(&identity) {
+                self.active_window.push(identity);
+            }
+        }
+        self.uniform_order = self.active_window.clone();
+        self.uniform_order.shuffle(rng);
+        self.uniform_cursor = 0;
+        self.active_window_batches = 0;
+    }
+
+    fn next_active_window_batch<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Vec<usize> {
+        if self.active_window.is_empty() || self.active_window_batches >= self.active_window_steps {
+            self.activate_next_window(rng);
+        }
+        let batch_size = self.batch_size.min(self.active_window.len());
+        if batch_size >= self.active_window.len() {
+            let mut all = self.active_window.clone();
+            all.shuffle(rng);
+            self.active_window_batches += 1;
+            return all;
+        }
+
+        let uniform_count =
+            ((batch_size as f32 * self.uniform_fraction).ceil() as usize).clamp(1, batch_size);
+        let mut selected = Vec::with_capacity(batch_size);
+        while selected.len() < uniform_count {
+            if self.uniform_cursor >= self.uniform_order.len() {
+                self.uniform_order = self.active_window.clone();
+                self.uniform_order.shuffle(rng);
+                self.uniform_cursor = 0;
+            }
+            let identity = self.uniform_order[self.uniform_cursor];
+            self.uniform_cursor += 1;
+            if !selected.contains(&identity) {
+                selected.push(identity);
+            }
+        }
+
+        let observed = self
+            .active_window
+            .iter()
+            .copied()
+            .filter(|identity| self.loss_observed[*identity])
+            .collect::<Vec<_>>();
+        let observed_mean = observed
+            .iter()
+            .map(|identity| self.loss_ema[*identity])
+            .sum::<f32>()
+            / observed.len().max(1) as f32;
+        let min_exposure = self
+            .active_window
+            .iter()
+            .map(|identity| self.trajectory_counts[*identity])
+            .min()
+            .unwrap_or(0);
+        while selected.len() < batch_size {
+            let candidates = self
+                .active_window
+                .iter()
+                .copied()
+                .filter(|identity| !selected.contains(identity))
+                .collect::<Vec<_>>();
+            let weights = candidates
+                .iter()
+                .map(|identity| self.priority_weight(*identity, observed_mean, min_exposure))
+                .collect::<Vec<_>>();
+            let total = weights.iter().sum::<f32>();
+            let mut draw = rng.random::<f32>() * total.max(f32::MIN_POSITIVE);
+            let mut chosen = *candidates.last().expect("non-empty priority candidates");
+            for (identity, weight) in candidates.into_iter().zip(weights) {
+                draw -= weight;
+                if draw <= 0.0 {
+                    chosen = identity;
+                    break;
+                }
+            }
+            selected.push(chosen);
+        }
+        self.active_window_batches += 1;
+        selected
     }
 }
 
@@ -294,5 +498,60 @@ mod tests {
 
         sampler.ensure_minimum_trajectory_counts(&[2_000, 1_500, 100, 0], 8);
         assert_eq!(sampler.trajectory_counts(), [16_000, 12_000, 800, 800]);
+    }
+
+    #[test]
+    fn active_windows_preserve_local_revisits_and_rotate_across_the_dataset() {
+        let mut rng = StdRng::seed_from_u64(23);
+        let mut sampler = E2eIdentitySampler::new_with_active_window(
+            100, 8, 1.0, 0.95, 0.5, 4.0, 20, 10, &mut rng,
+        );
+        let first_window = sampler.active_window().to_vec();
+        let mut windows = Vec::new();
+        for window in 0..17 {
+            let mut identities = Vec::new();
+            for _ in 0..10 {
+                let batch = sampler.next_batch(&mut rng);
+                assert_eq!(batch.len(), 8);
+                identities.extend(batch.iter().copied());
+                sampler.record_trajectories(&batch, 4);
+            }
+            identities.sort_unstable();
+            identities.dedup();
+            assert!(
+                identities.len() <= 20,
+                "window {window} escaped its active identity set: {identities:?}"
+            );
+            windows.extend(identities);
+            if window == 1 {
+                let retained = first_window
+                    .iter()
+                    .filter(|identity| sampler.active_window().contains(identity))
+                    .count();
+                assert_eq!(retained, 15);
+            }
+        }
+        windows.sort_unstable();
+        windows.dedup();
+        assert_eq!(windows.len(), 100);
+        assert!(sampler.is_compatible_with_active_window(100, 8, 1.0, 0.95, 0.5, 4.0, 20, 10,));
+        assert!(!sampler.is_compatible_with_active_window(100, 8, 1.0, 0.95, 0.5, 4.0, 25, 10,));
+    }
+
+    #[test]
+    fn active_window_checkpoint_round_trip_preserves_rotation_state() {
+        let mut rng = StdRng::seed_from_u64(29);
+        let mut sampler =
+            E2eIdentitySampler::new_with_active_window(32, 4, 0.75, 0.95, 0.5, 4.0, 8, 3, &mut rng);
+        for _ in 0..5 {
+            sampler.next_batch(&mut rng);
+        }
+        let encoded = serde_json::to_vec(&sampler).unwrap();
+        let mut restored: E2eIdentitySampler = serde_json::from_slice(&encoded).unwrap();
+        let mut expected_rng = rng.clone();
+        assert_eq!(
+            restored.next_batch(&mut rng),
+            sampler.next_batch(&mut expected_rng)
+        );
     }
 }

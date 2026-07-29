@@ -456,6 +456,12 @@ pub(super) fn pending_rollout_batches_compatible(
         } else {
             BurnE2eGeneratorAdamWState::new(&generator)
         };
+        if resume_checkpoint.is_some() && config.curriculum_reset_endpoint_optimizer {
+            generator_optimizer.reset_amortization_optimizer(&generator);
+            eprintln!(
+                "hyper2d curriculum reset endpoint AdamW moments and per-identity optimizer clocks"
+            );
+        }
         let mut particle_pool = if config.use_particle_pool {
             let fresh_pool = || {
                 BurnE2eDeviceParticlePool::new(
@@ -491,19 +497,24 @@ pub(super) fn pending_rollout_batches_compatible(
         } else {
             None
         };
+        let (train_condition_cache_budget, holdout_condition_cache_budget) =
+            split_e2e_condition_cache_budget(
+                config.condition_device_cache_max_bytes,
+                train_examples.len(),
+                holdout_examples.len(),
+            );
         let train_conditions = BurnE2eConditionCache::from_examples_drain(
             train_examples,
             &device,
-            config.condition_device_cache_max_bytes,
+            train_condition_cache_budget,
             config,
         )?;
-        let holdout_conditions =
-            BurnE2eConditionCache::from_examples_drain(
-                holdout_examples,
-                &device,
-                config.condition_device_cache_max_bytes,
-                config,
-            )?;
+        let holdout_conditions = BurnE2eConditionCache::from_examples_drain(
+            holdout_examples,
+            &device,
+            holdout_condition_cache_budget,
+            config,
+        )?;
         if config.amortization_initialize_from_generator && !amortization_restored {
             initialize_e2e_amortization_from_generator(
                 &mut generator,
@@ -515,6 +526,13 @@ pub(super) fn pending_rollout_batches_compatible(
                 "hyper2d initialized {} training-only endpoint latents from the conditioned row-flow generator",
                 train_conditions.examples,
             );
+        }
+        let mut row_flow_endpoint_scale_calibrated = false;
+        if amortization_restored
+            && e2e_endpoint_scale_calibration_due(config, completed_step.saturating_add(1))
+        {
+            recalibrate_e2e_row_flow_endpoint_scale(&mut generator, &npa_config)?;
+            row_flow_endpoint_scale_calibrated = true;
         }
         let train_condition_cache_bytes = train_conditions.feature_bytes();
         let holdout_condition_cache_bytes = holdout_conditions.feature_bytes();
@@ -615,13 +633,15 @@ pub(super) fn pending_rollout_batches_compatible(
         let rollout_replicas = config.rollouts_per_example.max(1);
         let batch_size = condition_batch_size.saturating_mul(rollout_replicas);
         let sampler_resume_checkpoint = resume_checkpoint.as_ref().filter(|checkpoint| {
-            checkpoint.sampler.is_compatible(
+            checkpoint.sampler.is_compatible_with_active_window(
                 train_examples.len(),
                 condition_batch_size,
                 config.sampling_uniform_fraction,
                 config.sampling_priority_ema_beta,
                 config.sampling_priority_min_weight,
                 config.sampling_priority_max_weight,
+                config.sampling_active_window_size,
+                config.sampling_active_window_steps,
             ) && checkpoint.seed_trajectory_counts.len() == train_examples.len()
         });
         let pending_batch_resume_checkpoint = sampler_resume_checkpoint.filter(|checkpoint| {
@@ -652,13 +672,15 @@ pub(super) fn pending_rollout_batches_compatible(
         }
         let mut identity_sampler = sampler_resume_checkpoint.map_or_else(
             || {
-                E2eIdentitySampler::new(
+                E2eIdentitySampler::new_with_active_window(
                     train_examples.len(),
                     condition_batch_size,
                     config.sampling_uniform_fraction,
                     config.sampling_priority_ema_beta,
                     config.sampling_priority_min_weight,
                     config.sampling_priority_max_weight,
+                    config.sampling_active_window_size,
+                    config.sampling_active_window_steps,
                     &mut sampler_init_rng,
                 )
             },
@@ -712,7 +734,14 @@ pub(super) fn pending_rollout_batches_compatible(
         }
         let train_pixel_xy = burn_e2e_pixel_xy(config, &device);
         let projected_target_cache_bytes = e2e_target_cache_bytes(train_examples, config);
-        let train_target_cache = if projected_target_cache_bytes
+        let rollout_free_remaining = config.rollout_free_amortization()
+            && completed_step >= config.amortization_substrate_steps;
+        let train_target_cache = if rollout_free_remaining {
+            eprintln!(
+                "hyper2d rollout-free flow training skips target decode, upload, and particle seeding"
+            );
+            None
+        } else if projected_target_cache_bytes
             <= config.target_device_cache_max_bytes
         {
             eprintln!(
@@ -726,14 +755,43 @@ pub(super) fn pending_rollout_batches_compatible(
                 &device,
             )?)
         } else {
-            eprintln!(
-                "hyper2d target cache examples={} bytes={} exceeds limit={}; using CPU prefetch",
-                train_examples.len(),
-                projected_target_cache_bytes,
-                config.target_device_cache_max_bytes,
-            );
             None
         };
+        let average_target_bytes = projected_target_cache_bytes
+            .checked_div(train_examples.len().max(1))
+            .unwrap_or(0)
+            .max(1);
+        let bounded_target_cache_rows = config
+            .target_device_cache_max_bytes
+            .checked_div(average_target_bytes)
+            .unwrap_or(0)
+            .min(train_examples.len());
+        let mut train_target_device_cache = (!rollout_free_remaining
+            && train_target_cache.is_none()
+            && config.target_device_cache_max_bytes > 0)
+            .then(|| {
+                eprintln!(
+                    "hyper2d target cache examples={} bytes={} exceeds limit={}; storage=bounded-device-lru estimated_rows={}",
+                    train_examples.len(),
+                    projected_target_cache_bytes,
+                    config.target_device_cache_max_bytes,
+                    bounded_target_cache_rows,
+                );
+                BurnE2eTargetDeviceCache::new(
+                    config.target_device_cache_max_bytes,
+                    bounded_target_cache_rows,
+                )
+            });
+        if !rollout_free_remaining
+            && train_target_cache.is_none()
+            && train_target_device_cache.is_none()
+        {
+            eprintln!(
+                "hyper2d target cache examples={} bytes={} limit=0; storage=step-upload",
+                train_examples.len(),
+                projected_target_cache_bytes,
+            );
+        }
         check_process_memory_budget("e2e_rollout:after_target_cache", direct_config_view(config))?;
         check_gpu_memory_budget("e2e_rollout:after_target_cache", direct_config_view(config))?;
         let prefetch_depth = e2e_cpu_prefetch_depth(batch_size, config.steps);
@@ -754,7 +812,11 @@ pub(super) fn pending_rollout_batches_compatible(
                 &train_conditions,
                 indices.clone(),
                 prefetch_config,
-                train_target_cache.is_some(),
+                e2e_target_prefetch_mode(
+                    train_target_cache.is_some(),
+                    train_target_device_cache.as_ref(),
+                    prefetch_config.rollout_free_amortization(),
+                ),
             )?);
         }
         let mut next_prefetch_step = completed_step
@@ -774,7 +836,11 @@ pub(super) fn pending_rollout_batches_compatible(
                     &mut sample_rng,
                 ),
                 prefetch_config,
-                train_target_cache.is_some(),
+                e2e_target_prefetch_mode(
+                    train_target_cache.is_some(),
+                    train_target_device_cache.as_ref(),
+                    prefetch_config.rollout_free_amortization(),
+                ),
             )?);
             next_prefetch_step += 1;
         }
@@ -853,6 +919,12 @@ pub(super) fn pending_rollout_batches_compatible(
         let mut total_host_staged_target_rows = 0u128;
         let mut measured_optimizer_training_ms = 0.0_f64;
         for step in completed_step.saturating_add(1)..=config.steps {
+            if !row_flow_endpoint_scale_calibrated
+                && e2e_endpoint_scale_calibration_due(config, step)
+            {
+                recalibrate_e2e_row_flow_endpoint_scale(&mut generator, &npa_config)?;
+                row_flow_endpoint_scale_calibrated = true;
+            }
             let prepared_batch =
                 join_e2e_cpu_batch_prefetch(prefetch_queue.pop_front().ok_or_else(|| {
                     AutomataError::InvalidArgument(
@@ -861,10 +933,31 @@ pub(super) fn pending_rollout_batches_compatible(
                 })?)?;
             let BurnE2ePreparedCpuBatch {
                 indices,
-                targets: prepared_targets,
+                target_identities,
+                targets: mut prepared_targets,
                 target_expansion,
                 prepared_dino,
             } = prepared_batch;
+            if let Some(cache) = train_target_device_cache.as_mut() {
+                let protected_target_identities = indices
+                    .iter()
+                    .chain(
+                        prefetch_queue
+                            .iter()
+                            .flat_map(|pending| pending.indices.iter()),
+                    )
+                    .copied()
+                    .collect::<Vec<_>>();
+                total_host_staged_target_rows = total_host_staged_target_rows
+                    .saturating_add(prepared_targets.len() as u128);
+                cache.insert_prepared(
+                    &target_identities,
+                    std::mem::take(&mut prepared_targets),
+                    &protected_target_identities,
+                    &train_pixel_xy,
+                    &device,
+                )?;
+            }
             while next_prefetch_step <= config.steps && prefetch_queue.len() < prefetch_depth {
                 let mut sample_rng = e2e_sampling_rng(config.seed, next_prefetch_step);
                 let mut prefetch_config = config;
@@ -879,7 +972,11 @@ pub(super) fn pending_rollout_batches_compatible(
                         &mut sample_rng,
                     ),
                     prefetch_config,
-                    train_target_cache.is_some(),
+                    e2e_target_prefetch_mode(
+                        train_target_cache.is_some(),
+                        train_target_device_cache.as_ref(),
+                        prefetch_config.rollout_free_amortization(),
+                    ),
                 )?);
                 next_prefetch_step += 1;
             }
@@ -896,13 +993,19 @@ pub(super) fn pending_rollout_batches_compatible(
                 .is_multiple_of(config.sampling_priority_update_interval.max(1));
             let collect_metrics = report_due || validation_due || checkpoint_due;
             let collect_per_example_losses = collect_metrics || priority_due;
-            if config.lr_schedule == E2eLrSchedule::UpstreamGrowing
-                && step > 1
-                && step.saturating_sub(1).is_multiple_of(10_000)
-                && !(config.amortization_enabled
-                    && step <= config.amortization_substrate_steps)
-            {
+            let identity_scheduled_substrate = config.amortization_enabled
+                && step <= config.amortization_substrate_steps
+                && config.lr_schedule == E2eLrSchedule::UpstreamGrowing;
+            let (reset_base_optimizer, reset_global_generator_state) =
+                e2e_upstream_optimizer_reset_scopes(
+                    config.lr_schedule == E2eLrSchedule::UpstreamGrowing,
+                    step,
+                    identity_scheduled_substrate,
+                );
+            if reset_base_optimizer {
                 base_optimizer = BurnBaseAdamWState::zeros_like(&params);
+            }
+            if reset_global_generator_state {
                 generator_optimizer = BurnE2eGeneratorAdamWState::new(&generator);
                 if config.use_particle_pool {
                     particle_pool = Some(BurnE2eDeviceParticlePool::new(
@@ -917,15 +1020,14 @@ pub(super) fn pending_rollout_batches_compatible(
                 eprintln!(
                     "hyper2d upstream-growing repetition reset at optimizer step {step}"
                 );
+            } else if reset_base_optimizer {
+                eprintln!(
+                    "hyper2d upstream-growing shared-base optimizer reset at step {step}; endpoint optimizer and pool resets remain per-identity"
+                );
             }
-            let identity_scheduled_substrate = config.amortization_enabled
-                && step <= config.amortization_substrate_steps
-                && config.lr_schedule == E2eLrSchedule::UpstreamGrowing;
-            let optimizer_lr_scale = if identity_scheduled_substrate {
-                1.0
-            } else {
-                e2e_lr_scale(config, step)
-            };
+            let global_lr_scale = e2e_lr_scale(config, step);
+            let (base_lr_scale, optimizer_lr_scale) =
+                e2e_optimizer_lr_scales(global_lr_scale, identity_scheduled_substrate);
             let reported_lr_scale = if identity_scheduled_substrate {
                 mean_upstream_growing_identity_lr_scale(
                     &generator_optimizer.amortization_identity_steps,
@@ -936,6 +1038,8 @@ pub(super) fn pending_rollout_batches_compatible(
                 optimizer_lr_scale
             };
             let mut step_config = e2e_config_with_lr_scale(config, optimizer_lr_scale);
+            step_config.base_optimizer.learning_rate =
+                config.base_optimizer.learning_rate * base_lr_scale;
             step_config.trajectory_tail_weight = e2e_trajectory_tail_weight(config, step);
             step_config.identity_tail_weight = e2e_identity_tail_weight(config, step);
             step_config.amortization_substrate_only =
@@ -951,7 +1055,9 @@ pub(super) fn pending_rollout_batches_compatible(
             }
             step_config.shared_base_trainable =
                 config.shared_base_trainable && step >= config.shared_base_train_start_step;
-            let pool_batch = if let Some(pool) = particle_pool.as_mut() {
+            let pool_batch = if step_config.rollout_free_amortization() {
+                None
+            } else if let Some(pool) = particle_pool.as_mut() {
                 let mut pool_rng = e2e_pool_rng(config.seed, step);
                 if identity_scheduled_substrate {
                     let reset_identities = upstream_growing_repetition_reset_identities(
@@ -991,8 +1097,16 @@ pub(super) fn pending_rollout_batches_compatible(
                 .map(|batch| (Some((batch.x, batch.s)), Some(batch.slots)))
                 .unwrap_or((None, None));
             let uncached_targets;
-            let (step_targets, target_indices) = if let Some(cache) = train_target_cache.as_ref() {
+            let bounded_cached_targets;
+            let no_targets = [];
+            let (step_targets, target_indices) = if step_config.rollout_free_amortization() {
+                (no_targets.as_slice(), Vec::new())
+            } else if let Some(cache) = train_target_cache.as_ref() {
                 (cache.as_slice(), indices.clone())
+            } else if let Some(cache) = train_target_device_cache.as_mut() {
+                let (targets, expansion) = cache.select(&indices)?;
+                bounded_cached_targets = targets;
+                (bounded_cached_targets.as_slice(), expansion)
             } else {
                 total_host_staged_target_rows = total_host_staged_target_rows
                     .saturating_add(prepared_targets.len() as u128);
@@ -1049,7 +1163,9 @@ pub(super) fn pending_rollout_batches_compatible(
             if let Some(per_example_losses) = step_output.per_example_losses.as_deref() {
                 identity_sampler.update_losses(&indices, per_example_losses);
             }
-            if let (Some(pool), Some(pool_slots)) = (particle_pool.as_mut(), pool_slots) {
+            if step_output.particle_steps > 0
+                && let (Some(pool), Some(pool_slots)) = (particle_pool.as_mut(), pool_slots)
+            {
                 pool.update_batch(&pool_slots, step_output.final_x, step_output.final_s)?;
             }
             let mut stats = step_output.history;
@@ -1213,7 +1329,12 @@ pub(super) fn pending_rollout_batches_compatible(
                         params: params.detached(),
                         generator: generator.detached(),
                     };
-                    if step == config.steps && checkpoint_quality.is_some() {
+                    if final_checkpoint_candidate_due(
+                        step,
+                        config.steps,
+                        checkpoint_quality.is_some(),
+                        amortization_quality.is_some(),
+                    ) {
                         final_checkpoint_candidate = Some(candidate);
                     } else if best_checkpoint.as_ref().is_none_or(|checkpoint| {
                         comparable_selection_score_is_better(
@@ -1461,6 +1582,53 @@ pub(super) fn pending_rollout_batches_compatible(
             }
             quality_validation
         };
+        let train_generated_quality_validation = if generator.kind
+            == E2eHyperGeneratorKind::ConditionalRowFlow
+            && config.validation_split != "train"
+            && !holdout_examples.is_empty()
+            && final_validation_config.validation_examples > 0
+        {
+            let quality = evaluate_e2e_rollout_quality(
+                &params.detached(),
+                &generator.detached(),
+                &npa_config,
+                train_examples,
+                &[],
+                &train_conditions,
+                &holdout_conditions,
+                final_validation_config,
+                &device,
+            )?;
+            if let Some(quality) = &quality {
+                quality_validation_evaluations = quality_validation_evaluations.saturating_add(1);
+                quality_validation_elapsed_ms += quality.elapsed_ms;
+            }
+            quality
+        } else {
+            None
+        };
+        let endpoint_teacher_quality_validation =
+            if let Some(quality) = selected_checkpoint_amortization_quality_validation.clone() {
+                Some(quality)
+            } else if config.amortization_enabled
+                && final_validation_config.validation_examples > 0
+            {
+                let quality = evaluate_e2e_amortization_quality(
+                    &params.detached(),
+                    &generator.detached(),
+                    &npa_config,
+                    train_examples,
+                    &train_conditions,
+                    final_validation_config,
+                    &device,
+                )?;
+                if let Some(quality) = &quality {
+                    quality_validation_elapsed_ms += quality.elapsed_ms;
+                }
+                quality
+            } else {
+                None
+            };
         let stability_validation = evaluate_e2e_rollout_stability(
             &params,
             &generator,
@@ -1665,10 +1833,42 @@ pub(super) fn pending_rollout_batches_compatible(
         metrics.insert(
             "target_device_cache".to_string(),
             json!({
-                "resident": train_target_cache.is_some(),
+                "resident": train_target_cache.is_some()
+                    || train_target_device_cache
+                        .as_ref()
+                        .is_some_and(|cache| !cache.entries.is_empty()),
+                "storage": if train_target_cache.is_some() {
+                    "complete-set-device-resident"
+                } else if train_target_device_cache.is_some() {
+                    "bounded-device-lru"
+                } else {
+                    "step-upload"
+                },
                 "projected_bytes_f32": projected_target_cache_bytes,
                 "max_bytes": config.target_device_cache_max_bytes,
-                "step_target_upload": train_target_cache.is_none(),
+                "step_target_upload": train_target_cache.is_none()
+                    && train_target_device_cache.is_none()
+                    && !rollout_free_remaining,
+                "bounded_cache": train_target_device_cache
+                    .as_ref()
+                    .map(BurnE2eTargetDeviceCache::metrics),
+                "rollout_free_skipped": rollout_free_remaining,
+            }),
+        );
+        metrics.insert(
+            "target_source_materialization".to_string(),
+            json!({
+                "plan": "lazy-on-first-use-shared-per-identity",
+                "train_loaded": train_examples
+                    .iter()
+                    .filter(|example| example.target.is_loaded())
+                    .count(),
+                "train_examples": train_examples.len(),
+                "holdout_loaded": holdout_examples
+                    .iter()
+                    .filter(|example| example.target.is_loaded())
+                    .count(),
+                "holdout_examples": holdout_examples.len(),
             }),
         );
         metrics.insert(
@@ -1682,6 +1882,14 @@ pub(super) fn pending_rollout_batches_compatible(
         metrics.insert(
             "holdout_condition_cache_storage".to_string(),
             json!(holdout_condition_cache_storage),
+        );
+        metrics.insert(
+            "train_condition_token_cache".to_string(),
+            train_conditions.token_cache_metrics(),
+        );
+        metrics.insert(
+            "holdout_condition_token_cache".to_string(),
+            holdout_conditions.token_cache_metrics(),
         );
         metrics.insert(
             "cpu_condition_features_drained_from_examples".to_string(),
@@ -1719,6 +1927,16 @@ pub(super) fn pending_rollout_batches_compatible(
                 "priority_min_weight": config.sampling_priority_min_weight,
                 "priority_max_weight": config.sampling_priority_max_weight,
                 "priority_update_interval": config.sampling_priority_update_interval,
+                "active_window_size": config.sampling_active_window_size,
+                "active_window_steps": config.sampling_active_window_steps,
+                "active_window_enabled": config.sampling_active_window_size > 0,
+                "active_window_refresh_size": config.sampling_active_window_size.div_ceil(4),
+                "active_window_retention_fraction": if config.sampling_active_window_size == 0 {
+                    0.0
+                } else {
+                    1.0 - config.sampling_active_window_size.div_ceil(4) as f64
+                        / config.sampling_active_window_size as f64
+                },
                 "trajectory_exposure": exposure,
                 "upstream_reference_trajectories_per_identity": upstream_reference_trajectories,
                 "upstream_reference_particles_per_trajectory": upstream_reference_particles,
@@ -1975,6 +2193,14 @@ pub(super) fn pending_rollout_batches_compatible(
             json!(row_flow_endpoint_vjp_bridge),
         );
         metrics.insert(
+            "row_flow_endpoint_gradient_normalization".to_string(),
+            json!(if row_flow_endpoint_vjp_bridge && config.per_parameter_grad_normalization {
+                "upstream-w1-b1-w2-b2-per-identity"
+            } else {
+                "disabled"
+            }),
+        );
+        metrics.insert(
             "row_flow_endpoint_reused_for_auxiliaries".to_string(),
             json!(row_flow_endpoint_vjp_bridge
                 && (config.adapter_teacher_weight > 0.0
@@ -1988,6 +2214,7 @@ pub(super) fn pending_rollout_batches_compatible(
                 "sample_id_table": generator.kind == E2eHyperGeneratorKind::SampleIdTable,
                 "amortization_endpoint_table": generator.amortization_residual_table.is_some(),
                 "bias_correction": "per-identity",
+                "update_scope": "deduplicated-active-columns-gather-scatter",
                 "absent_identity_parameters": "frozen",
                 "absent_identity_moments": "frozen",
                 "identity_steps_checkpointed": true,
@@ -1996,6 +2223,9 @@ pub(super) fn pending_rollout_batches_compatible(
                 } else {
                     "not-applicable"
                 },
+                "upstream_growing_lr_floor": "hard-floor-after-exact-milestone-decay",
+                "shared_base_schedule": "global-upstream-growing",
+                "shared_base_moment_reset": "global-at-10000-update-boundaries",
                 "upstream_growing_moment_reset": "per-identity-at-10000-update-boundaries",
                 "upstream_growing_pool_reset": "selected-identity-slots-at-10000-update-boundaries",
             }),
@@ -2227,8 +2457,12 @@ pub(super) fn pending_rollout_batches_compatible(
             json!(quality_validation.clone()),
         );
         metrics.insert(
+            "train_generated_quality_validation".to_string(),
+            json!(train_generated_quality_validation),
+        );
+        metrics.insert(
             "amortization_quality_validation".to_string(),
-            json!(selected_checkpoint_amortization_quality_validation.clone()),
+            json!(endpoint_teacher_quality_validation.clone()),
         );
         metrics.insert(
             "stability_validation".to_string(),
@@ -2247,7 +2481,7 @@ pub(super) fn pending_rollout_batches_compatible(
             final_loss,
             generator: generator_hyper,
             quality_validation,
-            amortization_quality_validation: selected_checkpoint_amortization_quality_validation,
+            amortization_quality_validation: endpoint_teacher_quality_validation,
             stability_validation,
         })
     }
@@ -2328,6 +2562,72 @@ pub(super) fn pending_rollout_batches_compatible(
             (Some(_), Some(_)) => false,
             (None, None) => unreachable!("equal optional contracts matched above"),
         }
+    }
+
+    pub(super) fn final_checkpoint_candidate_due(
+        step: usize,
+        total_steps: usize,
+        generated_rollout_quality: bool,
+        endpoint_quality: bool,
+    ) -> bool {
+        step == total_steps && (generated_rollout_quality || endpoint_quality)
+    }
+
+    pub(super) fn e2e_optimizer_lr_scales(
+        global_lr_scale: f32,
+        identity_scheduled_substrate: bool,
+    ) -> (f32, f32) {
+        (
+            global_lr_scale,
+            if identity_scheduled_substrate {
+                1.0
+            } else {
+                global_lr_scale
+            },
+        )
+    }
+
+    pub(super) fn e2e_endpoint_scale_calibration_due(
+        config: BurnE2eRolloutTrainConfig,
+        next_step: usize,
+    ) -> bool {
+        config.generator_kind == E2eHyperGeneratorKind::ConditionalRowFlow
+            && config.amortization_enabled
+            && config.amortization_substrate_steps > 0
+            && config.steps > config.amortization_substrate_steps
+            && next_step == config.amortization_substrate_steps.saturating_add(1)
+    }
+
+    fn recalibrate_e2e_row_flow_endpoint_scale(
+        generator: &mut BurnE2eGeneratorParams,
+        npa_config: &NpaConfig,
+    ) -> AutomataResult<()> {
+        let row_rms = generator.recalibrate_row_flow_from_amortization(npa_config)?;
+        let min = row_rms.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = row_rms
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mean = row_rms.iter().sum::<f32>() / row_rms.len().max(1) as f32;
+        let floor_rows = row_rms
+            .iter()
+            .filter(|value| **value <= 1.000_001e-3)
+            .count();
+        eprintln!(
+            "hyper2d recalibrated conditional row-flow scales from the trained endpoint table: rows={} min={min:.6e} mean={mean:.6e} max={max:.6e} floor_rows={floor_rows}",
+            row_rms.len(),
+        );
+        Ok(())
+    }
+
+    pub(super) fn e2e_upstream_optimizer_reset_scopes(
+        upstream_growing: bool,
+        step: usize,
+        identity_scheduled_substrate: bool,
+    ) -> (bool, bool) {
+        let boundary =
+            upstream_growing && step > 1 && step.saturating_sub(1).is_multiple_of(10_000);
+        (boundary, boundary && !identity_scheduled_substrate)
     }
 
     pub(super) fn e2e_final_validation_config(
@@ -2897,7 +3197,13 @@ pub(super) fn pending_rollout_batches_compatible(
                 ))
             })?
             .join("report.json");
-        let report: serde_json::Value = serde_json::from_slice(&fs::read(&report_path)?)?;
+        let report_bytes = fs::read(&report_path).map_err(|error| {
+            AutomataError::InvalidArgument(format!(
+                "curriculum resume requires source-order report {}: {error}",
+                report_path.display()
+            ))
+        })?;
+        let report: serde_json::Value = serde_json::from_slice(&report_bytes)?;
         let recorded = report
             .get("selected_sources")
             .and_then(serde_json::Value::as_array)

@@ -7,10 +7,11 @@ use super::*;
         configured_output_bias: bool,
     ) -> AutomataResult<()> {
         let artifact_output_bias = artifact_output_bias.unwrap_or(true);
-        if artifact_output_bias != configured_output_bias {
-            return Err(AutomataError::InvalidModel(format!(
-                "warm-start HyperNPA output-bias contract {artifact_output_bias} does not match configured {configured_output_bias}; legacy artifacts without adapter_output_bias are bias-enabled and cannot warm-start the upstream-aligned zero-bias trainer"
-            )));
+        if artifact_output_bias && !configured_output_bias {
+            return Err(AutomataError::InvalidModel(
+                "warm-start HyperNPA enables an affine output drive but the configured trainer uses the strict upstream zero-output-bias contract; affine and legacy artifacts cannot enter the strict parity path"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
@@ -294,6 +295,22 @@ use super::*;
 
         pub(super) fn next_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
             next_adamw_bias_correction(&mut self.step, cfg)
+        }
+
+        pub(super) fn reset_amortization_optimizer(
+            &mut self,
+            params: &BurnE2eGeneratorParams,
+        ) {
+            self.amortization_step = 0;
+            self.amortization_identity_steps.fill(0);
+            self.amortization_residual_m = params
+                .amortization_residual_table
+                .as_ref()
+                .map(|table| table.clone().inner().zeros_like());
+            self.amortization_residual_v = params
+                .amortization_residual_table
+                .as_ref()
+                .map(|table| table.clone().inner().zeros_like());
         }
 
         fn next_row_flow_bias_correction(&mut self, cfg: AdamWConfig) -> AdamWBiasCorrection {
@@ -693,6 +710,80 @@ use super::*;
                 config.adapter_output_bias,
             )?;
             if expected_kind == E2eHyperGeneratorKind::ConditionalRowFlow {
+                let expanded_initial =
+                    if config.dino_patch_pixels
+                        && !initial.condition_patch_pixels.unwrap_or(false)
+                    {
+                        let rgb_channels = 3 * usize::from(config.dino_rgb_channels);
+                        let alpha_channels = usize::from(config.dino_alpha_channel);
+                        let channels = rgb_channels + alpha_channels;
+                        if channels == 0
+                            || initial.condition_rgb_channels.unwrap_or(false)
+                                != config.dino_rgb_channels
+                            || initial.condition_alpha_channel.unwrap_or(false)
+                                != config.dino_alpha_channel
+                            || (initial.condition_rgb_channel_scale.unwrap_or(1.0)
+                                - config.dino_rgb_channel_scale)
+                                .abs()
+                                > f32::EPSILON
+                            || (initial.condition_alpha_channel_scale.unwrap_or(1.0)
+                                - config.dino_alpha_channel_scale)
+                                .abs()
+                                > f32::EPSILON
+                            || initial.condition_l2_normalize_features.unwrap_or(true)
+                                != config.dino_l2_normalize_features
+                        {
+                            return Err(AutomataError::InvalidModel(
+                                "warm-start row flow can only expand patch-mean channels when its RGB/alpha/normalization contract matches training"
+                                    .to_string(),
+                            ));
+                        }
+                        let patch_width =
+                            config.dino_image_size / config.dino_token_grid_width.max(1);
+                        let patch_height =
+                            config.dino_image_size / config.dino_token_grid_height.max(1);
+                        let pixels_per_patch = patch_width.saturating_mul(patch_height);
+                        let flow = initial.row_flow.as_ref().ok_or_else(|| {
+                            AutomataError::InvalidModel(
+                                "warm-start conditional row flow is missing its contract"
+                                    .to_string(),
+                            )
+                        })?;
+                        let semantic_dims =
+                            flow.condition_dims.checked_sub(channels).ok_or_else(|| {
+                                AutomataError::InvalidModel(
+                                    "warm-start row-flow condition is smaller than its patch-mean channels"
+                                        .to_string(),
+                                )
+                            })?;
+                        let weights = ConditionalRowFlowWeights {
+                            values: initial.weights.row_flow.clone(),
+                        };
+                        let (expanded_flow, expanded_weights) = weights
+                            .expand_mean_channels_to_patch_pixels(
+                                flow,
+                                semantic_dims,
+                                channels,
+                                pixels_per_patch,
+                            )?;
+                        if expanded_flow.condition_dims != first.embed_dims {
+                            return Err(AutomataError::InvalidModel(format!(
+                                "expanded patch-pixel row flow has {} condition dimensions, expected {}",
+                                expanded_flow.condition_dims, first.embed_dims
+                            )));
+                        }
+                        let mut expanded = initial.clone();
+                        expanded.version = expanded.version.max(3);
+                        expanded.condition_embed_dims = Some(expanded_flow.condition_dims);
+                        expanded.condition_patch_pixels = Some(true);
+                        expanded.row_flow = Some(expanded_flow);
+                        expanded.weights.row_flow = expanded_weights.values;
+                        expanded.validate()?;
+                        Some(expanded)
+                    } else {
+                        None
+                    };
+                let initial = expanded_initial.as_ref().unwrap_or(initial);
                 let flow = BurnRowFlowParams::from_artifact_with_output_bias(
                     initial,
                     &base.config,
@@ -1621,6 +1712,29 @@ use super::*;
             Ok(true)
         }
 
+        pub(super) fn recalibrate_row_flow_from_amortization(
+            &mut self,
+            npa: &NpaConfig,
+        ) -> AutomataResult<Vec<f32>> {
+            let endpoint_table = self
+                .amortization_residual_table
+                .as_ref()
+                .ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "row-flow scale calibration requires an endpoint table".to_string(),
+                    )
+                })?
+                .clone();
+            self.row_flow
+                .as_mut()
+                .ok_or_else(|| {
+                    AutomataError::InvalidArgument(
+                        "row-flow scale calibration requires conditional-row-flow".to_string(),
+                    )
+                })?
+                .recalibrate_from_endpoint_table(endpoint_table, npa)
+        }
+
         pub(super) fn initialize_amortization_from_rows(
             &mut self,
             rows: Tensor3,
@@ -1928,6 +2042,9 @@ use super::*;
             let mut gradient = table
                 .grad_remove(grads)
                 .unwrap_or_else(|| table.clone().inner().zeros_like());
+            sanitize_nonfinite_gradients(std::slice::from_mut(&mut gradient));
+            let raw_norm = (self.amortization_grad_normalization && collect_metrics)
+                .then(|| tensor_l2_norm_tensor(&gradient));
             if self.amortization_grad_normalization {
                 gradient = normalize_packed_npa_table_gradient(
                     gradient,
@@ -1940,12 +2057,20 @@ use super::*;
                 weight_decay: 0.0,
                 ..cfg
             };
-            let (norm, _, scale) = prepare_grad_group(
+            let (prepared_norm, _, scale) = prepare_grad_group(
                 std::slice::from_mut(&mut gradient),
                 table_cfg.grad_clip_norm,
                 false,
-                collect_metrics,
+                collect_metrics && raw_norm.is_none(),
             )?;
+            let norm = if let Some(raw_norm) = raw_norm {
+                finite_scalar(
+                    "Burn amortization endpoint raw grad norm",
+                    raw_norm.into_scalar(),
+                )?
+            } else {
+                prepared_norm
+            };
             let moment = state.amortization_residual_m.as_mut().ok_or_else(|| {
                 AutomataError::InvalidArgument(
                     "amortization optimizer is missing first moments".to_string(),
@@ -2083,6 +2208,9 @@ use super::*;
                             "amortization optimizer is missing second moments".to_string(),
                         )
                     })?;
+                    sanitize_nonfinite_gradients(std::slice::from_mut(&mut gradient));
+                    let raw_norm = (self.amortization_grad_normalization && collect_metrics)
+                        .then(|| tensor_l2_norm_tensor(&gradient));
                     if self.amortization_grad_normalization {
                         gradient = normalize_packed_npa_table_gradient(
                             gradient,
@@ -2090,12 +2218,20 @@ use super::*;
                                 .expect("amortization table has an NPA gradient layout"),
                         );
                     }
-                    let (table_norm, _, table_scale) = prepare_grad_group(
+                    let (prepared_table_norm, _, table_scale) = prepare_grad_group(
                         std::slice::from_mut(&mut gradient),
                         table_cfg.grad_clip_norm,
                         false,
-                        collect_metrics,
+                        collect_metrics && raw_norm.is_none(),
                     )?;
+                    let table_norm = if let Some(raw_norm) = raw_norm {
+                        finite_scalar(
+                            "Burn amortization endpoint raw grad norm",
+                            raw_norm.into_scalar(),
+                        )?
+                    } else {
+                        prepared_table_norm
+                    };
                     *table = track(apply_sparse_column_adamw_tensor(
                         table.clone().inner(),
                         gradient,

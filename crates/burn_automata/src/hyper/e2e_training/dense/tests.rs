@@ -77,6 +77,15 @@ fn e2e_learning_rate_warmup_is_linear_and_bounded() {
 }
 
 #[test]
+fn quality_eval_batch_is_bounded_by_particle_rows() {
+    assert_eq!(bounded_quality_eval_batch_size(64, 512), 64);
+    assert_eq!(bounded_quality_eval_batch_size(64, 1024), 32);
+    assert_eq!(bounded_quality_eval_batch_size(32, 2048), 16);
+    assert_eq!(bounded_quality_eval_batch_size(32, 4096), 8);
+    assert_eq!(bounded_quality_eval_batch_size(32, 65_536), 1);
+}
+
+#[test]
 fn adaptive_trajectory_tail_count_is_bounded_and_ceil_rounded() {
     assert_eq!(adaptive_training::adaptive_trajectory_tail_count(0, 0.25), 0);
     assert_eq!(adaptive_training::adaptive_trajectory_tail_count(16, 0.0), 0);
@@ -147,13 +156,13 @@ fn cpu_prefetch_deduplicates_rollout_replicas_and_preserves_order() {
 fn warm_start_output_bias_contract_is_explicit() {
     let legacy = validate_warm_start_output_bias_contract(None, false).unwrap_err();
     assert!(
-        legacy.to_string().contains("legacy artifacts"),
+        legacy.to_string().contains("strict parity path"),
         "unexpected error: {legacy}"
     );
     validate_warm_start_output_bias_contract(Some(false), false).unwrap();
     validate_warm_start_output_bias_contract(Some(true), true).unwrap();
+    validate_warm_start_output_bias_contract(Some(false), true).unwrap();
     assert!(validate_warm_start_output_bias_contract(Some(true), false).is_err());
-    assert!(validate_warm_start_output_bias_contract(Some(false), true).is_err());
 }
 
 #[test]
@@ -486,6 +495,23 @@ fn model_batch_optimizer_normalizes_large_finite_gradients_without_overflow() {
 }
 
 #[test]
+fn optimizer_normalizes_large_finite_gradients_without_overflow() {
+    let device = BurnDevice::default();
+    let inner_device: Device<InnerBackend> = device;
+    let mut gradients = vec![Tensor::<InnerBackend, 2>::from_data(
+        TensorData::new(vec![1.0e30, -1.0e30, 1.0e30, -1.0e30], [2, 2]),
+        &inner_device,
+    )];
+    let (norm, _, _) = prepare_grad_group(&mut gradients, 0.0, true, true).unwrap();
+    assert!(norm.is_finite());
+    assert!((norm / 2.0e30 - 1.0).abs() <= 1.0e-5);
+    let normalized = tensor_vec(gradients.remove(0)).unwrap();
+    assert!(normalized.iter().all(|value| value.is_finite()));
+    let normalized_norm = normalized.iter().map(|value| value * value).sum::<f32>().sqrt();
+    assert!((normalized_norm - 1.0).abs() <= 1.0e-5);
+}
+
+#[test]
 fn model_batch_scale_only_optimizer_preserves_native_rule_parameters() {
     let device = BurnDevice::default();
     let mut config = NpaConfig::growing_2d();
@@ -657,6 +683,80 @@ fn dense_endpoint_gradients_match_upstream_parameter_groups() {
 }
 
 #[test]
+fn dense_endpoint_gradient_normalization_handles_large_finite_values() {
+    let device = BurnDevice::default();
+    let inner_device: Device<InnerBackend> = device;
+    let config = NpaConfig::growing_2d();
+    let row_layout = NpaParameterRowLayout2d::new(&config);
+    let packed_values = row_layout.row_count() * row_layout.max_row_dims();
+    let layout = PackedNpaGradientLayout::new(&config, false);
+    let identities = 2;
+    let mut values = vec![0.0_f32; packed_values * identities];
+    for (index, value) in values.iter_mut().enumerate() {
+        *value = if index % 2 == 0 { 1.0e30 } else { -1.0e30 };
+    }
+    let normalized = normalize_packed_npa_table_gradient(
+        Tensor::<InnerBackend, 2>::from_data(
+            TensorData::new(values, [packed_values, identities]),
+            &inner_device,
+        ),
+        layout,
+    )
+    .into_data()
+    .to_vec::<f32>()
+    .unwrap();
+    assert!(normalized.iter().all(|value| value.is_finite()));
+    assert!(normalized.iter().any(|value| value.abs() > 0.0));
+    assert!(normalized.iter().all(|value| value.abs() <= 1.0));
+}
+
+#[test]
+fn row_flow_endpoint_gradient_normalization_keeps_output_drive_independent() {
+    let device = BurnDevice::default();
+    let inner_device: Device<InnerBackend> = device;
+    let config = NpaConfig::growing_2d();
+    let layout = NpaParameterRowLayout2d::new(&config);
+    let rows = layout.row_count();
+    let row_dims = layout.max_row_dims();
+    let first_output_row = config.hidden_dims;
+    let b2_column = config.hidden_dims;
+    let mut values = vec![0.0_f32; rows * row_dims];
+    values[first_output_row * row_dims + b2_column] = 3.0;
+    values[(first_output_row + 1) * row_dims + b2_column] = 4.0;
+
+    let gradient = Tensor::<InnerBackend, 3>::from_data(
+        TensorData::new(values, [1, rows, row_dims]),
+        &inner_device,
+    );
+    let normalized = normalize_packed_npa_endpoint_gradient(
+        gradient.clone(),
+        PackedNpaGradientLayout::new(&config, true),
+    )
+    .into_data()
+    .to_vec::<f32>()
+    .unwrap();
+    assert!(
+        (normalized[first_output_row * row_dims + b2_column] - 0.6).abs() <= 1.0e-5
+    );
+    assert!(
+        (normalized[(first_output_row + 1) * row_dims + b2_column] - 0.8).abs() <= 1.0e-5
+    );
+
+    let strict = normalize_packed_npa_endpoint_gradient(
+        gradient,
+        PackedNpaGradientLayout::new(&config, false),
+    )
+    .into_data()
+    .to_vec::<f32>()
+    .unwrap();
+    assert_eq!(strict[first_output_row * row_dims + b2_column], 0.0);
+    assert_eq!(
+        strict[(first_output_row + 1) * row_dims + b2_column],
+        0.0
+    );
+}
+
+#[test]
 fn sparse_table_adamw_freezes_absent_identities_and_steps_active_once() {
     let device = BurnDevice::default();
     let inner_device: Device<InnerBackend> = device;
@@ -726,6 +826,24 @@ fn upstream_growing_sparse_schedule_is_per_identity_and_resets_moments() {
         (2_001, 0.3, false)
     );
     assert_eq!(
+        upstream_growing_identity_schedule(2_001, 0.0081),
+        (2_001, 0.3, false)
+    );
+    assert_eq!(
+        upstream_growing_identity_schedule(4_001, 0.0081),
+        (4_001, 0.09, false)
+    );
+    let (phase_step, lr_scale, reset) =
+        upstream_growing_identity_schedule(6_001, 0.0081);
+    assert_eq!(phase_step, 6_001);
+    assert!((lr_scale - 0.027).abs() <= 1.0e-7);
+    assert!(!reset);
+    let (phase_step, lr_scale, reset) =
+        upstream_growing_identity_schedule(8_001, 0.0081);
+    assert_eq!(phase_step, 8_001);
+    assert!((lr_scale - 0.0081).abs() <= 1.0e-7);
+    assert!(!reset);
+    assert_eq!(
         upstream_growing_identity_schedule(10_001, 0.0),
         (1, 1.0, true)
     );
@@ -780,6 +898,24 @@ fn upstream_growing_sparse_schedule_is_per_identity_and_resets_moments() {
     assert!((moment[3] + 0.4).abs() < 1.0e-5);
     assert!((velocity[1] - 0.004).abs() < 1.0e-6);
     assert!((velocity[3] - 0.016).abs() < 1.0e-6);
+}
+
+#[test]
+fn sparse_endpoint_schedule_preserves_the_shared_base_global_clock() {
+    assert_eq!(e2e_optimizer_lr_scales(0.09, true), (0.09, 1.0));
+    assert_eq!(e2e_optimizer_lr_scales(0.09, false), (0.09, 0.09));
+    assert_eq!(
+        e2e_upstream_optimizer_reset_scopes(true, 10_001, true),
+        (true, false)
+    );
+    assert_eq!(
+        e2e_upstream_optimizer_reset_scopes(true, 10_001, false),
+        (true, true)
+    );
+    assert_eq!(
+        e2e_upstream_optimizer_reset_scopes(true, 10_000, true),
+        (false, false)
+    );
 }
 
 #[test]
@@ -1413,6 +1549,63 @@ fn conditional_row_flow_amortization_distills_endpoint_without_teacher_gradient(
 }
 
 #[test]
+fn conditional_row_flow_recalibrates_each_controller_row_on_device() {
+    let npa = NpaConfig::growing_2d();
+    let layout = NpaParameterRowLayout2d::new(&npa);
+    let flow = ConditionalRowFlowConfig {
+        layers: 1,
+        width: 8,
+        heads: 2,
+        ffn_dims: 16,
+        condition_dims: 3,
+        condition_tokens: 2,
+        row_count: layout.row_count(),
+        max_row_dims: layout.max_row_dims(),
+        row_value_dims: layout.rows().iter().map(|row| row.value_dims).collect(),
+        sample_steps: 2,
+        source_seed: 59,
+        source_scale: 1.0,
+        solver: crate::hyper::CONDITIONAL_ROW_FLOW_SOLVER_HEUN.to_string(),
+        row_rms: vec![0.02; layout.row_count()],
+    };
+    let weights = ConditionalRowFlowWeights::seeded(&flow, 67).unwrap();
+    let device = BurnDevice::default();
+    let mut params =
+        BurnRowFlowParams::from_values(flow, &weights.values, &npa, &device).unwrap();
+    let examples = 3;
+    let mut endpoint_values =
+        vec![0.0; layout.row_count() * layout.max_row_dims() * examples];
+    for (row_index, row) in layout.rows().iter().enumerate() {
+        let expected = 0.005 * (row_index % 7 + 1) as f32;
+        for value_index in 0..row.value_dims {
+            for example in 0..examples {
+                endpoint_values
+                    [(row_index * layout.max_row_dims() + value_index) * examples + example] =
+                    if example == 1 { -expected } else { expected };
+            }
+        }
+    }
+    let calibrated = params
+        .recalibrate_from_endpoint_table(
+            tensor(
+                endpoint_values,
+                [layout.row_count() * layout.max_row_dims(), examples],
+                &device,
+            ),
+            &npa,
+        )
+        .unwrap();
+    for (row_index, actual) in calibrated.iter().copied().enumerate() {
+        let expected = 0.005 * (row_index % 7 + 1) as f32;
+        assert!(
+            (actual - expected).abs() < 1.0e-6,
+            "row {row_index} RMS mismatch: {actual} vs {expected}",
+        );
+    }
+    assert_eq!(params.config.row_rms, calibrated);
+}
+
+#[test]
 fn conditional_row_flow_batched_rows_match_independent_inference() {
     let npa = NpaConfig::growing_2d();
     let layout = NpaParameterRowLayout2d::new(&npa);
@@ -1545,7 +1738,7 @@ fn row_flow_endpoint_bridge_matches_direct_multi_chunk_vjp() {
         bridge.accumulate(&mut chunk_grads);
     }
     let mut bridged_grads = bridge
-        .objective(0.5)
+        .objective(0.5, None)
         .expect("two chunks produce an endpoint objective")
         .backward();
     let bridged_gradients = bridged
@@ -1625,7 +1818,7 @@ fn row_flow_endpoint_bridge_matches_direct_multi_chunk_vjp() {
     let mut endpoint_grads = expanded_rows.mul(auxiliary_coefficient).sum().backward();
     bridge.accumulate(&mut endpoint_grads);
     let bridged_objective = bridge
-        .objective(0.25)
+        .objective(0.25, None)
         .expect("endpoint gradient creates a bridge objective")
         + bridged
             .self_rectification_loss_to_endpoint_prepared(
@@ -1669,6 +1862,14 @@ fn row_flow_endpoint_bridge_matches_direct_multi_chunk_vjp() {
             "row-flow tensor {tensor_index} reused auxiliary gradient mismatch: error={max_error:e} reference={max_reference:e}"
         );
     }
+}
+
+#[test]
+fn endpoint_substrate_defers_gradient_normalization_to_its_optimizer() {
+    assert!(endpoint_bridge_normalizes_gradient(true, false));
+    assert!(!endpoint_bridge_normalizes_gradient(false, false));
+    assert!(!endpoint_bridge_normalizes_gradient(true, true));
+    assert!(!endpoint_bridge_normalizes_gradient(false, true));
 }
 
 #[test]
@@ -1762,7 +1963,7 @@ fn mixed_endpoint_bridge_matches_flow_and_endpoint_vjp() {
     let mut rollout_grads = bridged_rows.mul(coefficient).sum().backward();
     bridge.accumulate(&mut rollout_grads);
     let mut bridged_grads = bridge
-        .objective(1.0)
+        .objective(1.0, None)
         .expect("mixed endpoint bridge accumulated a VJP")
         .backward();
     let bridged_flow_gradients = bridged
@@ -4070,6 +4271,107 @@ fn age_stratified_pool_sampling_preserves_explicit_fresh_slots() {
             counts
         });
     assert!(persistent_counts.iter().all(|count| *count >= 1));
+}
+
+#[test]
+fn bounded_target_cache_reuses_rows_and_protects_pending_batches() {
+    fn prepared_target(identity: usize) -> BurnE2ePreparedTargetExample {
+        let value = identity as f32;
+        BurnE2ePreparedTargetExample {
+            target_rgb: vec![value, 0.0, 0.0],
+            target_density: vec![1.0],
+            target_foreground: vec![1.0],
+            target_foreground_scale: 1.0,
+            target_mean: [value, 0.0],
+            target_positions: vec![value, 0.0],
+            pixel_size: 1.0,
+            target_points: 1,
+            particle_count: 1,
+            update_prob: 1.0,
+            seed_scale: 0.1,
+            target_cpu: crate::TargetImage2d {
+                source_width: 1,
+                source_height: 1,
+                positions: vec![[value, 0.0]],
+                colors: vec![[1.0, 0.0, 0.0]],
+                pixel_size: 1.0,
+                threshold: 0.0,
+                aabb: [-1.0, 1.0, -1.0, 1.0],
+            },
+        }
+    }
+
+    let device = BurnDevice::default();
+    let pixel_xy = tensor(vec![0.0, 0.0], [1, 2], &device);
+    let row_bytes = prepared_target(0).device_bytes();
+    let mut cache = BurnE2eTargetDeviceCache::new(row_bytes * 2, 2);
+    cache
+        .insert_prepared(
+            &[1, 2],
+            vec![prepared_target(1), prepared_target(2)],
+            &[1, 2],
+            &pixel_xy,
+            &device,
+        )
+        .unwrap();
+
+    let (selected, expansion) = cache.select(&[1, 2, 1]).unwrap();
+    assert_eq!(selected.len(), 2);
+    assert_eq!(expansion, [0, 1, 0]);
+    assert_eq!(cache.resident_bytes, row_bytes * 2);
+
+    cache
+        .insert_prepared(
+            &[3],
+            vec![prepared_target(3)],
+            &[2, 3],
+            &pixel_xy,
+            &device,
+        )
+        .unwrap();
+    assert_eq!(
+        cache.cached_identities(),
+        [2usize, 3].into_iter().collect::<HashSet<_>>()
+    );
+    assert_eq!(cache.evictions, 1);
+
+    let error = cache
+        .insert_prepared(
+            &[4],
+            vec![prepared_target(4)],
+            &[2, 3, 4],
+            &pixel_xy,
+            &device,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("cannot fit the active request"));
+}
+
+#[cfg(feature = "dino")]
+#[test]
+fn dino_cache_slot_selection_never_evicts_the_active_request() {
+    let protected = [10usize, 40].into_iter().collect::<HashSet<_>>();
+    let mut next_evict = 0;
+    let mut slots = vec![Some(10), Some(20), Some(30)];
+
+    let slot = next_e2e_dino_cache_slot(&slots, &protected, &mut next_evict).unwrap();
+    assert_eq!(slot, 1);
+    slots[slot] = Some(40);
+
+    let protected = [10usize, 40, 50].into_iter().collect::<HashSet<_>>();
+    let slot = next_e2e_dino_cache_slot(&slots, &protected, &mut next_evict).unwrap();
+    assert_eq!(slot, 2);
+
+    let protected = [10usize, 30, 50].into_iter().collect::<HashSet<_>>();
+    let mut slots = vec![Some(10), None, Some(30)];
+    let mut next_evict = 0;
+    let slot = next_e2e_dino_cache_slot(&slots, &protected, &mut next_evict).unwrap();
+    assert_eq!(slot, 1);
+    slots[slot] = Some(50);
+    assert!(
+        next_e2e_dino_cache_slot(&slots, &protected, &mut next_evict).is_none(),
+        "every cache row is protected after filling the final empty slot"
+    );
 }
 
 #[test]
@@ -6600,6 +6902,25 @@ fn e2e_tail_objective_balances_hard_trajectories_per_identity() {
 }
 
 #[test]
+fn e2e_identity_tail_applies_with_one_trajectory_per_identity() {
+    let device = BurnDevice::default();
+    let losses = tensor1(vec![1.0, 2.0, 3.0, 100.0], [4], &device).require_grad();
+    let objective =
+        e2e_tail_aware_objective(losses.clone(), false, 0.0, 0.0, Some(1), 0.5, 1.0);
+    let value = tensor1_vec(objective.clone().inner()).unwrap()[0];
+    assert!((value - 39.0).abs() < 1.0e-6);
+
+    let mut gradients = objective.backward();
+    let gradient = losses
+        .grad_remove(&mut gradients)
+        .unwrap_or_else(|| losses.clone().inner().zeros_like())
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(max_abs_difference(&gradient, &[0.125, 0.125, 0.375, 0.375]) < 1.0e-6);
+}
+
+#[test]
 fn e2e_hierarchical_tail_objective_prioritizes_hard_identities() {
     let device = BurnDevice::default();
     let losses = tensor1(
@@ -7762,6 +8083,15 @@ fn phase_batch_sampler_full_batch_returns_each_example_once() {
 }
 
 #[test]
+fn condition_cache_budget_is_split_without_overcommit() {
+    assert_eq!(split_e2e_condition_cache_budget(1_000, 900, 100), (900, 100));
+    assert_eq!(split_e2e_condition_cache_budget(1_001, 2, 1), (667, 334));
+    assert_eq!(split_e2e_condition_cache_budget(1_000, 0, 10), (0, 1_000));
+    assert_eq!(split_e2e_condition_cache_budget(1_000, 10, 0), (1_000, 0));
+    assert_eq!(split_e2e_condition_cache_budget(1_000, 0, 0), (0, 0));
+}
+
+#[test]
 fn checkpoint_selection_does_not_compare_different_validation_contracts() {
     let frequent = BurnE2eValidationContract {
         examples: 16,
@@ -7809,6 +8139,18 @@ fn checkpoint_selection_uses_generated_quality_when_schedule_crosses_substrate()
     assert!(!e2e_schedule_selects_generated_rollout(true, 8_750, 8_750));
     assert!(e2e_schedule_selects_generated_rollout(true, 8_751, 8_750));
     assert!(e2e_schedule_selects_generated_rollout(false, 8_750, 8_750));
+}
+
+#[test]
+fn terminal_endpoint_only_quality_is_a_checkpoint_candidate() {
+    assert!(final_checkpoint_candidate_due(10_000, 10_000, false, true));
+    assert!(final_checkpoint_candidate_due(10_000, 10_000, true, false));
+    assert!(!final_checkpoint_candidate_due(
+        9_999, 10_000, false, true
+    ));
+    assert!(!final_checkpoint_candidate_due(
+        10_000, 10_000, false, false
+    ));
 }
 
 #[test]

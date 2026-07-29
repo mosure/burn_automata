@@ -29,7 +29,12 @@ impl BurnRowFlowParams {
             solver: crate::hyper::row_flow::CONDITIONAL_ROW_FLOW_SOLVER_HEUN.to_string(),
             row_rms,
         };
-        let weights = ConditionalRowFlowWeights::seeded(&flow, config.seed ^ 0x726f_7766_6c6f_7734)?;
+        let weights = ConditionalRowFlowWeights::seeded_with_initialization(
+            &flow,
+            config.seed ^ 0x726f_7766_6c6f_7734,
+            config.generator_cross_gate_init,
+            config.generator_output_init_scale,
+        )?;
         Self::from_values_with_output_bias(
             flow,
             &weights.values,
@@ -151,6 +156,59 @@ impl BurnRowFlowParams {
             trainable_value_count: self.trainable_value_count,
             time_frequencies: detach2(self.time_frequencies.clone()),
         }
+    }
+
+    pub(super) fn recalibrate_from_endpoint_table(
+        &mut self,
+        endpoint_table: Tensor2,
+        npa: &NpaConfig,
+    ) -> AutomataResult<Vec<f32>> {
+        let rows = self.config.row_count;
+        let row_dims = self.config.max_row_dims;
+        let [packed_rows, examples] = endpoint_table.shape().dims::<2>();
+        if examples == 0 || packed_rows != rows.saturating_mul(row_dims) {
+            return Err(AutomataError::InvalidArgument(format!(
+                "row-flow endpoint scale calibration expected [{}, examples], got [{packed_rows}, {examples}]",
+                rows.saturating_mul(row_dims),
+            )));
+        }
+        let device = endpoint_table.device();
+        let endpoints = detach2(endpoint_table).reshape([rows, row_dims, examples]);
+        let squared = endpoints.clone().mul(endpoints);
+        let sum_squares = squared
+            .sum_dim(2)
+            .sum_dim(1)
+            .reshape([rows]);
+        let denominators = self
+            .config
+            .row_value_dims
+            .iter()
+            .map(|dims| dims.saturating_mul(examples) as f32)
+            .collect::<Vec<_>>();
+        let row_rms = sum_squares
+            .div(Tensor::<BurnBackend, 1>::from_data(
+                TensorData::new(denominators, [rows]),
+                &device,
+            ))
+            .sqrt()
+            .clamp_min(1.0e-3);
+        let values = tensor1_vec(row_rms.inner())?;
+        if values.len() != rows
+            || values
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(AutomataError::InvalidArgument(
+                "row-flow endpoint scale calibration produced invalid row RMS values".to_string(),
+            ));
+        }
+        let layout = NpaParameterRowLayout2d::new(npa);
+        layout.validate_flow_config(&self.config)?;
+        self.config.row_rms.clone_from(&values);
+        self.row_scale = static_row_scale(&self.config, &device);
+        self.source_rows =
+            static_source_rows(&layout, &self.config, &device).mul(self.row_mask.clone());
+        Ok(values)
     }
 
     pub(super) fn weight_values(&self) -> AutomataResult<Vec<f32>> {

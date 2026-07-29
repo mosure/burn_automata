@@ -1653,7 +1653,10 @@ use super::*;
                     0.3_f32.powi(milestones_passed as i32)
                 }
             };
-            min_scale + (1.0 - min_scale) * raw_scale.clamp(0.0, 1.0)
+            match config.lr_schedule {
+                E2eLrSchedule::UpstreamGrowing => raw_scale.max(min_scale),
+                _ => min_scale + (1.0 - min_scale) * raw_scale.clamp(0.0, 1.0),
+            }
         };
         schedule_scale * e2e_lr_warmup_scale(config.lr_warmup_steps, step)
     }
